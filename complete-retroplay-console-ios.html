@@ -33,7 +33,7 @@
             width: 100vw;
             display: flex;
             flex-direction: column;
-            justify-content: flex-start;
+            justify-content: center;
             align-items: center;
             overflow: hidden;
             color: var(--text-color);
@@ -657,6 +657,34 @@
             max-width: 100%;
             max-height: 100%;
             object-fit: contain;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        /* Improved game display styles to center content better */
+        .game-content {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        /* Improved D-pad touch area with better responsiveness */
+        .d-pad-touch {
+            width: 100%;
+            height: 100%;
+            position: absolute;
+            z-index: 10;
+        }
+
+        /* Improved button press effect */
+        .button-press {
+            transform: scale(0.9);
+            transition: transform 0.1s ease;
         }
 
         @keyframes spin {
@@ -1086,17 +1114,21 @@
                 
                 if (container.width / container.height > aspectRatio) {
                     // Container is wider than needed, height is the limiting factor
-                    height = container.height;
+                    height = Math.min(container.height, container.width / aspectRatio);
                     width = height * aspectRatio;
                 } else {
                     // Container is taller than needed, width is the limiting factor
-                    width = container.width;
+                    width = Math.min(container.width, container.height * aspectRatio);
                     height = width / aspectRatio;
                 }
                 
-                // Apply dimensions to canvas
+                // Apply dimensions to canvas and center it
                 this.universalCanvas.style.width = `${width}px`;
                 this.universalCanvas.style.height = `${height}px`;
+                this.universalCanvas.style.position = 'absolute';
+                this.universalCanvas.style.top = '50%';
+                this.universalCanvas.style.left = '50%';
+                this.universalCanvas.style.transform = 'translate(-50%, -50%)';
             }
             
             // Override default initialize methods from games to use universal canvas
@@ -1211,6 +1243,7 @@
                 
                 // Listen for changes
                 window.addEventListener('resize', handleOrientationChange);
+                window.addEventListener('orientationchange', handleOrientationChange);
                 
                 // Try to lock orientation on mobile if supported
                 if (!this.isDesktop && screen.orientation && screen.orientation.lock) {
@@ -1219,7 +1252,7 @@
                     });
                 }
             }
-            
+
             setupTouchControls() {
                 // Improved D-pad touch handling with gesture detection
                 const dPadTouchArea = document.getElementById('d-pad-touch-area');
@@ -1228,9 +1261,10 @@
                 const dDown = document.getElementById('d-down');
                 const dLeft = document.getElementById('d-left');
                 
-                let activeDPadDirection = null;
+                let activeDPadDirections = new Set(); // Track multiple active directions
                 let touchStartX = 0;
                 let touchStartY = 0;
+                let touchId = null;
                 
                 // Function to determine which direction is active based on touch position
                 const updateDPadDirection = (touch) => {
@@ -1253,97 +1287,104 @@
                     dDown.classList.remove('active');
                     dLeft.classList.remove('active');
                     
+                    // Release all previous directions
+                    activeDPadDirections.forEach(dir => {
+                        this.handleButtonRelease(dir);
+                    });
+                    activeDPadDirections.clear();
+                    
                     // If touch is within deadzone, no direction is active
                     if (distance < deadzone) {
-                        this.handleButtonRelease('up');
-                        this.handleButtonRelease('right');
-                        this.handleButtonRelease('down');
-                        this.handleButtonRelease('left');
-                        activeDPadDirection = null;
                         return;
                     }
                     
                     // Determine which direction is active based on angle
                     const angle = Math.atan2(offsetY, offsetX) * 180 / Math.PI;
                     
-                    // Right: -45 to 45 degrees
-                    // Down: 45 to 135 degrees
-                    // Left: 135 to -135 degrees
-                    // Up: -135 to -45 degrees
-                    
-                    let newDirection;
-                    
-                    if (angle > -45 && angle <= 45) {
-                        newDirection = 'right';
-                        dRight.classList.add('active');
-                    } else if (angle > 45 && angle <= 135) {
-                        newDirection = 'down';
-                        dDown.classList.add('active');
-                    } else if ((angle > 135 && angle <= 180) || (angle >= -180 && angle <= -135)) {
-                        newDirection = 'left';
-                        dLeft.classList.add('active');
-                    } else if (angle > -135 && angle <= -45) {
-                        newDirection = 'up';
-                        dUp.classList.add('active');
+                    // Allow diagonal inputs by checking angle ranges
+                    // Horizontal axis detection
+                    if (Math.abs(offsetX) > deadzone * 0.8) {
+                        if (offsetX > 0) {
+                            activeDPadDirections.add('right');
+                            dRight.classList.add('active');
+                            this.handleButtonPress('right');
+                        } else {
+                            activeDPadDirections.add('left');
+                            dLeft.classList.add('active');
+                            this.handleButtonPress('left');
+                        }
                     }
                     
-                    // If direction changed, update button presses
-                    if (newDirection !== activeDPadDirection) {
-                        // Release previous direction if there was one
-                        if (activeDPadDirection) {
-                            this.handleButtonRelease(activeDPadDirection);
+                    // Vertical axis detection
+                    if (Math.abs(offsetY) > deadzone * 0.8) {
+                        if (offsetY > 0) {
+                            activeDPadDirections.add('down');
+                            dDown.classList.add('active');
+                            this.handleButtonPress('down');
+                        } else {
+                            activeDPadDirections.add('up');
+                            dUp.classList.add('active');
+                            this.handleButtonPress('up');
                         }
-                        
-                        // Press new direction
-                        this.handleButtonPress(newDirection);
-                        activeDPadDirection = newDirection;
                     }
                 };
                 
                 // Touch event handlers for D-pad
                 dPadTouchArea.addEventListener('touchstart', (e) => {
                     e.preventDefault();
-                    touchStartX = e.touches[0].clientX;
-                    touchStartY = e.touches[0].clientY;
-                    updateDPadDirection.call(this, e.touches[0]);
+                    // Only track the first touch
+                    if (touchId === null) {
+                        const touch = e.touches[0];
+                        touchId = touch.identifier;
+                        touchStartX = touch.clientX;
+                        touchStartY = touch.clientY;
+                        updateDPadDirection.call(this, touch);
+                    }
                 }, { passive: false });
                 
                 dPadTouchArea.addEventListener('touchmove', (e) => {
                     e.preventDefault();
-                    updateDPadDirection.call(this, e.touches[0]);
+                    // Find our tracked touch
+                    for (let i = 0; i < e.changedTouches.length; i++) {
+                        const touch = e.changedTouches[i];
+                        if (touch.identifier === touchId) {
+                            updateDPadDirection.call(this, touch);
+                            break;
+                        }
+                    }
                 }, { passive: false });
                 
-                dPadTouchArea.addEventListener('touchend', (e) => {
+                const endDPadTouch = (e) => {
                     e.preventDefault();
-                    
-                    // Release active direction
-                    if (activeDPadDirection) {
-                        this.handleButtonRelease(activeDPadDirection);
-                        activeDPadDirection = null;
+                    // Check if our tracked touch ended
+                    let touchFound = false;
+                    for (let i = 0; i < e.changedTouches.length; i++) {
+                        if (e.changedTouches[i].identifier === touchId) {
+                            touchFound = true;
+                            break;
+                        }
                     }
                     
-                    // Reset visual feedback
-                    dUp.classList.remove('active');
-                    dRight.classList.remove('active');
-                    dDown.classList.remove('active');
-                    dLeft.classList.remove('active');
-                }, { passive: false });
+                    if (touchFound) {
+                        // Release all active directions
+                        activeDPadDirections.forEach(dir => {
+                            this.handleButtonRelease(dir);
+                        });
+                        activeDPadDirections.clear();
+                        
+                        // Reset visual feedback
+                        dUp.classList.remove('active');
+                        dRight.classList.remove('active');
+                        dDown.classList.remove('active');
+                        dLeft.classList.remove('active');
+                        
+                        // Reset touch tracking
+                        touchId = null;
+                    }
+                };
                 
-                dPadTouchArea.addEventListener('touchcancel', (e) => {
-                    e.preventDefault();
-                    
-                    // Release active direction
-                    if (activeDPadDirection) {
-                        this.handleButtonRelease(activeDPadDirection);
-                        activeDPadDirection = null;
-                    }
-                    
-                    // Reset visual feedback
-                    dUp.classList.remove('active');
-                    dRight.classList.remove('active');
-                    dDown.classList.remove('active');
-                    dLeft.classList.remove('active');
-                }, { passive: false });
+                dPadTouchArea.addEventListener('touchend', endDPadTouch.bind(this), { passive: false });
+                dPadTouchArea.addEventListener('touchcancel', endDPadTouch.bind(this), { passive: false });
                 
                 // Improved action button touch handling
                 const actionButtons = {
@@ -1354,33 +1395,40 @@
                 // Set up touch handling for each action button
                 Object.entries(actionButtons).forEach(([key, button]) => {
                     let isActive = false;
+                    let buttonTouchId = null;
                     
                     button.addEventListener('touchstart', (e) => {
                         e.preventDefault();
-                        if (!isActive) {
+                        // Only process if not already active
+                        if (!isActive && buttonTouchId === null) {
+                            buttonTouchId = e.touches[0].identifier;
                             isActive = true;
                             button.classList.add('active');
                             this.handleButtonPress(key);
                         }
                     }, { passive: false });
                     
-                    button.addEventListener('touchend', (e) => {
+                    const endButtonTouch = (e) => {
                         e.preventDefault();
-                        if (isActive) {
+                        // Check if our tracked touch ended
+                        let touchFound = false;
+                        for (let i = 0; i < e.changedTouches.length; i++) {
+                            if (e.changedTouches[i].identifier === buttonTouchId) {
+                                touchFound = true;
+                                break;
+                            }
+                        }
+                        
+                        if (touchFound) {
                             isActive = false;
+                            buttonTouchId = null;
                             button.classList.remove('active');
                             this.handleButtonRelease(key);
                         }
-                    }, { passive: false });
+                    };
                     
-                    button.addEventListener('touchcancel', (e) => {
-                        e.preventDefault();
-                        if (isActive) {
-                            isActive = false;
-                            button.classList.remove('active');
-                            this.handleButtonRelease(key);
-                        }
-                    }, { passive: false });
+                    button.addEventListener('touchend', endButtonTouch.bind(this), { passive: false });
+                    button.addEventListener('touchcancel', endButtonTouch.bind(this), { passive: false });
                     
                     // Add mousedown/up for desktop
                     button.addEventListener('mousedown', (e) => {
@@ -1649,7 +1697,6 @@
                     throw error;
                 }
             }
-
             // Process game data from JSON and convert it to a playable game object
             processGameData(gameData) {
                 try {
@@ -1692,185 +1739,186 @@
                     console.error('Error processing game cartridge:', error);
                     return null;
                 }
+
             }
 
-            // Load GitHub Files for browser - simplified for mobile
-            async loadGitHubFiles() {
-                const fileList = document.getElementById('file-list');
-                fileList.innerHTML = '<li><div class="loading">Loading repository files...</div></li>';
+// Load GitHub Files for browser - simplified for mobile
+async loadGitHubFiles() {
+    const fileList = document.getElementById('file-list');
+    fileList.innerHTML = '<li><div class="loading">Loading repository files...</div></li>';
 
-                try {
-                    // Use preloaded game files instead of API call for better mobile performance
-                    const PRELOADED_GAMES = [
-                        {
-                            name: "snake-2.0-complete.json",
-                            path: "snake-2.0-complete.json",
-                            raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/snake-2.0-complete.json`
-                        },
-                        {
-                            name: "tetris-game.json",
-                            path: "tetris-game.json",
-                            raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/tetris-game.json`
-                        },
-                        {
-                            name: "breakout-game.json",
-                            path: "breakout-game.json",
-                            raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/breakout-game.json`
-                        },
-                        {
-                            name: "flappy-bird.json", 
-                            path: "flappy-bird.json",
-                            raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/flappy-bird.json`
-                        },
-                        {
-                            name: "space-invaders.json",
-                            path: "space-invaders.json",
-                            raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/space-invaders.json`
-                        }
-                    ];
-
-                    // Display files
-                    if (PRELOADED_GAMES.length > 0) {
-                        fileList.innerHTML = '';
-                        
-                        PRELOADED_GAMES.forEach(file => {
-                            const listItem = document.createElement('li');
-                            
-                            listItem.innerHTML = `
-                                <div class="file-link" data-raw-url="${file.raw_url}" data-path="${file.path}">
-                                    ${file.name}
-                                </div>
-                            `;
-                            
-                            listItem.querySelector('.file-link').addEventListener('click', async () => {
-                                this.loadingScreen.style.display = 'flex';
-                                await this.loadGameFromGitHub(file.raw_url, file.name);
-                            });
-                            
-                            fileList.appendChild(listItem);
-                        });
-                    } else {
-                        fileList.innerHTML = '<li><div class="error-message">No JSON game files found in the repository.</div></li>';
-                    }
-
-                } catch (error) {
-                    console.error("Error loading repository:", error);
-                    fileList.innerHTML = `
-                        <li>
-                            <div class="error-message">
-                                <strong>Error:</strong> ${error.message}
-                            </div>
-                            <p>Could not load repository data.</p>
-                        </li>
-                    `;
-                }
+    try {
+        // Use preloaded game files instead of API call for better mobile performance
+        const PRELOADED_GAMES = [
+            {
+                name: "snake-2.0-complete.json",
+                path: "snake-2.0-complete.json",
+                raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/snake-2.0-complete.json`
+            },
+            {
+                name: "tetris-game.json",
+                path: "tetris-game.json",
+                raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/tetris-game.json`
+            },
+            {
+                name: "breakout-game.json",
+                path: "breakout-game.json",
+                raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/breakout-game.json`
+            },
+            {
+                name: "flappy-bird.json", 
+                path: "flappy-bird.json",
+                raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/flappy-bird.json`
+            },
+            {
+                name: "space-invaders.json",
+                path: "space-invaders.json",
+                raw_url: `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/space-invaders.json`
             }
+        ];
 
-            // Load game from GitHub
-            async loadGameFromGitHub(url, fileName) {
-                try {
-                    // Fetch the JSON content
-                    const response = await fetch(url);
-                    if (!response.ok) {
-                        throw new Error(`Failed to fetch game (${response.status})`);
-                    }
+        // Display files
+        if (PRELOADED_GAMES.length > 0) {
+            fileList.innerHTML = '';
+            
+            PRELOADED_GAMES.forEach(file => {
+                const listItem = document.createElement('li');
+                
+                listItem.innerHTML = `
+                    <div class="file-link" data-raw-url="${file.raw_url}" data-path="${file.path}">
+                        ${file.name}
+                    </div>
+                `;
+                
+                listItem.querySelector('.file-link').addEventListener('click', async () => {
+                    this.loadingScreen.style.display = 'flex';
+                    await this.loadGameFromGitHub(file.raw_url, file.name);
+                });
+                
+                fileList.appendChild(listItem);
+            });
+        } else {
+            fileList.innerHTML = '<li><div class="error-message">No JSON game files found in the repository.</div></li>';
+        }
 
-                    const gameData = await response.json();
+    } catch (error) {
+        console.error("Error loading repository:", error);
+        fileList.innerHTML = `
+            <li>
+                <div class="error-message">
+                    <strong>Error:</strong> ${error.message}
+                </div>
+                <p>Could not load repository data.</p>
+            </li>
+        `;
+    }
+}
 
-                    // Process the game data
-                    const game = this.processGameData(gameData);
+// Load game from GitHub
+async loadGameFromGitHub(url, fileName) {
+    try {
+        // Fetch the JSON content
+        const response = await fetch(url);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch game (${response.status})`);
+        }
 
-                    if (game) {
-                        // Add to library
-                        this.gameLibrary[game.id] = game;
-                        
-                        // Close GitHub browser
-                        document.getElementById('github-browser').style.display = 'none';
-                        
-                        // Close game menu if open
-                        document.getElementById('game-menu').style.display = 'none';
-                        
-                        // Hide loading screen
-                        this.loadingScreen.style.display = 'none';
-                        
-                        // Load the game
-                        this.loadGame(game.id);
-                        
-                        console.log(`Successfully loaded game from GitHub: ${game.name}`);
-                    } else {
-                        throw new Error('Invalid game cartridge format');
-                    }
-                } catch (error) {
-                    console.error('Error loading game from GitHub:', error);
-                    this.loadingScreen.style.display = 'none';
-                    alert(`Error loading game: ${error.message}`);
-                }
+        const gameData = await response.json();
+
+        // Process the game data
+        const game = this.processGameData(gameData);
+
+        if (game) {
+            // Add to library
+            this.gameLibrary[game.id] = game;
+            
+            // Close GitHub browser
+            document.getElementById('github-browser').style.display = 'none';
+            
+            // Close game menu if open
+            document.getElementById('game-menu').style.display = 'none';
+            
+            // Hide loading screen
+            this.loadingScreen.style.display = 'none';
+            
+            // Load the game
+            this.loadGame(game.id);
+            
+            console.log(`Successfully loaded game from GitHub: ${game.name}`);
+        } else {
+            throw new Error('Invalid game cartridge format');
+        }
+    } catch (error) {
+        console.error('Error loading game from GitHub:', error);
+        this.loadingScreen.style.display = 'none';
+        alert(`Error loading game: ${error.message}`);
+    }
+}
+
+handleKeyDown(e) {
+    // Visual feedback - add active class to button
+    const updateButtonVisuals = (buttonId, isActive) => {
+        const element = document.getElementById(buttonId);
+        if (element) {
+            if (isActive) {
+                element.classList.add('active');
+            } else {
+                element.classList.remove('active');
             }
+        }
+    };
 
-            handleKeyDown(e) {
-                // Visual feedback - add active class to button
-                const updateButtonVisuals = (buttonId, isActive) => {
-                    const element = document.getElementById(buttonId);
-                    if (element) {
-                        if (isActive) {
-                            element.classList.add('active');
-                        } else {
-                            element.classList.remove('active');
-                        }
-                    }
-                };
-
-                // Map keyboard keys to buttons
-                switch (e.key) {
-                    case 'ArrowUp':
-                        updateButtonVisuals('d-up', true);
-                        this.handleButtonPress('up');
-                        e.preventDefault();
-                        break;
-                    case 'ArrowRight':
-                        updateButtonVisuals('d-right', true);
-                        this.handleButtonPress('right');
-                        e.preventDefault();
-                        break;
-                    case 'ArrowDown':
-                        updateButtonVisuals('d-down', true);
-                        this.handleButtonPress('down');
-                        e.preventDefault();
-                        break;
-                    case 'ArrowLeft':
-                        updateButtonVisuals('d-left', true);
-                        this.handleButtonPress('left');
-                        e.preventDefault();
-                        break;
-                    case 'z':
-                    case 'Z':
-                        updateButtonVisuals('btn-a', true);
-                        this.handleButtonPress('a');
-                        e.preventDefault();
-                        break;
-                    case 'x':
-                    case 'X':
-                        updateButtonVisuals('btn-b', true);
-                        this.handleButtonPress('b');
-                        e.preventDefault();
-                        break;
-                    case 'Enter':
-                        updateButtonVisuals('btn-start', true);
-                        document.getElementById('game-menu').style.display = 'flex';
-                        this.loadGameList();
-                        e.preventDefault();
-                        break;
-                    case 'Shift':
-                        updateButtonVisuals('btn-select', true);
-                        if (this.currentGame) {
-                            document.getElementById('overlay').style.display = 'flex';
-                        }
-                        e.preventDefault();
-                        break;
-                }
+    // Map keyboard keys to buttons
+    switch (e.key) {
+        case 'ArrowUp':
+            updateButtonVisuals('d-up', true);
+            this.handleButtonPress('up');
+            e.preventDefault();
+            break;
+        case 'ArrowRight':
+            updateButtonVisuals('d-right', true);
+            this.handleButtonPress('right');
+            e.preventDefault();
+            break;
+        case 'ArrowDown':
+            updateButtonVisuals('d-down', true);
+            this.handleButtonPress('down');
+            e.preventDefault();
+            break;
+        case 'ArrowLeft':
+            updateButtonVisuals('d-left', true);
+            this.handleButtonPress('left');
+            e.preventDefault();
+            break;
+        case 'z':
+        case 'Z':
+            updateButtonVisuals('btn-a', true);
+            this.handleButtonPress('a');
+            e.preventDefault();
+            break;
+        case 'x':
+        case 'X':
+            updateButtonVisuals('btn-b', true);
+            this.handleButtonPress('b');
+            e.preventDefault();
+            break;
+        case 'Enter':
+            updateButtonVisuals('btn-start', true);
+            document.getElementById('game-menu').style.display = 'flex';
+            this.loadGameList();
+            e.preventDefault();
+            break;
+        case 'Shift':
+            updateButtonVisuals('btn-select', true);
+            if (this.currentGame) {
+                document.getElementById('overlay').style.display = 'flex';
             }
+            e.preventDefault();
+            break;
+    }
+}
 
-            handleKeyUp(e) {
+handleKeyUp(e) {
                 // Visual feedback - remove active class from button
                 const updateButtonVisuals = (buttonId, isActive) => {
                     const element = document.getElementById(buttonId);
@@ -2060,7 +2108,6 @@
                                 break;
                         }
                     },
-
                     update: function() {
                         if (this.gameOver) return;
                         
@@ -2243,107 +2290,107 @@
                     }
                 };
 
-                // Override default canvas methods for the pong game too
-                this.gameLibrary['simple-pong'] = this.overrideGameCanvasMethods(this.gameLibrary['simple-pong']);
+// Override default canvas methods for the pong game too
+this.gameLibrary['simple-pong'] = this.overrideGameCanvasMethods(this.gameLibrary['simple-pong']);
 
-                // Load Mini Maze game
-                this.loadJsonGameFile('mini-maze.json')
-                    .then(game => {
-                        if (game) {
-                            // Add to library with our universal canvas overrides
-                            this.gameLibrary[game.id] = this.overrideGameCanvasMethods(game);
-                            console.log('Successfully loaded Mini Maze game');
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error loading Mini Maze game:', error);
-                    });
-                
-                // Load Breakout game
-                this.loadJsonGameFile('breakout-game.json')
-                    .then(game => {
-                        if (game) {
-                            // Add to library with our universal canvas overrides
-                            this.gameLibrary[game.id] = this.overrideGameCanvasMethods(game);
-                            console.log('Successfully loaded Breakout game');
-                        }
-                    })
-                    .catch(error => {
-                        console.error('Error loading Breakout game:', error);
-                    });
-            }
-            
-            // Helper method to load game from JSON file
-            async loadJsonGameFile(filename) {
-                try {
-                    // Try to load from the documents first (for the uploaded files)
-                    const fileData = document.querySelector(`[data-source="${filename}"] .document_content`);
-                    if (fileData) {
-                        const gameData = JSON.parse(fileData.textContent);
-                        return this.processGameData(gameData);
-                    }
-                    
-                    // If not found in documents, try loading embedded preloaded game data
-                    const PRELOADED_GAME_DATA = {
-                        'mini-maze.json': {"id":"mini-maze","name":"Mini Maze","description":"Navigate the maze to the exit","icon":"🧩","gameData":{"width":280,"height":248,"backgroundColor":"#8bac0f","wallColor":"#223344","playerColor":"#e42c64","exitColor":"#4CAF50","cellSize":20}},
-                        'breakout-game.json': {"id":"breakout-game","name":"Breakout","description":"Classic brick-breaking arcade game","icon":"🧱","gameData":{"paddleWidth":50,"paddleHeight":10,"ballRadius":5,"brickRowCount":5,"brickColumnCount":8,"brickWidth":30,"brickHeight":15,"brickPadding":5,"brickOffsetTop":40,"brickOffsetLeft":15,"initialLives":3,"initialSpeed":3,"speedIncrement":0.25,"maxSpeed":8,"paddleSpeed":6,"colors":{"background":"#000000","paddle":"#AAAAFF","ball":"#FFFFFF","brickColors":["#FF0000","#FF7F00","#FFFF00","#00FF00","#0000FF"],"text":"#FFFFFF"}}}
-                    };
-                    
-                    if (PRELOADED_GAME_DATA[filename]) {
-                        return this.processGameData(PRELOADED_GAME_DATA[filename]);
-                    }
-                    
-                    // If still not found, try loading from GitHub
-                    const gameUrl = `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/${filename}`;
-                    const response = await fetch(gameUrl);
-                    
-                    if (!response.ok) {
-                        throw new Error(`Failed to fetch game (${response.status})`);
-                    }
-                    
-                    const gameData = await response.json();
-                    return this.processGameData(gameData);
-                } catch (error) {
-                    console.error(`Error loading game file ${filename}:`, error);
-                    return null;
-                }
-            }
+// Load Mini Maze game
+this.loadJsonGameFile('mini-maze.json')
+    .then(game => {
+        if (game) {
+            // Add to library with our universal canvas overrides
+            this.gameLibrary[game.id] = this.overrideGameCanvasMethods(game);
+            console.log('Successfully loaded Mini Maze game');
+        }
+    })
+    .catch(error => {
+        console.error('Error loading Mini Maze game:', error);
+    });
 
-            displayMainMenu() {
-                // Clear the game display
-                this.gameDisplay.innerHTML = '';
-                this.createUniversalCanvasContainer();
-                
-                // Create menu content
-                const menuContent = document.createElement('div');
-                menuContent.style.width = '100%';
-                menuContent.style.height = '100%';
-                menuContent.style.display = 'flex';
-                menuContent.style.flexDirection = 'column';
-                menuContent.style.justifyContent = 'center';
-                menuContent.style.alignItems = 'center';
-                menuContent.style.color = 'black';
-                menuContent.style.textAlign = 'center';
-                menuContent.style.fontFamily = '"Press Start 2P", cursive';
-                menuContent.style.position = 'absolute';
-                menuContent.style.top = '0';
-                menuContent.style.left = '0';
-                
-                // Adjust font size based on desktop/mobile
-                const titleSize = this.isDesktop ? '24px' : '18px';
-                const textSize = this.isDesktop ? '14px' : '12px';
-                
-                menuContent.innerHTML = `
-                    <h2 style="font-size: ${titleSize}; margin-bottom: 20px;">RetroPlay</h2>
-                    <p style="font-size: ${textSize}; margin-bottom: 20px;">Press START to open game library</p>
-                    <p style="font-size: ${textSize};">Use D-Pad to navigate</p>
-                `;
-                
-                this.universalCanvasContainer.appendChild(menuContent);
-                
-                // Draw a nice background on the universal canvas
-                const ctx = this.universalCanvas.getContext('2d');
-                ctx.fillStyle = '#8bac0f';
+// Load Breakout game
+this.loadJsonGameFile('breakout-game.json')
+    .then(game => {
+        if (game) {
+            // Add to library with our universal canvas overrides
+            this.gameLibrary[game.id] = this.overrideGameCanvasMethods(game);
+            console.log('Successfully loaded Breakout game');
+        }
+    })
+    .catch(error => {
+        console.error('Error loading Breakout game:', error);
+    });
+}
+
+// Helper method to load game from JSON file
+async loadJsonGameFile(filename) {
+try {
+    // Try to load from the documents first (for the uploaded files)
+    const fileData = document.querySelector(`[data-source="${filename}"] .document_content`);
+    if (fileData) {
+        const gameData = JSON.parse(fileData.textContent);
+        return this.processGameData(gameData);
+    }
+    
+    // If not found in documents, try loading embedded preloaded game data
+    const PRELOADED_GAME_DATA = {
+        'mini-maze.json': {"id":"mini-maze","name":"Mini Maze","description":"Navigate the maze to the exit","icon":"🧩","gameData":{"width":280,"height":248,"backgroundColor":"#8bac0f","wallColor":"#223344","playerColor":"#e42c64","exitColor":"#4CAF50","cellSize":20}},
+        'breakout-game.json': {"id":"breakout-game","name":"Breakout","description":"Classic brick-breaking arcade game","icon":"🧱","gameData":{"paddleWidth":50,"paddleHeight":10,"ballRadius":5,"brickRowCount":5,"brickColumnCount":8,"brickWidth":30,"brickHeight":15,"brickPadding":5,"brickOffsetTop":40,"brickOffsetLeft":15,"initialLives":3,"initialSpeed":3,"speedIncrement":0.25,"maxSpeed":8,"paddleSpeed":6,"colors":{"background":"#000000","paddle":"#AAAAFF","ball":"#FFFFFF","brickColors":["#FF0000","#FF7F00","#FFFF00","#00FF00","#0000FF"],"text":"#FFFFFF"}}}
+    };
+    
+    if (PRELOADED_GAME_DATA[filename]) {
+        return this.processGameData(PRELOADED_GAME_DATA[filename]);
+    }
+    
+    // If still not found, try loading from GitHub
+    const gameUrl = `https://raw.githubusercontent.com/${this.REPO_OWNER}/${this.REPO_NAME}/${this.BRANCH}/${filename}`;
+    const response = await fetch(gameUrl);
+    
+    if (!response.ok) {
+        throw new Error(`Failed to fetch game (${response.status})`);
+    }
+    
+    const gameData = await response.json();
+    return this.processGameData(gameData);
+} catch (error) {
+    console.error(`Error loading game file ${filename}:`, error);
+    return null;
+}
+}
+
+displayMainMenu() {
+// Clear the game display
+this.gameDisplay.innerHTML = '';
+this.createUniversalCanvasContainer();
+
+// Create menu content
+const menuContent = document.createElement('div');
+menuContent.style.width = '100%';
+menuContent.style.height = '100%';
+menuContent.style.display = 'flex';
+menuContent.style.flexDirection = 'column';
+menuContent.style.justifyContent = 'center';
+menuContent.style.alignItems = 'center';
+menuContent.style.color = 'black';
+menuContent.style.textAlign = 'center';
+menuContent.style.fontFamily = '"Press Start 2P", cursive';
+menuContent.style.position = 'absolute';
+menuContent.style.top = '0';
+menuContent.style.left = '0';
+
+// Adjust font size based on desktop/mobile
+const titleSize = this.isDesktop ? '24px' : '18px';
+const textSize = this.isDesktop ? '14px' : '12px';
+
+menuContent.innerHTML = `
+    <h2 style="font-size: ${titleSize}; margin-bottom: 20px;">RetroPlay</h2>
+    <p style="font-size: ${textSize}; margin-bottom: 20px;">Press START to open game library</p>
+    <p style="font-size: ${textSize};">Use D-Pad to navigate</p>
+`;
+
+this.universalCanvasContainer.appendChild(menuContent);
+
+// Draw a nice background on the universal canvas
+const ctx = this.universalCanvas.getContext('2d');
+ctx.fillStyle = '#8bac0f';
                 ctx.fillRect(0, 0, this.universalCanvas.width, this.universalCanvas.height);
                 
                 // Draw some decorative elements
@@ -2505,7 +2552,7 @@
                     // Additional game-specific functions, also serialized as strings
                     additionalFunctions: {}
                 };
-                
+
                 // Extract any additional functions from the game
                 for (const key in this.currentGame) {
                     if (typeof this.currentGame[key] === 'function' && 
