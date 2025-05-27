@@ -433,8 +433,8 @@ def update_local_browser_html(apps, github_username, repo_name):
     </div>
 
     <script>
-        // App data
-        const apps = {json.dumps(apps, indent=8)};
+        // App data with GitHub raw URLs
+        const apps = {json.dumps([{**app, 'url': f'https://raw.githubusercontent.com/{github_username}/{repo_name}/refs/heads/main/{app["path"].replace("./", "")}'} for app in apps], indent=8)};
         
         // State
         let selectedTag = 'all';
@@ -514,21 +514,23 @@ def update_local_browser_html(apps, github_username, repo_name):
                 return;
             }}
             
-            appGrid.innerHTML = filteredApps.map(app => `
-                <div class="app-card">
-                    <div class="app-header">
-                        <div class="app-icon">${{app.icon || '📄'}}</div>
-                        <h3 class="app-title">${{app.title}}</h3>
+            appGrid.innerHTML = filteredApps.map(app => {{
+                return `
+                    <div class="app-card">
+                        <div class="app-header">
+                            <div class="app-icon">${{app.icon || '📄'}}</div>
+                            <h3 class="app-title">${{app.title}}</h3>
+                        </div>
+                        <p class="app-description">${{app.description}}</p>
+                        <div class="app-tags">
+                            ${{(app.tags || []).map(tag => `<span class="app-tag">${{tag}}</span>`).join('')}}
+                        </div>
+                        <button class="app-button" onclick="window.open('${{app.url}}', '_blank')">
+                            Open App
+                        </button>
                     </div>
-                    <p class="app-description">${{app.description}}</p>
-                    <div class="app-tags">
-                        ${{(app.tags || []).map(tag => `<span class="app-tag">${{tag}}</span>`).join('')}}
-                    </div>
-                    <button class="app-button" onclick="window.location.href='${{app.path}}'">
-                        Open App
-                    </button>
-                </div>
-            `).join('');
+                `;
+            }}).join('');
         }}
     </script>
 </body>
