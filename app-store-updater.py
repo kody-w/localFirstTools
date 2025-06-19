@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-App Store Index Updater
-Scans the current directory for HTML files and updates index.html with all found apps.
+Vibe Coding Gallery Index Updater
+Scans the current directory for HTML files and updates the gallery configuration.
+Creates a vibe_gallery_config.json file compatible with the Vibe Coding Gallery.
 """
 
 import os
@@ -10,6 +11,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 from html.parser import HTMLParser
+import random
 
 class TitleExtractor(HTMLParser):
     """Extract title from HTML file"""
@@ -38,88 +40,150 @@ def extract_title_from_html(filepath):
             
         parser = TitleExtractor()
         parser.feed(content)
-        return parser.title or "Untitled App"
+        return parser.title or "Untitled Creation"
     except Exception as e:
         print(f"Error extracting title from {filepath}: {e}")
-        return "Untitled App"
+        return "Untitled Creation"
 
-def generate_description_from_title(title):
-    """Generate a simple description based on the title"""
-    # Remove common suffixes
-    clean_title = re.sub(r'\s*-\s*Complete$', '', title, flags=re.IGNORECASE)
-    clean_title = re.sub(r'\s*Tool$', '', clean_title, flags=re.IGNORECASE)
-    clean_title = re.sub(r'\s*App$', '', clean_title, flags=re.IGNORECASE)
+def generate_artistic_description(title):
+    """Generate an artistic description based on the title"""
+    templates = [
+        "An experimental dive into the creative possibilities of {}",
+        "Interactive art piece exploring {} through code and creativity",
+        "A digital meditation on {} in the modern age",
+        "Pushing browser limits to create unexpected {} experiences",
+        "Real-time generative {} that evolves with each interaction",
+        "Creative coding experiment blending {} with imagination",
+        "A playful exploration of {} where code becomes art",
+        "Digital canvas for {} where logic meets creativity",
+        "Vibe coding exploration of {} at its finest",
+        "An immersive journey through {} in the digital realm",
+        "Experimental web art redefining how we experience {}",
+        "Interactive {} piece that responds to your digital presence"
+    ]
     
-    return f"A utility for {clean_title.lower()} tasks and operations"
+    # Clean and format the title for use in description
+    clean_title = re.sub(r'\s*-\s*Complete$', '', title, flags=re.IGNORECASE)
+    clean_title = re.sub(r'(Tool|App|Utility)$', '', clean_title, flags=re.IGNORECASE).strip()
+    
+    # Make it lowercase and more descriptive
+    if clean_title:
+        focus = clean_title.lower()
+    else:
+        focus = "digital expression"
+    
+    return random.choice(templates).format(focus)
 
-def guess_tags_from_title(title):
-    """Guess appropriate tags based on the title"""
+def generate_artist_name():
+    """Generate creative artist/creator names"""
+    prefixes = [
+        "Digital", "Cyber", "Neon", "Pixel", "Binary", "Quantum", 
+        "Virtual", "Electric", "Holographic", "Algorithmic", "Fractal",
+        "Synthetic", "Neural", "Cosmic", "Glitch", "Ethereal"
+    ]
+    
+    suffixes = [
+        "Dreams", "Visions", "Aesthetics", "Lab", "Studio", "Collective",
+        "Workshop", "Experiments", "Explorations", "Creations", "Arts",
+        "Design", "Canvas", "Playground", "Gallery", "Space"
+    ]
+    
+    return f"{random.choice(prefixes)} {random.choice(suffixes)}"
+
+def guess_creative_tags(title):
+    """Generate creative/artistic tags based on the title"""
     title_lower = title.lower()
     tags = []
     
-    # Category mappings
+    # Creative tag mappings
     tag_mappings = {
-        'productivity': ['task', 'todo', 'planner', 'schedule', 'organize', 'track'],
-        'visualization': ['diagram', 'chart', 'graph', 'view', 'display', 'mermaid'],
-        'health': ['health', 'medical', 'therapy', 'emdr', 'wellness'],
-        'development': ['code', 'dev', 'api', 'debug', 'test'],
-        'tools': ['tool', 'utility', 'helper', 'assistant'],
-        'data': ['data', 'csv', 'json', 'excel', 'database'],
-        'communication': ['chat', 'message', 'email', 'contact'],
-        'finance': ['finance', 'money', 'budget', 'expense', 'invoice'],
-        'education': ['learn', 'study', 'quiz', 'flash', 'education'],
-        'media': ['image', 'video', 'audio', 'media', 'photo'],
-        'security': ['security', 'password', 'encrypt', 'auth'],
-        'games': ['game', 'puzzle', 'play'],
+        'interactive': ['task', 'todo', 'planner', 'schedule', 'organize', 'track', 'game', 'play'],
+        'generative': ['chart', 'graph', 'diagram', 'view', 'display', 'data', 'random'],
+        'experimental': ['tool', 'utility', 'helper', 'test', 'debug', 'api'],
+        'visual': ['image', 'photo', 'picture', 'view', 'display', 'diagram', 'chart'],
+        'kinetic': ['animation', 'motion', 'move', 'dynamic', 'flow'],
+        'audio-reactive': ['audio', 'music', 'sound', 'voice', 'media'],
+        'particles': ['particle', 'physics', 'simulation', 'flow'],
+        'geometric': ['shape', 'geometry', 'math', 'calculate', 'formula'],
+        'organic': ['health', 'wellness', 'natural', 'life', 'bio'],
+        'abstract': ['creative', 'art', 'design', 'color', 'style'],
+        'immersive': ['3d', 'vr', 'space', 'world', 'environment'],
+        'minimal': ['simple', 'clean', 'basic', 'pure', 'zen'],
+        'cyberpunk': ['cyber', 'tech', 'digital', 'code', 'hack'],
+        'glitch': ['error', 'bug', 'corrupt', 'distort'],
+        'retro': ['old', 'vintage', 'classic', 'nostalgia', '80s', '90s']
     }
     
+    # Check for matches
     for tag, keywords in tag_mappings.items():
         if any(keyword in title_lower for keyword in keywords):
             tags.append(tag)
     
-    # If no tags found, add 'utility' as default
-    if not tags:
-        tags.append('utility')
-        
-    return tags
+    # Ensure we have at least 2 tags
+    if len(tags) < 2:
+        # Add some random creative tags
+        all_tags = list(tag_mappings.keys())
+        while len(tags) < 2:
+            random_tag = random.choice(all_tags)
+            if random_tag not in tags:
+                tags.append(random_tag)
+    
+    # Limit to 4 tags max
+    return tags[:4]
 
-def choose_icon_from_title(title):
-    """Choose an appropriate emoji icon based on the title"""
+def choose_vibe_icon(title):
+    """Choose an artistic emoji icon based on the title"""
     title_lower = title.lower()
     
-    # Icon mappings
+    # Vibe icon mappings
     icon_mappings = {
-        '📋': ['task', 'todo', 'list', 'checklist'],
-        '📊': ['chart', 'graph', 'diagram', 'data', 'mermaid'],
-        '👁️': ['eye', 'emdr', 'vision', 'view'],
-        '🏥': ['health', 'medical', 'therapy'],
-        '💻': ['code', 'dev', 'api', 'program'],
-        '🔧': ['tool', 'utility', 'fix'],
-        '📈': ['finance', 'money', 'budget', 'expense'],
-        '🎮': ['game', 'play', 'puzzle'],
-        '🔒': ['security', 'password', 'lock'],
-        '📚': ['learn', 'study', 'education', 'quiz'],
-        '🖼️': ['image', 'photo', 'picture'],
-        '🎵': ['audio', 'music', 'sound'],
-        '📹': ['video', 'media'],
-        '💬': ['chat', 'message', 'talk'],
-        '⏰': ['time', 'clock', 'schedule', 'calendar'],
-        '🔍': ['search', 'find', 'lookup'],
-        '📝': ['write', 'note', 'text', 'document'],
+        '✨': ['magic', 'sparkle', 'special', 'star'],
+        '🎨': ['art', 'paint', 'color', 'draw', 'design'],
+        '🌟': ['star', 'bright', 'shine', 'glow'],
+        '💫': ['dizzy', 'spin', 'whirl', 'motion'],
+        '🔮': ['crystal', 'magic', 'future', 'predict', 'mystery'],
+        '🎭': ['theater', 'drama', 'mask', 'play', 'game'],
+        '🌈': ['rainbow', 'color', 'spectrum', 'pride'],
+        '🎪': ['circus', 'fun', 'entertainment', 'show'],
+        '🎯': ['target', 'goal', 'aim', 'focus', 'task'],
+        '🎲': ['dice', 'random', 'chance', 'game', 'play'],
+        '🎸': ['guitar', 'music', 'rock', 'audio', 'sound'],
+        '🎹': ['piano', 'keyboard', 'music', 'keys'],
+        '🌊': ['wave', 'flow', 'water', 'fluid', 'motion'],
+        '🔥': ['fire', 'hot', 'burn', 'energy', 'power'],
+        '⚡': ['lightning', 'electric', 'fast', 'speed', 'energy'],
+        '🌙': ['moon', 'night', 'dark', 'dream', 'sleep'],
+        '🌸': ['flower', 'bloom', 'nature', 'organic', 'life'],
+        '🦋': ['butterfly', 'transform', 'change', 'flutter'],
+        '🌀': ['cyclone', 'spiral', 'spin', 'vortex', 'twist'],
+        '💎': ['gem', 'diamond', 'crystal', 'precious', 'value'],
+        '🎆': ['firework', 'explode', 'burst', 'celebrate'],
+        '🌃': ['night', 'city', 'urban', 'neon', 'cyber'],
+        '🏔️': ['mountain', 'peak', 'high', 'climb', 'challenge'],
+        '🌺': ['hibiscus', 'tropical', 'exotic', 'flower'],
+        '🦄': ['unicorn', 'magic', 'fantasy', 'unique', 'special']
     }
     
+    # Check for keyword matches
+    matched_icons = []
     for icon, keywords in icon_mappings.items():
         if any(keyword in title_lower for keyword in keywords):
-            return icon
-            
-    return '📄'  # Default icon
+            matched_icons.append(icon)
+    
+    if matched_icons:
+        return random.choice(matched_icons)
+    
+    # If no match, return a random vibe icon
+    vibe_icons = ['✨', '🎨', '🌟', '💫', '🔮', '🎭', '🌈', '🎪', '🎯', '🎲', 
+                  '🎸', '🎹', '🌊', '🔥', '⚡', '🌙', '🌸', '🦋', '🌀', '💎']
+    return random.choice(vibe_icons)
 
 def scan_html_files(directory="."):
     """Scan directory for HTML files and extract metadata"""
-    apps = []
+    artworks = []
     
     # Files to exclude
-    exclude_files = {'index.html', 'template.html', 'example.html', 'test.html'}
+    exclude_files = {'index.html', 'template.html', 'example.html', 'test.html', 'gallery.html'}
     
     for filename in os.listdir(directory):
         if filename.endswith('.html') and filename.lower() not in exclude_files:
@@ -129,97 +193,82 @@ def scan_html_files(directory="."):
             title = extract_title_from_html(filepath)
             
             # Generate ID from filename
-            app_id = os.path.splitext(filename)[0]
+            artwork_id = os.path.splitext(filename)[0]
             
-            # Generate or extract other metadata
-            description = generate_description_from_title(title)
-            tags = guess_tags_from_title(title)
-            icon = choose_icon_from_title(title)
+            # Generate artistic metadata
+            description = generate_artistic_description(title)
+            tags = guess_creative_tags(title)
+            icon = choose_vibe_icon(title)
+            artist = generate_artist_name()
             
-            app = {
-                'id': app_id,
+            artwork = {
+                'id': artwork_id,
                 'title': title,
+                'artist': artist,
                 'description': description,
                 'tags': tags,
                 'path': f'./{filename}',
                 'icon': icon
             }
             
-            apps.append(app)
-            print(f"Found app: {title} ({filename})")
+            artworks.append(artwork)
+            print(f"Found artwork: {icon} {title} by {artist}")
     
-    return sorted(apps, key=lambda x: x['title'])
+    return sorted(artworks, key=lambda x: x['title'])
 
-def update_index_html(apps):
-    """Update the apps array in index.html"""
-    try:
-        with open('index.html', 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Create the new apps array
-        apps_json = json.dumps(apps, indent=12)
-        # Add proper indentation for the JavaScript context
-        apps_json = '\n'.join(['        ' + line if i > 0 else line 
-                              for i, line in enumerate(apps_json.split('\n'))])
-        
-        # Pattern to find the apps array
-        pattern = r'(let apps = )\[[\s\S]*?\](\s*;)'
-        
-        # Replace the apps array
-        new_content = re.sub(pattern, rf'\1{apps_json}\2', content)
-        
-        # Write back to file
-        with open('index.html', 'w', encoding='utf-8') as f:
-            f.write(new_content)
-            
-        print(f"\nSuccessfully updated index.html with {len(apps)} apps")
-        
-    except Exception as e:
-        print(f"Error updating index.html: {e}")
-
-def create_config_file(apps):
-    """Create a configuration JSON file for backup"""
+def create_gallery_config(artworks):
+    """Create a configuration JSON file for the Vibe Coding Gallery"""
     config = {
         'version': '1.0',
+        'exhibition': 'Vibe Coding Showcase',
         'lastUpdated': datetime.now().isoformat(),
-        'apps': apps
+        'artworks': artworks
     }
     
-    with open('utility_apps_config.json', 'w', encoding='utf-8') as f:
+    with open('vibe_gallery_config.json', 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=2)
         
-    print("Created utility_apps_config.json backup file")
+    print("\nCreated vibe_gallery_config.json")
+
+def display_summary(artworks):
+    """Display a summary of the found artworks"""
+    print(f"\nFound {len(artworks)} artworks total")
+    print("\n" + "="*60)
+    print("VIBE CODING GALLERY COLLECTION")
+    print("="*60 + "\n")
+    
+    for i, artwork in enumerate(artworks, 1):
+        print(f"{i}. {artwork['icon']} {artwork['title']}")
+        print(f"   Artist: {artwork['artist']}")
+        print(f"   File: {artwork['path']}")
+        print(f"   Tags: {', '.join(artwork['tags'])}")
+        print(f"   Description: {artwork['description'][:60]}...")
+        print()
 
 def main():
-    """Main function to run the app store updater"""
-    print("App Store Index Updater")
-    print("=" * 50)
-    print("Scanning for HTML files in current directory...\n")
+    """Main function to run the gallery updater"""
+    print("🎨 Vibe Coding Gallery Index Updater 🎨")
+    print("=" * 60)
+    print("Scanning for HTML artworks in current directory...\n")
     
     # Scan for HTML files
-    apps = scan_html_files()
+    artworks = scan_html_files()
     
-    if not apps:
-        print("No HTML files found (excluding index.html)")
+    if not artworks:
+        print("No HTML files found (excluding gallery files)")
         return
     
-    print(f"\nFound {len(apps)} apps total")
-    print("\nApp List:")
-    print("-" * 50)
-    for app in apps:
-        print(f"{app['icon']} {app['title']}")
-        print(f"   File: {app['path']}")
-        print(f"   Tags: {', '.join(app['tags'])}")
-        print()
+    display_summary(artworks)
     
     # Ask for confirmation
-    response = input("Update index.html with these apps? (y/n): ")
+    response = input("\nCreate/update vibe_gallery_config.json with these artworks? (y/n): ")
     if response.lower() == 'y':
-        update_index_html(apps)
-        create_config_file(apps)
-        print("\nDone! Your app store has been updated.")
+        create_gallery_config(artworks)
+        print("\n✨ Done! Your vibe coding gallery has been updated.")
+        print("The gallery will automatically load vibe_gallery_config.json")
+        print("when opened in a browser.")
     else:
-        print("Cancelled. No changes made.")
+        print("\n❌ Cancelled. No changes made.")
 
 if __name__ == "__main__":
     main()
