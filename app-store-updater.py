@@ -3,6 +3,7 @@
 Vibe Coding Gallery Index Updater
 Scans the current directory for HTML files and updates the gallery configuration.
 Creates a vibe_gallery_config.json file compatible with the Vibe Coding Gallery.
+Excludes files in the archive directory.
 """
 
 import os
@@ -178,6 +179,14 @@ def choose_vibe_icon(title):
                   '🎸', '🎹', '🌊', '🔥', '⚡', '🌙', '🌸', '🦋', '🌀', '💎']
     return random.choice(vibe_icons)
 
+def is_in_archive(filepath):
+    """Check if a file is in the archive directory"""
+    # Convert to Path object for easier manipulation
+    path = Path(filepath)
+    
+    # Check if 'archive' is in any part of the path
+    return 'archive' in path.parts
+
 def scan_html_files(directory="."):
     """Scan directory for HTML files and extract metadata"""
     artworks = []
@@ -185,34 +194,54 @@ def scan_html_files(directory="."):
     # Files to exclude
     exclude_files = {'index.html', 'template.html', 'example.html', 'test.html', 'gallery.html'}
     
-    for filename in os.listdir(directory):
-        if filename.endswith('.html') and filename.lower() not in exclude_files:
-            filepath = os.path.join(directory, filename)
+    # Directories to exclude
+    exclude_dirs = {'archive', '.git', 'node_modules', 'dist', 'build'}
+    
+    for root, dirs, files in os.walk(directory):
+        # Remove excluded directories from dirs to prevent os.walk from descending into them
+        dirs[:] = [d for d in dirs if d not in exclude_dirs]
+        
+        # Check if current directory is archive or within archive
+        if is_in_archive(root):
+            continue
             
-            # Extract title from HTML
-            title = extract_title_from_html(filepath)
-            
-            # Generate ID from filename
-            artwork_id = os.path.splitext(filename)[0]
-            
-            # Generate artistic metadata
-            description = generate_artistic_description(title)
-            tags = guess_creative_tags(title)
-            icon = choose_vibe_icon(title)
-            artist = generate_artist_name()
-            
-            artwork = {
-                'id': artwork_id,
-                'title': title,
-                'artist': artist,
-                'description': description,
-                'tags': tags,
-                'path': f'./{filename}',
-                'icon': icon
-            }
-            
-            artworks.append(artwork)
-            print(f"Found artwork: {icon} {title} by {artist}")
+        for filename in files:
+            if filename.endswith('.html') and filename.lower() not in exclude_files:
+                filepath = os.path.join(root, filename)
+                
+                # Double-check the file isn't in archive
+                if is_in_archive(filepath):
+                    continue
+                
+                # Extract title from HTML
+                title = extract_title_from_html(filepath)
+                
+                # Generate ID from filename
+                artwork_id = os.path.splitext(filename)[0]
+                
+                # Generate artistic metadata
+                description = generate_artistic_description(title)
+                tags = guess_creative_tags(title)
+                icon = choose_vibe_icon(title)
+                artist = generate_artist_name()
+                
+                # Get relative path from current directory
+                rel_path = os.path.relpath(filepath, directory)
+                # Ensure path uses forward slashes for web compatibility
+                rel_path = rel_path.replace(os.sep, '/')
+                
+                artwork = {
+                    'id': artwork_id,
+                    'title': title,
+                    'artist': artist,
+                    'description': description,
+                    'tags': tags,
+                    'path': f'./{rel_path}',
+                    'icon': icon
+                }
+                
+                artworks.append(artwork)
+                print(f"Found artwork: {icon} {title} by {artist}")
     
     return sorted(artworks, key=lambda x: x['title'])
 
@@ -226,7 +255,7 @@ def create_gallery_config(artworks):
     }
     
     with open('vibe_gallery_config.json', 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=2)
+        json.dump(config, f, indent=2, ensure_ascii=False)
         
     print("\nCreated vibe_gallery_config.json")
 
@@ -249,13 +278,14 @@ def main():
     """Main function to run the gallery updater"""
     print("🎨 Vibe Coding Gallery Index Updater 🎨")
     print("=" * 60)
-    print("Scanning for HTML artworks in current directory...\n")
+    print("Scanning for HTML artworks in current directory...")
+    print("(Excluding archive directory)\n")
     
     # Scan for HTML files
     artworks = scan_html_files()
     
     if not artworks:
-        print("No HTML files found (excluding gallery files)")
+        print("No HTML files found (excluding gallery files and archive)")
         return
     
     display_summary(artworks)
