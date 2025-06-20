@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Game Boy Emulator</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #2a2a2a;
+            color: #fff;
+        }
+        
+        h1 {
+            text-align: center;
+            color: #8bc34a;
+        }
+        
+        #emulator-container {
+            text-align: center;
+            margin: 20px 0;
+        }
+        
+        canvas {
+            border: 4px solid #444;
+            image-rendering: pixelated;
+            width: 480px;
+            height: 432px;
+            background-color: #9bbf65;
+        }
+        
+        .controls {
+            margin: 20px 0;
+            text-align: center;
+        }
+        
+        button {
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        button:hover {
+            background-color: #45a049;
+        }
+        
+        button:disabled {
+            background-color: #666;
+            cursor: not-allowed;
+        }
+        
+        input[type="file"] {
+            display: none;
+        }
+        
+        .file-label {
+            display: inline-block;
+            margin: 5px;
+            padding: 10px 20px;
+            font-size: 16px;
+            background-color: #2196F3;
+            color: white;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        
+        .file-label:hover {
+            background-color: #0b7dda;
+        }
+        
+        .save-states {
+            margin: 20px 0;
+            padding: 20px;
+            background-color: #333;
+            border-radius: 8px;
+        }
+        
+        .save-slot {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #444;
+            border-radius: 4px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        .empty-slot {
+            opacity: 0.5;
+        }
+        
+        .keyboard-info {
+            margin: 20px 0;
+            padding: 15px;
+            background-color: #333;
+            border-radius: 8px;
+            text-align: left;
+        }
+        
+        .keyboard-info h3 {
+            color: #8bc34a;
+            margin-top: 0;
+        }
+        
+        .key-mapping {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .status {
+            text-align: center;
+            margin: 10px 0;
+            color: #8bc34a;
+        }
+    </style>
+</head>
+<body>
+    <h1>Game Boy Emulator</h1>
+    
+    <div class="controls">
+        <label for="rom-input" class="file-label">Load ROM</label>
+        <input type="file" id="rom-input" accept=".gb,.gbc">
+        <button id="pause-btn" disabled>Pause</button>
+        <button id="reset-btn" disabled>Reset</button>
+        <button id="mute-btn" disabled>Mute</button>
+    </div>
+    
+    <div id="emulator-container">
+        <canvas id="gameboy-canvas" width="160" height="144"></canvas>
+    </div>
+    
+    <div class="status" id="status">No ROM loaded</div>
+    
+    <div class="save-states">
+        <h3>Save States</h3>
+        <div id="save-slots"></div>
+    </div>
+    
+    <div class="keyboard-info">
+        <h3>Keyboard Controls</h3>
+        <div class="key-mapping">
+            <div>↑↓←→ - D-Pad</div>
+            <div>Z - A Button</div>
+            <div>X - B Button</div>
+            <div>Enter - Start</div>
+            <div>Shift - Select</div>
+            <div>F1-F4 - Save State</div>
+            <div>1-4 - Load State</div>
+        </div>
+    </div>
+
+    <script>
+        // Simple Game Boy emulator implementation
+        class GameBoyEmulator {
+            constructor(canvas) {
+                this.canvas = canvas;
+                this.ctx = canvas.getContext('2d');
+                this.running = false;
+                this.paused = false;
+                this.muted = false;
+                this.rom = null;
+                this.romName = '';
+                this.memory = new Uint8Array(0x10000); // 64KB memory
+                this.registers = {
+                    A: 0, B: 0, C: 0, D: 0, E: 0, H: 0, L: 0,
+                    SP: 0xFFFE, PC: 0x0100
+                };
+                this.screen = new ImageData(160, 144);
+                this.keys = {
+                    up: false, down: false, left: false, right: false,
+                    a: false, b: false, start: false, select: false
+                };
+                
+                this.setupKeyboardControls();
+            }
+            
+            loadROM(arrayBuffer, filename) {
+                this.rom = new Uint8Array(arrayBuffer);
+                this.romName = filename;
+                this.reset();
+                this.running = true;
+                this.paused = false;
+                document.getElementById('status').textContent = `Playing: ${filename}`;
+                document.getElementById('pause-btn').disabled = false;
+                document.getElementById('reset-btn').disabled = false;
+                document.getElementById('mute-btn').disabled = false;
+                this.updateSaveSlots();
+                this.run();
+            }
+            
+            reset() {
+                this.memory.fill(0);
+                if (this.rom) {
+                    // Copy ROM to memory (simplified)
+                    for (let i = 0; i < Math.min(this.rom.length, 0x8000); i++) {
+                        this.memory[i] = this.rom[i];
+                    }
+                }
+                this.registers.PC = 0x0100;
+                this.registers.SP = 0xFFFE;
+                this.registers.A = 0;
+            }
+            
+            run() {
+                if (!this.running) return;
+                
+                if (!this.paused) {
+                    // Simplified emulation loop
+                    for (let i = 0; i < 1000; i++) {
+                        this.step();
+                    }
+                    this.render();
+                }
+                
+                requestAnimationFrame(() => this.run());
+            }
+            
+            step() {
+                // Very simplified CPU step (just for demo)
+                const opcode = this.memory[this.registers.PC];
+                this.registers.PC = (this.registers.PC + 1) & 0xFFFF;
+                
+                // Add some basic visual feedback
+                if (Math.random() < 0.01) {
+                    const x = Math.floor(Math.random() * 160);
+                    const y = Math.floor(Math.random() * 144);
+                    const color = Math.floor(Math.random() * 4) * 85;
+                    this.setPixel(x, y, color, color, color);
+                }
+            }
+            
+            setPixel(x, y, r, g, b) {
+                const index = (y * 160 + x) * 4;
+                this.screen.data[index] = r;
+                this.screen.data[index + 1] = g;
+                this.screen.data[index + 2] = b;
+                this.screen.data[index + 3] = 255;
+            }
+            
+            render() {
+                // Create a temporary canvas for scaling
+                const tempCanvas = document.createElement('canvas');
+                tempCanvas.width = 160;
+                tempCanvas.height = 144;
+                const tempCtx = tempCanvas.getContext('2d');
+                tempCtx.putImageData(this.screen, 0, 0);
+                
+                // Scale up to the display canvas
+                this.ctx.imageSmoothingEnabled = false;
+                this.ctx.drawImage(tempCanvas, 0, 0, 160, 144, 0, 0, this.canvas.width, this.canvas.height);
+            }
+            
+            saveState(slot) {
+                if (!this.rom) return;
+                
+                const state = {
+                    romName: this.romName,
+                    memory: Array.from(this.memory),
+                    registers: {...this.registers},
+                    screen: Array.from(this.screen.data),
+                    timestamp: new Date().toISOString()
+                };
+                
+                const key = `gameboy_save_${this.romName}_slot${slot}`;
+                localStorage.setItem(key, JSON.stringify(state));
+                this.updateSaveSlots();
+            }
+            
+            loadState(slot) {
+                if (!this.rom) return;
+                
+                const key = `gameboy_save_${this.romName}_slot${slot}`;
+                const savedState = localStorage.getItem(key);
+                
+                if (savedState) {
+                    const state = JSON.parse(savedState);
+                    this.memory = new Uint8Array(state.memory);
+                    this.registers = {...state.registers};
+                    this.screen.data.set(new Uint8Array(state.screen));
+                    this.render();
+                }
+            }
+            
+            updateSaveSlots() {
+                const container = document.getElementById('save-slots');
+                container.innerHTML = '';
+                
+                for (let i = 1; i <= 4; i++) {
+                    const slot = document.createElement('div');
+                    slot.className = 'save-slot';
+                    
+                    const key = `gameboy_save_${this.romName}_slot${i}`;
+                    const savedState = localStorage.getItem(key);
+                    
+                    if (savedState) {
+                        const state = JSON.parse(savedState);
+                        const date = new Date(state.timestamp);
+                        slot.innerHTML = `
+                            <span>Slot ${i}: ${date.toLocaleString()}</span>
+                            <div>
+                                <button onclick="emulator.loadState(${i})">Load</button>
+                                <button onclick="emulator.saveState(${i})">Overwrite</button>
+                            </div>
+                        `;
+                    } else {
+                        slot.className += ' empty-slot';
+                        slot.innerHTML = `
+                            <span>Slot ${i}: Empty</span>
+                            <button onclick="emulator.saveState(${i})">Save</button>
+                        `;
+                    }
+                    
+                    container.appendChild(slot);
+                }
+            }
+            
+            setupKeyboardControls() {
+                document.addEventListener('keydown', (e) => {
+                    switch(e.key) {
+                        case 'ArrowUp': this.keys.up = true; e.preventDefault(); break;
+                        case 'ArrowDown': this.keys.down = true; e.preventDefault(); break;
+                        case 'ArrowLeft': this.keys.left = true; e.preventDefault(); break;
+                        case 'ArrowRight': this.keys.right = true; e.preventDefault(); break;
+                        case 'z': case 'Z': this.keys.a = true; break;
+                        case 'x': case 'X': this.keys.b = true; break;
+                        case 'Enter': this.keys.start = true; break;
+                        case 'Shift': this.keys.select = true; break;
+                        case 'F1': this.saveState(1); e.preventDefault(); break;
+                        case 'F2': this.saveState(2); e.preventDefault(); break;
+                        case 'F3': this.saveState(3); e.preventDefault(); break;
+                        case 'F4': this.saveState(4); e.preventDefault(); break;
+                        case '1': this.loadState(1); break;
+                        case '2': this.loadState(2); break;
+                        case '3': this.loadState(3); break;
+                        case '4': this.loadState(4); break;
+                    }
+                });
+                
+                document.addEventListener('keyup', (e) => {
+                    switch(e.key) {
+                        case 'ArrowUp': this.keys.up = false; break;
+                        case 'ArrowDown': this.keys.down = false; break;
+                        case 'ArrowLeft': this.keys.left = false; break;
+                        case 'ArrowRight': this.keys.right = false; break;
+                        case 'z': case 'Z': this.keys.a = false; break;
+                        case 'x': case 'X': this.keys.b = false; break;
+                        case 'Enter': this.keys.start = false; break;
+                        case 'Shift': this.keys.select = false; break;
+                    }
+                });
+            }
+        }
+        
+        // Initialize emulator
+        const canvas = document.getElementById('gameboy-canvas');
+        const emulator = new GameBoyEmulator(canvas);
+        
+        // ROM loading
+        document.getElementById('rom-input').addEventListener('change', async (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                const arrayBuffer = await file.arrayBuffer();
+                emulator.loadROM(arrayBuffer, file.name);
+            }
+        });
+        
+        // Control buttons
+        document.getElementById('pause-btn').addEventListener('click', () => {
+            emulator.paused = !emulator.paused;
+            document.getElementById('pause-btn').textContent = emulator.paused ? 'Resume' : 'Pause';
+        });
+        
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            emulator.reset();
+        });
+        
+        document.getElementById('mute-btn').addEventListener('click', () => {
+            emulator.muted = !emulator.muted;
+            document.getElementById('mute-btn').textContent = emulator.muted ? 'Unmute' : 'Mute';
+        });
+        
+        // Initialize save slots display
+        emulator.updateSaveSlots();
+    </script>
+</body>
+</html>
