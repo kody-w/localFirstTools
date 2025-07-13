@@ -428,16 +428,29 @@
         // Initialize cameras with iOS-specific constraints
         async function initCameras() {
             try {
-                status.innerHTML = '<span class="loading-spinner"></span>Setting up cameras...';
+                status.innerHTML = '<span class="loading-spinner"></span>Requesting camera access...';
                 
-                // Get camera permissions first
+                // First, request basic camera permission
+                try {
+                    const testStream = await navigator.mediaDevices.getUserMedia({ video: true });
+                    testStream.getTracks().forEach(track => track.stop());
+                } catch (err) {
+                    showError('Camera access denied. Please enable camera permissions in Settings > Safari > Camera');
+                    return;
+                }
+                
+                // Now enumerate devices
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const videoDevices = devices.filter(device => device.kind === 'videoinput');
                 
-                console.log('Found video devices:', videoDevices.length);
+                console.log('Found video devices:', videoDevices);
+                videoDevices.forEach(device => {
+                    console.log(`Camera: ${device.label || 'Unnamed'} - ${device.deviceId}`);
+                });
                 
                 if (videoDevices.length < 2) {
-                    throw new Error('Two cameras required. Please ensure camera access is granted.');
+                    // Try single camera mode for testing
+                    console.log('Less than 2 cameras found, trying single camera mode');
                 }
 
                 // iOS-specific camera constraints - MAX QUALITY
@@ -464,30 +477,58 @@
 
                 // Get front camera
                 try {
+                    console.log('Requesting front camera...');
                     frontStream = await navigator.mediaDevices.getUserMedia(constraints.front);
                     frontVideo.srcObject = frontStream;
+                    
+                    // Important: Set these attributes before play()
+                    frontVideo.setAttribute('autoplay', '');
+                    frontVideo.setAttribute('muted', '');
+                    frontVideo.setAttribute('playsinline', '');
+                    
                     await frontVideo.play();
+                    console.log('Front camera active');
                 } catch (err) {
                     console.error('Front camera error:', err);
-                    throw new Error('Unable to access front camera');
+                    throw new Error('Unable to access front camera: ' + err.message);
                 }
 
                 // Get back camera
                 try {
+                    console.log('Requesting back camera...');
                     backStream = await navigator.mediaDevices.getUserMedia(constraints.back);
                     backVideo.srcObject = backStream;
+                    
+                    // Important: Set these attributes before play()
+                    backVideo.setAttribute('autoplay', '');
+                    backVideo.setAttribute('muted', '');
+                    backVideo.setAttribute('playsinline', '');
+                    
                     await backVideo.play();
+                    console.log('Back camera active');
                 } catch (err) {
                     console.error('Back camera error:', err);
                     // Try without exact constraint
-                    constraints.back.video.facingMode = 'environment';
-                    backStream = await navigator.mediaDevices.getUserMedia(constraints.back);
-                    backVideo.srcObject = backStream;
-                    await backVideo.play();
+                    try {
+                        constraints.back.video.facingMode = 'environment';
+                        backStream = await navigator.mediaDevices.getUserMedia(constraints.back);
+                        backVideo.srcObject = backStream;
+                        backVideo.setAttribute('autoplay', '');
+                        backVideo.setAttribute('muted', '');
+                        backVideo.setAttribute('playsinline', '');
+                        await backVideo.play();
+                        console.log('Back camera active (fallback)');
+                    } catch (err2) {
+                        console.error('Back camera fallback error:', err2);
+                        throw new Error('Unable to access back camera: ' + err2.message);
+                    }
                 }
 
                 status.textContent = 'Ready to record';
                 startBtn.disabled = false;
+                
+                // Dispatch event to show record button
+                window.dispatchEvent(new Event('cameraReady'));
             } catch (err) {
                 console.error('Camera initialization error:', err);
                 showError(err.message);
@@ -919,9 +960,43 @@
             }
         }, { passive: false });
 
-        // Initialize
-        initCameras();
+        // Initialize app with user interaction
+        let hasInitialized = false;
+        
+        async function initApp() {
+            if (hasInitialized) return;
+            hasInitialized = true;
+            
+            status.textContent = 'Initializing...';
+            await initCameras();
+        }
+
+        // Add init button for iOS
+        const initButton = document.createElement('button');
+        initButton.className = 'primary';
+        initButton.style.width = '200px';
+        initButton.innerHTML = '<span>📷</span> Start Camera Setup';
+        initButton.onclick = initApp;
+        
+        // Replace start button initially
+        startBtn.style.display = 'none';
+        startBtn.parentNode.insertBefore(initButton, startBtn);
+        
+        // Initialize Three.js immediately
         initThreeJS();
+        
+        // Auto-init on non-iOS or after user gesture
+        if (!isIOS) {
+            initApp();
+        } else {
+            status.textContent = 'Tap "Start Camera Setup" to begin';
+            
+            // Remove init button after successful init
+            window.addEventListener('cameraReady', () => {
+                initButton.style.display = 'none';
+                startBtn.style.display = 'flex';
+            });
+        }
 
         // Wake lock to prevent screen dimming during recording
         if ('wakeLock' in navigator && isIOS) {
