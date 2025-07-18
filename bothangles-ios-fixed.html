@@ -95,8 +95,8 @@
       z-index: 1;
     }
     
-    /* Hidden video and canvas elements */
-    #frontCamera, #backCamera {
+    /* Hidden elements */
+    #frontCamera, #backCamera, #depthCanvas, #backPhotoCanvas {
       position: absolute;
       top: -9999px;
       left: -9999px;
@@ -740,13 +740,8 @@
   
   <video id="frontCamera" autoplay muted playsinline webkit-playsinline x5-playsinline></video>
   <video id="backCamera" autoplay muted playsinline webkit-playsinline x5-playsinline></video>
-  
-  <!-- Frame buffer canvases for storing previous frames -->
-  <canvas class="frame-buffer" id="frameBuffer0" width="640" height="480"></canvas>
-  <canvas class="frame-buffer" id="frameBuffer1" width="640" height="480"></canvas>
-  <canvas class="frame-buffer" id="frameBuffer2" width="640" height="480"></canvas>
-  <canvas class="frame-buffer" id="frameBuffer3" width="640" height="480"></canvas>
-  <canvas class="frame-buffer" id="frameBuffer4" width="640" height="480"></canvas>
+  <canvas id="depthCanvas"></canvas>
+  <canvas id="backPhotoCanvas"></canvas>
   
   <canvas id="hologramCanvas"></canvas>
   
@@ -936,14 +931,10 @@
     let scanlinesEnabled = true;
     let wireframeMode = false;
     let autoRotate = true;
-    let temporalLayersEnabled = true;
-    let alignmentOffset = 0;
     
-    // Frame buffer management
-    const frameBuffers = [];
-    const frameTextures = [];
-    const FRAME_BUFFER_SIZE = 5;
-    let frameIndex = 0;
+    // Camera mode
+    let cameraMode = 'photo'; // 'photo', 'dual', 'mirror', 'rotating'
+    let hasDualCameras = false;
     
     // iOS detection
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !window.MSStream;
@@ -1053,11 +1044,15 @@
         time += 0.01;
         
         if (hologramGroup && autoRotate) {
-          // Subtle side-to-side rotation instead of full 360
-          const swayAmount = 0.3; // Maximum rotation in radians (about 17 degrees)
-          const swaySpeed = 0.8; // Speed of the sway
-          hologramGroup.rotation.y = Math.sin(time * swaySpeed * rotationSpeed) * swayAmount;
-          hologramGroup.rotation.x = Math.sin(time * 0.5) * 0.05; // Even more subtle vertical tilt
+          hologramGroup.rotation.y += 0.005 * rotationSpeed;
+          
+          // Add more dynamic rotation for single camera mode
+          if (cameraMode === 'rotating') {
+            hologramGroup.rotation.x = Math.sin(time * 0.5) * 0.2;
+            hologramGroup.rotation.z = Math.cos(time * 0.3) * 0.1;
+          } else {
+            hologramGroup.rotation.x = Math.sin(time * 0.5) * 0.1;
+          }
         }
         
         if (hologramGroup) {
@@ -1126,148 +1121,121 @@
       }
       geometry.computeVertexNormals();
       
-      // Calculate perspective alignment offset
-      const perspectiveOffset = alignmentOffset * depthSeparation;
-      
-      // Simplified materials for iOS
-      if (isIOS) {
-        const frontMaterial = new THREE.MeshBasicMaterial({
-          map: frontTexture,
-          transparent: true,
-          opacity: 0.9,
-          side: THREE.DoubleSide,
-          wireframe: wireframeMode
-        });
-        
-        const backMaterial = new THREE.MeshBasicMaterial({
-          map: backTexture,
-          transparent: true,
-          opacity: 0.9,
-          side: THREE.DoubleSide,
-          wireframe: wireframeMode
-        });
-        
-        const frontMesh = new THREE.Mesh(geometry, frontMaterial);
-        const backMesh = new THREE.Mesh(geometry.clone(), backMaterial);
-        
-        frontMesh.position.z = depthSeparation;
-        backMesh.position.z = -depthSeparation;
-        backMesh.position.x = perspectiveOffset; // Align based on perspective
-        
-        hologramGroup.add(frontMesh);
-        hologramGroup.add(backMesh);
-      } else {
-        // Full shader for desktop
-        const hologramShader = {
-          uniforms: {
-            map: { value: null },
-            time: { value: 0 },
-            glowColor: { value: new THREE.Color() },
-            glowIntensity: { value: glowIntensity }
-          },
-          vertexShader: `
-            varying vec2 vUv;
-            varying vec3 vNormal;
-            uniform float time;
-            void main() {
-              vUv = uv;
-              vNormal = normal;
-              vec3 pos = position;
-              float wave = sin(pos.x * 5.0 + time) * 0.05;
-              pos.z += wave;
-              gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
-            }
-          `,
-          fragmentShader: `
-            uniform sampler2D map;
-            uniform float time;
-            uniform vec3 glowColor;
-            uniform float glowIntensity;
-            varying vec2 vUv;
-            varying vec3 vNormal;
-            void main() {
-              vec4 texColor = texture2D(map, vUv);
-              float edge = 1.0 - abs(dot(vNormal, vec3(0.0, 0.0, 1.0)));
-              vec3 glow = glowColor * pow(edge, 2.0) * glowIntensity;
-              float interference = sin(vUv.y * 100.0 + time * 5.0) * 0.1 + 1.0;
-              gl_FragColor = vec4(texColor.rgb * interference + glow, texColor.a * 0.9);
-            }
-          `,
-          transparent: true,
-          side: THREE.DoubleSide
-        };
-        
-        const frontMaterial = new THREE.ShaderMaterial({
-          ...hologramShader,
-          uniforms: {
-            ...hologramShader.uniforms,
-            map: { value: frontTexture },
-            glowColor: { value: new THREE.Color(0x00ffff) },
-            time: { value: 0 }
-          },
-          wireframe: wireframeMode
-        });
-        
-        const backMaterial = new THREE.ShaderMaterial({
-          ...hologramShader,
-          uniforms: {
-            ...hologramShader.uniforms,
-            map: { value: backTexture },
-            glowColor: { value: new THREE.Color(0xff00ff) },
-            time: { value: 0 }
-          },
-          wireframe: wireframeMode
-        });
-        
-        const frontMesh = new THREE.Mesh(geometry.clone(), frontMaterial);
-        const backMesh = new THREE.Mesh(geometry.clone(), backMaterial);
-        
-        frontMesh.position.z = depthSeparation;
-        backMesh.position.z = -depthSeparation;
-        backMesh.position.x = perspectiveOffset; // Align based on perspective
-        
-        hologramGroup.add(frontMesh);
-        hologramGroup.add(backMesh);
-      }
-      
-      // Add temporal layers using frame buffer
-      if (temporalLayersEnabled) {
-        const layerCount = isIOS ? 2 : 4;
-        for (let i = 0; i < layerCount && i < frameTextures.length; i++) {
-          const frameTexture = frameTextures[(frameIndex - i - 1 + FRAME_BUFFER_SIZE) % FRAME_BUFFER_SIZE];
-          
-          const layerMaterial = new THREE.MeshBasicMaterial({
-            map: frameTexture,
+      // Create materials
+      const createMaterial = (texture, glowColor) => {
+        if (isIOS) {
+          return new THREE.MeshBasicMaterial({
+            map: texture,
             transparent: true,
-            opacity: 0.2 - i * 0.04,
-            blending: THREE.AdditiveBlending,
-            side: THREE.DoubleSide
+            opacity: 0.9,
+            side: THREE.DoubleSide,
+            wireframe: wireframeMode,
+            depthWrite: true,
+            depthTest: true
           });
-          
-          const layerMesh = new THREE.Mesh(geometry.clone(), layerMaterial);
-          layerMesh.position.z = (i + 1) * depthSeparation * 0.4;
-          layerMesh.position.x = perspectiveOffset * (1 - i * 0.2); // Gradual alignment
-          layerMesh.scale.set(1 + i * 0.02, 1 + i * 0.02, 1);
-          hologramGroup.add(layerMesh);
-        }
-      } else {
-        // Original static layers
-        const layerCount = isIOS ? 2 : 4;
-        for (let i = 0; i < layerCount; i++) {
-          const layerMaterial = new THREE.MeshBasicMaterial({
-            map: i % 2 === 0 ? frontTexture : backTexture,
+        } else {
+          const hologramShader = {
+            uniforms: {
+              map: { value: texture },
+              time: { value: 0 },
+              glowColor: { value: new THREE.Color(glowColor) },
+              glowIntensity: { value: glowIntensity }
+            },
+            vertexShader: `
+              varying vec2 vUv;
+              varying vec3 vNormal;
+              uniform float time;
+              void main() {
+                vUv = uv;
+                vNormal = normal;
+                vec3 pos = position;
+                float wave = sin(pos.x * 5.0 + time) * 0.05;
+                pos.z += wave;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+              }
+            `,
+            fragmentShader: `
+              uniform sampler2D map;
+              uniform float time;
+              uniform vec3 glowColor;
+              uniform float glowIntensity;
+              varying vec2 vUv;
+              varying vec3 vNormal;
+              void main() {
+                vec4 texColor = texture2D(map, vUv);
+                float edge = 1.0 - abs(dot(vNormal, vec3(0.0, 0.0, 1.0)));
+                vec3 glow = glowColor * pow(edge, 2.0) * glowIntensity;
+                float interference = sin(vUv.y * 100.0 + time * 5.0) * 0.1 + 1.0;
+                gl_FragColor = vec4(texColor.rgb * interference + glow, texColor.a * 0.9);
+              }
+            `,
             transparent: true,
-            opacity: 0.1 - i * 0.02,
-            blending: THREE.AdditiveBlending,
-            side: THREE.DoubleSide
-          });
+            side: THREE.DoubleSide,
+            depthWrite: true,
+            depthTest: true,
+            wireframe: wireframeMode
+          };
           
-          const layerMesh = new THREE.Mesh(geometry.clone(), layerMaterial);
-          layerMesh.position.z = (i - 1.5) * depthSeparation * 0.3;
-          layerMesh.position.x = perspectiveOffset * (1 - i * 0.2);
-          layerMesh.scale.set(1 + i * 0.02, 1 + i * 0.02, 1);
-          hologramGroup.add(layerMesh);
+          return new THREE.ShaderMaterial(hologramShader);
         }
+      };
+      
+      // Create four-sided hologram
+      const frontMaterial = createMaterial(frontTexture, 0x00ffff);
+      const backMaterial = createMaterial(actualBackTexture, 0xff00ff);
+      const leftMaterial = createMaterial(leftTexture, 0x00ff88);
+      const rightMaterial = createMaterial(rightTexture, 0xff8800);
+      
+      // Create meshes with depth separation
+      const frontDepthOffset = depthDetectionEnabled ? personDepth : 0;
+      
+      // Front face
+      const frontMesh = new THREE.Mesh(geometry, frontMaterial);
+      frontMesh.position.z = depthSeparation + frontDepthOffset;
+      hologramGroup.add(frontMesh);
+      
+      // Back face
+      const backMesh = new THREE.Mesh(geometry.clone(), backMaterial);
+      backMesh.position.z = -depthSeparation;
+      backMesh.rotation.y = Math.PI;
+      hologramGroup.add(backMesh);
+      
+      // Left face
+      const leftMesh = new THREE.Mesh(geometry.clone(), leftMaterial);
+      leftMesh.position.x = -depthSeparation;
+      leftMesh.rotation.y = Math.PI / 2;
+      hologramGroup.add(leftMesh);
+      
+      // Right face
+      const rightMesh = new THREE.Mesh(geometry.clone(), rightMaterial);
+      rightMesh.position.x = depthSeparation;
+      rightMesh.rotation.y = -Math.PI / 2;
+      hologramGroup.add(rightMesh);
+      
+      // Add transitional layers for smoother blending
+      const layerCount = isIOS ? 2 : 4;
+      for (let i = 0; i < layerCount; i++) {
+        const angle = (i / layerCount) * Math.PI * 2;
+        const layerTexture = i % 4 === 0 ? frontTexture : 
+                           i % 4 === 1 ? rightTexture :
+                           i % 4 === 2 ? actualBackTexture : leftTexture;
+        
+        const layerMaterial = new THREE.MeshBasicMaterial({
+          map: layerTexture,
+          transparent: true,
+          opacity: 0.05,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          depthWrite: false,
+          depthTest: true
+        });
+        
+        const layerMesh = new THREE.Mesh(geometry.clone(), layerMaterial);
+        layerMesh.position.x = Math.sin(angle) * depthSeparation * 0.7;
+        layerMesh.position.z = Math.cos(angle) * depthSeparation * 0.7;
+        layerMesh.rotation.y = angle;
+        layerMesh.scale.set(1.1, 1.1, 1);
+        hologramGroup.add(layerMesh);
       }
       
       if (!isIOS) {
