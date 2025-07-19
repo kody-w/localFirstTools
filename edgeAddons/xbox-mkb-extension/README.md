@@ -13,16 +13,23 @@ This extension adds mouse and keyboard support for Xbox Cloud Gaming on PC.
 ## Usage
 
 1. Go to Xbox Cloud Gaming (xbox.com/play)
-2. Start a game
-3. Click on the game canvas to activate controls
-4. Press ESC to release mouse control
+2. Press **Ctrl+Shift+X** to enable the extension
+3. For game menus: Use keyboard (Space/Enter to select)
+4. For gameplay: Click on the game canvas to enable mouse control
+5. Press ESC to release mouse control
+
+## Important Notes
+
+- **Enable First**: Press Ctrl+Shift+X to toggle the extension on/off
+- **Menu Navigation**: Space and Enter both work as the A button
+- **Mouse Control**: Only activates after clicking the game canvas
 
 ## Default Controls
 
 - **Movement**: WASD
-- **Camera**: Mouse
-- **Jump**: Space
-- **Crouch**: Shift
+- **Camera**: Mouse (when pointer locked)
+- **Select/Jump**: Space or Enter
+- **Back/Crouch**: Shift
 - **Interact**: E
 - **Reload**: R
 - **Fire**: Left Click
@@ -37,3 +44,10 @@ Click the extension icon to adjust:
 - Mouse sensitivity
 - Y-axis inversion
 - View all key bindings
+
+## Troubleshooting
+
+If controls aren't working:
+1. Make sure the extension is enabled (Ctrl+Shift+X)
+2. For menus, just press keys - no mouse lock needed
+3. For gameplay, click the game canvas first
