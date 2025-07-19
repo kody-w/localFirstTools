@@ -67,7 +67,8 @@ cat > content.js << 'EOF'
       'd': 'LS_RIGHT',
       
       // Actions
-      ' ': 'A', // Space - Jump
+      ' ': 'A', // Space - Jump/Select
+      'enter': 'A', // Enter - Also maps to A for menus
       'shift': 'B', // Shift - Crouch/Cancel
       'e': 'X', // E - Interact
       'r': 'Y', // R - Reload
@@ -133,6 +134,7 @@ cat > content.js << 'EOF'
   // Mouse tracking
   let mouseX = 0, mouseY = 0;
   let isPointerLocked = false;
+  let isEnabled = false; // Track if extension is enabled
 
   // Load config from storage
   chrome.storage.sync.get(['mkbConfig'], (result) => {
@@ -141,41 +143,66 @@ cat > content.js << 'EOF'
     }
   });
 
-  // Override gamepad API
-  const originalGetGamepads = navigator.getGamepads.bind(navigator);
+  // Wait for page to be ready
+  let gamepadOverrideApplied = false;
   
-  navigator.getGamepads = function() {
-    const gamepads = originalGetGamepads();
-    if (isPointerLocked) {
-      // Create virtual gamepad
-      const virtualGamepad = {
-        id: 'Xbox Mouse & Keyboard Virtual Controller',
-        index: 0,
-        connected: true,
-        timestamp: gamepadState.timestamp,
-        mapping: 'standard',
-        axes: [...gamepadState.axes],
-        buttons: gamepadState.buttons.map(pressed => ({
-          pressed,
-          touched: pressed,
-          value: pressed ? 1.0 : 0.0
-        }))
-      };
-      
-      // Replace first null/undefined gamepad
-      for (let i = 0; i < 4; i++) {
-        if (!gamepads[i]) {
-          gamepads[i] = virtualGamepad;
-          break;
+  function applyGamepadOverride() {
+    if (gamepadOverrideApplied) return;
+    
+    const originalGetGamepads = navigator.getGamepads.bind(navigator);
+    
+    navigator.getGamepads = function() {
+      const gamepads = originalGetGamepads();
+      if (isEnabled) {
+        // Create virtual gamepad
+        const virtualGamepad = {
+          id: 'Xbox Mouse & Keyboard Virtual Controller',
+          index: 0,
+          connected: true,
+          timestamp: gamepadState.timestamp,
+          mapping: 'standard',
+          axes: [...gamepadState.axes],
+          buttons: gamepadState.buttons.map(pressed => ({
+            pressed,
+            touched: pressed,
+            value: pressed ? 1.0 : 0.0
+          }))
+        };
+        
+        // Replace first null/undefined gamepad or add as first
+        if (gamepads.length === 0 || !gamepads[0]) {
+          gamepads[0] = virtualGamepad;
+        } else {
+          // Find first empty slot
+          for (let i = 0; i < 4; i++) {
+            if (!gamepads[i]) {
+              gamepads[i] = virtualGamepad;
+              break;
+            }
+          }
         }
       }
+      return gamepads;
+    };
+    
+    gamepadOverrideApplied = true;
+  }
+
+  // Apply override immediately and on various page events
+  applyGamepadOverride();
+  document.addEventListener('DOMContentLoaded', applyGamepadOverride);
+  window.addEventListener('load', applyGamepadOverride);
+
+  // Also dispatch gamepad connected event
+  function emitGamepadConnected() {
+    if (isEnabled) {
+      window.dispatchEvent(new Event('gamepadconnected'));
     }
-    return gamepads;
-  };
+  }
 
   // Handle keyboard input
   document.addEventListener('keydown', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled) return;
     
     const key = e.key.toLowerCase();
     const binding = config.keyBindings[key];
@@ -200,10 +227,10 @@ cat > content.js << 'EOF'
       updateMovementAxes();
       gamepadState.timestamp = performance.now();
     }
-  });
+  }, true); // Use capture phase
 
   document.addEventListener('keyup', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled) return;
     
     const key = e.key.toLowerCase();
     const binding = config.keyBindings[key];
@@ -228,11 +255,11 @@ cat > content.js << 'EOF'
       updateMovementAxes();
       gamepadState.timestamp = performance.now();
     }
-  });
+  }, true); // Use capture phase
 
   // Handle mouse input
   document.addEventListener('mousedown', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     const binding = config.keyBindings[`mouse${e.button}`];
     if (binding) {
@@ -246,7 +273,7 @@ cat > content.js << 'EOF'
   });
 
   document.addEventListener('mouseup', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     const binding = config.keyBindings[`mouse${e.button}`];
     if (binding) {
@@ -260,7 +287,7 @@ cat > content.js << 'EOF'
   });
 
   document.addEventListener('mousemove', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     // Update right stick based on mouse movement
     mouseX += e.movementX * config.sensitivity * 0.01;
@@ -285,8 +312,30 @@ cat > content.js << 'EOF'
     gamepadState.timestamp = performance.now();
   });
 
-  // Pointer lock handling
+  // Toggle extension with keyboard shortcut (Ctrl+Shift+X)
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'X') {
+      isEnabled = !isEnabled;
+      if (isEnabled) {
+        emitGamepadConnected();
+        showNotification('Mouse & Keyboard: Enabled');
+      } else {
+        showNotification('Mouse & Keyboard: Disabled');
+        // Reset state
+        gamepadState.buttons.fill(false);
+        gamepadState.axes.fill(0);
+        Object.keys(movement).forEach(key => movement[key] = false);
+        mouseX = 0;
+        mouseY = 0;
+      }
+      updateIndicator();
+    }
+  });
+
+  // Pointer lock handling - only for mouse control
   document.addEventListener('click', async (e) => {
+    if (!isEnabled) return;
+    
     const gameCanvas = document.querySelector('canvas');
     if (gameCanvas && gameCanvas.contains(e.target)) {
       try {
@@ -299,14 +348,7 @@ cat > content.js << 'EOF'
 
   document.addEventListener('pointerlockchange', () => {
     isPointerLocked = document.pointerLockElement !== null;
-    if (!isPointerLocked) {
-      // Reset state when pointer lock is released
-      gamepadState.buttons.fill(false);
-      gamepadState.axes.fill(0);
-      Object.keys(movement).forEach(key => movement[key] = false);
-      mouseX = 0;
-      mouseY = 0;
-    }
+    updateIndicator();
   });
 
   // Update movement axes based on WASD
@@ -356,25 +398,64 @@ cat > content.js << 'EOF'
     .mkb-indicator.active {
       background: rgba(0, 200, 0, 0.8);
     }
+    .mkb-indicator.disabled {
+      background: rgba(100, 100, 100, 0.8);
+    }
+    .mkb-notification {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.9);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      font-family: Arial, sans-serif;
+      font-size: 18px;
+      z-index: 10001;
+      pointer-events: none;
+      animation: fadeInOut 2s ease-in-out;
+    }
+    @keyframes fadeInOut {
+      0% { opacity: 0; }
+      20% { opacity: 1; }
+      80% { opacity: 1; }
+      100% { opacity: 0; }
+    }
   `;
   document.head.appendChild(style);
 
   // Add visual indicator
   const indicator = document.createElement('div');
-  indicator.className = 'mkb-indicator';
-  indicator.textContent = 'Mouse & Keyboard: Click game to activate';
+  indicator.className = 'mkb-indicator disabled';
+  indicator.textContent = 'M&K: Press Ctrl+Shift+X to enable';
   document.body.appendChild(indicator);
 
-  // Update indicator based on pointer lock state
-  setInterval(() => {
-    if (isPointerLocked) {
+  // Update indicator
+  function updateIndicator() {
+    if (!isEnabled) {
+      indicator.className = 'mkb-indicator disabled';
+      indicator.textContent = 'M&K: Press Ctrl+Shift+X to enable';
+    } else if (isPointerLocked) {
       indicator.className = 'mkb-indicator active';
-      indicator.textContent = 'Mouse & Keyboard: Active (ESC to release)';
+      indicator.textContent = 'M&K: Active (ESC to release mouse)';
     } else {
       indicator.className = 'mkb-indicator';
-      indicator.textContent = 'Mouse & Keyboard: Click game to activate';
+      indicator.textContent = 'M&K: Enabled (Click game for mouse)';
     }
-  }, 100);
+  }
+
+  // Show notification
+  function showNotification(text) {
+    const notification = document.createElement('div');
+    notification.className = 'mkb-notification';
+    notification.textContent = text;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 2000);
+  }
+
+  // Initialize
+  updateIndicator();
 
 })();
 EOF
@@ -393,6 +474,7 @@ chrome.runtime.onInstalled.addListener(() => {
       'a': 'LS_LEFT',
       'd': 'LS_RIGHT',
       ' ': 'A',
+      'enter': 'A',
       'shift': 'B',
       'e': 'X',
       'r': 'Y',
@@ -431,6 +513,16 @@ cat > popup.html << 'EOF'
     h1 {
       font-size: 18px;
       margin-bottom: 15px;
+    }
+    .info-box {
+      background: #f0f0f0;
+      padding: 10px;
+      border-radius: 5px;
+      margin-bottom: 15px;
+    }
+    .info-box p {
+      margin: 5px 0;
+      font-size: 14px;
     }
     .control-group {
       margin-bottom: 15px;
@@ -486,10 +578,23 @@ cat > popup.html << 'EOF'
       color: #666;
       font-size: 12px;
     }
+    .shortcut {
+      background: #0078d4;
+      color: white;
+      padding: 2px 6px;
+      border-radius: 3px;
+      font-family: monospace;
+      font-size: 12px;
+    }
   </style>
 </head>
 <body>
   <h1>Xbox Mouse & Keyboard Settings</h1>
+  
+  <div class="info-box">
+    <p><strong>Toggle Extension:</strong> <span class="shortcut">Ctrl+Shift+X</span></p>
+    <p>Press <strong>Space</strong> or <strong>Enter</strong> to start games</p>
+  </div>
   
   <div class="control-group">
     <label>Mouse Sensitivity: <span class="sensitivity-value" id="sensitivityValue">1.0</span></label>
@@ -551,6 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
       'a': 'A',
       'd': 'D',
       ' ': 'Space',
+      'enter': 'Enter',
       'shift': 'Shift',
       'e': 'E',
       'r': 'R',
@@ -573,8 +679,8 @@ document.addEventListener('DOMContentLoaded', () => {
       'LS_DOWN': 'Move Backward',
       'LS_LEFT': 'Move Left',
       'LS_RIGHT': 'Move Right',
-      'A': 'A Button (Jump)',
-      'B': 'B Button (Crouch)',
+      'A': 'A Button (Select/Jump)',
+      'B': 'B Button (Back/Crouch)',
       'X': 'X Button (Interact)',
       'Y': 'Y Button (Reload)',
       'RT': 'Right Trigger (Fire)',
@@ -643,6 +749,7 @@ document.addEventListener('DOMContentLoaded', () => {
         'a': 'LS_LEFT',
         'd': 'LS_RIGHT',
         ' ': 'A',
+        'enter': 'A',
         'shift': 'B',
         'e': 'X',
         'r': 'Y',
@@ -735,16 +842,23 @@ This extension adds mouse and keyboard support for Xbox Cloud Gaming on PC.
 ## Usage
 
 1. Go to Xbox Cloud Gaming (xbox.com/play)
-2. Start a game
-3. Click on the game canvas to activate controls
-4. Press ESC to release mouse control
+2. Press **Ctrl+Shift+X** to enable the extension
+3. For game menus: Use keyboard (Space/Enter to select)
+4. For gameplay: Click on the game canvas to enable mouse control
+5. Press ESC to release mouse control
+
+## Important Notes
+
+- **Enable First**: Press Ctrl+Shift+X to toggle the extension on/off
+- **Menu Navigation**: Space and Enter both work as the A button
+- **Mouse Control**: Only activates after clicking the game canvas
 
 ## Default Controls
 
 - **Movement**: WASD
-- **Camera**: Mouse
-- **Jump**: Space
-- **Crouch**: Shift
+- **Camera**: Mouse (when pointer locked)
+- **Select/Jump**: Space or Enter
+- **Back/Crouch**: Shift
 - **Interact**: E
 - **Reload**: R
 - **Fire**: Left Click
@@ -759,6 +873,13 @@ Click the extension icon to adjust:
 - Mouse sensitivity
 - Y-axis inversion
 - View all key bindings
+
+## Troubleshooting
+
+If controls aren't working:
+1. Make sure the extension is enabled (Ctrl+Shift+X)
+2. For menus, just press keys - no mouse lock needed
+3. For gameplay, click the game canvas first
 EOF
 
 # Final message
@@ -773,6 +894,8 @@ echo "1. Open Edge and go to: edge://extensions/"
 echo "2. Turn ON 'Developer mode'"
 echo "3. Click 'Load unpacked'"
 echo "4. Select the folder: $EXTENSION_DIR"
+echo ""
+echo "⚡ IMPORTANT: Press Ctrl+Shift+X to enable/disable the extension!"
 echo ""
 echo "🎮 Happy gaming with mouse and keyboard!"
 EOF

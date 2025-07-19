@@ -10,7 +10,8 @@
       'd': 'LS_RIGHT',
       
       // Actions
-      ' ': 'A', // Space - Jump
+      ' ': 'A', // Space - Jump/Select
+      'enter': 'A', // Enter - Also maps to A for menus
       'shift': 'B', // Shift - Crouch/Cancel
       'e': 'X', // E - Interact
       'r': 'Y', // R - Reload
@@ -76,6 +77,7 @@
   // Mouse tracking
   let mouseX = 0, mouseY = 0;
   let isPointerLocked = false;
+  let isEnabled = false; // Track if extension is enabled
 
   // Load config from storage
   chrome.storage.sync.get(['mkbConfig'], (result) => {
@@ -84,41 +86,66 @@
     }
   });
 
-  // Override gamepad API
-  const originalGetGamepads = navigator.getGamepads.bind(navigator);
+  // Wait for page to be ready
+  let gamepadOverrideApplied = false;
   
-  navigator.getGamepads = function() {
-    const gamepads = originalGetGamepads();
-    if (isPointerLocked) {
-      // Create virtual gamepad
-      const virtualGamepad = {
-        id: 'Xbox Mouse & Keyboard Virtual Controller',
-        index: 0,
-        connected: true,
-        timestamp: gamepadState.timestamp,
-        mapping: 'standard',
-        axes: [...gamepadState.axes],
-        buttons: gamepadState.buttons.map(pressed => ({
-          pressed,
-          touched: pressed,
-          value: pressed ? 1.0 : 0.0
-        }))
-      };
-      
-      // Replace first null/undefined gamepad
-      for (let i = 0; i < 4; i++) {
-        if (!gamepads[i]) {
-          gamepads[i] = virtualGamepad;
-          break;
+  function applyGamepadOverride() {
+    if (gamepadOverrideApplied) return;
+    
+    const originalGetGamepads = navigator.getGamepads.bind(navigator);
+    
+    navigator.getGamepads = function() {
+      const gamepads = originalGetGamepads();
+      if (isEnabled) {
+        // Create virtual gamepad
+        const virtualGamepad = {
+          id: 'Xbox Mouse & Keyboard Virtual Controller',
+          index: 0,
+          connected: true,
+          timestamp: gamepadState.timestamp,
+          mapping: 'standard',
+          axes: [...gamepadState.axes],
+          buttons: gamepadState.buttons.map(pressed => ({
+            pressed,
+            touched: pressed,
+            value: pressed ? 1.0 : 0.0
+          }))
+        };
+        
+        // Replace first null/undefined gamepad or add as first
+        if (gamepads.length === 0 || !gamepads[0]) {
+          gamepads[0] = virtualGamepad;
+        } else {
+          // Find first empty slot
+          for (let i = 0; i < 4; i++) {
+            if (!gamepads[i]) {
+              gamepads[i] = virtualGamepad;
+              break;
+            }
+          }
         }
       }
+      return gamepads;
+    };
+    
+    gamepadOverrideApplied = true;
+  }
+
+  // Apply override immediately and on various page events
+  applyGamepadOverride();
+  document.addEventListener('DOMContentLoaded', applyGamepadOverride);
+  window.addEventListener('load', applyGamepadOverride);
+
+  // Also dispatch gamepad connected event
+  function emitGamepadConnected() {
+    if (isEnabled) {
+      window.dispatchEvent(new Event('gamepadconnected'));
     }
-    return gamepads;
-  };
+  }
 
   // Handle keyboard input
   document.addEventListener('keydown', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled) return;
     
     const key = e.key.toLowerCase();
     const binding = config.keyBindings[key];
@@ -143,10 +170,10 @@
       updateMovementAxes();
       gamepadState.timestamp = performance.now();
     }
-  });
+  }, true); // Use capture phase
 
   document.addEventListener('keyup', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled) return;
     
     const key = e.key.toLowerCase();
     const binding = config.keyBindings[key];
@@ -171,11 +198,11 @@
       updateMovementAxes();
       gamepadState.timestamp = performance.now();
     }
-  });
+  }, true); // Use capture phase
 
   // Handle mouse input
   document.addEventListener('mousedown', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     const binding = config.keyBindings[`mouse${e.button}`];
     if (binding) {
@@ -189,7 +216,7 @@
   });
 
   document.addEventListener('mouseup', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     const binding = config.keyBindings[`mouse${e.button}`];
     if (binding) {
@@ -203,7 +230,7 @@
   });
 
   document.addEventListener('mousemove', (e) => {
-    if (!isPointerLocked) return;
+    if (!isEnabled || !isPointerLocked) return;
     
     // Update right stick based on mouse movement
     mouseX += e.movementX * config.sensitivity * 0.01;
@@ -228,8 +255,30 @@
     gamepadState.timestamp = performance.now();
   });
 
-  // Pointer lock handling
+  // Toggle extension with keyboard shortcut (Ctrl+Shift+X)
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'X') {
+      isEnabled = !isEnabled;
+      if (isEnabled) {
+        emitGamepadConnected();
+        showNotification('Mouse & Keyboard: Enabled');
+      } else {
+        showNotification('Mouse & Keyboard: Disabled');
+        // Reset state
+        gamepadState.buttons.fill(false);
+        gamepadState.axes.fill(0);
+        Object.keys(movement).forEach(key => movement[key] = false);
+        mouseX = 0;
+        mouseY = 0;
+      }
+      updateIndicator();
+    }
+  });
+
+  // Pointer lock handling - only for mouse control
   document.addEventListener('click', async (e) => {
+    if (!isEnabled) return;
+    
     const gameCanvas = document.querySelector('canvas');
     if (gameCanvas && gameCanvas.contains(e.target)) {
       try {
@@ -242,14 +291,7 @@
 
   document.addEventListener('pointerlockchange', () => {
     isPointerLocked = document.pointerLockElement !== null;
-    if (!isPointerLocked) {
-      // Reset state when pointer lock is released
-      gamepadState.buttons.fill(false);
-      gamepadState.axes.fill(0);
-      Object.keys(movement).forEach(key => movement[key] = false);
-      mouseX = 0;
-      mouseY = 0;
-    }
+    updateIndicator();
   });
 
   // Update movement axes based on WASD
@@ -299,24 +341,63 @@
     .mkb-indicator.active {
       background: rgba(0, 200, 0, 0.8);
     }
+    .mkb-indicator.disabled {
+      background: rgba(100, 100, 100, 0.8);
+    }
+    .mkb-notification {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(0, 0, 0, 0.9);
+      color: white;
+      padding: 20px;
+      border-radius: 10px;
+      font-family: Arial, sans-serif;
+      font-size: 18px;
+      z-index: 10001;
+      pointer-events: none;
+      animation: fadeInOut 2s ease-in-out;
+    }
+    @keyframes fadeInOut {
+      0% { opacity: 0; }
+      20% { opacity: 1; }
+      80% { opacity: 1; }
+      100% { opacity: 0; }
+    }
   `;
   document.head.appendChild(style);
 
   // Add visual indicator
   const indicator = document.createElement('div');
-  indicator.className = 'mkb-indicator';
-  indicator.textContent = 'Mouse & Keyboard: Click game to activate';
+  indicator.className = 'mkb-indicator disabled';
+  indicator.textContent = 'M&K: Press Ctrl+Shift+X to enable';
   document.body.appendChild(indicator);
 
-  // Update indicator based on pointer lock state
-  setInterval(() => {
-    if (isPointerLocked) {
+  // Update indicator
+  function updateIndicator() {
+    if (!isEnabled) {
+      indicator.className = 'mkb-indicator disabled';
+      indicator.textContent = 'M&K: Press Ctrl+Shift+X to enable';
+    } else if (isPointerLocked) {
       indicator.className = 'mkb-indicator active';
-      indicator.textContent = 'Mouse & Keyboard: Active (ESC to release)';
+      indicator.textContent = 'M&K: Active (ESC to release mouse)';
     } else {
       indicator.className = 'mkb-indicator';
-      indicator.textContent = 'Mouse & Keyboard: Click game to activate';
+      indicator.textContent = 'M&K: Enabled (Click game for mouse)';
     }
-  }, 100);
+  }
+
+  // Show notification
+  function showNotification(text) {
+    const notification = document.createElement('div');
+    notification.className = 'mkb-notification';
+    notification.textContent = text;
+    document.body.appendChild(notification);
+    setTimeout(() => notification.remove(), 2000);
+  }
+
+  // Initialize
+  updateIndicator();
 
 })();

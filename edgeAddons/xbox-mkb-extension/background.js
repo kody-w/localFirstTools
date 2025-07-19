@@ -9,6 +9,7 @@ chrome.runtime.onInstalled.addListener(() => {
       'a': 'LS_LEFT',
       'd': 'LS_RIGHT',
       ' ': 'A',
+      'enter': 'A',
       'shift': 'B',
       'e': 'X',
       'r': 'Y',
