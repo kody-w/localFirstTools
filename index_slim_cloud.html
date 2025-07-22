@@ -1623,6 +1623,8 @@
                 width: calc(100% - 40px);
                 right: 20px;
                 left: 20px;
+                height: 350px; /* Reduced height on mobile */
+                bottom: calc(env(safe-area-inset-bottom, 20px) + 20px); /* Lowered position */
             }
 
             .voice-pause-button {
@@ -3525,7 +3527,7 @@
            }
        }
 
-       // Voice Input Manager
+       // Voice Input Manager - FIXED
        class VoiceInputManager {
            constructor(aiManager) {
                this.aiManager = aiManager;
@@ -3536,6 +3538,7 @@
                this.pushToTalkKey = 'Space';
                this.isKeyPressed = false;
                this.isPaused = false;
+               this.wasListeningBeforePause = false;
                
                this.initializeSpeechRecognition();
                
@@ -3582,6 +3585,7 @@
                        this.aiManager.world.showModeManager.broadcastVoiceActivity('idle');
                    }
                    
+                   // Only restart if continuous mode is enabled and not paused
                    if (this.continuousMode && this.isEnabled && this.aiManager.isActive && !this.isPaused) {
                        setTimeout(() => {
                            if (!this.aiManager.voiceManager.isSpeaking && !this.isPaused) {
@@ -3624,6 +3628,12 @@
                    this.isListening = false;
                    this.voiceInputBtn.classList.remove('recording');
                    this.listeningIndicator.classList.remove('active');
+                   
+                   // Ignore aborted errors when pausing
+                   if (event.error === 'aborted') {
+                       console.log('Speech recognition aborted (likely due to pause)');
+                       return;
+                   }
                    
                    if (event.error === 'no-speech') {
                        return;
@@ -3738,11 +3748,32 @@
 
            setPaused(paused) {
                this.isPaused = paused;
+               
                if (paused) {
-                   this.stopListening();
-               } else if (this.continuousMode && this.isEnabled && this.aiManager.isActive) {
-                   this.startListening();
+                   // Remember if we were listening before pause
+                   this.wasListeningBeforePause = this.isListening;
+                   
+                   // Stop listening gracefully
+                   if (this.isListening) {
+                       try {
+                           this.recognition.abort(); // Use abort instead of stop to prevent error
+                       } catch (error) {
+                           console.log('Error aborting speech recognition:', error);
+                       }
+                       this.isListening = false;
+                       this.voiceInputBtn.classList.remove('recording');
+                       this.listeningIndicator.classList.remove('active');
+                   }
+               } else {
+                   // Resume if we were listening before and continuous mode is on
+                   if (this.continuousMode && this.isEnabled && this.aiManager.isActive && this.wasListeningBeforePause) {
+                       setTimeout(() => {
+                           this.startListening();
+                       }, 500);
+                   }
+                   this.wasListeningBeforePause = false;
                }
+               
                this.updateButtonState();
            }
 
@@ -4170,7 +4201,7 @@
            }
        }
 
-       // AI Manager Class with Markdown Support and Show Mode Integration - UPDATED TO REMOVE GUID
+       // AI Manager Class with Persistent Text Display - UPDATED
        class AIManager {
            constructor(worldInstance) {
                this.world = worldInstance;
@@ -4199,6 +4230,7 @@
                this.textGroup = null;
                this.textContainer = null;
                this.inactiveText = null;
+               this.persistentTextGroup = null; // New group for persistent text
 
                this.lastVoiceResponse = null;
                this.activeTextAnimation = null;
@@ -4608,6 +4640,11 @@
                this.textContainer.position.y = 7;
                companionGroup.add(this.textContainer);
 
+               // Persistent text group
+               this.persistentTextGroup = new THREE.Group();
+               this.persistentTextGroup.position.y = 6.5;
+               companionGroup.add(this.persistentTextGroup);
+
                // Add inactive text if not active
                if (!isActive) {
                    const loader = new THREE.FontLoader();
@@ -4639,6 +4676,10 @@
 
                // Position companion in scene
                companionGroup.position.set(0, 0, -WORLD_ATTRIBUTES.companionDistance);
+               
+               // Rotate the companion to show higher
+               companionGroup.rotation.x = THREE.MathUtils.degToRad(-20);
+               
                this.world.scene.add(companionGroup);
 
                this.companion = {
@@ -4677,9 +4718,13 @@
                    // Pulse glow
                    this.companion.light.intensity = 2 + Math.sin(time * 3) * 0.5;
 
-                   // Make text container face camera
+                   // Make text containers face camera
                    if (this.textContainer) {
                        this.textContainer.lookAt(this.world.camera.position);
+                   }
+                   
+                   if (this.persistentTextGroup) {
+                       this.persistentTextGroup.lookAt(this.world.camera.position);
                    }
 
                    // Rotate inactive text if present
@@ -4791,6 +4836,7 @@
                    this.activeTextAnimation = null;
                }
 
+               // Clear only the scrolling text meshes, not persistent ones
                this.textMeshes.forEach(mesh => {
                    if (mesh.geometry) mesh.geometry.dispose();
                    if (mesh.material) mesh.material.dispose();
@@ -4851,10 +4897,10 @@
                });
 
                const totalHeight = lines.length * lineHeight;
-               this.animateScrollingText(totalHeight);
+               this.animateScrollingText(totalHeight, text);
            }
 
-           animateScrollingText(totalHeight) {
+           animateScrollingText(totalHeight, fullText) {
                const scrollSpeed = 0.01;
                const startY = -3;
                const endY = totalHeight + 3;
@@ -4867,6 +4913,8 @@
                    this.textGroup.position.y = currentY;
 
                    if (currentY > endY) {
+                       // When scrolling ends, keep the text visible
+                       this.createPersistentText(fullText);
                        this.fadeOutText();
                        return;
                    }
@@ -4889,6 +4937,79 @@
                };
 
                animate();
+           }
+
+           createPersistentText(text) {
+               // Clear existing persistent text
+               this.persistentTextGroup.children.forEach(child => {
+                   if (child.geometry) child.geometry.dispose();
+                   if (child.material) child.material.dispose();
+               });
+               this.persistentTextGroup.clear();
+
+               if (!this.font) return;
+
+               // Create a condensed version of the text for persistent display
+               const maxLength = 100;
+               const displayText = text.length > maxLength ? text.substring(0, maxLength) + '...' : text;
+               
+               const lines = [];
+               const maxCharsPerLine = 35;
+               const words = displayText.split(' ');
+               let currentLine = '';
+
+               words.forEach(word => {
+                   if ((currentLine + word).length > maxCharsPerLine) {
+                       if (currentLine) {
+                           lines.push(currentLine.trim());
+                           currentLine = '';
+                       }
+                   }
+                   currentLine += word + ' ';
+               });
+               if (currentLine) {
+                   lines.push(currentLine.trim());
+               }
+
+               // Limit to 3 lines
+               const displayLines = lines.slice(0, 3);
+               if (lines.length > 3) {
+                   displayLines[2] = displayLines[2].substring(0, displayLines[2].length - 3) + '...';
+               }
+
+               const lineHeight = 0.6;
+               const persistentMaterial = new THREE.MeshStandardMaterial({
+                   color: 0xffffff,
+                   emissive: 0x06ffa5,
+                   emissiveIntensity: 0.2,
+                   metalness: 0.3,
+                   roughness: 0.5,
+                   transparent: true,
+                   opacity: 0.8
+               });
+
+               displayLines.forEach((line, index) => {
+                   const textGeometry = new THREE.TextGeometry(line, {
+                       font: this.font,
+                       size: 0.3,
+                       height: 0.03,
+                       curveSegments: 8,
+                       bevelEnabled: true,
+                       bevelThickness: 0.01,
+                       bevelSize: 0.01,
+                       bevelSegments: 5
+                   });
+
+                   textGeometry.center();
+
+                   const textMesh = new THREE.Mesh(textGeometry, persistentMaterial);
+                   textMesh.position.y = -index * lineHeight;
+                   
+                   this.persistentTextGroup.add(textMesh);
+               });
+
+               // Center the persistent text group
+               this.persistentTextGroup.position.y = 6.5 + (displayLines.length * lineHeight) / 2;
            }
 
            fadeOutText() {
@@ -4939,7 +5060,7 @@
            }
 
            showTypingIndicator() {
-            const typingDiv = document.createElement('div');
+               const typingDiv = document.createElement('div');
                typingDiv.className = 'ai-typing';
                typingDiv.id = 'ai-typing-indicator';
                typingDiv.innerHTML = `
