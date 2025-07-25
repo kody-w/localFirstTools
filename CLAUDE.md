@@ -21,18 +21,7 @@ localFirstTools is a collection of self-contained HTML applications that follow 
    - `apps/productivity/` for productivity tools
    - `apps/business/` for business applications
    - etc.
-2. Run `python github-browser-updater.py` to update the gallery
-3. The script will automatically detect the new HTML file and update index.html
-
-### Updating the Gallery
-```bash
-python github-browser-updater.py
-```
-
-### Creating an App Store Archive
-```bash
-python app-store-updater.py
-```
+2. The application will be available at its path when served via GitHub Pages or a local server
 
 ### Building the Xbox Extension
 ```bash
@@ -102,5 +91,4 @@ localFirstTools/
 
 ### Important Files
 - **index.html**: Main gallery/launcher page (must remain in root)
-- **github-browser-updater.py**: Updates gallery and discovers new apps in subdirectories
-- **app-store-updater.py**: Creates versioned archives for distribution
+- **data/config/utility_apps_config.json**: Application registry (if using dynamic gallery)
