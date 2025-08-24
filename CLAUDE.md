@@ -11,7 +11,7 @@ localFirstTools is a collection of self-contained HTML applications that follow 
 1. **Self-Contained HTML Files**: Every application is a single HTML file with all CSS and JavaScript inline. Never split these into separate files.
 2. **No External Dependencies**: Applications must work offline. Do not add CDN links or npm packages.
 3. **Gallery System**: The index.html serves as a launcher. New applications are automatically discovered by the Python updater scripts.
-4. **JSON Configuration**: Applications are registered in `utility_apps_config.json` with metadata including title, category, description, and filename.
+4. **JSON Configuration**: Applications are registered in `data/config/utility_apps_config.json` with metadata including id, title, description, tags, path, and icon.
 
 ## Common Development Tasks
 
@@ -20,26 +20,56 @@ localFirstTools is a collection of self-contained HTML applications that follow 
    - `apps/games/` for games
    - `apps/productivity/` for productivity tools
    - `apps/business/` for business applications
-   - etc.
+   - `apps/ai-tools/` for AI-powered tools
+   - `apps/development/` for development tools
+   - `apps/media/` for media/recording apps
+   - `apps/education/` for learning tools
+   - `apps/health/` for health apps
+   - `apps/utilities/` for general utilities
 2. The application will be available at its path when served via GitHub Pages or a local server
+
+### Organizing Files
+```bash
+python scripts/organize_files.py --execute
+```
+This script automatically categorizes and moves HTML files to appropriate directories based on filename patterns.
+
+### Local Development Server
+For Flask-based development (if needed):
+```bash
+cd scripts
+./setup-flask-app.sh
+```
 
 ### Building the Xbox Extension
 ```bash
-cd edgeAddons/xbox-mkb-extension
+cd edgeAddons
 ./create-xbox-mkb-extension.sh
 ```
 
-## Application Categories
+## Application Pattern
 
-When creating new applications, use these existing categories:
-- Games
-- Productivity
-- Media & Entertainment
-- Business & Finance
-- Development Tools
-- Education & Reference
-- AI Tools
-- Utilities
+Each HTML application follows this structure:
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>App Name</title>
+    <style>
+        /* All CSS inline - no external stylesheets */
+    </style>
+</head>
+<body>
+    <!-- HTML content -->
+    <script>
+        // All JavaScript inline - no external scripts
+        // Use localStorage for persistence
+    </script>
+</body>
+</html>
+```
 
 ## Development Guidelines
 
@@ -49,13 +79,12 @@ When creating new applications, use these existing categories:
 4. **Error Handling**: Applications should gracefully handle offline scenarios and missing data
 5. **Performance**: Keep file sizes reasonable since all code is inline
 
-## Testing
+## Game Data Files
 
-Testing is done manually in the browser. There is no automated test framework. When modifying applications:
-1. Test in multiple browsers (Chrome, Firefox, Edge)
-2. Test offline functionality
-3. Test on mobile devices
-4. Verify local storage persistence
+Games can load configuration from JSON files in `data/games/`:
+- Game configuration files follow the pattern: `game-name-game.json`
+- These contain game levels, sprites, rules, etc.
+- Games should gracefully handle missing JSON files
 
 ## File Naming Conventions
 
@@ -90,5 +119,7 @@ localFirstTools/
 ```
 
 ### Important Files
-- **index.html**: Main gallery/launcher page (must remain in root)
-- **data/config/utility_apps_config.json**: Application registry (if using dynamic gallery)
+- **index.html**: Main gallery/launcher page (must remain in root) - Features animated "Vibe Coding" gallery interface
+- **data/config/utility_apps_config.json**: Auto-generated application registry with metadata
+- **data/config/tasks.json**: Task tracking data (gitignored)
+- **scripts/organize_files.py**: Utility to auto-categorize and organize HTML files into proper directories
