@@ -1,0 +1,141 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  # Multi-VM setup
+  
+  # Web Server VM
+  config.vm.define "web" do |web|
+    web.vm.box = "ubuntu/jammy64"
+    web.vm.hostname = "level4-web"
+    web.vm.network "private_network", ip: "192.168.56.10"
+    web.vm.network "forwarded_port", guest: 80, host: 3004
+    
+    web.vm.provider "virtualbox" do |vb|
+      vb.name = "level4-web"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+    
+    web.vm.provision "shell", inline: <<-SHELL
+      apt-get update
+      apt-get install -y nginx python3 python3-pip
+      
+      # Configure Nginx
+      cat > /etc/nginx/sites-available/default <<-'NGINX'
+server {
+    listen 80 default_server;
+    server_name _;
+    
+    location / {
+        proxy_pass http://192.168.56.11:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+NGINX
+      
+      systemctl restart nginx
+      echo "Web VM provisioned successfully"
+    SHELL
+  end
+  
+  # Application Server VM
+  config.vm.define "app" do |app|
+    app.vm.box = "ubuntu/jammy64"
+    app.vm.hostname = "level4-app"
+    app.vm.network "private_network", ip: "192.168.56.11"
+    
+    app.vm.provider "virtualbox" do |vb|
+      vb.name = "level4-app"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+    
+    app.vm.provision "shell", inline: <<-SHELL
+      apt-get update
+      apt-get install -y python3 python3-pip
+      pip3 install flask gunicorn
+      
+      # Create Flask app
+      cat > /home/vagrant/app.py <<-'PYTHON'
+from flask import Flask, jsonify
+import socket
+import os
+from datetime import datetime
+
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return jsonify({
+        'level': 4,
+        'type': 'Virtual Machine',
+        'vm_name': socket.gethostname(),
+        'ip_address': socket.gethostbyname(socket.gethostname()),
+        'os': os.uname().sysname,
+        'timestamp': datetime.now().isoformat(),
+        'message': 'Full OS virtualization with Vagrant'
+    })
+
+@app.route('/health')
+def health():
+    return jsonify({'status': 'healthy'})
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
+PYTHON
+      
+      # Create systemd service
+      cat > /etc/systemd/system/flask-app.service <<-'SERVICE'
+[Unit]
+Description=Flask Application
+After=network.target
+
+[Service]
+User=vagrant
+WorkingDirectory=/home/vagrant
+ExecStart=/usr/local/bin/gunicorn --bind 0.0.0.0:5000 app:app
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+SERVICE
+      
+      systemctl daemon-reload
+      systemctl enable flask-app
+      systemctl start flask-app
+      
+      echo "App VM provisioned successfully"
+    SHELL
+  end
+  
+  # Database VM
+  config.vm.define "db" do |db|
+    db.vm.box = "ubuntu/jammy64"
+    db.vm.hostname = "level4-db"
+    db.vm.network "private_network", ip: "192.168.56.12"
+    
+    db.vm.provider "virtualbox" do |vb|
+      vb.name = "level4-db"
+      vb.memory = "1024"
+      vb.cpus = 1
+    end
+    
+    db.vm.provision "shell", inline: <<-SHELL
+      apt-get update
+      apt-get install -y postgresql postgresql-contrib
+      
+      # Configure PostgreSQL
+      sudo -u postgres psql -c "CREATE USER appuser WITH PASSWORD 'apppass';"
+      sudo -u postgres createdb -O appuser appdb
+      
+      # Allow remote connections
+      echo "host all all 192.168.56.0/24 md5" >> /etc/postgresql/14/main/pg_hba.conf
+      echo "listen_addresses = '*'" >> /etc/postgresql/14/main/postgresql.conf
+      
+      systemctl restart postgresql
+      echo "Database VM provisioned successfully"
+    SHELL
+  end
+end
