@@ -2,7 +2,9 @@
 
 A curated collection of **100+ self-contained HTML applications** following the "local-first" philosophy. Every tool works completely offline, with no external dependencies, no build process, and no tracking.
 
-[![Live Gallery](https://img.shields.io/badge/🌐%20Live-Gallery-06ffa5?style=for-the-badge)](https://kody-w.github.io/localFirstTools)
+https://kody-w.github.io/localFirstTools/index.html
+
+
 [![License](https://img.shields.io/badge/License-MIT-8338ec?style=for-the-badge)](LICENSE)
 
 ![Local First Tools Gallery](https://via.placeholder.com/1200x400/0a0a0a/06ffa5?text=Local+First+Tools+Gallery)
