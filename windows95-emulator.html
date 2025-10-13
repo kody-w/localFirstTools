@@ -1318,38 +1318,162 @@
             }
 
             openMinesweeper() {
+                // Show difficulty selection dialog
+                const difficultyDialog = document.createElement('div');
+                difficultyDialog.style.cssText = 'padding: 20px; text-align: center;';
+                difficultyDialog.innerHTML = `
+                    <h3 style="margin-top: 0;">Select Difficulty</h3>
+                    <div style="display: flex; flex-direction: column; gap: 10px; margin: 20px 0;">
+                        <button class="btn primary" onclick="emulator.startMinesweeper('easy')" style="padding: 12px;">Easy (8x8, 10 mines)</button>
+                        <button class="btn primary" onclick="emulator.startMinesweeper('medium')" style="padding: 12px;">Medium (16x16, 40 mines)</button>
+                        <button class="btn primary" onclick="emulator.startMinesweeper('hard')" style="padding: 12px;">Hard (24x24, 99 mines)</button>
+                    </div>
+                    <div style="margin-top: 20px; padding: 10px; background: #f0f0f0; border: 1px solid #808080; text-align: left; font-size: 11px;">
+                        <strong>Statistics:</strong><br>
+                        Easy - Wins: <span id="stats-easy-wins">0</span> | Best: <span id="stats-easy-time">-</span><br>
+                        Medium - Wins: <span id="stats-medium-wins">0</span> | Best: <span id="stats-medium-time">-</span><br>
+                        Hard - Wins: <span id="stats-hard-wins">0</span> | Best: <span id="stats-hard-time">-</span>
+                    </div>
+                `;
+
+                // Load and display stats
+                const stats = this.loadMinesweeperStats();
+                setTimeout(() => {
+                    ['easy', 'medium', 'hard'].forEach(diff => {
+                        const winsEl = document.getElementById(`stats-${diff}-wins`);
+                        const timeEl = document.getElementById(`stats-${diff}-time`);
+                        if (winsEl) winsEl.textContent = stats[diff].wins;
+                        if (timeEl) timeEl.textContent = stats[diff].bestTime ? `${stats[diff].bestTime}s` : '-';
+                    });
+                }, 50);
+
+                this.windowManager.createWindow('Minesweeper', difficultyDialog, { width: 400, height: 360 });
+            }
+
+            loadMinesweeperStats() {
+                const saved = SafeStorage.getItem('win95-minesweeper-stats');
+                if (saved) {
+                    try {
+                        return JSON.parse(saved);
+                    } catch (e) {
+                        return this.getDefaultMinesweeperStats();
+                    }
+                }
+                return this.getDefaultMinesweeperStats();
+            }
+
+            getDefaultMinesweeperStats() {
+                return {
+                    easy: { wins: 0, losses: 0, bestTime: null },
+                    medium: { wins: 0, losses: 0, bestTime: null },
+                    hard: { wins: 0, losses: 0, bestTime: null }
+                };
+            }
+
+            saveMinesweeperStats(stats) {
+                SafeStorage.setItem('win95-minesweeper-stats', JSON.stringify(stats));
+            }
+
+            startMinesweeper(difficulty) {
+                const configs = {
+                    easy: { rows: 8, cols: 8, mines: 10 },
+                    medium: { rows: 16, cols: 16, mines: 40 },
+                    hard: { rows: 24, cols: 24, mines: 99 }
+                };
+
+                const config = configs[difficulty];
                 const content = document.createElement('div');
-                const rows = 10, cols = 10, mines = 15;
-                let board = this.createMinesweeperBoard(rows, cols, mines);
+                let board = this.createMinesweeperBoard(config.rows, config.cols, config.mines);
+                let gameStarted = false;
+                let gameOver = false;
+                let startTime = null;
+                let timerInterval = null;
+                let flagCount = 0;
 
                 content.innerHTML = `
                     <div style="padding: 10px; text-align: center;">
-                        <div style="background: var(--button-face); padding: 5px; margin-bottom: 10px; border: 2px inset;">
-                            <strong>Mines: ${mines}</strong> | <strong>Flags: <span id="flag-count">0</span></strong>
+                        <div style="background: var(--button-face); padding: 8px; margin-bottom: 10px; border: 2px inset; display: flex; justify-content: space-between; align-items: center;">
+                            <div><strong>💣 ${config.mines}</strong></div>
+                            <div><strong>🚩 <span id="flag-count">0</span></strong></div>
+                            <div><strong>⏱️ <span id="timer">0</span>s</strong></div>
+                            <button class="btn" onclick="emulator.startMinesweeper('${difficulty}')" style="padding: 4px 8px;">New Game</button>
                         </div>
-                        <div id="minesweeper-board" style="display: inline-grid; grid-template-columns: repeat(${cols}, 24px); gap: 0; border: 2px outset var(--button-face);"></div>
+                        <div id="minesweeper-board" style="display: inline-grid; grid-template-columns: repeat(${config.cols}, 22px); gap: 0; border: 2px outset var(--button-face);"></div>
                     </div>
                 `;
 
                 const boardEl = content.querySelector('#minesweeper-board');
+                const flagCountEl = content.querySelector('#flag-count');
+                const timerEl = content.querySelector('#timer');
+
                 board.forEach((row, r) => {
                     row.forEach((cell, c) => {
                         const cellBtn = document.createElement('button');
                         cellBtn.className = 'btn';
-                        cellBtn.style.cssText = 'width: 24px; height: 24px; padding: 0; font-size: 10px; font-weight: bold;';
+                        cellBtn.style.cssText = 'width: 22px; height: 22px; padding: 0; font-size: 10px; font-weight: bold;';
                         cellBtn.dataset.row = r;
                         cellBtn.dataset.col = c;
-                        cellBtn.onclick = () => this.revealCell(boardEl, board, r, c);
+
+                        cellBtn.onclick = () => {
+                            if (!gameStarted) {
+                                gameStarted = true;
+                                startTime = Date.now();
+                                timerInterval = setInterval(() => {
+                                    if (!gameOver) {
+                                        const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                                        timerEl.textContent = elapsed;
+                                    }
+                                }, 1000);
+                            }
+                            if (!gameOver) {
+                                this.revealMinesweeperCell(boardEl, board, r, c, config, difficulty, timerInterval, () => {
+                                    gameOver = true;
+                                    clearInterval(timerInterval);
+                                    const elapsed = Math.floor((Date.now() - startTime) / 1000);
+                                    this.updateMinesweeperStats(difficulty, true, elapsed);
+                                }, () => {
+                                    gameOver = true;
+                                    clearInterval(timerInterval);
+                                    this.updateMinesweeperStats(difficulty, false, null);
+                                });
+                            }
+                        };
+
                         cellBtn.oncontextmenu = (e) => {
                             e.preventDefault();
-                            this.toggleFlag(cellBtn);
+                            if (!gameOver && !cellBtn.disabled) {
+                                if (cellBtn.textContent === '🚩') {
+                                    cellBtn.textContent = '';
+                                    flagCount--;
+                                } else if (cellBtn.textContent === '') {
+                                    cellBtn.textContent = '🚩';
+                                    flagCount++;
+                                }
+                                flagCountEl.textContent = flagCount;
+                            }
                             return false;
                         };
+
                         boardEl.appendChild(cellBtn);
                     });
                 });
 
-                this.windowManager.createWindow('Minesweeper', content, { width: 300, height: 380 });
+                const width = Math.max(320, config.cols * 22 + 40);
+                const height = Math.max(380, config.rows * 22 + 100);
+                this.windowManager.createWindow(`Minesweeper - ${difficulty.charAt(0).toUpperCase() + difficulty.slice(1)}`, content, { width, height });
+            }
+
+            updateMinesweeperStats(difficulty, won, time) {
+                const stats = this.loadMinesweeperStats();
+                if (won) {
+                    stats[difficulty].wins++;
+                    if (!stats[difficulty].bestTime || time < stats[difficulty].bestTime) {
+                        stats[difficulty].bestTime = time;
+                    }
+                } else {
+                    stats[difficulty].losses++;
+                }
+                this.saveMinesweeperStats(stats);
             }
 
             createMinesweeperBoard(rows, cols, mines) {
