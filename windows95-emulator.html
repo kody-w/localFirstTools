@@ -1029,14 +1029,20 @@
             createWindow(title, content, options = {}) {
                 const windowId = 'win-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
 
+                // Load saved position if available
+                const savedPosition = this.loadWindowPosition(title);
+                const defaultX = 100 + this.windows.length * 30;
+                const defaultY = 100 + this.windows.length * 30;
+
                 const windowEl = document.createElement('div');
                 windowEl.className = 'window active';
                 windowEl.id = windowId;
-                windowEl.style.left = (options.x || 100 + this.windows.length * 30) + 'px';
-                windowEl.style.top = (options.y || 100 + this.windows.length * 30) + 'px';
-                windowEl.style.width = (options.width || 400) + 'px';
-                windowEl.style.height = (options.height || 300) + 'px';
+                windowEl.style.left = (options.x || savedPosition?.x || defaultX) + 'px';
+                windowEl.style.top = (options.y || savedPosition?.y || defaultY) + 'px';
+                windowEl.style.width = (options.width || savedPosition?.width || 400) + 'px';
+                windowEl.style.height = (options.height || savedPosition?.height || 300) + 'px';
                 windowEl.style.zIndex = this.nextZIndex++;
+                windowEl.dataset.windowTitle = title; // Store title for position saving
 
                 const titleBar = document.createElement('div');
                 titleBar.className = 'window-titlebar';
@@ -1081,6 +1087,11 @@
 
                 // Focus window
                 this.focusWindow(windowEl);
+
+                // Play window open sound
+                if (this.desktop.playSoundEffect) {
+                    this.desktop.playSoundEffect('window-open');
+                }
 
                 return windowObj;
             }
@@ -1138,6 +1149,11 @@
                     windowObj.minimized = true;
                     windowEl.classList.add('minimized');
                     this.desktop.updateTaskbarButtons();
+
+                    // Play minimize sound
+                    if (this.desktop.playSoundEffect) {
+                        this.desktop.playSoundEffect('minimize');
+                    }
                 }
             }
 
@@ -1151,6 +1167,22 @@
                     windowEl.style.width = windowEl.dataset.restoreWidth;
                     windowEl.style.height = windowEl.dataset.restoreHeight;
                     windowEl.dataset.maximized = 'false';
+
+                    // Save restored position
+                    const title = windowEl.dataset.windowTitle;
+                    if (title) {
+                        this.saveWindowPosition(title, {
+                            x: parseInt(windowEl.style.left),
+                            y: parseInt(windowEl.style.top),
+                            width: parseInt(windowEl.style.width),
+                            height: parseInt(windowEl.style.height)
+                        });
+                    }
+
+                    // Play minimize sound (for restore)
+                    if (this.desktop.playSoundEffect) {
+                        this.desktop.playSoundEffect('minimize');
+                    }
                 } else {
                     // Store current position
                     windowEl.dataset.restoreLeft = windowEl.style.left;
@@ -1164,6 +1196,11 @@
                     windowEl.style.width = '640px';
                     windowEl.style.height = '450px';
                     windowEl.dataset.maximized = 'true';
+
+                    // Play maximize sound
+                    if (this.desktop.playSoundEffect) {
+                        this.desktop.playSoundEffect('maximize');
+                    }
                 }
             }
 
@@ -1184,6 +1221,11 @@
                     this.desktop.removeTaskbarButton(windowObj);
                     windowEl.remove();
                     this.windows.splice(index, 1);
+
+                    // Play window close sound
+                    if (this.desktop.playSoundEffect) {
+                        this.desktop.playSoundEffect('window-close');
+                    }
                 }
             }
 
@@ -1197,7 +1239,46 @@
             }
 
             handleMouseUp() {
-                this.draggedWindow = null;
+                if (this.draggedWindow) {
+                    // Save window position after dragging
+                    const title = this.draggedWindow.dataset.windowTitle;
+                    if (title) {
+                        this.saveWindowPosition(title, {
+                            x: parseInt(this.draggedWindow.style.left),
+                            y: parseInt(this.draggedWindow.style.top),
+                            width: parseInt(this.draggedWindow.style.width),
+                            height: parseInt(this.draggedWindow.style.height)
+                        });
+                    }
+                    this.draggedWindow = null;
+                }
+            }
+
+            loadWindowPosition(title) {
+                try {
+                    const positions = SafeStorage.getItem('win95-window-positions');
+                    if (positions) {
+                        const allPositions = JSON.parse(positions);
+                        return allPositions[title];
+                    }
+                } catch (e) {
+                    console.warn('Failed to load window position:', e);
+                }
+                return null;
+            }
+
+            saveWindowPosition(title, position) {
+                try {
+                    let positions = {};
+                    const saved = SafeStorage.getItem('win95-window-positions');
+                    if (saved) {
+                        positions = JSON.parse(saved);
+                    }
+                    positions[title] = position;
+                    SafeStorage.setItem('win95-window-positions', JSON.stringify(positions));
+                } catch (e) {
+                    console.warn('Failed to save window position:', e);
+                }
             }
         }
 
@@ -1313,23 +1394,215 @@
                             osc.stop(now + i * 0.15 + 0.3);
                         });
                         break;
+
+                    case 'window-open':
+                        // Window opening sound - ascending chirp
+                        const openOsc = ctx.createOscillator();
+                        const openGain = ctx.createGain();
+                        openOsc.connect(openGain);
+                        openGain.connect(ctx.destination);
+                        openOsc.frequency.setValueAtTime(400, now);
+                        openOsc.frequency.exponentialRampToValueAtTime(800, now + 0.08);
+                        openGain.gain.setValueAtTime(0.08, now);
+                        openGain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+                        openOsc.start(now);
+                        openOsc.stop(now + 0.08);
+                        break;
+
+                    case 'window-close':
+                        // Window closing sound - descending chirp
+                        const closeOsc = ctx.createOscillator();
+                        const closeGain = ctx.createGain();
+                        closeOsc.connect(closeGain);
+                        closeGain.connect(ctx.destination);
+                        closeOsc.frequency.setValueAtTime(800, now);
+                        closeOsc.frequency.exponentialRampToValueAtTime(400, now + 0.08);
+                        closeGain.gain.setValueAtTime(0.08, now);
+                        closeGain.gain.exponentialRampToValueAtTime(0.01, now + 0.08);
+                        closeOsc.start(now);
+                        closeOsc.stop(now + 0.08);
+                        break;
+
+                    case 'button-click':
+                        // Button click sound - short tap
+                        const btnOsc = ctx.createOscillator();
+                        const btnGain = ctx.createGain();
+                        btnOsc.connect(btnGain);
+                        btnGain.connect(ctx.destination);
+                        btnOsc.type = 'sine';
+                        btnOsc.frequency.setValueAtTime(600, now);
+                        btnGain.gain.setValueAtTime(0.05, now);
+                        btnGain.gain.exponentialRampToValueAtTime(0.01, now + 0.03);
+                        btnOsc.start(now);
+                        btnOsc.stop(now + 0.03);
+                        break;
+
+                    case 'minimize':
+                        // Minimize sound - quick descending tone
+                        const minOsc = ctx.createOscillator();
+                        const minGain = ctx.createGain();
+                        minOsc.connect(minGain);
+                        minGain.connect(ctx.destination);
+                        minOsc.frequency.setValueAtTime(700, now);
+                        minOsc.frequency.exponentialRampToValueAtTime(300, now + 0.1);
+                        minGain.gain.setValueAtTime(0.07, now);
+                        minGain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                        minOsc.start(now);
+                        minOsc.stop(now + 0.1);
+                        break;
+
+                    case 'maximize':
+                        // Maximize sound - expanding tone
+                        const maxOsc = ctx.createOscillator();
+                        const maxGain = ctx.createGain();
+                        maxOsc.connect(maxGain);
+                        maxGain.connect(ctx.destination);
+                        maxOsc.frequency.setValueAtTime(500, now);
+                        maxOsc.frequency.exponentialRampToValueAtTime(900, now + 0.1);
+                        maxGain.gain.setValueAtTime(0.07, now);
+                        maxGain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                        maxOsc.start(now);
+                        maxOsc.stop(now + 0.1);
+                        break;
+
+                    case 'start-menu':
+                        // Start menu sound - pleasant two-tone
+                        const sm1 = ctx.createOscillator();
+                        const sm2 = ctx.createOscillator();
+                        const smGain = ctx.createGain();
+                        sm1.connect(smGain);
+                        sm2.connect(smGain);
+                        smGain.connect(ctx.destination);
+                        sm1.frequency.setValueAtTime(600, now);
+                        sm2.frequency.setValueAtTime(800, now + 0.05);
+                        smGain.gain.setValueAtTime(0.06, now);
+                        smGain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+                        sm1.start(now);
+                        sm1.stop(now + 0.06);
+                        sm2.start(now + 0.05);
+                        sm2.stop(now + 0.12);
+                        break;
                 }
             }
 
             // Programs
             openNotepad() {
                 const content = document.createElement('div');
-                content.innerHTML = `
-                    <div style="display: flex; flex-direction: column; height: 100%;">
-                        <div style="background: var(--button-face); padding: 2px; border-bottom: 1px solid var(--button-shadow);">
-                            <button class="btn" onclick="alert('File menu')">File</button>
-                            <button class="btn" onclick="alert('Edit menu')">Edit</button>
-                            <button class="btn" onclick="alert('Help menu')">Help</button>
-                        </div>
-                        <textarea id="notepad-textarea" style="flex: 1; border: none; font-family: 'Courier New', monospace; font-size: 12px; padding: 4px; resize: none; outline: none; width: 100%; box-sizing: border-box;"></textarea>
-                    </div>
+                content.style.cssText = 'display: flex; flex-direction: column; height: 100%;';
+
+                // Menu bar
+                const menuBar = document.createElement('div');
+                menuBar.style.cssText = 'background: var(--button-face); padding: 2px; border-bottom: 1px solid var(--button-shadow); display: flex; gap: 2px;';
+                menuBar.innerHTML = `
+                    <button class="btn" onclick="emulator.notepadNew()">New</button>
+                    <button class="btn" onclick="emulator.notepadSave()">Save</button>
+                    <button class="btn" onclick="emulator.notepadLoad()">Load</button>
+                    <button class="btn" onclick="emulator.notepadDownload()">Download</button>
+                    <button class="btn" onclick="emulator.notepadUpload()">Upload File</button>
                 `;
+
+                // Textarea
+                const textarea = document.createElement('textarea');
+                textarea.id = 'notepad-textarea';
+                textarea.style.cssText = 'flex: 1; border: none; font-family: "Courier New", monospace; font-size: 12px; padding: 4px; resize: none; outline: none; width: 100%; box-sizing: border-box;';
+
+                // Load autosaved content
+                const autosaved = SafeStorage.getItem('notepad-autosave');
+                if (autosaved) {
+                    textarea.value = autosaved;
+                }
+
+                // Autosave on input
+                textarea.addEventListener('input', () => {
+                    SafeStorage.setItem('notepad-autosave', textarea.value);
+                });
+
+                // File input (hidden)
+                const fileInput = document.createElement('input');
+                fileInput.type = 'file';
+                fileInput.accept = '.txt';
+                fileInput.style.display = 'none';
+                fileInput.id = 'notepad-file-input';
+                fileInput.addEventListener('change', (e) => {
+                    const file = e.target.files[0];
+                    if (file) {
+                        const reader = new FileReader();
+                        reader.onload = (event) => {
+                            textarea.value = event.target.result;
+                            SafeStorage.setItem('notepad-autosave', textarea.value);
+                        };
+                        reader.readAsText(file);
+                    }
+                });
+
+                content.appendChild(menuBar);
+                content.appendChild(textarea);
+                content.appendChild(fileInput);
+
+                this.notepadState = { currentFile: 'Untitled' };
                 this.windowManager.createWindow('Untitled - Notepad', content, { width: 500, height: 400 });
+            }
+
+            notepadNew() {
+                const textarea = document.getElementById('notepad-textarea');
+                if (textarea) {
+                    if (textarea.value && !confirm('Clear current document?')) {
+                        return;
+                    }
+                    textarea.value = '';
+                    SafeStorage.setItem('notepad-autosave', '');
+                    this.notepadState.currentFile = 'Untitled';
+                }
+            }
+
+            notepadSave() {
+                const textarea = document.getElementById('notepad-textarea');
+                if (textarea) {
+                    const filename = prompt('Enter filename:', this.notepadState?.currentFile || 'document');
+                    if (filename) {
+                        SafeStorage.setItem('notepad-file-' + filename, textarea.value);
+                        this.notepadState.currentFile = filename;
+                        alert('Saved as: ' + filename);
+                    }
+                }
+            }
+
+            notepadLoad() {
+                const filename = prompt('Enter filename to load:');
+                if (filename) {
+                    const content = SafeStorage.getItem('notepad-file-' + filename);
+                    if (content !== null) {
+                        const textarea = document.getElementById('notepad-textarea');
+                        if (textarea) {
+                            textarea.value = content;
+                            SafeStorage.setItem('notepad-autosave', content);
+                            this.notepadState.currentFile = filename;
+                            alert('Loaded: ' + filename);
+                        }
+                    } else {
+                        alert('File not found: ' + filename);
+                    }
+                }
+            }
+
+            notepadDownload() {
+                const textarea = document.getElementById('notepad-textarea');
+                if (textarea) {
+                    const blob = new Blob([textarea.value], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = (this.notepadState?.currentFile || 'document') + '.txt';
+                    a.click();
+                    URL.revokeObjectURL(url);
+                }
+            }
+
+            notepadUpload() {
+                const fileInput = document.getElementById('notepad-file-input');
+                if (fileInput) {
+                    fileInput.click();
+                }
             }
 
             openCalculator() {
@@ -3915,6 +4188,310 @@ Swap:             0           0           0`;
                 this.windowManager.createWindow('System Properties', content, { width: 420, height: 440 });
             }
 
+            openRegistryEditor() {
+                // Load or initialize registry from localStorage
+                const registry = this.loadRegistry();
+
+                const content = document.createElement('div');
+                content.style.cssText = 'display: flex; flex-direction: column; height: 100%; background: var(--button-face);';
+
+                // Menu bar
+                const menuBar = document.createElement('div');
+                menuBar.style.cssText = 'background: var(--button-face); padding: 2px 4px; border-bottom: 1px solid #808080; font-size: 11px;';
+                menuBar.innerHTML = `
+                    <span style="padding: 2px 8px; cursor: pointer;">Registry</span>
+                    <span style="padding: 2px 8px; cursor: pointer;">Edit</span>
+                    <span style="padding: 2px 8px; cursor: pointer;">View</span>
+                    <span style="padding: 2px 8px; cursor: pointer;">Help</span>
+                `;
+
+                // Toolbar
+                const toolbar = document.createElement('div');
+                toolbar.style.cssText = 'background: var(--button-face); padding: 4px; border-bottom: 1px solid #808080; display: flex; gap: 4px;';
+                toolbar.innerHTML = `
+                    <button class="btn" onclick="emulator.registryAddKey()" title="New Key">📁+</button>
+                    <button class="btn" onclick="emulator.registryAddValue()" title="New Value">📝+</button>
+                    <button class="btn" onclick="emulator.registryDelete()" title="Delete">🗑️</button>
+                    <button class="btn" onclick="emulator.registryRefresh()" title="Refresh">🔄</button>
+                `;
+
+                // Main container
+                const mainContainer = document.createElement('div');
+                mainContainer.style.cssText = 'display: flex; flex: 1; overflow: hidden;';
+
+                // Tree view (left panel)
+                const treePanel = document.createElement('div');
+                treePanel.id = 'registry-tree';
+                treePanel.style.cssText = 'width: 250px; background: white; border: 2px inset; overflow-y: auto; font-size: 11px; font-family: "MS Sans Serif", Arial, sans-serif;';
+
+                // Details view (right panel)
+                const detailsPanel = document.createElement('div');
+                detailsPanel.id = 'registry-details';
+                detailsPanel.style.cssText = 'flex: 1; margin-left: 4px; background: white; border: 2px inset; overflow-y: auto;';
+
+                // Build tree view
+                this.buildRegistryTree(treePanel, registry);
+
+                // Build details view header
+                detailsPanel.innerHTML = `
+                    <div style="background: #000080; color: white; padding: 4px; font-size: 11px; display: flex; border-bottom: 1px solid #808080;">
+                        <div style="flex: 1; padding: 2px;">Name</div>
+                        <div style="flex: 1; padding: 2px;">Type</div>
+                        <div style="flex: 2; padding: 2px;">Data</div>
+                    </div>
+                    <div id="registry-values" style="font-size: 11px;"></div>
+                `;
+
+                mainContainer.appendChild(treePanel);
+                mainContainer.appendChild(detailsPanel);
+
+                content.appendChild(menuBar);
+                content.appendChild(toolbar);
+                content.appendChild(mainContainer);
+
+                this.registryState = { currentKey: null, registry: registry };
+                this.windowManager.createWindow('Registry Editor', content, { width: 700, height: 500 });
+            }
+
+            loadRegistry() {
+                const saved = SafeStorage.getItem('win95-registry');
+                if (saved) {
+                    try {
+                        return JSON.parse(saved);
+                    } catch (e) {
+                        return this.getDefaultRegistry();
+                    }
+                }
+                return this.getDefaultRegistry();
+            }
+
+            getDefaultRegistry() {
+                return {
+                    'HKEY_CLASSES_ROOT': {
+                        '.txt': { '(Default)': 'txtfile' },
+                        'txtfile': { '(Default)': 'Text Document' }
+                    },
+                    'HKEY_CURRENT_USER': {
+                        'Software': {
+                            'Microsoft': {
+                                'Windows': { 'CurrentVersion': 'Windows 95 Simulator' }
+                            }
+                        },
+                        'Control Panel': {
+                            'Desktop': { 'Wallpaper': 'None' },
+                            'Mouse': { 'DoubleClickSpeed': '500' }
+                        }
+                    },
+                    'HKEY_LOCAL_MACHINE': {
+                        'SOFTWARE': {
+                            'Microsoft': {
+                                'Windows': {
+                                    'CurrentVersion': { 'Version': '4.00.950' }
+                                }
+                            }
+                        },
+                        'SYSTEM': {
+                            'CurrentControlSet': { 'Control': { 'ComputerName': 'WIN95-SIM' } }
+                        }
+                    },
+                    'HKEY_USERS': {
+                        '.DEFAULT': { '(Default)': 'Default User Settings' }
+                    },
+                    'HKEY_CURRENT_CONFIG': {
+                        'Software': { 'Fonts': { '(Default)': 'MS Sans Serif' } }
+                    }
+                };
+            }
+
+            saveRegistry(registry) {
+                try {
+                    SafeStorage.setItem('win95-registry', JSON.stringify(registry));
+                } catch (e) {
+                    alert('Error saving registry: ' + e.message);
+                }
+            }
+
+            buildRegistryTree(container, registry, path = []) {
+                container.innerHTML = '';
+
+                const buildNode = (obj, parent, currentPath) => {
+                    Object.keys(obj).sort().forEach(key => {
+                        const fullPath = [...currentPath, key];
+                        const pathStr = fullPath.join('\\');
+
+                        const nodeDiv = document.createElement('div');
+                        nodeDiv.style.cssText = 'padding: 2px 2px 2px ' + (currentPath.length * 16 + 4) + 'px; cursor: pointer; user-select: none;';
+
+                        const hasChildren = typeof obj[key] === 'object' && obj[key] !== null && !obj[key].hasOwnProperty('(Default)') && Object.keys(obj[key]).length > 0;
+
+                        nodeDiv.innerHTML = (hasChildren ? '📁 ' : '📄 ') + key;
+
+                        nodeDiv.onclick = (e) => {
+                            e.stopPropagation();
+                            // Highlight selected
+                            container.querySelectorAll('div').forEach(d => d.style.background = 'white');
+                            nodeDiv.style.background = '#000080';
+                            nodeDiv.style.color = 'white';
+
+                            // Update details panel
+                            this.registryState.currentKey = fullPath;
+                            this.displayRegistryValues(obj[key]);
+                        };
+
+                        parent.appendChild(nodeDiv);
+
+                        // Recursively build child nodes
+                        if (typeof obj[key] === 'object' && obj[key] !== null) {
+                            buildNode(obj[key], parent, fullPath);
+                        }
+                    });
+                };
+
+                // Build root nodes
+                Object.keys(registry).sort().forEach(rootKey => {
+                    const rootDiv = document.createElement('div');
+                    rootDiv.style.cssText = 'padding: 2px 4px; cursor: pointer; font-weight: bold; user-select: none;';
+                    rootDiv.innerHTML = '🖥️ ' + rootKey;
+
+                    rootDiv.onclick = (e) => {
+                        e.stopPropagation();
+                        container.querySelectorAll('div').forEach(d => {
+                            d.style.background = 'white';
+                            d.style.color = 'black';
+                        });
+                        rootDiv.style.background = '#000080';
+                        rootDiv.style.color = 'white';
+
+                        this.registryState.currentKey = [rootKey];
+                        this.displayRegistryValues(registry[rootKey]);
+                    };
+
+                    container.appendChild(rootDiv);
+
+                    if (typeof registry[rootKey] === 'object') {
+                        buildNode(registry[rootKey], container, [rootKey]);
+                    }
+                });
+            }
+
+            displayRegistryValues(keyData) {
+                const valuesContainer = document.getElementById('registry-values');
+                if (!valuesContainer) return;
+
+                valuesContainer.innerHTML = '';
+
+                if (!keyData || typeof keyData !== 'object') return;
+
+                // Display values (leaf nodes)
+                Object.keys(keyData).forEach(valueName => {
+                    const valueData = keyData[valueName];
+
+                    if (typeof valueData === 'string' || typeof valueData === 'number') {
+                        const row = document.createElement('div');
+                        row.style.cssText = 'display: flex; padding: 4px; border-bottom: 1px solid #e0e0e0; cursor: pointer;';
+                        row.innerHTML = `
+                            <div style="flex: 1; padding: 2px;">${valueName}</div>
+                            <div style="flex: 1; padding: 2px;">REG_SZ</div>
+                            <div style="flex: 2; padding: 2px;">${valueData}</div>
+                        `;
+
+                        row.onclick = () => {
+                            const newValue = prompt('Edit value for: ' + valueName, valueData);
+                            if (newValue !== null) {
+                                this.registryUpdateValue(valueName, newValue);
+                            }
+                        };
+
+                        valuesContainer.appendChild(row);
+                    }
+                });
+            }
+
+            registryAddKey() {
+                if (!this.registryState || !this.registryState.currentKey) {
+                    alert('Please select a location in the registry tree first.');
+                    return;
+                }
+
+                const keyName = prompt('Enter new key name:');
+                if (keyName && keyName.trim()) {
+                    let current = this.registryState.registry;
+                    this.registryState.currentKey.forEach(part => {
+                        if (!current[part]) current[part] = {};
+                        current = current[part];
+                    });
+
+                    current[keyName.trim()] = {};
+                    this.saveRegistry(this.registryState.registry);
+                    this.registryRefresh();
+                }
+            }
+
+            registryAddValue() {
+                if (!this.registryState || !this.registryState.currentKey) {
+                    alert('Please select a location in the registry tree first.');
+                    return;
+                }
+
+                const valueName = prompt('Enter value name:');
+                if (valueName !== null) {
+                    const valueData = prompt('Enter value data:');
+                    if (valueData !== null) {
+                        let current = this.registryState.registry;
+                        this.registryState.currentKey.forEach(part => {
+                            if (!current[part]) current[part] = {};
+                            current = current[part];
+                        });
+
+                        current[valueName || '(Default)'] = valueData;
+                        this.saveRegistry(this.registryState.registry);
+                        this.displayRegistryValues(current);
+                    }
+                }
+            }
+
+            registryUpdateValue(valueName, newValue) {
+                if (!this.registryState || !this.registryState.currentKey) return;
+
+                let current = this.registryState.registry;
+                this.registryState.currentKey.forEach(part => {
+                    current = current[part];
+                });
+
+                current[valueName] = newValue;
+                this.saveRegistry(this.registryState.registry);
+                this.displayRegistryValues(current);
+            }
+
+            registryDelete() {
+                if (!this.registryState || !this.registryState.currentKey) {
+                    alert('Please select an item to delete.');
+                    return;
+                }
+
+                if (confirm('Are you sure you want to delete this key and all its subkeys?')) {
+                    let parent = this.registryState.registry;
+                    const path = [...this.registryState.currentKey];
+                    const keyToDelete = path.pop();
+
+                    path.forEach(part => {
+                        parent = parent[part];
+                    });
+
+                    delete parent[keyToDelete];
+                    this.saveRegistry(this.registryState.registry);
+                    this.registryRefresh();
+                }
+            }
+
+            registryRefresh() {
+                const treePanel = document.getElementById('registry-tree');
+                if (treePanel) {
+                    this.registryState.registry = this.loadRegistry();
+                    this.buildRegistryTree(treePanel, this.registryState.registry);
+                }
+            }
+
             openControlPanel() {
                 const content = document.createElement('div');
                 content.style.cssText = 'display: flex; flex-direction: column; height: 100%; background: var(--button-face);';
@@ -4759,6 +5336,9 @@ Swap:             0           0           0`;
                     } else {
                         startMenu.classList.add('active');
                         startMenu.style.display = 'block';
+
+                        // Play start menu sound
+                        this.playSoundEffect('start-menu');
                     }
                 }
             }
