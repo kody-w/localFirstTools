@@ -21,16 +21,40 @@ localFirstTools is a collection of self-contained HTML applications following a 
 # Primary method - extracts metadata and regenerates config
 python3 vibe_gallery_updater.py
 
-# Quick shell wrapper
+# Watch mode - automatically updates when HTML files change
+python3 vibe_gallery_watcher.py
+
+# Run watcher once and exit (quick update)
+python3 vibe_gallery_watcher.py --once
+
+# Quick shell wrapper (runs updater)
 ./update-gallery.sh
 
 # Legacy updater (still works with data/config/utility_apps_config.json)
 python3 archive/app-store-updater.py
 ```
 
+### Organize Files into Category Folders
+```bash
+# Move HTML files from root to category folders
+python3 vibe_gallery_organizer.py
+
+# Preview what would be moved (dry run)
+python3 vibe_gallery_organizer.py --dry-run
+```
+
 ### Update Tools Manifest
 ```bash
 python3 update-tools-manifest.py
+```
+
+### Accessibility Tools
+```bash
+# Check color contrast in HTML files
+python3 color_contrast_check.py
+
+# Apply accessibility patches to HTML files
+python3 accessibility_patch.py
 ```
 
 ### Build Xbox Extension
@@ -58,6 +82,28 @@ The gallery organizes applications into thematic categories:
 - **particle_physics** - Physics simulations and particle systems
 - **educational_tools** - Learning resources and tutorials
 
+## Development Workflow
+
+### Adding a New Application
+1. Create self-contained HTML file in root directory
+2. Include proper `<title>` and `<meta name="description">` tags
+3. Test the application in multiple browsers
+4. Run `python3 vibe_gallery_updater.py` to regenerate configs
+5. Verify the app appears correctly in index.html gallery
+
+### Development Mode
+For active development, use the watcher to automatically update configs:
+```bash
+python3 vibe_gallery_watcher.py
+```
+This watches for file changes and automatically regenerates the gallery config.
+
+### Modifying Existing Applications
+1. Edit the HTML file directly
+2. Test changes in browser
+3. Run updater or watcher to update gallery configs
+4. Commit changes to git
+
 ## Development Guidelines
 
 1. **HTML Structure**: Each application should be a complete, valid HTML document with proper DOCTYPE and meta tags
@@ -67,6 +113,7 @@ The gallery organizes applications into thematic categories:
 5. **Error Handling**: Applications should gracefully handle offline scenarios and missing data
 6. **Performance**: Keep file sizes reasonable since all code is inline
 7. **Metadata Tags**: Include descriptive comments in HTML for auto-categorization (e.g., <!-- 3d, canvas, animation -->)
+8. **Accessibility**: Ensure proper ARIA labels, keyboard navigation, and color contrast ratios (use accessibility_patch.py)
 
 ## Testing
 
@@ -98,9 +145,11 @@ localFirstTools/
 ```
 
 ### Important Files
-- **index.html**: Main gallery launcher (must remain in root)
+- **index.html**: Main gallery launcher with 3D gallery mode and Xbox controller support (must remain in root)
 - **vibe_gallery_config.json**: Primary application registry with metadata (auto-generated)
 - **vibe_gallery_updater.py**: Main script for updating gallery configuration
+- **vibe_gallery_watcher.py**: Auto-updates config when HTML files change
+- **vibe_gallery_organizer.py**: Moves HTML files into category folders
 - **tools-manifest.json**: Simple manifest of all HTML tools
 - **data/config/utility_apps_config.json**: Legacy registry (still functional)
 
@@ -111,13 +160,48 @@ localFirstTools/
 - Shell scripts: `purpose-description.sh`
 - Python scripts: `purpose_description.py`
 
-## Metadata Extraction
+## Metadata Extraction System
 
-The vibe_gallery_updater.py script automatically extracts:
-- Title from `<title>` tags
-- Description from meta description or auto-generated from content
-- Technical features (3D, canvas, SVG, animation, etc.) from code analysis
-- Complexity level based on code patterns
-- Interaction type (game, drawing, visual, interactive)
+The vibe_gallery_updater.py script automatically extracts metadata from HTML files:
 
-Applications are automatically categorized based on keywords and technical features detected in the code.
+### Extracted Metadata
+- **Title**: From `<title>` tags or filename
+- **Description**: From meta description tag or auto-generated
+- **Tags**: Technical features detected (3D, canvas, SVG, animation, etc.)
+- **Complexity**: simple/intermediate/advanced (based on file size and features)
+- **Interaction Type**: game/drawing/visual/interactive/audio/interface
+- **Category**: Auto-assigned based on content analysis
+
+### Auto-Categorization Logic
+Applications are automatically categorized into one of 9 categories based on:
+1. **Keywords in file path** (e.g., "games", "ai", "media")
+2. **Technical features detected** (e.g., WebGL → 3d_immersive)
+3. **Content analysis** (e.g., "particle" keyword → particle_physics)
+4. **Interaction patterns** (e.g., click/drag/touch → interactive)
+
+### Configuration Files
+- **vibe_gallery_config.json** (root): Primary config with full metadata and categorization
+- **tools-manifest.json** (root): Simple listing of all HTML files with basic metadata
+- **data/config/utility_apps_config.json**: Legacy config (still functional)
+
+When you modify HTML files, run the updater to regenerate these configs automatically.
+
+## Gallery Features
+
+### 3D Gallery Mode
+The index.html includes an immersive 3D gallery experience powered by Three.js:
+- **Keyboard Controls**: WASD for movement, mouse for looking around
+- **Xbox Controller Support**: Left stick for movement, right stick for camera, A button to open tools
+- **Mobile Support**: Touch gestures and virtual joystick for movement
+- **Interactive Artwork Display**: Tools displayed as 3D "paintings" in a virtual gallery
+
+### Gallery Modes
+- **Main Gallery**: Default view showing all active applications
+- **Archive**: View for older/deprecated applications
+- **3D Experience**: Immersive walkthrough gallery with controller support
+
+### User Features
+- **Search**: Filter tools by title, description, or filename
+- **Pin Tools**: Pin favorite tools to the top of the gallery
+- **Vote System**: Users can vote for feature requests (stored in localStorage)
+- **Download**: Save individual HTML files locally
