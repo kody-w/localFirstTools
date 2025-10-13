@@ -20,15 +20,17 @@ localFirstTools is a collection of self-contained HTML applications following a 
 ```bash
 # Primary method - extracts metadata and regenerates config
 python3 vibe_gallery_updater.py
+# (Symlinked from scripts/gallery/vibe_gallery_updater.py)
 
 # Watch mode - automatically updates when HTML files change
-python3 vibe_gallery_watcher.py
+python3 scripts/gallery/vibe_gallery_watcher.py
 
 # Run watcher once and exit (quick update)
-python3 vibe_gallery_watcher.py --once
+python3 scripts/gallery/vibe_gallery_watcher.py --once
 
 # Quick shell wrapper (runs updater)
 ./update-gallery.sh
+# (Symlinked from scripts/shell/update-gallery.sh)
 
 # Legacy updater (still works with data/config/utility_apps_config.json)
 python3 archive/app-store-updater.py
@@ -37,24 +39,25 @@ python3 archive/app-store-updater.py
 ### Organize Files into Category Folders
 ```bash
 # Move HTML files from root to category folders
-python3 vibe_gallery_organizer.py
+python3 scripts/gallery/vibe_gallery_organizer.py
 
 # Preview what would be moved (dry run)
-python3 vibe_gallery_organizer.py --dry-run
+python3 scripts/gallery/vibe_gallery_organizer.py --dry-run
 ```
 
 ### Update Tools Manifest
 ```bash
 python3 update-tools-manifest.py
+# (Symlinked from scripts/gallery/update-tools-manifest.py)
 ```
 
 ### Accessibility Tools
 ```bash
 # Check color contrast in HTML files
-python3 color_contrast_check.py
+python3 scripts/maintenance/color_contrast_check.py
 
 # Apply accessibility patches to HTML files
-python3 accessibility_patch.py
+python3 scripts/maintenance/accessibility_patch.py
 ```
 
 ### Build Xbox Extension
@@ -129,14 +132,50 @@ Testing is done manually in the browser. When modifying applications:
 ### Core Structure
 ```
 localFirstTools/
-├── index.html                       # Main gallery launcher (DO NOT MODIFY LOCATION)
-├── vibe_gallery_config.json        # Primary auto-generated app registry
-├── tools-manifest.json             # Simple tool listing with metadata
-├── [100+ HTML applications]        # Self-contained apps in root directory
-├── archive/                        # Legacy scripts and archived versions
-├── scripts/                        # Utility shell scripts
+├── index.html                          # Main gallery launcher (DO NOT MODIFY LOCATION)
+├── vibe_gallery_config.json           # Primary auto-generated app registry
+├── tools-manifest.json                # Simple tool listing with metadata
+├── README.md                          # Project documentation
+├── CLAUDE.md                          # AI assistant instructions
+├── [152 HTML applications]            # Self-contained apps in root directory
+│
+├── docs/                              # All documentation (organized by type)
+│   ├── wowmon/                       # WowMon game design docs (60 files)
+│   ├── agent/                        # Agent strategy reports (12 files)
+│   ├── accessibility/                # Accessibility guides and reports (6 files)
+│   ├── architecture/                 # System architecture documentation (2 files)
+│   ├── implementation/               # Implementation guides (5 files)
+│   ├── game-design/                  # Game design documents (7 files)
+│   ├── tutorials/                    # Quick references and tutorials (8 files)
+│   ├── reports/                      # Analysis and optimization reports (3 files)
+│   └── misc/                         # Miscellaneous documentation (5 files)
+│
+├── scripts/                           # All automation scripts (organized by purpose)
+│   ├── gallery/                      # Gallery maintenance scripts (5 files)
+│   │   ├── vibe_gallery_updater.py  # Main gallery config updater
+│   │   ├── vibe_gallery_watcher.py  # Auto-updates on file changes
+│   │   ├── vibe_gallery_organizer.py # Moves HTML to category folders
+│   │   ├── update_gallery.py        # Alternative updater
+│   │   └── update-tools-manifest.py # Updates tools manifest
+│   │
+│   ├── maintenance/                  # Utility and maintenance scripts (4 files)
+│   │   ├── accessibility_patch.py   # Apply accessibility fixes
+│   │   ├── color_contrast_check.py  # Check color contrast
+│   │   ├── compressor.py            # Compress HTML files
+│   │   └── flatten-to-root.py       # Move files to root
+│   │
+│   └── shell/                        # Shell scripts (2 files)
+│       ├── update-gallery.sh        # Quick gallery update wrapper
+│       └── update-and-organize-gallery.sh
+│
+├── Symlinks (Backward Compatibility)  # Root-level symlinks to scripts
+│   ├── vibe_gallery_updater.py -> scripts/gallery/vibe_gallery_updater.py
+│   ├── update-tools-manifest.py -> scripts/gallery/update-tools-manifest.py
+│   └── update-gallery.sh -> scripts/shell/update-gallery.sh
+│
+├── archive/                           # Legacy scripts and archived versions
 ├── edgeAddons/
-│   └── xbox-mkb-extension/         # Xbox controller browser support
+│   └── xbox-mkb-extension/           # Xbox controller browser support
 ├── data/
 │   ├── config/
 │   │   └── utility_apps_config.json  # Legacy app registry
@@ -147,11 +186,37 @@ localFirstTools/
 ### Important Files
 - **index.html**: Main gallery launcher with 3D gallery mode and Xbox controller support (must remain in root)
 - **vibe_gallery_config.json**: Primary application registry with metadata (auto-generated)
-- **vibe_gallery_updater.py**: Main script for updating gallery configuration
-- **vibe_gallery_watcher.py**: Auto-updates config when HTML files change
-- **vibe_gallery_organizer.py**: Moves HTML files into category folders
+- **scripts/gallery/vibe_gallery_updater.py**: Main script for updating gallery configuration (symlinked to root)
+- **scripts/gallery/vibe_gallery_watcher.py**: Auto-updates config when HTML files change
+- **scripts/gallery/vibe_gallery_organizer.py**: Moves HTML files into category folders
 - **tools-manifest.json**: Simple manifest of all HTML tools
 - **data/config/utility_apps_config.json**: Legacy registry (still functional)
+
+### Documentation Organization
+All documentation has been organized into `docs/` subdirectories:
+- **docs/wowmon/**: 60+ WowMon game design documents (endgame, narrative, casual player advocacy, etc.)
+- **docs/agent/**: 12 agent strategy and design reports
+- **docs/accessibility/**: 6 accessibility guides, reports, and code examples
+- **docs/architecture/**: System architecture and design documentation
+- **docs/implementation/**: Implementation guides and integration documentation
+- **docs/game-design/**: Game redesigns (roguelike, metroidvania, action RPG, etc.)
+- **docs/tutorials/**: Quick references, tutorials, and quickstart guides
+- **docs/reports/**: Performance reports, optimization recommendations, and analysis
+- **docs/misc/**: Other documentation (UIRenderer docs, build ideas, etc.)
+
+### Script Organization
+All scripts have been organized into `scripts/` subdirectories:
+- **scripts/gallery/**: Gallery maintenance and configuration scripts
+- **scripts/maintenance/**: Accessibility, compression, and utility scripts
+- **scripts/shell/**: Shell wrapper scripts
+
+### Backward Compatibility
+Symlinks in the root directory maintain compatibility with existing workflows:
+- `vibe_gallery_updater.py` → `scripts/gallery/vibe_gallery_updater.py`
+- `update-tools-manifest.py` → `scripts/gallery/update-tools-manifest.py`
+- `update-gallery.sh` → `scripts/shell/update-gallery.sh`
+
+This means existing commands continue to work exactly as before.
 
 ## File Naming Conventions
 
