@@ -246,8 +246,7 @@
             image-rendering: -webkit-optimize-contrast;
             image-rendering: crisp-edges;
             -ms-interpolation-mode: nearest-neighbor;
-            width: 100%;
-            height: 100%;
+            /* Width and height controlled by #screen selector for proper scaling */
         }
 
         .status-bar {
@@ -1835,33 +1834,34 @@ user@win95:~$ `;
             }
 
             initLinuxTerminal() {
-                // Virtual filesystem
-                this.linuxFS = {
-                    '/': {
-                        type: 'dir',
-                        contents: {
-                            'home': {
-                                type: 'dir',
-                                contents: {
-                                    'user': {
-                                        type: 'dir',
-                                        contents: {
-                                            'welcome.txt': { type: 'file', content: 'Welcome to the Linux Terminal Emulator!\nType commands like ls, cat, echo, etc.' },
-                                            'notes.txt': { type: 'file', content: 'This is a text file.' }
-                                        }
-                                    }
-                                }
-                            },
-                            'bin': { type: 'dir', contents: {} },
-                            'etc': { type: 'dir', contents: {} },
-                            'var': { type: 'dir', contents: {} },
-                            'tmp': { type: 'dir', contents: {} }
-                        }
+                // Load filesystem from localStorage or use default
+                const savedFS = SafeStorage.getItem('win95-linux-filesystem');
+
+                if (savedFS) {
+                    try {
+                        this.linuxFS = JSON.parse(savedFS);
+                        console.log('Loaded persistent filesystem from storage');
+                    } catch (error) {
+                        console.error('Failed to load filesystem, using default:', error);
+                        this.initDefaultLinuxFS();
                     }
-                };
+                } else {
+                    this.initDefaultLinuxFS();
+                }
+
+                // Load terminal history
+                const savedHistory = SafeStorage.getItem('win95-terminal-history');
+                if (savedHistory) {
+                    try {
+                        this.terminalHistory = JSON.parse(savedHistory);
+                    } catch (error) {
+                        this.terminalHistory = [];
+                    }
+                } else {
+                    this.terminalHistory = [];
+                }
 
                 this.terminalCwd = '/home/user';
-                this.terminalHistory = [];
                 this.terminalHistoryIndex = -1;
                 this.terminalEnv = {
                     USER: 'user',
@@ -1882,6 +1882,7 @@ user@win95:~$ `;
                             if (command) {
                                 this.terminalHistory.push(command);
                                 this.terminalHistoryIndex = this.terminalHistory.length;
+                                this.saveTerminalHistory(); // Save history after each command
                                 this.executeLinuxCommand(command);
                             } else {
                                 this.terminalPrint('');
@@ -1908,6 +1909,64 @@ user@win95:~$ `;
                         }
                     });
                 }
+            }
+
+            initDefaultLinuxFS() {
+                // Initialize default filesystem structure
+                this.linuxFS = {
+                    '/': {
+                        type: 'dir',
+                        contents: {
+                            'home': {
+                                type: 'dir',
+                                contents: {
+                                    'user': {
+                                        type: 'dir',
+                                        contents: {
+                                            'welcome.txt': { type: 'file', content: 'Welcome to the Linux Terminal Emulator!\nType commands like ls, cat, echo, etc.\nFiles you create will be saved automatically.' },
+                                            'notes.txt': { type: 'file', content: 'This is a persistent text file.\nYour changes are saved automatically!' }
+                                        }
+                                    }
+                                }
+                            },
+                            'bin': { type: 'dir', contents: {} },
+                            'etc': { type: 'dir', contents: {} },
+                            'var': { type: 'dir', contents: {} },
+                            'tmp': { type: 'dir', contents: {} }
+                        }
+                    }
+                };
+                this.saveLinuxFilesystem();
+            }
+
+            saveLinuxFilesystem() {
+                // Save filesystem to localStorage
+                try {
+                    SafeStorage.setItem('win95-linux-filesystem', JSON.stringify(this.linuxFS));
+                    console.log('Filesystem saved to storage');
+                } catch (error) {
+                    console.error('Failed to save filesystem:', error);
+                }
+            }
+
+            saveTerminalHistory() {
+                // Save terminal history to localStorage
+                try {
+                    // Keep only last 100 commands to avoid storage limits
+                    const historyToSave = this.terminalHistory.slice(-100);
+                    SafeStorage.setItem('win95-terminal-history', JSON.stringify(historyToSave));
+                } catch (error) {
+                    console.error('Failed to save terminal history:', error);
+                }
+            }
+
+            resetLinuxFilesystem() {
+                // Reset to default filesystem (utility command)
+                if (confirm('Reset filesystem to default? All files will be lost.')) {
+                    this.initDefaultLinuxFS();
+                    return 'Filesystem reset to default';
+                }
+                return 'Reset cancelled';
             }
 
             terminalPrint(text, color = '#0f0') {
@@ -1978,6 +2037,7 @@ Utilities:
   cowsay <text>     - ASCII cow speaks
   fortune           - Random fortune cookie
   clear             - Clear screen
+  reset             - Reset filesystem to default
   exit              - Close terminal`;
                         break;
 
@@ -2121,6 +2181,10 @@ Utilities:
                         response = fortunes[Math.floor(Math.random() * fortunes.length)];
                         break;
 
+                    case 'reset':
+                        response = this.resetLinuxFilesystem();
+                        break;
+
                     case 'exit':
                         const win = output?.closest('.window');
                         if (win) this.windowManager.closeWindow(win);
@@ -2233,6 +2297,7 @@ Utilities:
                 }
 
                 parent.contents[name] = { type: 'dir', contents: {} };
+                this.saveLinuxFilesystem(); // Save after modification
                 return '';
             }
 
@@ -2250,6 +2315,7 @@ Utilities:
 
                 if (!parent.contents[name]) {
                     parent.contents[name] = { type: 'file', content: '' };
+                    this.saveLinuxFilesystem(); // Save after modification
                 }
 
                 return '';
@@ -2276,6 +2342,7 @@ Utilities:
                 }
 
                 delete parent.contents[name];
+                this.saveLinuxFilesystem(); // Save after modification
                 return '';
             }
 
@@ -3626,6 +3693,7 @@ Swap:             0           0           0`;
             fullscreen() {
                 try {
                     const container = document.getElementById('emulator-container');
+                    const frame = document.querySelector('.emulator-frame');
 
                     if (!document.fullscreenEnabled && !document.webkitFullscreenEnabled &&
                         !document.mozFullScreenEnabled && !document.msFullscreenEnabled) {
@@ -3633,7 +3701,7 @@ Swap:             0           0           0`;
                         return;
                     }
 
-                    if (document.fullscreenElement || document.webkitFullscreenElement || 
+                    if (document.fullscreenElement || document.webkitFullscreenElement ||
                         document.mozFullScreenElement || document.msFullscreenElement) {
                         // Exit fullscreen
                         const exitFullscreen = document.exitFullscreen ||
@@ -3642,6 +3710,10 @@ Swap:             0           0           0`;
                                              document.msExitFullscreen;
                         if (exitFullscreen) {
                             exitFullscreen.call(document);
+                        }
+                        // Remove fullscreen class
+                        if (frame) {
+                            frame.classList.remove('fullscreen-mode');
                         }
                     } else {
                         // Enter fullscreen
@@ -3652,7 +3724,12 @@ Swap:             0           0           0`;
                                                 container.msRequestFullscreen;
 
                         if (requestFullscreen) {
-                            requestFullscreen.call(container).catch(err => {
+                            requestFullscreen.call(container).then(() => {
+                                // Add fullscreen class when successfully entered
+                                if (frame) {
+                                    frame.classList.add('fullscreen-mode');
+                                }
+                            }).catch(err => {
                                 console.error('Fullscreen request failed:', err);
                                 alert('Could not enter fullscreen mode');
                             });
@@ -3959,14 +4036,32 @@ TIP: Try opening multiple windows and arranging them!`);
             }
         });
 
-        // Fullscreen change handler
-        document.addEventListener('fullscreenchange', () => {
-            if (document.fullscreenElement) {
+        // Fullscreen change handler with cross-browser support
+        function handleFullscreenChange() {
+            const frame = document.querySelector('.emulator-frame');
+            const isFullscreen = document.fullscreenElement ||
+                               document.webkitFullscreenElement ||
+                               document.mozFullScreenElement ||
+                               document.msFullscreenElement;
+
+            if (isFullscreen) {
                 console.log('Entered fullscreen mode');
+                if (frame) {
+                    frame.classList.add('fullscreen-mode');
+                }
             } else {
                 console.log('Exited fullscreen mode');
+                if (frame) {
+                    frame.classList.remove('fullscreen-mode');
+                }
             }
-        });
+        }
+
+        // Add event listeners for all browser prefixes
+        document.addEventListener('fullscreenchange', handleFullscreenChange);
+        document.addEventListener('webkitfullscreenchange', handleFullscreenChange);
+        document.addEventListener('mozfullscreenchange', handleFullscreenChange);
+        document.addEventListener('MSFullscreenChange', handleFullscreenChange);
 
         // Log initialization
         console.log('Windows 95 WASM Emulator initialized');
