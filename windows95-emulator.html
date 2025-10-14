@@ -9146,17 +9146,29 @@ Swap:             0           0           0`;
                 if (clippyApiEndpoint) {
                     const endpoint = clippyApiEndpoint.value.trim();
                     SafeStorage.setItem('clippy_api_endpoint', endpoint);
+                    console.log('💾 Saved API Endpoint:', endpoint);
                     if (window.clippy && window.clippy.aiManager) {
                         window.clippy.aiManager.setAPIEndpoint(endpoint);
+                        console.log('✅ Updated AIManager endpoint');
                     }
                 }
 
                 if (clippyApiKey) {
                     const apiKey = clippyApiKey.value.trim();
                     SafeStorage.setItem('clippy_api_key', apiKey);
+                    console.log('💾 Saved API Key (length):', apiKey.length);
                     if (window.clippy && window.clippy.aiManager) {
                         window.clippy.aiManager.setAPIKey(apiKey);
+                        console.log('✅ Updated AIManager key');
                     }
+                }
+
+                // Refresh any open chat windows to show updated status
+                const chatStatus = document.getElementById('clippy-chat-status');
+                if (chatStatus && window.clippy?.aiManager) {
+                    chatStatus.textContent = window.clippy.aiManager.hasAPIKey() && window.clippy.aiManager.aiEnabled ?
+                        '✅ AI Mode Active' : '📴 Offline Mode (Configure in Control Panel)';
+                    console.log('🔄 Refreshed chat status bar');
                 }
 
                 console.log('Control Panel settings saved');
@@ -9359,7 +9371,19 @@ Swap:             0           0           0`;
                 chatHistory.innerHTML = `
                     <div style="padding: 8px; background: #ffffc0; border: 1px solid #808080; margin-bottom: 8px; border-radius: 4px;">
                         <strong>📎 Clippy:</strong> Hi! I'm Clippit, your Windows 95 assistant! I'm here to help you with anything you need. What can I help you with today?
+                        <div style="margin-top: 8px; padding: 6px; background: #f0f0ff; border-left: 3px solid #0078D7; font-size: 10px;">
+                            💡 <strong>Tip:</strong> Click any message to select it for context in your next question!
+                        </div>
                     </div>
+                `;
+
+                // Selection toolbar
+                const selectionToolbar = document.createElement('div');
+                selectionToolbar.id = 'clippy-selection-toolbar';
+                selectionToolbar.style.cssText = 'padding: 6px 8px; background: #f0f0f0; border-top: 1px solid #808080; display: flex; align-items: center; gap: 8px; font-size: 10px;';
+                selectionToolbar.innerHTML = `
+                    <span id="selection-count" style="flex: 1; color: #666;">📋 0 messages selected</span>
+                    <button class="btn" style="padding: 2px 8px; font-size: 10px;" onclick="window.emulator.clearMessageSelections()">Clear Selection</button>
                 `;
 
                 // Input area
@@ -9397,6 +9421,7 @@ Swap:             0           0           0`;
 
                 content.appendChild(header);
                 content.appendChild(chatHistory);
+                content.appendChild(selectionToolbar);
                 content.appendChild(inputArea);
                 content.appendChild(statusBar);
 
@@ -9416,11 +9441,50 @@ Swap:             0           0           0`;
                 const message = input.value.trim();
                 if (!message) return;
 
-                // Add user message to history
+                // Generate unique message IDs
+                const userMsgId = `msg-${Date.now()}-user`;
+                const timestamp = new Date().toLocaleTimeString();
+
+                // Initialize conversation history if needed
+                if (!this.chatConversationHistory) {
+                    this.chatConversationHistory = [];
+                }
+
+                // Add user message to history with metadata
                 const userMsg = document.createElement('div');
-                userMsg.style.cssText = 'padding: 8px; background: #e0e0ff; border: 1px solid #808080; margin-bottom: 8px; border-radius: 4px; text-align: right;';
-                userMsg.innerHTML = `<strong>You:</strong> ${this.escapeHtml(message)}`;
+                userMsg.className = 'chat-message chat-message-user';
+                userMsg.dataset.messageId = userMsgId;
+                userMsg.dataset.sender = 'user';
+                userMsg.dataset.timestamp = timestamp;
+                userMsg.dataset.content = message;
+                userMsg.style.cssText = 'padding: 8px; background: #e0e0ff; border: 1px solid #808080; margin-bottom: 8px; border-radius: 4px; text-align: right; cursor: pointer; transition: background 0.2s;';
+                userMsg.innerHTML = `
+                    <div style="font-size: 9px; color: #666; margin-bottom: 4px;">You • ${timestamp}</div>
+                    <strong>You:</strong> ${this.escapeHtml(message)}
+                `;
+
+                // Make message selectable for context
+                userMsg.addEventListener('click', () => this.toggleMessageSelection(userMsg));
+                userMsg.addEventListener('mouseenter', () => {
+                    if (!userMsg.classList.contains('selected')) {
+                        userMsg.style.background = '#d0d0ff';
+                    }
+                });
+                userMsg.addEventListener('mouseleave', () => {
+                    if (!userMsg.classList.contains('selected')) {
+                        userMsg.style.background = '#e0e0ff';
+                    }
+                });
+
                 history.appendChild(userMsg);
+
+                // Store in conversation history
+                this.chatConversationHistory.push({
+                    id: userMsgId,
+                    sender: 'user',
+                    message: message,
+                    timestamp: timestamp
+                });
 
                 // Clear input
                 input.value = '';
@@ -9440,11 +9504,16 @@ Swap:             0           0           0`;
                 try {
                     if (status) status.textContent = '⏳ Getting response...';
 
+                    // Get selected messages for context
+                    const selectedMessages = this.getSelectedMessagesContext();
+
                     const context = {
                         program: 'Chat Window',
                         action: 'conversation',
                         pattern: 'chatting',
                         userMessage: message,
+                        selectedContext: selectedMessages,
+                        conversationHistory: this.chatConversationHistory.slice(-10), // Last 10 messages
                         windowCount: this.windowManager?.windows?.length || 0
                     };
 
@@ -9457,12 +9526,26 @@ Swap:             0           0           0`;
                     // Remove thinking indicator
                     thinkingMsg.remove();
 
-                    // Add Clippy response
-                    const clippyMsg = document.createElement('div');
-                    clippyMsg.style.cssText = 'padding: 8px; background: #ffffc0; border: 1px solid #808080; margin-bottom: 8px; border-radius: 4px;';
+                    // Generate Clippy message ID
+                    const clippyMsgId = `msg-${Date.now()}-clippy`;
+                    const clippyTimestamp = new Date().toLocaleTimeString();
 
+                    // Add Clippy response with metadata
+                    const clippyMsg = document.createElement('div');
+                    clippyMsg.className = 'chat-message chat-message-clippy';
+                    clippyMsg.dataset.messageId = clippyMsgId;
+                    clippyMsg.dataset.sender = 'clippy';
+                    clippyMsg.dataset.timestamp = clippyTimestamp;
+                    clippyMsg.style.cssText = 'padding: 8px; background: #ffffc0; border: 1px solid #808080; margin-bottom: 8px; border-radius: 4px; cursor: pointer; transition: background 0.2s;';
+
+                    let responseText = '';
                     if (response && response.message) {
-                        clippyMsg.innerHTML = `<strong>📎 Clippy:</strong> ${this.escapeHtml(response.message)}`;
+                        responseText = response.message;
+                        clippyMsg.dataset.content = responseText;
+                        clippyMsg.innerHTML = `
+                            <div style="font-size: 9px; color: #666; margin-bottom: 4px;">📎 Clippy • ${clippyTimestamp}</div>
+                            <strong>📎 Clippy:</strong> ${this.escapeHtml(responseText)}
+                        `;
                     } else {
                         // Offline fallback responses
                         const fallbacks = [
@@ -9471,11 +9554,37 @@ Swap:             0           0           0`;
                             "I'd love to help with that! For now, I'm running in offline mode. Check out the Start menu to explore all the programs available!",
                             "That's interesting! While I can't give detailed answers in offline mode, I can help you navigate Windows 95. Try opening File Explorer or any of the programs!"
                         ];
-                        clippyMsg.innerHTML = `<strong>📎 Clippy:</strong> ${fallbacks[Math.floor(Math.random() * fallbacks.length)]}`;
+                        responseText = fallbacks[Math.floor(Math.random() * fallbacks.length)];
+                        clippyMsg.dataset.content = responseText;
+                        clippyMsg.innerHTML = `
+                            <div style="font-size: 9px; color: #666; margin-bottom: 4px;">📎 Clippy • ${clippyTimestamp}</div>
+                            <strong>📎 Clippy:</strong> ${responseText}
+                        `;
                     }
+
+                    // Make Clippy message selectable too
+                    clippyMsg.addEventListener('click', () => this.toggleMessageSelection(clippyMsg));
+                    clippyMsg.addEventListener('mouseenter', () => {
+                        if (!clippyMsg.classList.contains('selected')) {
+                            clippyMsg.style.background = '#ffffb0';
+                        }
+                    });
+                    clippyMsg.addEventListener('mouseleave', () => {
+                        if (!clippyMsg.classList.contains('selected')) {
+                            clippyMsg.style.background = '#ffffc0';
+                        }
+                    });
 
                     history.appendChild(clippyMsg);
                     history.scrollTop = history.scrollHeight;
+
+                    // Store in conversation history
+                    this.chatConversationHistory.push({
+                        id: clippyMsgId,
+                        sender: 'clippy',
+                        message: responseText,
+                        timestamp: clippyTimestamp
+                    });
 
                     if (status) {
                         status.textContent = window.clippy?.aiManager?.hasAPIKey() && window.clippy?.aiManager?.aiEnabled ?
@@ -9500,6 +9609,104 @@ Swap:             0           0           0`;
                 const div = document.createElement('div');
                 div.textContent = text;
                 return div.innerHTML;
+            }
+
+            // Message selection for context
+            toggleMessageSelection(messageElement) {
+                if (!messageElement) return;
+
+                const isSelected = messageElement.classList.contains('selected');
+
+                if (isSelected) {
+                    // Deselect
+                    messageElement.classList.remove('selected');
+                    const sender = messageElement.dataset.sender;
+                    if (sender === 'user') {
+                        messageElement.style.background = '#e0e0ff';
+                        messageElement.style.borderColor = '#808080';
+                    } else {
+                        messageElement.style.background = '#ffffc0';
+                        messageElement.style.borderColor = '#808080';
+                    }
+                    messageElement.style.borderWidth = '1px';
+                } else {
+                    // Select
+                    messageElement.classList.add('selected');
+                    messageElement.style.background = '#b0e0b0'; // Green highlight
+                    messageElement.style.borderColor = '#0078D7';
+                    messageElement.style.borderWidth = '2px';
+
+                    // Show notification
+                    if (window.toastManager) {
+                        window.toastManager.show('Message selected for context', 'info');
+                    }
+                }
+
+                // Update selection count display
+                this.updateSelectionCount();
+
+                console.log('Message selection toggled:', {
+                    id: messageElement.dataset.messageId,
+                    sender: messageElement.dataset.sender,
+                    selected: !isSelected
+                });
+            }
+
+            updateSelectionCount() {
+                const countElement = document.getElementById('selection-count');
+                if (!countElement) return;
+
+                const selectedMessages = document.querySelectorAll('.chat-message.selected');
+                const count = selectedMessages.length;
+
+                if (count === 0) {
+                    countElement.textContent = '📋 0 messages selected';
+                    countElement.style.color = '#666';
+                } else if (count === 1) {
+                    countElement.textContent = '📋 1 message selected for context';
+                    countElement.style.color = '#0078D7';
+                    countElement.style.fontWeight = 'bold';
+                } else {
+                    countElement.textContent = `📋 ${count} messages selected for context`;
+                    countElement.style.color = '#0078D7';
+                    countElement.style.fontWeight = 'bold';
+                }
+            }
+
+            getSelectedMessagesContext() {
+                const history = document.getElementById('clippy-chat-history');
+                if (!history) return [];
+
+                const selectedMessages = history.querySelectorAll('.chat-message.selected');
+                const context = [];
+
+                selectedMessages.forEach(msg => {
+                    context.push({
+                        id: msg.dataset.messageId,
+                        sender: msg.dataset.sender,
+                        content: msg.dataset.content,
+                        timestamp: msg.dataset.timestamp
+                    });
+                });
+
+                console.log('📋 Selected messages for context:', context.length);
+                return context;
+            }
+
+            clearMessageSelections() {
+                const history = document.getElementById('clippy-chat-history');
+                if (!history) return;
+
+                const selectedMessages = history.querySelectorAll('.chat-message.selected');
+                selectedMessages.forEach(msg => {
+                    this.toggleMessageSelection(msg); // Toggle to deselect
+                });
+
+                if (selectedMessages.length > 0 && window.toastManager) {
+                    window.toastManager.show('Selection cleared', 'info');
+                }
+
+                this.updateSelectionCount();
             }
 
             // LocalFirst Tools Browser
@@ -9845,7 +10052,7 @@ Swap:             0           0           0`;
                 return card;
             }
 
-            openToolInWindow(tool) {
+            async openToolInWindow(tool) {
                 const state = this.toolsBrowserState;
                 if (!state) return;
 
@@ -9863,12 +10070,56 @@ Swap:             0           0           0`;
                 console.log('Tool path:', toolUrl);
                 console.log('Full URL:', fullUrl);
 
-                // Just open in new tab - simpler and more reliable
-                window.open(fullUrl, '_blank');
-
-                // Show a notification
+                // Show loading notification
                 if (window.toastManager) {
-                    window.toastManager.show(`Opening ${tool.title}...`, 'info');
+                    window.toastManager.show(`Loading ${tool.title}...`, 'info');
+                }
+
+                try {
+                    // Fetch the raw HTML content
+                    const response = await fetch(fullUrl);
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                    }
+                    const htmlContent = await response.text();
+
+                    // Create container for the tool
+                    const toolWindow = document.createElement('div');
+                    toolWindow.style.cssText = 'width: 100%; height: 100%; background: white; overflow: hidden;';
+
+                    // Create iframe with relaxed sandbox to allow full functionality
+                    const iframe = document.createElement('iframe');
+                    iframe.style.cssText = 'width: 100%; height: 100%; border: none; display: block;';
+                    iframe.sandbox = 'allow-scripts allow-same-origin allow-forms allow-popups allow-modals allow-downloads';
+
+                    toolWindow.appendChild(iframe);
+
+                    // Create window first with reasonable default size
+                    const windowWidth = Math.min(1000, window.innerWidth - 100);
+                    const windowHeight = Math.min(700, window.innerHeight - 100);
+
+                    this.windowManager.createWindow(
+                        tool.title || 'LocalFirst Tool',
+                        toolWindow,
+                        { width: windowWidth, height: windowHeight }
+                    );
+
+                    // Write content to iframe document after window is created
+                    // This avoids CORS issues by creating a same-origin document
+                    iframe.contentDocument.open();
+                    iframe.contentDocument.write(htmlContent);
+                    iframe.contentDocument.close();
+
+                    // Success notification
+                    if (window.toastManager) {
+                        window.toastManager.show(`Loaded ${tool.title}`, 'success');
+                    }
+
+                } catch (error) {
+                    console.error('Failed to load tool:', error);
+                    if (window.toastManager) {
+                        window.toastManager.show(`Failed to load ${tool.title}: ${error.message}`, 'error');
+                    }
                 }
 
             }
@@ -11922,14 +12173,19 @@ TIP: Try opening multiple windows and arranging them!`, 'Help');
             }
         });
 
-        // Handle file input label update
-        document.getElementById('disk-input').addEventListener('change', function(e) {
-            const fileName = e.target.files[0]?.name;
-            if (fileName) {
-                const label = document.querySelector('.file-input-label');
-                label.textContent = fileName;
-            }
-        });
+        // Handle file input label update (with null check)
+        const diskInput = document.getElementById('disk-input');
+        if (diskInput) {
+            diskInput.addEventListener('change', function(e) {
+                const fileName = e.target.files[0]?.name;
+                if (fileName) {
+                    const label = document.querySelector('.file-input-label');
+                    if (label) {
+                        label.textContent = fileName;
+                    }
+                }
+            });
+        }
 
         // Fullscreen change handler with cross-browser support
         function handleFullscreenChange() {
@@ -12812,6 +13068,13 @@ TIP: Try opening multiple windows and arranging them!`, 'Help');
                 this.emotionSystem = null;
                 this.aiEnabled = SafeStorage.getItem('clippy_ai_enabled') !== 'false'; // Default true
                 this.maxHistoryLength = 10; // Keep last 10 interactions
+
+                // Debug logging
+                console.log('🔧 ClippyAIManager initialized:');
+                console.log('  - API Endpoint:', this.apiEndpoint);
+                console.log('  - Has API Key:', !!this.apiKey);
+                console.log('  - API Key length:', this.apiKey?.length || 0);
+                console.log('  - AI Enabled:', this.aiEnabled);
             }
 
             hasAPIKey() {
@@ -12855,7 +13118,14 @@ Provide a brief, contextually relevant tip or comment. Be genuinely helpful, not
             }
 
             async getClippyResponse(context) {
+                console.log('🤖 Clippy AI getResponse called');
+                console.log('  - Has API Key:', this.hasAPIKey());
+                console.log('  - AI Enabled:', this.aiEnabled);
+                console.log('  - API Endpoint:', this.apiEndpoint);
+                console.log('  - API Key length:', this.apiKey?.length || 0);
+
                 if (!this.hasAPIKey() || !this.aiEnabled) {
+                    console.warn('❌ Clippy AI not available - missing key or disabled');
                     return null; // Fall back to offline mode
                 }
 
@@ -12864,12 +13134,39 @@ Provide a brief, contextually relevant tip or comment. Be genuinely helpful, not
                 // Determine the actual message to send based on context
                 let userMessage;
                 if (context.userMessage) {
-                    // Chat conversation - use actual user message
+                    // Chat conversation - build message with context
                     userMessage = context.userMessage;
+
+                    // Add conversation history if available
+                    if (context.conversationHistory && context.conversationHistory.length > 0) {
+                        const recentHistory = context.conversationHistory.slice(-5); // Last 5 messages
+                        const historyText = recentHistory.map(msg =>
+                            `${msg.sender === 'user' ? 'User' : 'Clippy'} (${msg.timestamp}): ${msg.message}`
+                        ).join('\n');
+
+                        userMessage = `[CONVERSATION HISTORY]\n${historyText}\n\n[CURRENT MESSAGE]\n${userMessage}`;
+                    }
+
+                    // Add selected message context if any
+                    if (context.selectedContext && context.selectedContext.length > 0) {
+                        const selectedText = context.selectedContext.map(msg =>
+                            `${msg.sender === 'user' ? 'User' : 'Clippy'} (${msg.timestamp}): ${msg.content}`
+                        ).join('\n');
+
+                        userMessage = `[REFERENCED MESSAGES]\n${selectedText}\n\n${userMessage}`;
+                    }
                 } else {
                     // Passive tip - use program context
                     userMessage = `User just opened ${context.program}. Provide a helpful tip or comment.`;
                 }
+
+                console.log('📤 Sending to AI:', {
+                    endpoint: this.apiEndpoint,
+                    messageLength: userMessage.length,
+                    hasContext: !!systemPrompt,
+                    hasHistory: !!(context.conversationHistory && context.conversationHistory.length > 0),
+                    hasSelected: !!(context.selectedContext && context.selectedContext.length > 0)
+                });
 
                 try {
                     const response = await fetch(this.apiEndpoint, {
@@ -12879,18 +13176,30 @@ Provide a brief, contextually relevant tip or comment. Be genuinely helpful, not
                             'x-functions-key': this.apiKey
                         },
                         body: JSON.stringify({
-                            message: userMessage,
-                            context: systemPrompt,
-                            conversationHistory: this.conversationHistory.slice(-5) // Last 5 messages
+                            user_input: userMessage  // API expects 'user_input' field
                         })
                     });
 
+                    console.log('📥 Response status:', response.status, response.statusText);
+
                     if (!response.ok) {
-                        console.warn('Clippy AI request failed:', response.status);
+                        const errorText = await response.text();
+                        console.error('❌ Clippy AI request failed:', {
+                            status: response.status,
+                            statusText: response.statusText,
+                            error: errorText
+                        });
+
+                        // Show error to user
+                        if (window.toastManager) {
+                            window.toastManager.show(`AI Error: ${response.status} - Check console for details`, 'error');
+                        }
                         return null;
                     }
 
                     const data = await response.json();
+                    console.log('✅ AI Response received:', data);
+
                     const aiMessage = data.response || data.message || data.text;
 
                     if (aiMessage) {
@@ -12919,7 +13228,17 @@ Provide a brief, contextually relevant tip or comment. Be genuinely helpful, not
                         };
                     }
                 } catch (error) {
-                    console.error('Clippy AI error:', error);
+                    console.error('❌ Clippy AI error:', error);
+                    console.error('   Error details:', {
+                        name: error.name,
+                        message: error.message,
+                        stack: error.stack
+                    });
+
+                    // Show error to user
+                    if (window.toastManager) {
+                        window.toastManager.show(`AI Connection Error: ${error.message}`, 'error');
+                    }
                     return null;
                 }
 
