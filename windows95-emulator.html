@@ -607,6 +607,60 @@
             color: var(--text-color);
         }
 
+        .resize-handle {
+            position: absolute;
+            z-index: 10;
+        }
+
+        .resize-n, .resize-s {
+            left: 0;
+            right: 0;
+            height: 5px;
+            cursor: ns-resize;
+        }
+
+        .resize-n { top: 0; }
+        .resize-s { bottom: 0; }
+
+        .resize-e, .resize-w {
+            top: 0;
+            bottom: 0;
+            width: 5px;
+            cursor: ew-resize;
+        }
+
+        .resize-e { right: 0; }
+        .resize-w { left: 0; }
+
+        .resize-ne, .resize-nw, .resize-se, .resize-sw {
+            width: 10px;
+            height: 10px;
+        }
+
+        .resize-ne {
+            top: 0;
+            right: 0;
+            cursor: nesw-resize;
+        }
+
+        .resize-nw {
+            top: 0;
+            left: 0;
+            cursor: nwse-resize;
+        }
+
+        .resize-se {
+            bottom: 0;
+            right: 0;
+            cursor: nwse-resize;
+        }
+
+        .resize-sw {
+            bottom: 0;
+            left: 0;
+            cursor: nesw-resize;
+        }
+
         .taskbar-button {
             min-width: 100px;
             max-width: 200px;
@@ -1024,6 +1078,10 @@
                 this.nextZIndex = 1000;
                 this.draggedWindow = null;
                 this.dragOffset = { x: 0, y: 0 };
+                this.resizingWindow = null;
+                this.resizeDirection = null;
+                this.resizeStart = { x: 0, y: 0, width: 0, height: 0, left: 0, top: 0 };
+                this.snapThreshold = 20; // pixels from edge to trigger snap
             }
 
             createWindow(title, content, options = {}) {
@@ -1063,8 +1121,22 @@
                     contentEl.appendChild(content);
                 }
 
+                // Add resize handles
+                const resizeHandles = document.createElement('div');
+                resizeHandles.innerHTML = `
+                    <div class="resize-handle resize-n" data-direction="n"></div>
+                    <div class="resize-handle resize-s" data-direction="s"></div>
+                    <div class="resize-handle resize-e" data-direction="e"></div>
+                    <div class="resize-handle resize-w" data-direction="w"></div>
+                    <div class="resize-handle resize-ne" data-direction="ne"></div>
+                    <div class="resize-handle resize-nw" data-direction="nw"></div>
+                    <div class="resize-handle resize-se" data-direction="se"></div>
+                    <div class="resize-handle resize-sw" data-direction="sw"></div>
+                `;
+
                 windowEl.appendChild(titleBar);
                 windowEl.appendChild(contentEl);
+                windowEl.appendChild(resizeHandles);
 
                 // Add to desktop
                 const screenContainer = document.getElementById('screen_container');
@@ -1123,6 +1195,25 @@
 
                 // Focus on click
                 windowEl.addEventListener('mousedown', () => this.focusWindow(windowEl));
+
+                // Resize handles
+                const resizeHandles = windowEl.querySelectorAll('.resize-handle');
+                resizeHandles.forEach(handle => {
+                    handle.addEventListener('mousedown', (e) => {
+                        e.stopPropagation();
+                        this.resizingWindow = windowEl;
+                        this.resizeDirection = handle.dataset.direction;
+                        this.resizeStart = {
+                            x: e.clientX,
+                            y: e.clientY,
+                            width: windowEl.offsetWidth,
+                            height: windowEl.offsetHeight,
+                            left: windowEl.offsetLeft,
+                            top: windowEl.offsetTop
+                        };
+                        this.focusWindow(windowEl);
+                    });
+                });
             }
 
             focusWindow(windowEl) {
@@ -1230,16 +1321,93 @@
             }
 
             handleMouseMove(e) {
+                // Handle window resizing
+                if (this.resizingWindow) {
+                    const deltaX = e.clientX - this.resizeStart.x;
+                    const deltaY = e.clientY - this.resizeStart.y;
+                    const dir = this.resizeDirection;
+                    const win = this.resizingWindow;
+                    const minWidth = 200;
+                    const minHeight = 150;
+
+                    let newWidth = this.resizeStart.width;
+                    let newHeight = this.resizeStart.height;
+                    let newLeft = this.resizeStart.left;
+                    let newTop = this.resizeStart.top;
+
+                    // Calculate new dimensions based on resize direction
+                    if (dir.includes('e')) {
+                        newWidth = Math.max(minWidth, this.resizeStart.width + deltaX);
+                    }
+                    if (dir.includes('w')) {
+                        newWidth = Math.max(minWidth, this.resizeStart.width - deltaX);
+                        if (newWidth > minWidth) newLeft = this.resizeStart.left + deltaX;
+                    }
+                    if (dir.includes('s')) {
+                        newHeight = Math.max(minHeight, this.resizeStart.height + deltaY);
+                    }
+                    if (dir.includes('n')) {
+                        newHeight = Math.max(minHeight, this.resizeStart.height - deltaY);
+                        if (newHeight > minHeight) newTop = this.resizeStart.top + deltaY;
+                    }
+
+                    win.style.width = newWidth + 'px';
+                    win.style.height = newHeight + 'px';
+                    win.style.left = newLeft + 'px';
+                    win.style.top = newTop + 'px';
+                }
+
+                // Handle window dragging
                 if (this.draggedWindow) {
-                    const newX = Math.max(0, Math.min(640 - 100, e.clientX - this.dragOffset.x));
-                    const newY = Math.max(0, Math.min(450 - 30, e.clientY - this.dragOffset.y));
+                    const screenContainer = document.getElementById('screen_container');
+                    const containerRect = screenContainer.getBoundingClientRect();
+                    const containerWidth = containerRect.width;
+                    const containerHeight = containerRect.height;
+
+                    let newX = e.clientX - this.dragOffset.x;
+                    let newY = e.clientY - this.dragOffset.y;
+
+                    // Keep within bounds
+                    newX = Math.max(0, Math.min(containerWidth - 100, newX));
+                    newY = Math.max(0, Math.min(containerHeight - 30, newY));
+
                     this.draggedWindow.style.left = newX + 'px';
                     this.draggedWindow.style.top = newY + 'px';
+
+                    // Show snap preview
+                    this.showSnapPreview(e.clientX, e.clientY, containerWidth, containerHeight);
                 }
             }
 
-            handleMouseUp() {
+            handleMouseUp(e) {
+                // Handle resize end
+                if (this.resizingWindow) {
+                    const title = this.resizingWindow.dataset.windowTitle;
+                    if (title) {
+                        this.saveWindowPosition(title, {
+                            x: parseInt(this.resizingWindow.style.left),
+                            y: parseInt(this.resizingWindow.style.top),
+                            width: parseInt(this.resizingWindow.style.width),
+                            height: parseInt(this.resizingWindow.style.height)
+                        });
+                    }
+                    this.resizingWindow = null;
+                    this.resizeDirection = null;
+                }
+
+                // Handle drag end with snap
                 if (this.draggedWindow) {
+                    const screenContainer = document.getElementById('screen_container');
+                    const containerRect = screenContainer.getBoundingClientRect();
+                    const containerWidth = containerRect.width;
+                    const containerHeight = containerRect.height;
+
+                    // Check for snap zones
+                    const snapPosition = this.getSnapPosition(e.clientX, e.clientY, containerWidth, containerHeight);
+                    if (snapPosition) {
+                        this.snapWindow(this.draggedWindow, snapPosition, containerWidth, containerHeight);
+                    }
+
                     // Save window position after dragging
                     const title = this.draggedWindow.dataset.windowTitle;
                     if (title) {
@@ -1251,6 +1419,96 @@
                         });
                     }
                     this.draggedWindow = null;
+                    this.hideSnapPreview();
+                }
+            }
+
+            showSnapPreview(mouseX, mouseY, containerWidth, containerHeight) {
+                const snapPosition = this.getSnapPosition(mouseX, mouseY, containerWidth, containerHeight);
+                let preview = document.getElementById('snap-preview');
+
+                if (!preview) {
+                    preview = document.createElement('div');
+                    preview.id = 'snap-preview';
+                    preview.style.cssText = 'position: absolute; border: 3px solid #0066cc; background: rgba(0, 102, 204, 0.1); pointer-events: none; z-index: 9999; display: none;';
+                    document.getElementById('screen_container').appendChild(preview);
+                }
+
+                if (snapPosition) {
+                    const pos = this.calculateSnapDimensions(snapPosition, containerWidth, containerHeight);
+                    preview.style.left = pos.left + 'px';
+                    preview.style.top = pos.top + 'px';
+                    preview.style.width = pos.width + 'px';
+                    preview.style.height = pos.height + 'px';
+                    preview.style.display = 'block';
+                } else {
+                    preview.style.display = 'none';
+                }
+            }
+
+            hideSnapPreview() {
+                const preview = document.getElementById('snap-preview');
+                if (preview) {
+                    preview.style.display = 'none';
+                }
+            }
+
+            getSnapPosition(mouseX, mouseY, containerWidth, containerHeight) {
+                const threshold = this.snapThreshold;
+
+                // Left edge
+                if (mouseX < threshold) {
+                    if (mouseY < threshold) return 'top-left';
+                    if (mouseY > containerHeight - threshold) return 'bottom-left';
+                    return 'left';
+                }
+
+                // Right edge
+                if (mouseX > containerWidth - threshold) {
+                    if (mouseY < threshold) return 'top-right';
+                    if (mouseY > containerHeight - threshold) return 'bottom-right';
+                    return 'right';
+                }
+
+                // Top edge
+                if (mouseY < threshold) {
+                    return 'top';
+                }
+
+                // Bottom edge
+                if (mouseY > containerHeight - threshold) {
+                    return 'bottom';
+                }
+
+                return null;
+            }
+
+            calculateSnapDimensions(position, containerWidth, containerHeight) {
+                const taskbarHeight = 30;
+                const workHeight = containerHeight - taskbarHeight;
+
+                const positions = {
+                    'left': { left: 0, top: 0, width: containerWidth / 2, height: workHeight },
+                    'right': { left: containerWidth / 2, top: 0, width: containerWidth / 2, height: workHeight },
+                    'top': { left: 0, top: 0, width: containerWidth, height: workHeight },
+                    'bottom': { left: 0, top: workHeight / 2, width: containerWidth, height: workHeight / 2 },
+                    'top-left': { left: 0, top: 0, width: containerWidth / 2, height: workHeight / 2 },
+                    'top-right': { left: containerWidth / 2, top: 0, width: containerWidth / 2, height: workHeight / 2 },
+                    'bottom-left': { left: 0, top: workHeight / 2, width: containerWidth / 2, height: workHeight / 2 },
+                    'bottom-right': { left: containerWidth / 2, top: workHeight / 2, width: containerWidth / 2, height: workHeight / 2 }
+                };
+
+                return positions[position] || null;
+            }
+
+            snapWindow(windowEl, position, containerWidth, containerHeight) {
+                const dims = this.calculateSnapDimensions(position, containerWidth, containerHeight);
+                if (dims) {
+                    windowEl.style.left = dims.left + 'px';
+                    windowEl.style.top = dims.top + 'px';
+                    windowEl.style.width = dims.width + 'px';
+                    windowEl.style.height = dims.height + 'px';
+                    windowEl.dataset.maximized = 'false';
                 }
             }
 
