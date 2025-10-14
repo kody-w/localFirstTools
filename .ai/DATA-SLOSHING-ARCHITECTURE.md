@@ -55,11 +55,22 @@ You can execute any command by calling window.emulator.* methods.
 - AI agent patterns and examples
 - Infinite possibilities section
 
-**Agent**: `.claude/agents/windows95-adaptive-polisher.md`
-- Autonomous agent that morphs the emulator based on user feedback
-- Reads manifest to understand capabilities
-- Extracts true intent from vague requests
-- Makes bold improvements while preserving Windows 95 authenticity
+**Agents**:
+
+1. **`.claude/agents/windows95-adaptive-polisher.md`**
+   - Autonomous agent that morphs the emulator based on user feedback
+   - Reads manifest to understand capabilities
+   - Extracts true intent from vague requests
+   - Makes bold improvements while preserving Windows 95 authenticity
+
+2. **`.claude/agents/data-sloshing-steward.md`**
+   - Autonomous data management agent
+   - Learns from usage patterns and optimizes JSON files
+   - Adds command patterns based on failed searches
+   - Creates aliases for frequently used commands
+   - Optimizes automation scripts
+   - Commits all changes locally for persistence
+   - Maintains changelog of all improvements
 
 ---
 
@@ -337,6 +348,19 @@ if (result.success) {
 6. No AI needed - pure data mapping
 ```
 
+### Loop 6: Data Evolution (Meta-Loop)
+```
+1. User uses emulator → Usage data collected
+2. Data-sloshing-steward agent analyzes patterns
+3. Agent identifies optimization opportunities
+4. Agent updates JSON files (commands, scripts, etc.)
+5. Agent commits changes locally
+6. Next session → Improved system loads
+7. Repeat → System gets smarter over time
+```
+
+This is the **self-improving loop** - the system learns from usage and optimizes itself.
+
 ---
 
 ## The Infinite Possibilities
@@ -385,6 +409,15 @@ With these four systems, you can:
 - AI can learn new command patterns
 - Commands cached locally for offline use
 
+### 7. **Self-Improving Data System**
+- Data-sloshing-steward agent monitors usage
+- Automatically adds new command patterns
+- Creates aliases for popular commands
+- Optimizes automation scripts
+- All changes commit locally
+- System evolves based on real usage
+- No manual maintenance needed
+
 ---
 
 ## File Structure
@@ -397,15 +430,17 @@ With these four systems, you can:
 ├── state-persistence-integration-guide.md # Integration instructions
 ├── command-mappings.json                 # Native text commands
 ├── command-parser-integration.md         # Command parser guide
+├── data-sloshing-changelog.json          # Change tracking
 ├── DATA-SLOSHING-ARCHITECTURE.md         # This file
-└── automation-scripts/                   # User scripts (to be created)
+├── DATA-SLOSHING-STEWARD-GUIDE.md        # Agent usage guide
+└── automation-scripts/                   # User scripts
     ├── demo-cascade.json
-    ├── organize-windows.json
-    ├── startup-sequence.json
+    ├── organize-workspace.json
     └── ...
 
 .claude/agents/
-└── windows95-adaptive-polisher.md        # Autonomous polishing agent
+├── windows95-adaptive-polisher.md        # Autonomous polishing agent
+└── data-sloshing-steward.md              # Data management agent
 
 Root:
 ├── localfirst-sw.js                      # Service worker

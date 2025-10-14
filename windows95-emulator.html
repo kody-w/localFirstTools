@@ -13426,7 +13426,15 @@ ${JSON.stringify(state, null, 2)}
                     dragStartY: 0,
                     iconStartX: 0,
                     iconStartY: 0,
-                    hasMoved: false
+                    hasMoved: false,
+                    // Rubber band selection state
+                    isSelecting: false,
+                    selectionStartX: 0,
+                    selectionStartY: 0,
+                    selectionEndX: 0,
+                    selectionEndY: 0,
+                    // Last clicked icon for shift+click range selection
+                    lastClickedIcon: null
                 };
 
                 const GRID_SIZE = 75; // Windows 95 authentic grid spacing
@@ -13447,11 +13455,57 @@ ${JSON.stringify(state, null, 2)}
                     return null;
                 };
 
+                // Check if icon intersects with selection rectangle
+                const isIconInSelection = (icon, x1, y1, x2, y2) => {
+                    const selLeft = Math.min(x1, x2);
+                    const selRight = Math.max(x1, x2);
+                    const selTop = Math.min(y1, y2);
+                    const selBottom = Math.max(y1, y2);
+
+                    const iconLeft = icon.x;
+                    const iconRight = icon.x + icon.width;
+                    const iconTop = icon.y;
+                    const iconBottom = icon.y + icon.height;
+
+                    // Check if rectangles overlap
+                    return !(iconRight < selLeft ||
+                             iconLeft > selRight ||
+                             iconBottom < selTop ||
+                             iconTop > selBottom);
+                };
+
                 // Redraw all desktop icons
                 const redrawAllIcons = () => {
                     this.desktop.icons.forEach(icon => {
                         this.drawIcon(icon.x, icon.y, icon.label, icon.emoji, icon.selected);
                     });
+                };
+
+                // Draw rubber band selection box (Windows 95 style)
+                const drawSelectionBox = () => {
+                    if (!dragState.isSelecting) return;
+
+                    const x1 = dragState.selectionStartX;
+                    const y1 = dragState.selectionStartY;
+                    const x2 = dragState.selectionEndX;
+                    const y2 = dragState.selectionEndY;
+
+                    const left = Math.min(x1, x2);
+                    const top = Math.min(y1, y2);
+                    const width = Math.abs(x2 - x1);
+                    const height = Math.abs(y2 - y1);
+
+                    // Draw semi-transparent blue fill
+                    this.ctx.fillStyle = 'rgba(0, 0, 128, 0.2)';
+                    this.ctx.fillRect(left, top, width, height);
+
+                    // Draw dotted border (Windows 95 style)
+                    this.ctx.strokeStyle = 'rgba(0, 0, 128, 0.8)';
+                    this.ctx.setLineDash([2, 2]);
+                    this.ctx.lineWidth = 1;
+                    this.ctx.strokeRect(left, top, width, height);
+                    this.ctx.setLineDash([]);
+                    this.ctx.lineWidth = 1;
                 };
 
                 // Save icon positions to localStorage
@@ -13463,19 +13517,41 @@ ${JSON.stringify(state, null, 2)}
                     SafeStorage.setItem('win95-icon-positions', JSON.stringify(positions));
                 };
 
-                // MOUSEDOWN - Start dragging
+                // MOUSEDOWN - Start dragging or selection
                 canvas.addEventListener('mousedown', (e) => {
                     const rect = canvas.getBoundingClientRect();
                     const x = e.clientX - rect.left;
                     const y = e.clientY - rect.top;
 
+                    const taskbarY = CONFIG.DISPLAY.HEIGHT - CONFIG.DISPLAY.TASKBAR_HEIGHT;
                     const clickedIcon = getIconAtPosition(x, y);
 
                     if (clickedIcon) {
+                        // Handle Shift+Click for range selection
+                        if (e.shiftKey && dragState.lastClickedIcon) {
+                            e.preventDefault();
+                            const lastIndex = this.desktop.icons.indexOf(dragState.lastClickedIcon);
+                            const currentIndex = this.desktop.icons.indexOf(clickedIcon);
+                            const startIndex = Math.min(lastIndex, currentIndex);
+                            const endIndex = Math.max(lastIndex, currentIndex);
+
+                            // Select all icons in range
+                            this.desktop.icons.forEach((ic, idx) => {
+                                if (idx >= startIndex && idx <= endIndex) {
+                                    ic.selected = true;
+                                }
+                            });
+
+                            this.drawDesktop();
+                            redrawAllIcons();
+                            return; // Don't start drag on Shift+Click
+                        }
+
                         // Handle multi-select with Ctrl key (Windows 95 style)
                         if (e.ctrlKey || e.metaKey) {
                             // Toggle selection on this icon
                             clickedIcon.selected = !clickedIcon.selected;
+                            dragState.lastClickedIcon = clickedIcon;
                             this.drawDesktop();
                             redrawAllIcons();
                             return; // Don't start drag on Ctrl+Click
@@ -13488,6 +13564,9 @@ ${JSON.stringify(state, null, 2)}
                                 ic.selected = (ic === clickedIcon);
                             });
                         }
+
+                        // Update last clicked icon
+                        dragState.lastClickedIcon = clickedIcon;
 
                         // Start drag operation
                         dragState.isDragging = true;
@@ -13510,16 +13589,32 @@ ${JSON.stringify(state, null, 2)}
                         redrawAllIcons();
 
                         canvas.style.cursor = 'grabbing';
+                    } else if (y < taskbarY) {
+                        // Clicked on empty desktop space - start rubber band selection
+                        dragState.isSelecting = true;
+                        dragState.selectionStartX = x;
+                        dragState.selectionStartY = y;
+                        dragState.selectionEndX = x;
+                        dragState.selectionEndY = y;
+
+                        // Deselect all icons unless holding Ctrl
+                        if (!e.ctrlKey && !e.metaKey) {
+                            this.desktop.icons.forEach(ic => {
+                                ic.selected = false;
+                            });
+                        }
+
+                        canvas.style.cursor = 'crosshair';
                     }
                 });
 
-                // MOUSEMOVE - Drag icon(s)
+                // MOUSEMOVE - Drag icon(s) or update selection box
                 canvas.addEventListener('mousemove', (e) => {
-                    if (dragState.isDragging && dragState.draggedIcon) {
-                        const rect = canvas.getBoundingClientRect();
-                        const x = e.clientX - rect.left;
-                        const y = e.clientY - rect.top;
+                    const rect = canvas.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
 
+                    if (dragState.isDragging && dragState.draggedIcon) {
                         // Calculate new position
                         const deltaX = x - dragState.dragStartX;
                         const deltaY = y - dragState.dragStartY;
@@ -13545,10 +13640,37 @@ ${JSON.stringify(state, null, 2)}
                         // Redraw desktop with icons in new positions
                         this.drawDesktop();
                         redrawAllIcons();
+                    } else if (dragState.isSelecting) {
+                        // Update selection box
+                        const taskbarY = CONFIG.DISPLAY.HEIGHT - CONFIG.DISPLAY.TASKBAR_HEIGHT;
+                        dragState.selectionEndX = Math.max(0, Math.min(CONFIG.DISPLAY.WIDTH, x));
+                        dragState.selectionEndY = Math.max(0, Math.min(taskbarY, y));
+
+                        // Update icon selections based on what's in the box
+                        // If Ctrl was held during mousedown, preserve previous selections
+                        this.desktop.icons.forEach(icon => {
+                            const inSelection = isIconInSelection(
+                                icon,
+                                dragState.selectionStartX,
+                                dragState.selectionStartY,
+                                dragState.selectionEndX,
+                                dragState.selectionEndY
+                            );
+                            // Only update selection state if icon is in the selection box
+                            // This allows Ctrl+drag to add to existing selection
+                            if (inSelection) {
+                                icon.selected = true;
+                            }
+                        });
+
+                        // Redraw with selection box
+                        this.drawDesktop();
+                        redrawAllIcons();
+                        drawSelectionBox();
                     }
                 });
 
-                // MOUSEUP - End dragging
+                // MOUSEUP - End dragging or selection
                 canvas.addEventListener('mouseup', (e) => {
                     if (dragState.isDragging) {
                         const rect = canvas.getBoundingClientRect();
@@ -13588,6 +13710,15 @@ ${JSON.stringify(state, null, 2)}
                         dragState.isDragging = false;
                         dragState.draggedIcon = null;
                         dragState.selectedIconsStartPos = null;
+                        canvas.style.cursor = 'default';
+                    } else if (dragState.isSelecting) {
+                        // End selection box operation
+                        dragState.isSelecting = false;
+
+                        // Final redraw without selection box
+                        this.drawDesktop();
+                        redrawAllIcons();
+
                         canvas.style.cursor = 'default';
                     }
                 });
