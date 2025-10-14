@@ -291,10 +291,214 @@ case 'yourNewCommand':
     break;
 ```
 
+## Digital Twin Builder Framework
+
+The system has evolved beyond daily briefings into a complete **data-driven application framework**. This framework enables building applications using pure JSON instead of code.
+
+### 🧠 Core Components
+
+#### 1. Digital Twin Context (`windows95-digital-twin-context.json`)
+Machine-readable API documentation that teaches AI agents about the emulator instantly:
+- Complete API surface documentation
+- Real-time control patterns
+- Example code snippets
+- DOM selectors and event handlers
+- Canvas rendering methods
+
+**Key Innovation**: AI cannot distinguish between trained knowledge and injected JSON context. Reading this file gives agents **instant expertise**.
+
+#### 2. Data Slosh Pipeline (`data-slosh-pipeline.js`)
+Bidirectional data flow system that creates a continuous cycle:
+```
+State → JSON → Pattern Detection → Instructions → Execution → New State → [LOOP]
+```
+
+Features:
+- Captures emulator state every 60 seconds
+- Detects patterns (too many windows, disorganized icons, etc.)
+- Auto-generates instruction files based on patterns
+- Executes time-based and state-based triggers
+- Updates digital twin with discoveries
+
+#### 3. State Persistence (`windows95-state-persistence.js`)
+Complete state capture and restore system:
+- localStorage for quick restore
+- IndexedDB for state history (last 50 states)
+- Time-travel debugging to any timestamp
+- JSON export/import for portability
+- Auto-save every 30 seconds
+
+#### 4. Instruction Executor (`windows95-instruction-executor.js`)
+Autonomous execution engine for JSON-defined workflows:
+- 15+ supported step types (createWindow, cascadeWindows, notification, etc.)
+- Time-based triggers (execute at specific times)
+- State-based triggers (execute when conditions met)
+- Self-generating (can create new instruction files)
+- No AI required - runs autonomously!
+
+#### 5. Digital Twin Builder Agent (`.claude/agents/digital-twin-builder.md`)
+AI agent that builds applications using pure data:
+- Reads digital twin context for instant expertise
+- Studies existing instruction files to learn patterns
+- Generates new JSON instruction files
+- Validates API usage and structure
+- Updates digital twin with discoveries
+
+### 📦 Static Instruction Files
+
+JSON files in `static-instructions/` define autonomous behaviors:
+
+- **`morning-routine.json`** - Daily startup workflow (triggers at 8 AM)
+- **`focus-mode.json`** - Deep work environment with Pomodoro timer
+- **`cleanup-workspace.json`** - Auto-organize desktop and windows
+- **`presentation-mode.json`** - Professional demo setup (built by agent)
+- **`learning-assistant-tutorial.json`** - Interactive tutorial system (built by agent)
+- **`workspace-templates-manager.json`** - Smart workspace management (built by agent)
+
+### 🎯 How It Works
+
+#### Traditional Development
+```
+Write code → Deploy → Users interact → Write more code
+```
+
+#### Data-Driven Framework
+```
+Define behavior as JSON → System executes autonomously → Patterns detected →
+System generates new JSON → Knowledge compounds → [Infinite improvement loop]
+```
+
+### 🚀 Building Applications
+
+Use the Digital Twin Builder agent to create new applications:
+
+```bash
+# Invoke the agent
+claude -a digital-twin-builder "Create a meditation timer with breathing exercises"
+
+# The agent will:
+# 1. Read windows95-digital-twin-context.json
+# 2. Study existing instruction files
+# 3. Generate new JSON instruction file
+# 4. Validate structure and APIs
+# 5. Save to static-instructions/
+
+# Execute the new instruction
+# In browser console:
+executeInstruction('meditation-timer')
+```
+
+### 🌊 Data Sloshing in Action
+
+Every 60 seconds, the system:
+1. **Captures** complete emulator state as JSON
+2. **Analyzes** patterns (window count, organization, etc.)
+3. **Generates** instruction files when patterns detected
+4. **Executes** scheduled or triggered instructions
+5. **Updates** digital twin with new discoveries
+6. **Loops** infinitely, improving over time
+
+### 💡 Philosophy: Ultra Think
+
+**Key Insight**: AI cannot distinguish between trained knowledge and injected JSON context.
+
+This enables:
+- **Instant Expertise** - Inject API docs, AI becomes expert immediately
+- **Knowledge Compounding** - Each agent updates JSON, benefiting all future agents
+- **Self-Evolution** - System writes its own behavior files
+- **Zero Code Changes** - Everything flows through JSON
+
+### 📚 Documentation
+
+- **`DIGITAL-TWIN-BUILDER-GUIDE.md`** - Complete guide to the framework
+- **`briefing-examples.md`** - Example briefing configurations
+- **`clippy-system.md`** - Multi-agent Clippy coordination
+- **`SYSTEM-OVERVIEW.md`** - High-level architecture overview
+
+### 🎨 Global APIs
+
+Available in browser console:
+
+```javascript
+// State Management
+getLatestState()              // Get current emulator state
+exportState()                 // Download state as JSON
+importState(json)             // Restore state from JSON
+
+// Instruction Control
+executeInstruction(name)      // Run an instruction
+listInstructions()            // See all available instructions
+generateInstruction(config)   // Create new instruction
+
+// Data Sloshing
+slosh()                       // Run one slosh cycle
+startSloshing()               // Auto-slosh every 60s
+stopSloshing()                // Stop auto-sloshing
+```
+
+### 🔧 Creating Custom Instructions
+
+Create a JSON file in `static-instructions/`:
+
+```json
+{
+  "name": "my-workflow",
+  "description": "What this does",
+  "version": "1.0.0",
+  "author": "you",
+  "saveStateAfter": true,
+  "schedule": "09:00",  // Optional: time-based trigger
+  "steps": [
+    {
+      "type": "createWindow",
+      "params": {
+        "title": "My Window",
+        "content": "<div>Content</div>",
+        "width": 400,
+        "height": 300
+      },
+      "delay": 500
+    },
+    {
+      "type": "notification",
+      "params": {
+        "title": "Done!",
+        "message": "Window created"
+      }
+    }
+  ]
+}
+```
+
+Then execute: `executeInstruction('my-workflow')`
+
 ## Files in this Directory
 
-- `windows95-agent-state.json` - The AI brain state file (this is what the emulator reads)
+### Core Framework
+- `windows95-digital-twin-context.json` - Machine-readable API documentation (15KB)
+- `data-slosh-pipeline.js` - Bidirectional data flow coordinator
+- `windows95-state-persistence.js` - State capture and restore system
+- `windows95-instruction-executor.js` - Autonomous JSON execution engine
+
+### Configuration & State
+- `windows95-agent-state.json` - Daily briefing state file (emulator reads this)
 - `README.md` - This documentation file
+
+### Documentation
+- `DIGITAL-TWIN-BUILDER-GUIDE.md` - Complete framework guide
+- `SYSTEM-OVERVIEW.md` - Architecture overview
+- `briefing-examples.md` - Example configurations
+- `clippy-system.md` - Multi-agent coordination
+
+### Static Instructions (Autonomous Behaviors)
+- `static-instructions/morning-routine.json` - Daily startup workflow
+- `static-instructions/focus-mode.json` - Deep work environment
+- `static-instructions/cleanup-workspace.json` - Auto-organize workspace
+- `static-instructions/presentation-mode.json` - Demo setup
+- `static-instructions/learning-assistant-tutorial.json` - Interactive tutorial
+- `static-instructions/workspace-templates-manager.json` - Template management
+
+### Future
 - (Future) `telemetry-history.json` - Historical telemetry data
 - (Future) `agent-logs.json` - Agent decision logs
 
