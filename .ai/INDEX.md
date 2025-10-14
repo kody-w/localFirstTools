@@ -10,6 +10,7 @@ This directory contains TWO powerful systems working together:
 
 ### Core Files
 - **QUICKSTART.md** ⭐ START HERE - Quick guide to data sloshing
+- **SLOSHING-STEWARD-QUICK-REF.md** - 🌊 Master orchestrator quick reference
 - **DATA-SLOSHING-ARCHITECTURE.md** - Complete technical architecture
 - **DATA-SLOSHING-STEWARD-GUIDE.md** - How to use the steward agent
 - **data-sloshing-changelog.json** - Change history and statistics
@@ -35,6 +36,7 @@ This directory contains TWO powerful systems working together:
 - **windows95-api-manifest.json** (1000+ lines) - Complete API reference for AI agents
 
 ### Agents
+- **../.claude/agents/sloshing-steward.md** - ⭐ MASTER ORCHESTRATOR (invoke this!)
 - **../.claude/agents/data-sloshing-steward.md** - Autonomous data manager
 - **../.claude/agents/windows95-adaptive-polisher.md** - Feature enhancer
 
@@ -69,6 +71,7 @@ This directory contains TWO powerful systems working together:
   - `workspace-templates-manager.json` - Template manager
 
 ### Agents
+- **../.claude/agents/sloshing-steward.md** - ⭐ MASTER ORCHESTRATOR (invoke this!)
 - **../.claude/agents/digital-twin-builder.md** - Application builder
 - **../.claude/agents/windows95-ai-controller.md** - Real-time controller
 
@@ -123,7 +126,7 @@ Small Files (<10KB):
 ### Get Started with Data Sloshing
 1. Read **QUICKSTART.md**
 2. Try typing "open notepad" in Clippy chat
-3. After a week: say "Optimize the command system"
+3. After a week: say **"Run the sloshing steward"** ⭐
 
 ### Get Started with Daily Briefings
 1. Read **README.md** (in this directory)

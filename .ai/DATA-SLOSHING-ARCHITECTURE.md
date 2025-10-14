@@ -57,11 +57,15 @@ You can execute any command by calling window.emulator.* methods.
 
 **Agents**:
 
-1. **`.claude/agents/windows95-adaptive-polisher.md`**
-   - Autonomous agent that morphs the emulator based on user feedback
-   - Reads manifest to understand capabilities
-   - Extracts true intent from vague requests
-   - Makes bold improvements while preserving Windows 95 authenticity
+1. **`.claude/agents/sloshing-steward.md`** ⭐ MASTER ORCHESTRATOR
+   - The master administrator of ALL data sloshing systems
+   - Coordinates all other agents and systems
+   - Performs comprehensive health checks
+   - Optimizes commands, scripts, state, and APIs
+   - Commits all changes to git locally
+   - Generates analytics reports
+   - Runs weekly/monthly maintenance
+   - **Invoke with**: "Run the sloshing steward"
 
 2. **`.claude/agents/data-sloshing-steward.md`**
    - Autonomous data management agent
@@ -71,6 +75,14 @@ You can execute any command by calling window.emulator.* methods.
    - Optimizes automation scripts
    - Commits all changes locally for persistence
    - Maintains changelog of all improvements
+   - **Invoked by**: Master orchestrator or directly
+
+3. **`.claude/agents/windows95-adaptive-polisher.md`**
+   - Autonomous agent that morphs the emulator based on user feedback
+   - Reads manifest to understand capabilities
+   - Extracts true intent from vague requests
+   - Makes bold improvements while preserving Windows 95 authenticity
+   - **Invoked by**: Master orchestrator or directly
 
 ---
 
@@ -439,8 +451,9 @@ With these four systems, you can:
     └── ...
 
 .claude/agents/
-├── windows95-adaptive-polisher.md        # Autonomous polishing agent
-└── data-sloshing-steward.md              # Data management agent
+├── sloshing-steward.md                   # ⭐ MASTER ORCHESTRATOR
+├── data-sloshing-steward.md              # Data management agent
+└── windows95-adaptive-polisher.md        # Feature polishing agent
 
 Root:
 ├── localfirst-sw.js                      # Service worker
