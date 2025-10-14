@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Linux WebAssembly VM - Real OS in Browser</title>
     <meta name="description" content="Run real Linux operating systems in your browser using WebAssembly and v86 emulator">
+
+    <!-- Load v86 library (static local file) -->
+    <script src="v86/build/libv86.js"></script>
+
     <style>
         * {
             margin: 0;
@@ -493,13 +497,25 @@
 
             async init() {
                 this.setupEventListeners();
-                this.updateStatus('loading', 'Initializing...');
-                this.disableBootButton('Loading emulator...');
                 this.updateConsole('🐧 Linux WebAssembly VM starting...');
 
-                // Initialize IndexedDB for caching
+                // Initialize IndexedDB for BIOS caching
                 await this.initDatabase();
-                this.loadV86Library();
+
+                // Check if v86 loaded (should be available from static script tag)
+                if (typeof V86Starter !== 'undefined') {
+                    this.v86Loaded = true;
+                    this.updateStatus('stopped', 'Ready to boot');
+                    this.enableBootButton();
+                    this.updateConsole('✅ v86 emulator loaded');
+                    this.updateConsole('✅ Ready - select an OS and click Boot OS');
+                    this.showReadyMessage();
+                } else {
+                    this.updateStatus('stopped', 'v86 not loaded');
+                    this.updateConsole('❌ ERROR: v86 library not found');
+                    this.updateConsole('💡 Make sure v86/build/libv86.js exists');
+                    this.showV86Instructions();
+                }
             }
 
             async initDatabase() {
@@ -567,123 +583,7 @@
                 });
             }
 
-            async loadV86Library() {
-                // Check cache first
-                this.updateConsole('🔍 Checking local cache...');
-                const cachedScript = await this.getCachedFile('libv86.js');
-
-                if (cachedScript) {
-                    this.updateConsole('✅ Found cached v86 library');
-                    this.loadScriptFromCache(cachedScript);
-                } else {
-                    this.updateConsole('📡 Connecting to jsDelivr CDN...');
-                    this.updateConsole('📥 Downloading v86 library (~4MB)...');
-                    this.downloadAndCacheV86();
-                }
-            }
-
-            loadScriptFromCache(scriptContent) {
-                try {
-                    const script = document.createElement('script');
-                    script.textContent = scriptContent;
-                    document.head.appendChild(script);
-
-                    this.updateConsole('✅ Loaded from cache');
-                    this.updateConsole('⚙️ Initializing WebAssembly runtime...');
-                    this.checkV86Availability();
-                } catch (error) {
-                    console.error('Failed to load from cache:', error);
-                    this.updateConsole('❌ Cache load failed, downloading fresh copy...');
-                    this.downloadAndCacheV86();
-                }
-            }
-
-            async downloadAndCacheV86() {
-                // Try multiple CDN sources in order of preference
-                const sources = [
-                    { url: 'https://cdn.jsdelivr.net/npm/v86@latest/build/libv86.js', name: 'jsDelivr npm CDN' },
-                    { url: 'http://copy.sh/v86/build/libv86.js', name: 'Official copy.sh' }
-                ];
-
-                for (const source of sources) {
-                    try {
-                        this.updateConsole(`📡 Trying ${source.name}...`);
-                        const response = await fetch(source.url);
-
-                        if (!response.ok) {
-                            throw new Error(`HTTP ${response.status}`);
-                        }
-
-                        const scriptContent = await response.text();
-                        this.updateConsole(`✅ Download complete from ${source.name}`);
-
-                        // Cache for next time
-                        this.updateConsole('💾 Caching for next time...');
-                        await this.setCachedFile('libv86.js', scriptContent);
-                        this.updateConsole('✅ Cached successfully');
-
-                        // Load the script
-                        const script = document.createElement('script');
-                        script.textContent = scriptContent;
-                        document.head.appendChild(script);
-
-                        this.updateConsole('⚙️ Initializing WebAssembly runtime...');
-                        this.checkV86Availability();
-                        return; // Success, exit function
-
-                    } catch (error) {
-                        console.error(`❌ Failed from ${source.name}:`, error);
-                        this.updateConsole(`❌ ${source.name} failed: ${error.message}`);
-                        // Try next source
-                    }
-                }
-
-                // All sources failed
-                this.v86Loaded = false;
-                this.updateStatus('stopped', 'All download sources failed');
-                this.disableBootButton('Download failed');
-                this.updateConsole('❌ ERROR: All CDN sources failed');
-                this.updateConsole('💡 Check your internet connection and try refreshing');
-                this.updateConsole('💡 Tried: jsDelivr npm CDN, copy.sh');
-                this.showV86Instructions();
-            }
-
-            checkV86Availability() {
-                // Poll for V86Starter availability with timeout
-                let attempts = 0;
-                const maxAttempts = 50; // 5 seconds total
-
-                const checkV86 = () => {
-                    attempts++;
-
-                    if (typeof V86Starter !== 'undefined') {
-                        console.log('✅ V86Starter is available!');
-                        this.v86Loaded = true;
-                        this.updateStatus('stopped', 'Ready to boot');
-                        this.enableBootButton();
-                        this.updateConsole('✅ WebAssembly runtime initialized');
-                        this.updateConsole('✅ Emulator ready - select an OS and click Boot OS');
-                        this.showReadyMessage();
-                    } else if (attempts < maxAttempts) {
-                        if (attempts % 10 === 0) {
-                            console.log(`⏳ Waiting for V86Starter... attempt ${attempts}/${maxAttempts}`);
-                        }
-                        setTimeout(checkV86, 100);
-                    } else {
-                        console.error('❌ V86Starter never became available');
-                        this.v86Loaded = false;
-                        this.updateStatus('stopped', 'Initialization timeout');
-                        this.disableBootButton('Initialization failed');
-                        this.updateConsole('❌ ERROR: Initialization timeout after 5 seconds');
-                        this.updateConsole('💡 Try refreshing the page or check your internet connection');
-                        this.showV86Instructions();
-                    }
-                };
-
-                checkV86();
-            }
-
-            async getBiosUrl(name, cdnUrl) {
+            async getBiosUrl(name, localPath) {
                 // Return cached blob URL if already loaded
                 if (this.cachedBiosUrls[name]) {
                     console.log('Using cached BIOS URL for', name);
@@ -835,9 +735,9 @@
 
                     this.updateConsole('📦 Loading BIOS files...');
 
-                    // Get BIOS files (cached or download via npm CDN with fallback)
-                    const biosUrl = await this.getBiosUrl('seabios.bin', 'https://cdn.jsdelivr.net/npm/v86@latest/bios/seabios.bin');
-                    const vgaBiosUrl = await this.getBiosUrl('vgabios.bin', 'https://cdn.jsdelivr.net/npm/v86@latest/bios/vgabios.bin');
+                    // Use local BIOS files
+                    const biosUrl = 'v86/bios/seabios.bin';
+                    const vgaBiosUrl = 'v86/bios/vgabios.bin';
 
                     this.emulator = new V86Starter({
                         screen_container: screenContainer,

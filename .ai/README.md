@@ -1,102 +1,175 @@
-# AI Intelligence Injection System
+# AI Daily Intelligence Briefing System
 
-This directory contains the "brain" file for the Windows 95 emulator AI agent system.
+This directory contains the **daily briefing brain** for the Windows 95 emulator - your AI-powered morning agenda and success guide.
 
 ## Overview
 
-The Windows 95 emulator has been enhanced with an intelligence injection system that allows a static HTML page to receive and execute commands from an AI agent through a local JSON file. This creates a unique architecture where:
+The Windows 95 emulator has been transformed into an **AI-guided productivity system** that receives daily intelligence briefings through a local JSON file. The system is **time-gap aware** - it knows how long it's been since your last session and calibrates the briefing accordingly.
 
-1. **Static HTML remains static** - No server required, works offline
-2. **AI agent writes state frames** - The `windows95-ai-controller` agent writes its decisions to a JSON file
-3. **HTML polls and executes** - The emulator reads the JSON file every 5 seconds and executes commands
+### What Makes This Special: Time-Gap Calibration
+
+**The AI treats you completely differently based on how long you've been away:**
+
+- **3 hours ago?** → "Welcome back! Let's continue your day."
+- **Yesterday?** → "Good morning! Here's today's agenda."
+- **1 week ago?** → "Welcome back! Let's ease back in and catch up."
+- **5 years ago?** → "🎉 Welcome back! It's been a while. No pressure, just explore."
+
+Every briefing includes:
+
+- 📋 **Contextual Agenda** - Priorities adjusted for time gap (productive if recent, gentle if long)
+- ⏰ **Time Blocks** - Schedule based on gap (full day if recent, exploration if long)
+- 📊 **Insights** - Yesterday's stats if recent, "what happened since" if long
+- 💡 **AI Guidance** - Tone calibrated to gap (energetic if recent, patient if long)
+- ⚡ **Quick Actions** - Programs recommended based on where you are
+
+This creates a unique architecture where:
+
+1. **Static HTML remains static** - No server required, works completely offline
+2. **AI publishes time-aware briefings** - Updated with full awareness of time context
+3. **HTML displays contextually** - The emulator shows exactly the right message for the gap
+4. **User success focused** - Meets you where you are, not where you "should" be
 
 ## Architecture
 
 ```
-┌─────────────────────────────────┐
-│  windows95-ai-controller Agent  │
-│  (Claude Code Sub-Agent)        │
-│                                 │
-│  - Analyzes emulator state      │
-│  - Makes decisions              │
-│  - Writes commands              │
-└────────────┬────────────────────┘
-             │
-             ▼ Writes state frames
-┌─────────────────────────────────┐
-│  .ai/windows95-agent-state.json │  ◄─── THIS FILE
-│  (AI Brain / State Frame)       │
-└────────────┬────────────────────┘
-             │
-             ▼ Polls every 5 seconds
-┌─────────────────────────────────┐
-│  windows95-emulator.html        │
-│  (Static HTML + JavaScript)     │
-│                                 │
-│  - AIStateController class      │
-│  - Reads state file             │
-│  - Executes commands            │
-│  - Shows visual feedback        │
-└─────────────────────────────────┘
+        ┌──────────────────────────────────────┐
+        │  Daily Briefing (Updated @ 8:00 AM)  │
+        │  - Today's agenda and priorities     │
+        │  - Time-blocked schedule             │
+        │  - Yesterday's achievements          │
+        │  - AI guidance for success           │
+        └──────────────┬───────────────────────┘
+                       │ Written by AI Agent or Human
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  .ai/windows95-agent-state.json      │  ◄─── DAILY BRIEFING FILE
+        │  (Published daily at 8:00 AM)        │
+        │  - todaysAgenda                      │
+        │  - insights (yesterday's stats)      │
+        │  - commands (windows to create)      │
+        └──────────────┬───────────────────────┘
+                       │ Polls every 5 seconds
+                       ▼
+        ┌──────────────────────────────────────┐
+        │  windows95-emulator.html             │
+        │  (User's Workspace)                  │
+        │                                      │
+        │  On Login, Shows:                    │
+        │  → Daily Intelligence Briefing       │
+        │  → Quick Actions Panel               │
+        │  → Green AI Status Indicator         │
+        └──────────────────────────────────────┘
+                       ↓
+               User works guided by
+               AI recommendations
 ```
 
-## State File Format
+## Daily Briefing Structure
 
-The `windows95-agent-state.json` file contains:
+The state file now serves as a **daily intelligence briefing** that guides the user through their day.
 
-### Structure
+## Daily Briefing File Format
+
+The `windows95-agent-state.json` file is structured as a daily intelligence briefing:
+
+### Core Structure
 
 ```json
 {
-  "timestamp": 1234567890000,          // Unix timestamp - changes trigger updates
-  "version": "1.0.0",                  // State file version
-  "agentId": "windows95-ai-controller", // Which agent wrote this
+  "timestamp": 1736928000000,           // Unix timestamp - changes trigger UI updates
+  "publishedDate": "2025-01-15",        // Human-readable date
+  "publishedTime": "08:00 AM",          // Time briefing was published
+  "version": "1.0.0",
+  "agentId": "windows95-ai-controller",
+  "briefingTitle": "Daily Intelligence Briefing - Tuesday, January 15th, 2025",
 
-  "goals": [                            // Current AI goals
-    "Monitor window activity",
-    "Optimize workspace layout"
-  ],
-
-  "observations": {                     // What the AI has observed
-    "windowCount": 3,
-    "activePrograms": ["Notepad", "Paint"],
-    "userActivity": "high"
+  "todaysAgenda": {                     // ⭐ THE MAIN AGENDA
+    "greeting": "Good morning! Welcome back...",
+    "primaryFocus": "Productivity and Organization",
+    "keyPriorities": [                  // Today's main tasks
+      "📋 Review and organize open projects",
+      "✅ Complete 3 high-priority tasks",
+      "🧹 Clean up desktop and file structure"
+    ],
+    "aiGuidance": "Today's focus is on clearing clutter...",
+    "recommendedPrograms": ["Notepad", "Paint", "FileManager"],
+    "timeBlocks": [                     // Suggested schedule
+      {
+        "time": "8:00 AM - 10:00 AM",
+        "activity": "Deep work - Focus on high-priority tasks",
+        "suggestion": "Minimize distractions, use Notepad"
+      }
+    ]
   },
 
-  "actions": [                          // History of actions taken
-    {
-      "timestamp": 1234567890000,
-      "type": "window_created",
-      "result": "success"
-    }
-  ],
+  "insights": {                         // 📊 YESTERDAY'S FEEDBACK
+    "yesterdayStats": {
+      "windowsOpened": 12,
+      "mostUsedProgram": "Notepad",
+      "productiveHours": 4.5,
+      "completedTasks": 7
+    },
+    "suggestions": [                    // AI insights from yesterday
+      "You opened Notepad 8 times - consider keeping it open",
+      "Your most productive time was 9-11 AM"
+    ],
+    "achievements": [                   // What you accomplished
+      "🏆 Completed 7 tasks yesterday",
+      "⚡ 4.5 hours of focused work"
+    ]
+  },
 
-  "commands": [                         // Commands to execute (THIS IS THE KEY PART!)
+  "commands": [                         // 🎯 UI COMMANDS TO EXECUTE
     {
-      "id": "unique-cmd-id",           // Unique ID (prevents duplicate execution)
-      "type": "createWindow",          // Command type
-      "params": {                      // Command parameters
-        "title": "AI Window",
-        "content": "<p>Hello!</p>",
-        "x": 100,
-        "y": 100
+      "id": "daily-briefing-main",
+      "type": "createWindow",
+      "params": {
+        "title": "☀️ Daily Intelligence Briefing",
+        "content": "<html with briefing>",
+        "x": 50, "y": 50, "width": 600, "height": 650
       },
-      "priority": "normal",            // Priority level
-      "expiry": 1234567900000          // Optional expiration timestamp
+      "priority": "critical"            // Shows immediately on login
+    },
+    {
+      "id": "quick-actions-panel",
+      "type": "createWindow",
+      "params": {
+        "title": "⚡ Quick Actions",
+        "content": "<buttons for recommended programs>"
+      },
+      "priority": "high"
     }
   ],
 
-  "telemetrySnapshot": {               // Telemetry data
-    "windows": [],
-    "events": []
-  },
-
-  "metadata": {                        // Metadata about the state
-    "lastUpdate": 1234567890000,
-    "autonomousMode": true
+  "metadata": {
+    "lastUpdate": 1736928000000,
+    "nextUpdate": "2025-01-16T08:00:00Z",  // When next briefing publishes
+    "briefingType": "daily_agenda"
   }
 }
 ```
+
+### Key Sections Explained
+
+#### 📋 `todaysAgenda`
+The heart of the daily briefing - contains:
+- **keyPriorities**: 3-5 prioritized tasks for the day
+- **timeBlocks**: Suggested schedule with time-based activities
+- **aiGuidance**: Contextual advice based on user patterns
+- **recommendedPrograms**: Which Windows 95 programs to use today
+
+#### 📊 `insights`
+Feedback loop from previous sessions:
+- **yesterdayStats**: Quantified productivity metrics
+- **suggestions**: AI observations about work patterns
+- **achievements**: Positive reinforcement for completed work
+
+#### 🎯 `commands`
+Windows to create on login - the daily briefing shows up as actual UI:
+- **Priority "critical"**: Daily briefing window (large, front-and-center)
+- **Priority "high"**: Quick actions panel with recommended programs
+- All windows appear within 5 seconds of opening the emulator
 
 ## Supported Commands
 
@@ -225,45 +298,165 @@ case 'yourNewCommand':
 - (Future) `telemetry-history.json` - Historical telemetry data
 - (Future) `agent-logs.json` - Agent decision logs
 
+## How to Update the Daily Briefing
+
+### Automatic Updates (Morning Publishing)
+
+The daily briefing is designed to be updated every morning at 8:00 AM. You can:
+
+1. **Use the AI Agent**: Ask the `windows95-ai-controller` agent to generate a new briefing
+2. **Manual Update**: Edit the JSON file directly with today's priorities
+3. **Automated Script**: Create a cron job or scheduled task to update the file
+
+### Publishing a New Briefing
+
+To publish a new daily briefing:
+
+1. **Update Core Fields**:
+```json
+{
+  "timestamp": 1736928000000,  // ⚠️ MUST CHANGE to trigger update
+  "publishedDate": "2025-01-15",
+  "publishedTime": "08:00 AM",
+  "briefingTitle": "Daily Intelligence Briefing - Tuesday, January 15th, 2025"
+}
+```
+
+2. **Set Today's Agenda**:
+```json
+"todaysAgenda": {
+  "primaryFocus": "What should the user focus on today?",
+  "keyPriorities": [
+    "Priority 1",
+    "Priority 2",
+    "Priority 3"
+  ],
+  "aiGuidance": "Contextual advice...",
+  "timeBlocks": [
+    {
+      "time": "8:00 AM - 10:00 AM",
+      "activity": "Deep work",
+      "suggestion": "What to do during this time"
+    }
+  ]
+}
+```
+
+3. **Include Yesterday's Insights** (optional but powerful):
+```json
+"insights": {
+  "yesterdayStats": {
+    "completedTasks": 7,
+    "productiveHours": 4.5
+  },
+  "achievements": [
+    "What they accomplished"
+  ]
+}
+```
+
+4. **Change the Timestamp** (this triggers the UI to reload the briefing):
+```javascript
+state.timestamp = Date.now();  // New timestamp = new briefing!
+```
+
+### Example: Publishing Today's Briefing
+
+```javascript
+const briefing = {
+  timestamp: Date.now(),  // ⭐ This makes it update!
+  publishedDate: "2025-01-15",
+  publishedTime: "08:00 AM",
+  briefingTitle: "Daily Intelligence Briefing - Tuesday, January 15th, 2025",
+
+  todaysAgenda: {
+    greeting: "Good morning! Ready for a productive day?",
+    primaryFocus: "Project completion and creative work",
+    keyPriorities: [
+      "📝 Finish project proposal by 11 AM",
+      "🎨 Design mockups for new feature",
+      "📞 Schedule follow-up meeting",
+      "🧹 Organize digital workspace"
+    ],
+    aiGuidance: "Focus on completion today. You're 80% done with the proposal - finish strong!",
+    recommendedPrograms: ["Notepad", "Paint"],
+    timeBlocks: [
+      {
+        time: "8:00 AM - 11:00 AM",
+        activity: "Deep work - Finish proposal",
+        suggestion: "Use Notepad, silence notifications"
+      },
+      {
+        time: "11:00 AM - 1:00 PM",
+        activity: "Creative work - Design mockups",
+        suggestion: "Open Paint, sketch ideas freely"
+      }
+    ]
+  },
+
+  insights: {
+    yesterdayStats: {
+      completedTasks: 5,
+      productiveHours: 3.5,
+      mostUsedProgram: "Notepad"
+    },
+    achievements: [
+      "🏆 Completed 5 tasks",
+      "📝 Drafted 3 proposals"
+    ]
+  },
+
+  commands: [
+    {
+      id: "daily-briefing-" + Date.now(),
+      type: "createWindow",
+      params: {
+        title: "☀️ Daily Intelligence Briefing - Jan 15",
+        content: "...",  // HTML content
+        x: 50, y: 50, width: 600, height: 650
+      },
+      priority: "critical"
+    }
+  ],
+
+  metadata: {
+    nextUpdate: "2025-01-16T08:00:00Z"
+  }
+};
+
+// Write to file
+fs.writeFileSync('.ai/windows95-agent-state.json',
+  JSON.stringify(briefing, null, 2));
+```
+
 ## Usage
 
 ### For Users
 
-Just open `windows95-emulator.html` in a browser. The AI system will:
-- Automatically start monitoring
-- Read this state file every 5 seconds
-- Execute any commands found in the `commands` array
+Just open `windows95-emulator.html` in a browser. Within 5 seconds:
+- ☀️ **Daily briefing window** appears with today's agenda
+- ⚡ **Quick actions panel** shows recommended programs
+- 🟢 **Green LED** indicates AI system is active
+- 📋 **Priorities and schedule** guide your day
 
-### For Developers / AI Agent
+The system automatically checks for updates every 5 seconds, so any changes to the briefing file appear immediately.
 
-To send commands to the emulator:
+### For AI Agents
 
-1. Read the current state file
-2. Add your commands to the `commands` array
-3. Update the `timestamp` to trigger a reload
-4. Write the file back
+The `windows95-ai-controller` agent can generate personalized briefings:
 
-Example workflow:
-
-```javascript
-// Read current state
-const state = JSON.parse(fs.readFileSync('.ai/windows95-agent-state.json'));
-
-// Add a new command
-state.commands.push({
-  id: `cmd-${Date.now()}`,
-  type: 'notification',
-  params: {
-    message: 'Hello from AI!'
-  }
-});
-
-// Update timestamp to trigger reload
-state.timestamp = Date.now();
-
-// Write back
-fs.writeFileSync('.ai/windows95-agent-state.json', JSON.stringify(state, null, 2));
+```bash
+# Ask the agent to create today's briefing
+"Create a daily intelligence briefing for the Windows 95 emulator focused on
+productivity and code review tasks"
 ```
+
+The agent will:
+1. Analyze your typical work patterns
+2. Generate prioritized tasks
+3. Create time-blocked schedule
+4. Write the briefing to the state file
+5. User sees it on next login!
 
 ## Benefits of This Architecture
 

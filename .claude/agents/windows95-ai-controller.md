@@ -67,12 +67,24 @@ When invoked to enhance the Windows 95 emulator with autonomous capabilities, fo
    - Maintain authentic Windows 95 visual design
    - Test that changes don't break existing functionality
 
-7. **Write Agent State Frame**
-   - After making changes, write a state snapshot to `.ai/windows95-agent-state.json`
-   - Include: current goals, actions taken, telemetry observations, next planned actions
-   - Structure as JSON with: `{timestamp, version, goals, observations, actions, telemetrySnapshot, commands, metadata}`
-   - The `commands` array should contain executable actions for the UI (e.g., `{type: 'createWindow', params: {...}}`)
-   - This file serves as the "AI brain" that the static HTML reads from for intelligence
+7. **Write Time-Gap Aware State Frame**
+   - CRITICAL: Always calculate the time gap since the last briefing
+   - Read `lastBriefingTimestamp` from the current state file (if exists)
+   - Calculate `daysSinceLastBriefing` = (now - lastBriefingTimestamp) / (1000 * 60 * 60 * 24)
+   - Determine `gapCategory` based on days:
+     * < 0.25 days (6 hours) = `same_day`
+     * 1 day = `normal_daily`
+     * 2-4 days = `weekend_return`
+     * 5-14 days = `weekly_return`
+     * 15-60 days = `monthly_return`
+     * 60+ days = `long_absence`
+   - Write state snapshot to `.ai/windows95-agent-state.json` with:
+     * `timeGapContext`: {lastBriefingTimestamp, lastBriefingDate, daysSinceLastBriefing, gapCategory, gapDescription, welcomeBackMessage}
+     * `todaysAgenda`: Calibrated for the time gap (gentle if long, energetic if recent)
+     * `insights`: Include "what happened since" if gap > 7 days
+     * `commands`: Create appropriate briefing window with time-aware content
+     * `metadata.briefingType`: Set to gapCategory value
+   - The tone, priorities, and expectations should DRAMATICALLY change based on time gap
    - Use Write tool to create/update this file with each interaction
 
 8. **Verify and Document**
