@@ -15353,22 +15353,170 @@ TIP: Try opening multiple windows and arranging them!`, 'Help');
 
             async loadBriefingContext() {
                 try {
+                    // Try to load agent-generated briefing
                     const response = await fetch('.ai/windows95-agent-state.json', {
                         cache: 'no-cache'
                     });
+
+                    let useAgentBriefing = false;
+
                     if (response.ok) {
-                        this.briefingContext = await response.json();
-                        this.log('Briefing context loaded', this.briefingContext);
+                        const agentBriefing = await response.json();
+                        const now = Date.now();
+                        const briefingAge = now - (agentBriefing.timestamp || 0);
+                        const twentyFourHours = 24 * 60 * 60 * 1000;
 
-                        // Determine personality based on time gap
-                        this.calibratePersonality();
-
-                        // Show initial greeting after a short delay
-                        setTimeout(() => this.showInitialGreeting(), 3000);
+                        // Use agent briefing if it's less than 24 hours old
+                        if (briefingAge < twentyFourHours) {
+                            this.briefingContext = agentBriefing;
+                            useAgentBriefing = true;
+                            this.log('Using agent-generated briefing (age: ' + Math.round(briefingAge / 1000 / 60) + ' minutes)');
+                        } else {
+                            this.log('Agent briefing expired (age: ' + Math.round(briefingAge / 1000 / 60 / 60) + ' hours), generating live briefing');
+                        }
                     }
+
+                    // If no valid agent briefing, generate live one
+                    if (!useAgentBriefing) {
+                        this.briefingContext = this.generateLiveBriefing();
+                        this.log('Generated live briefing with current dates');
+                    }
+
+                    // Determine personality based on time gap
+                    this.calibratePersonality();
+
+                    // Show initial greeting after a short delay
+                    setTimeout(() => this.showInitialGreeting(), 3000);
+
                 } catch (error) {
-                    this.log('Could not load briefing context:', error);
+                    this.log('Error loading briefing, generating live one:', error);
+                    this.briefingContext = this.generateLiveBriefing();
+                    this.calibratePersonality();
+                    setTimeout(() => this.showInitialGreeting(), 3000);
                 }
+            }
+
+            generateLiveBriefing() {
+                const now = new Date();
+                const timestamp = now.getTime();
+
+                // Get last visit from localStorage
+                const lastVisit = localStorage.getItem('win95-last-visit');
+                const lastVisitTime = lastVisit ? parseInt(lastVisit) : timestamp;
+                const daysSinceLastVisit = Math.floor((timestamp - lastVisitTime) / (1000 * 60 * 60 * 24));
+
+                // Save current visit
+                localStorage.setItem('win95-last-visit', timestamp.toString());
+
+                // Determine gap category
+                let gapCategory, gapDescription;
+                if (daysSinceLastVisit === 0) {
+                    gapCategory = 'same_day';
+                    gapDescription = 'earlier today';
+                } else if (daysSinceLastVisit === 1) {
+                    gapCategory = 'normal_daily';
+                    gapDescription = '1 day';
+                } else if (daysSinceLastVisit <= 3) {
+                    gapCategory = 'weekend_return';
+                    gapDescription = daysSinceLastVisit + ' days';
+                } else if (daysSinceLastVisit <= 14) {
+                    gapCategory = 'weekly_return';
+                    gapDescription = daysSinceLastVisit + ' days';
+                } else if (daysSinceLastVisit <= 60) {
+                    gapCategory = 'monthly_return';
+                    gapDescription = Math.round(daysSinceLastVisit / 7) + ' weeks';
+                } else {
+                    gapCategory = 'long_absence';
+                    gapDescription = Math.round(daysSinceLastVisit / 30) + ' months';
+                }
+
+                // Format dates
+                const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+                const months = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+
+                const dayName = daysOfWeek[now.getDay()];
+                const monthName = months[now.getMonth()];
+                const day = now.getDate();
+                const year = now.getFullYear();
+                const hours = now.getHours();
+                const minutes = now.getMinutes();
+                const ampm = hours >= 12 ? 'PM' : 'AM';
+                const displayHours = hours % 12 || 12;
+                const displayMinutes = minutes < 10 ? '0' + minutes : minutes;
+
+                const publishedDate = year + '-' + String(now.getMonth() + 1).padStart(2, '0') + '-' + String(day).padStart(2, '0');
+                const publishedTime = displayHours + ':' + displayMinutes + ' ' + ampm;
+                const briefingTitle = 'Daily Intelligence Briefing - ' + dayName + ', ' + monthName + ' ' + day + ', ' + year;
+
+                // Generate context-appropriate message
+                let welcomeMessage, primaryFocus, keyPriorities, aiGuidance;
+
+                if (gapCategory === 'same_day') {
+                    welcomeMessage = "Welcome back! You were here earlier today.";
+                    primaryFocus = "Continue your momentum";
+                    keyPriorities = [
+                        "📝 Complete pending tasks from earlier",
+                        "✅ Check off items from your list",
+                        "🎯 Stay focused on today's goals"
+                    ];
+                    aiGuidance = "You're in a good flow. Keep going!";
+                } else if (gapCategory === 'long_absence') {
+                    welcomeMessage = "Welcome back after " + gapDescription + "! Take it easy today.";
+                    primaryFocus = "Gentle reintroduction";
+                    keyPriorities = [
+                        "🔍 Explore the interface again",
+                        "📝 Start with something simple",
+                        "🎯 No pressure - just get comfortable"
+                    ];
+                    aiGuidance = "After " + gapDescription + ", focus on comfort over productivity.";
+                } else {
+                    welcomeMessage = "Good " + (hours < 12 ? 'morning' : hours < 18 ? 'afternoon' : 'evening') + "! Welcome back.";
+                    primaryFocus = "Productivity and progress";
+                    keyPriorities = [
+                        "🎯 Review your priorities",
+                        "📝 Focus on key tasks",
+                        "✨ Make meaningful progress"
+                    ];
+                    aiGuidance = "Let's make today count!";
+                }
+
+                return {
+                    timestamp: timestamp,
+                    publishedDate: publishedDate,
+                    publishedTime: publishedTime,
+                    version: "1.0.0",
+                    agentId: "live-briefing-generator",
+                    briefingTitle: briefingTitle,
+                    timeGapContext: {
+                        lastBriefingTimestamp: lastVisitTime,
+                        lastBriefingDate: new Date(lastVisitTime).toISOString().split('T')[0],
+                        daysSinceLastBriefing: daysSinceLastVisit,
+                        gapCategory: gapCategory,
+                        gapDescription: gapDescription,
+                        returningUser: daysSinceLastVisit > 0,
+                        welcomeBackMessage: welcomeMessage
+                    },
+                    todaysAgenda: {
+                        greeting: welcomeMessage,
+                        primaryFocus: primaryFocus,
+                        contextualNote: "Briefing generated with live dates on " + dayName + ", " + monthName + " " + day + ", " + year,
+                        keyPriorities: keyPriorities,
+                        aiGuidance: aiGuidance
+                    },
+                    insights: {
+                        suggestions: [
+                            "💡 This briefing was generated automatically with current dates",
+                            "🤖 An AI agent can override this with custom briefings",
+                            "📅 Briefing updates every 24 hours"
+                        ]
+                    },
+                    metadata: {
+                        lastUpdate: timestamp,
+                        updateFrequency: 86400000,
+                        briefingType: "live_generated",
+                        source: "emulator_javascript"
+                    }
+                };
             }
 
             calibratePersonality() {
