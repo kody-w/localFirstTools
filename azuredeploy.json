@@ -1,0 +1,521 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "functionAppName": {
+      "type": "string",
+      "defaultValue": "[concat('copilot365-', uniqueString(resourceGroup().id))]",
+      "metadata": {
+        "description": "Name of the Function App (must be globally unique)"
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "defaultValue": "[concat('st', uniqueString(resourceGroup().id))]",
+      "maxLength": 24,
+      "metadata": {
+        "description": "Storage Account Name (3-24 characters, lowercase and numbers only)"
+      }
+    },
+    "serviceBusNamespaceName": {
+      "type": "string",
+      "defaultValue": "[concat('sb-copilot-', uniqueString(resourceGroup().id))]",
+      "metadata": {
+        "description": "Name for the Service Bus Namespace for collaboration messaging"
+      }
+    },
+    "serviceBusSku": {
+      "type": "string",
+      "defaultValue": "Standard",
+      "allowedValues": [
+        "Basic",
+        "Standard",
+        "Premium"
+      ],
+      "metadata": {
+        "description": "Service Bus pricing tier (Standard required for topics/subscriptions)"
+      }
+    },
+    "openAIServiceName": {
+      "type": "string",
+      "defaultValue": "[concat('openai-', uniqueString(resourceGroup().id))]",
+      "metadata": {
+        "description": "Name for the Azure OpenAI Service (will be created for you)"
+      }
+    },
+    "openAIModelName": {
+      "type": "string",
+      "defaultValue": "gpt-4o",
+      "allowedValues": [
+        "gpt-35-turbo",
+        "gpt-4",
+        "gpt-4-32k",
+        "gpt-4o",
+        "gpt-4o-mini"
+      ],
+      "metadata": {
+        "description": "Azure OpenAI model to deploy (gpt-4o is latest and recommended)"
+      }
+    },
+    "openAISku": {
+      "type": "string",
+      "defaultValue": "S0",
+      "allowedValues": ["S0"],
+      "metadata": {
+        "description": "SKU for Azure OpenAI Service"
+      }
+    },
+    "openAIDeploymentCapacity": {
+      "type": "int",
+      "defaultValue": 10,
+      "minValue": 1,
+      "maxValue": 1000,
+      "metadata": {
+        "description": "Capacity for the OpenAI deployment in units of 1K TPM (Tokens Per Minute). Default is 10 (10K TPM)"
+      }
+    },
+    "eventGridTopicName": {
+      "type": "string",
+      "defaultValue": "[concat('egt-copilot-', uniqueString(resourceGroup().id))]",
+      "metadata": {
+        "description": "Name for the Event Grid Topic for real-time notifications"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "eastus",
+      "allowedValues": [
+        "eastus",
+        "eastus2",
+        "northcentralus",
+        "southcentralus",
+        "westus",
+        "westus3",
+        "australiaeast",
+        "canadaeast",
+        "francecentral",
+        "japaneast",
+        "norwayeast",
+        "swedencentral",
+        "switzerlandnorth",
+        "uksouth"
+      ],
+      "metadata": {
+        "description": "Location for all resources (must support Azure OpenAI). Default: East US"
+      }
+    }
+  },
+  "variables": {
+    "hostingPlanName": "[concat(parameters('functionAppName'), '-plan')]",
+    "applicationInsightsName": "[concat(parameters('functionAppName'), '-insights')]",
+    "fileShareName": "azfbusinessbot3c92ab",
+    "functionAppId": "[resourceId('Microsoft.Web/sites', parameters('functionAppName'))]",
+    "storageAccountId": "[resourceId('Microsoft.Storage/storageAccounts', parameters('storageAccountName'))]",
+    "openAIResourceId": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('openAIServiceName'))]",
+    "serviceBusNamespaceId": "[resourceId('Microsoft.ServiceBus/namespaces', parameters('serviceBusNamespaceName'))]",
+    "eventGridTopicId": "[resourceId('Microsoft.EventGrid/topics', parameters('eventGridTopicName'))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.ServiceBus/namespaces",
+      "apiVersion": "2022-01-01-preview",
+      "name": "[parameters('serviceBusNamespaceName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('serviceBusSku')]",
+        "tier": "[parameters('serviceBusSku')]",
+        "capacity": 1
+      },
+      "properties": {
+        "disableLocalAuth": false,
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/topics",
+      "apiVersion": "2022-01-01-preview",
+      "name": "[concat(parameters('serviceBusNamespaceName'), '/collaboration-events')]",
+      "dependsOn": [
+        "[variables('serviceBusNamespaceId')]"
+      ],
+      "properties": {
+        "maxSizeInMegabytes": 1024,
+        "defaultMessageTimeToLive": "P7D",
+        "duplicateDetectionHistoryTimeWindow": "PT10M",
+        "enableBatchedOperations": true,
+        "supportOrdering": true,
+        "enablePartitioning": false,
+        "enableExpress": false
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/topics/subscriptions",
+      "apiVersion": "2022-01-01-preview",
+      "name": "[concat(parameters('serviceBusNamespaceName'), '/collaboration-events/default-subscription')]",
+      "dependsOn": [
+        "[resourceId('Microsoft.ServiceBus/namespaces/topics', parameters('serviceBusNamespaceName'), 'collaboration-events')]"
+      ],
+      "properties": {
+        "lockDuration": "PT5M",
+        "defaultMessageTimeToLive": "P7D",
+        "deadLetteringOnMessageExpiration": true,
+        "deadLetteringOnFilterEvaluationExceptions": true,
+        "maxDeliveryCount": 10,
+        "enableBatchedOperations": true,
+        "requiresSession": false
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/queues",
+      "apiVersion": "2022-01-01-preview",
+      "name": "[concat(parameters('serviceBusNamespaceName'), '/agent-commands')]",
+      "dependsOn": [
+        "[variables('serviceBusNamespaceId')]"
+      ],
+      "properties": {
+        "maxSizeInMegabytes": 1024,
+        "defaultMessageTimeToLive": "P1D",
+        "lockDuration": "PT5M",
+        "enableBatchedOperations": true,
+        "deadLetteringOnMessageExpiration": true,
+        "requiresDuplicateDetection": true,
+        "duplicateDetectionHistoryTimeWindow": "PT10M",
+        "maxDeliveryCount": 10,
+        "enablePartitioning": false
+      }
+    },
+    {
+      "type": "Microsoft.EventGrid/topics",
+      "apiVersion": "2022-06-15",
+      "name": "[parameters('eventGridTopicName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "inputSchema": "EventGridSchema",
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.EventGrid/topics/eventSubscriptions",
+      "apiVersion": "2022-06-15",
+      "name": "[concat(parameters('eventGridTopicName'), '/ServiceBusSubscription')]",
+      "dependsOn": [
+        "[variables('eventGridTopicId')]",
+        "[resourceId('Microsoft.ServiceBus/namespaces/queues', parameters('serviceBusNamespaceName'), 'agent-commands')]"
+      ],
+      "properties": {
+        "destination": {
+          "endpointType": "ServiceBusQueue",
+          "properties": {
+            "resourceId": "[resourceId('Microsoft.ServiceBus/namespaces/queues', parameters('serviceBusNamespaceName'), 'agent-commands')]"
+          }
+        },
+        "eventDeliverySchema": "EventGridSchema",
+        "filter": {
+          "enableAdvancedFilteringOnArrays": true
+        }
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts",
+      "apiVersion": "2023-05-01",
+      "name": "[parameters('openAIServiceName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "[parameters('openAISku')]"
+      },
+      "kind": "OpenAI",
+      "properties": {
+        "customSubDomainName": "[parameters('openAIServiceName')]",
+        "networkAcls": {
+          "defaultAction": "Allow"
+        },
+        "publicNetworkAccess": "Enabled"
+      }
+    },
+    {
+      "type": "Microsoft.CognitiveServices/accounts/deployments",
+      "apiVersion": "2023-05-01",
+      "name": "[concat(parameters('openAIServiceName'), '/gpt-deployment')]",
+      "dependsOn": [
+        "[variables('openAIResourceId')]"
+      ],
+      "sku": {
+        "name": "Standard",
+        "capacity": "[parameters('openAIDeploymentCapacity')]"
+      },
+      "properties": {
+        "model": {
+          "format": "OpenAI",
+          "name": "[parameters('openAIModelName')]",
+          "version": "2024-08-06"
+        },
+        "versionUpgradeOption": "OnceNewDefaultVersionAvailable",
+        "raiPolicyName": "Microsoft.Default"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts",
+      "apiVersion": "2022-09-01",
+      "name": "[parameters('storageAccountName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Standard_LRS"
+      },
+      "kind": "StorageV2",
+      "properties": {
+        "supportsHttpsTrafficOnly": true,
+        "minimumTlsVersion": "TLS1_2"
+      }
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices",
+      "apiVersion": "2022-09-01",
+      "name": "[concat(parameters('storageAccountName'), '/default')]",
+      "dependsOn": [
+        "[variables('storageAccountId')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Storage/storageAccounts/fileServices/shares",
+      "apiVersion": "2022-09-01",
+      "name": "[concat(parameters('storageAccountName'), '/default/', variables('fileShareName'))]",
+      "dependsOn": [
+        "[resourceId('Microsoft.Storage/storageAccounts/fileServices', parameters('storageAccountName'), 'default')]"
+      ],
+      "properties": {
+        "shareQuota": 5120
+      }
+    },
+    {
+      "type": "Microsoft.Insights/components",
+      "apiVersion": "2020-02-02",
+      "name": "[variables('applicationInsightsName')]",
+      "location": "[parameters('location')]",
+      "kind": "web",
+      "properties": {
+        "Application_Type": "web"
+      }
+    },
+    {
+      "type": "Microsoft.Web/serverfarms",
+      "apiVersion": "2022-03-01",
+      "name": "[variables('hostingPlanName')]",
+      "location": "[parameters('location')]",
+      "sku": {
+        "name": "Y1",
+        "tier": "Dynamic",
+        "size": "Y1",
+        "family": "Y",
+        "capacity": 0
+      },
+      "kind": "functionapp",
+      "properties": {
+        "perSiteScaling": false,
+        "elasticScaleEnabled": false,
+        "maximumElasticWorkerCount": 1,
+        "isSpot": false,
+        "reserved": true,
+        "isXenon": false,
+        "hyperV": false,
+        "targetWorkerCount": 0,
+        "targetWorkerSizeId": 0,
+        "zoneRedundant": false
+      }
+    },
+    {
+      "type": "Microsoft.Web/sites",
+      "apiVersion": "2022-03-01",
+      "name": "[parameters('functionAppName')]",
+      "location": "[parameters('location')]",
+      "kind": "functionapp,linux",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Web/serverfarms', variables('hostingPlanName'))]",
+        "[variables('storageAccountId')]",
+        "[resourceId('Microsoft.Insights/components', variables('applicationInsightsName'))]",
+        "[variables('openAIResourceId')]",
+        "[resourceId('Microsoft.CognitiveServices/accounts/deployments', parameters('openAIServiceName'), 'gpt-deployment')]",
+        "[variables('serviceBusNamespaceId')]",
+        "[variables('eventGridTopicId')]"
+      ],
+      "properties": {
+        "serverFarmId": "[resourceId('Microsoft.Web/serverfarms', variables('hostingPlanName'))]",
+        "siteConfig": {
+          "appSettings": [
+            {
+              "name": "AzureWebJobsStorage",
+              "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';EndpointSuffix=', environment().suffixes.storage, ';AccountKey=',listKeys(variables('storageAccountId'), '2022-09-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTAZUREFILECONNECTIONSTRING",
+              "value": "[concat('DefaultEndpointsProtocol=https;AccountName=', parameters('storageAccountName'), ';EndpointSuffix=', environment().suffixes.storage, ';AccountKey=',listKeys(variables('storageAccountId'), '2022-09-01').keys[0].value)]"
+            },
+            {
+              "name": "WEBSITE_CONTENTSHARE",
+              "value": "[toLower(parameters('functionAppName'))]"
+            },
+            {
+              "name": "FUNCTIONS_EXTENSION_VERSION",
+              "value": "~4"
+            },
+            {
+              "name": "FUNCTIONS_WORKER_RUNTIME",
+              "value": "python"
+            },
+            {
+              "name": "APPINSIGHTS_INSTRUMENTATIONKEY",
+              "value": "[reference(resourceId('Microsoft.Insights/components', variables('applicationInsightsName'))).InstrumentationKey]"
+            },
+            {
+              "name": "APPLICATIONINSIGHTS_CONNECTION_STRING",
+              "value": "[reference(resourceId('Microsoft.Insights/components', variables('applicationInsightsName'))).ConnectionString]"
+            },
+            {
+              "name": "AZURE_OPENAI_API_KEY",
+              "value": "[listKeys(variables('openAIResourceId'), '2023-05-01').key1]"
+            },
+            {
+              "name": "AZURE_OPENAI_ENDPOINT",
+              "value": "[reference(variables('openAIResourceId')).endpoint]"
+            },
+            {
+              "name": "AZURE_OPENAI_API_VERSION",
+              "value": "2024-02-01"
+            },
+            {
+              "name": "AZURE_OPENAI_DEPLOYMENT_NAME",
+              "value": "gpt-deployment"
+            },
+            {
+              "name": "AZURE_SERVICE_BUS_CONNECTION_STRING",
+              "value": "[listKeys(resourceId('Microsoft.ServiceBus/namespaces/authorizationRules', parameters('serviceBusNamespaceName'), 'RootManageSharedAccessKey'), '2022-01-01-preview').primaryConnectionString]"
+            },
+            {
+              "name": "AZURE_SERVICE_BUS_NAMESPACE",
+              "value": "[parameters('serviceBusNamespaceName')]"
+            },
+            {
+              "name": "AZURE_EVENT_GRID_TOPIC_ENDPOINT",
+              "value": "[reference(variables('eventGridTopicId')).endpoint]"
+            },
+            {
+              "name": "AZURE_EVENT_GRID_TOPIC_KEY",
+              "value": "[listKeys(variables('eventGridTopicId'), '2022-06-15').key1]"
+            },
+            {
+              "name": "AZURE_FILES_SHARE_NAME",
+              "value": "[variables('fileShareName')]"
+            },
+            {
+              "name": "ASSISTANT_NAME",
+              "value": "Copilot Agent 365"
+            },
+            {
+              "name": "CHARACTERISTIC_DESCRIPTION",
+              "value": "Enterprise AI assistant with collaborative messaging"
+            },
+            {
+              "name": "SCM_DO_BUILD_DURING_DEPLOYMENT",
+              "value": "true"
+            },
+            {
+              "name": "ENABLE_ORYX_BUILD",
+              "value": "true"
+            },
+            {
+              "name": "PYTHON_ENABLE_WORKER_EXTENSIONS",
+              "value": "1"
+            },
+            {
+              "name": "ENABLE_COLLABORATIVE_MESSAGING",
+              "value": "true"
+            }
+          ],
+          "linuxFxVersion": "python|3.11",
+          "cors": {
+            "allowedOrigins": ["*"],
+            "supportCredentials": false
+          },
+          "use32BitWorkerProcess": false,
+          "functionAppScaleLimit": 200,
+          "minimumElasticInstanceCount": 0,
+          "ftpsState": "FtpsOnly",
+          "remoteDebuggingEnabled": false
+        },
+        "httpsOnly": true
+      }
+    },
+    {
+      "type": "Microsoft.ServiceBus/namespaces/providers/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[concat(parameters('serviceBusNamespaceName'), '/Microsoft.Authorization/', guid(variables('serviceBusNamespaceId'), variables('functionAppId'), 'ServiceBusDataOwner'))]",
+      "dependsOn": [
+        "[variables('functionAppId')]",
+        "[variables('serviceBusNamespaceId')]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '090c5cfd-751d-490a-894a-3ce6f1109419')]",
+        "principalId": "[reference(variables('functionAppId'), '2022-03-01', 'Full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    },
+    {
+      "type": "Microsoft.EventGrid/topics/providers/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "name": "[concat(parameters('eventGridTopicName'), '/Microsoft.Authorization/', guid(variables('eventGridTopicId'), variables('functionAppId'), 'EventGridDataSender'))]",
+      "dependsOn": [
+        "[variables('functionAppId')]",
+        "[variables('eventGridTopicId')]"
+      ],
+      "properties": {
+        "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'd5a91429-5739-47e2-a06b-3470a27159e7')]",
+        "principalId": "[reference(variables('functionAppId'), '2022-03-01', 'Full').identity.principalId]",
+        "principalType": "ServicePrincipal"
+      }
+    }
+  ],
+  "outputs": {
+    "functionAppName": {
+      "type": "string",
+      "value": "[parameters('functionAppName')]"
+    },
+    "functionAppUrl": {
+      "type": "string",
+      "value": "[concat('https://', reference(variables('functionAppId')).defaultHostName)]"
+    },
+    "functionEndpoint": {
+      "type": "string",
+      "value": "[concat('https://', reference(variables('functionAppId')).defaultHostName, '/api/businessinsightbot_function')]"
+    },
+    "functionUrlWithKey": {
+      "type": "string",
+      "value": "[concat('https://', reference(variables('functionAppId')).defaultHostName, '/api/businessinsightbot_function?code=', listkeys(concat(resourceId('Microsoft.Web/sites', parameters('functionAppName')), '/host/default'), '2022-03-01').functionKeys.default)]"
+    },
+    "serviceBusNamespace": {
+      "type": "string",
+      "value": "[parameters('serviceBusNamespaceName')]"
+    },
+    "serviceBusConnectionString": {
+      "type": "string",
+      "value": "[listKeys(resourceId('Microsoft.ServiceBus/namespaces/authorizationRules', parameters('serviceBusNamespaceName'), 'RootManageSharedAccessKey'), '2022-01-01-preview').primaryConnectionString]"
+    },
+    "eventGridTopicEndpoint": {
+      "type": "string",
+      "value": "[reference(variables('eventGridTopicId')).endpoint]"
+    },
+    "openAIEndpoint": {
+      "type": "string",
+      "value": "[reference(variables('openAIResourceId')).endpoint]"
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "value": "[resourceGroup().name]"
+    },
+    "deploymentInstructions": {
+      "type": "string",
+      "value": "DEPLOYMENT COMPLETE! Your Copilot Agent 365 is ready with enterprise messaging.\n\n🚀 QUICK START:\n1. Deploy this template to Azure\n2. Wait 5-10 minutes for all resources to provision\n3. Your bot is automatically configured with:\n   - Azure OpenAI (GPT-4o)\n   - Service Bus for collaborative messaging\n   - Event Grid for real-time notifications\n   - File Storage for memory persistence\n\n📡 COLLABORATIVE FEATURES:\n- Service Bus topics for multi-agent collaboration\n- Event-driven architecture for real-time responses\n- Session-based message ordering\n- Dead letter queues for reliability\n- Duplicate detection for exactly-once processing\n\n🔗 ACCESS YOUR BOT:\nUse the 'functionUrlWithKey' output value to send requests to your bot.\n\n💡 The Service Bus integration enables:\n- Multiple AI assistants working together\n- Autonomous task negotiation\n- Parallel processing with selective message consumption\n- Enterprise-scale reliability and performance"
+    }
+  }
+}
