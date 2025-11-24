@@ -1,0 +1,525 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Steam Deck Browser Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #1a1a2e;
+            color: #fff;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            touch-action: none;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+
+        #game-container {
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+        }
+
+        #canvas {
+            background: #0f0f23;
+            border: 2px solid #4a4a6e;
+            max-width: 100%;
+            max-height: 100%;
+            image-rendering: pixelated;
+            image-rendering: crisp-edges;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 14px;
+            line-height: 1.6;
+            transition: opacity 0.3s;
+            max-width: 300px;
+        }
+
+        #controls.hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #fullscreen-btn {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 12px 24px;
+            background: #4a4a6e;
+            border: none;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 16px;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        #fullscreen-btn:hover {
+            background: #5a5a8e;
+            transform: scale(1.05);
+        }
+
+        #gamepad-status {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px 20px;
+            border-radius: 8px;
+            font-size: 14px;
+            max-width: 400px;
+        }
+
+        .connected {
+            color: #4ade80;
+        }
+
+        .disconnected {
+            color: #f87171;
+        }
+
+        #score {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 32px;
+            font-weight: bold;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        #debug-info {
+            position: absolute;
+            bottom: 60px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            font-size: 12px;
+            font-family: monospace;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .button-press {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            background: #666;
+            margin: 0 2px;
+        }
+
+        .button-press.active {
+            background: #4ade80;
+        }
+
+        /* Fullscreen styles */
+        :fullscreen #game-container,
+        :-webkit-full-screen #game-container,
+        :-moz-full-screen #game-container,
+        :-ms-fullscreen #game-container {
+            background: #0f0f23;
+        }
+
+        :fullscreen #canvas,
+        :-webkit-full-screen #canvas,
+        :-moz-full-screen #canvas,
+        :-ms-fullscreen #canvas {
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="score">Score: 0</div>
+        <canvas id="canvas" width="1280" height="720"></canvas>
+        
+        <div id="controls">
+            <h3>Controls:</h3>
+            <p><strong>Gamepad:</strong></p>
+            <p>Left Stick / D-Pad: Move</p>
+            <p>A Button: Boost</p>
+            <p>Press any button to activate</p>
+            <p><strong>Keyboard:</strong></p>
+            <p>Arrow Keys / WASD: Move</p>
+            <p>Space: Boost</p>
+            <p>H: Toggle Help</p>
+            <p>F: Fullscreen</p>
+            <p>G: Show Debug Info</p>
+        </div>
+        
+        <button id="fullscreen-btn">Fullscreen (F)</button>
+        <div id="gamepad-status" class="disconnected">🎮 No Gamepad - Press any button</div>
+        <div id="debug-info" style="display: none;"></div>
+    </div>
+
+    <script>
+        // Game setup
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const scoreElement = document.getElementById('score');
+        const controlsDiv = document.getElementById('controls');
+        const fullscreenBtn = document.getElementById('fullscreen-btn');
+        const gamepadStatus = document.getElementById('gamepad-status');
+        const debugInfo = document.getElementById('debug-info');
+
+        // Game state
+        let score = 0;
+        let showControls = true;
+        let showDebug = false;
+        let activeGamepadIndex = -1;
+
+        // Player object
+        const player = {
+            x: 640,
+            y: 360,
+            vx: 0,
+            vy: 0,
+            size: 30,
+            speed: 5,
+            boosting: false,
+            color: '#4ade80'
+        };
+
+        // Collectibles
+        const collectibles = [];
+        const maxCollectibles = 10;
+
+        // Input state
+        const keys = {};
+        let lastButtonPress = 0;
+
+        // Initialize collectibles
+        function spawnCollectible() {
+            collectibles.push({
+                x: Math.random() * (canvas.width - 40) + 20,
+                y: Math.random() * (canvas.height - 40) + 20,
+                size: 15,
+                color: `hsl(${Math.random() * 360}, 70%, 60%)`,
+                collected: false
+            });
+        }
+
+        // Spawn initial collectibles
+        for (let i = 0; i < maxCollectibles; i++) {
+            spawnCollectible();
+        }
+
+        // Fullscreen functionality
+        function toggleFullscreen() {
+            if (!document.fullscreenElement) {
+                const elem = document.getElementById('game-container');
+                if (elem.requestFullscreen) {
+                    elem.requestFullscreen();
+                } else if (elem.webkitRequestFullscreen) {
+                    elem.webkitRequestFullscreen();
+                } else if (elem.mozRequestFullScreen) {
+                    elem.mozRequestFullScreen();
+                } else if (elem.msRequestFullscreen) {
+                    elem.msRequestFullscreen();
+                }
+            } else {
+                if (document.exitFullscreen) {
+                    document.exitFullscreen();
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.mozCancelFullScreen) {
+                    document.mozCancelFullScreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+            }
+        }
+
+        // Event listeners
+        fullscreenBtn.addEventListener('click', toggleFullscreen);
+
+        // Also try to capture gamepad on user interaction
+        document.addEventListener('click', () => {
+            pollGamepads();
+        });
+
+        // Keyboard controls
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            
+            if (e.key.toLowerCase() === 'f') {
+                toggleFullscreen();
+            }
+            
+            if (e.key.toLowerCase() === 'h') {
+                showControls = !showControls;
+                controlsDiv.classList.toggle('hidden', !showControls);
+            }
+
+            if (e.key.toLowerCase() === 'g') {
+                showDebug = !showDebug;
+                debugInfo.style.display = showDebug ? 'block' : 'none';
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+
+        // More aggressive gamepad detection
+        function pollGamepads() {
+            const gamepads = navigator.getGamepads();
+            let foundGamepad = false;
+            
+            for (let i = 0; i < gamepads.length; i++) {
+                if (gamepads[i]) {
+                    foundGamepad = true;
+                    activeGamepadIndex = i;
+                    
+                    // Check if any button is pressed to "activate" the gamepad
+                    let anyButtonPressed = false;
+                    for (let j = 0; j < gamepads[i].buttons.length; j++) {
+                        if (gamepads[i].buttons[j].pressed) {
+                            anyButtonPressed = true;
+                            break;
+                        }
+                    }
+                    
+                    if (anyButtonPressed || gamepads[i].connected) {
+                        gamepadStatus.innerHTML = `🎮 ${gamepads[i].id} Connected<br>Index: ${i} | Buttons: ${gamepads[i].buttons.length} | Axes: ${gamepads[i].axes.length}`;
+                        gamepadStatus.className = 'connected';
+                    }
+                    break;
+                }
+            }
+            
+            if (!foundGamepad) {
+                gamepadStatus.innerHTML = '🎮 No Gamepad - Press any button or click screen';
+                gamepadStatus.className = 'disconnected';
+                activeGamepadIndex = -1;
+            }
+        }
+
+        // Update gamepad state with better detection
+        function updateGamepad() {
+            const gamepads = navigator.getGamepads();
+            
+            // Try to find an active gamepad
+            if (activeGamepadIndex === -1) {
+                pollGamepads();
+            }
+            
+            if (activeGamepadIndex !== -1 && gamepads[activeGamepadIndex]) {
+                const gamepad = gamepads[activeGamepadIndex];
+                
+                // Debug info
+                if (showDebug) {
+                    let debugText = `Gamepad ${activeGamepadIndex}: ${gamepad.id}\n`;
+                    debugText += `Axes: ${gamepad.axes.map(a => a.toFixed(2)).join(', ')}\n`;
+                    debugText += `Buttons: `;
+                    for (let i = 0; i < Math.min(gamepad.buttons.length, 16); i++) {
+                        debugText += gamepad.buttons[i].pressed ? `[${i}]` : `${i}`;
+                        debugText += ' ';
+                    }
+                    debugInfo.textContent = debugText;
+                }
+                
+                // Movement - Left stick
+                const deadzone = 0.15;
+                let moveX = 0;
+                let moveY = 0;
+                
+                if (Math.abs(gamepad.axes[0]) > deadzone) {
+                    moveX = gamepad.axes[0];
+                }
+                if (Math.abs(gamepad.axes[1]) > deadzone) {
+                    moveY = gamepad.axes[1];
+                }
+                
+                // D-pad (usually buttons 12-15, but might vary)
+                if (gamepad.buttons[14] && gamepad.buttons[14].pressed) moveX = -1; // Left
+                if (gamepad.buttons[15] && gamepad.buttons[15].pressed) moveX = 1;  // Right
+                if (gamepad.buttons[12] && gamepad.buttons[12].pressed) moveY = -1; // Up
+                if (gamepad.buttons[13] && gamepad.buttons[13].pressed) moveY = 1;  // Down
+                
+                // Apply movement
+                player.vx = moveX * player.speed;
+                player.vy = moveY * player.speed;
+                
+                // Boost with A button (usually button 0 or 1)
+                player.boosting = (gamepad.buttons[0] && gamepad.buttons[0].pressed) || 
+                                 (gamepad.buttons[1] && gamepad.buttons[1].pressed);
+                
+                // Toggle controls with menu/start button (usually 9)
+                const menuPressed = gamepad.buttons[9] && gamepad.buttons[9].pressed;
+                if (menuPressed && Date.now() - lastButtonPress > 300) {
+                    showControls = !showControls;
+                    controlsDiv.classList.toggle('hidden', !showControls);
+                    lastButtonPress = Date.now();
+                }
+            }
+        }
+
+        // Update player movement
+        function updatePlayer() {
+            // Keyboard input (only if no gamepad input)
+            if (activeGamepadIndex === -1) {
+                player.vx = 0;
+                player.vy = 0;
+                
+                if (keys['arrowleft'] || keys['a']) player.vx = -player.speed;
+                if (keys['arrowright'] || keys['d']) player.vx = player.speed;
+                if (keys['arrowup'] || keys['w']) player.vy = -player.speed;
+                if (keys['arrowdown'] || keys['s']) player.vy = player.speed;
+                
+                player.boosting = keys[' '] || keys['space'];
+            }
+            
+            // Apply boost
+            const currentSpeed = player.boosting ? player.speed * 2 : player.speed;
+            if (player.vx !== 0) player.vx = player.vx > 0 ? currentSpeed : -currentSpeed;
+            if (player.vy !== 0) player.vy = player.vy > 0 ? currentSpeed : -currentSpeed;
+            
+            // Update position
+            player.x += player.vx;
+            player.y += player.vy;
+            
+            // Keep player in bounds
+            player.x = Math.max(player.size, Math.min(canvas.width - player.size, player.x));
+            player.y = Math.max(player.size, Math.min(canvas.height - player.size, player.y));
+        }
+
+        // Check collisions
+        function checkCollisions() {
+            for (let i = collectibles.length - 1; i >= 0; i--) {
+                const collectible = collectibles[i];
+                const dx = player.x - collectible.x;
+                const dy = player.y - collectible.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < player.size + collectible.size) {
+                    score += player.boosting ? 20 : 10;
+                    scoreElement.textContent = `Score: ${score}`;
+                    collectibles.splice(i, 1);
+                    spawnCollectible();
+                }
+            }
+        }
+
+        // Render game
+        function render() {
+            // Clear canvas
+            ctx.fillStyle = '#0f0f23';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw collectibles
+            collectibles.forEach(collectible => {
+                ctx.fillStyle = collectible.color;
+                ctx.beginPath();
+                ctx.arc(collectible.x, collectible.y, collectible.size, 0, Math.PI * 2);
+                ctx.fill();
+                
+                // Add glow effect
+                ctx.shadowBlur = 20;
+                ctx.shadowColor = collectible.color;
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            });
+            
+            // Draw player
+            ctx.fillStyle = player.boosting ? '#f59e0b' : player.color;
+            ctx.beginPath();
+            ctx.arc(player.x, player.y, player.size, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Add player glow
+            ctx.shadowBlur = player.boosting ? 50 : 30;
+            ctx.shadowColor = player.boosting ? '#f59e0b' : player.color;
+            ctx.fill();
+            ctx.shadowBlur = 0;
+            
+            // Draw boost indicator
+            if (player.boosting) {
+                ctx.strokeStyle = '#f59e0b';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(player.x, player.y, player.size + 10, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        }
+
+        // Game loop
+        function gameLoop() {
+            updateGamepad();
+            updatePlayer();
+            checkCollisions();
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Resize canvas to maintain aspect ratio
+        function resizeCanvas() {
+            const container = document.getElementById('game-container');
+            const aspectRatio = 16 / 9;
+            let width = container.clientWidth;
+            let height = container.clientHeight;
+            
+            if (width / height > aspectRatio) {
+                width = height * aspectRatio;
+            } else {
+                height = width / aspectRatio;
+            }
+            
+            canvas.style.width = width + 'px';
+            canvas.style.height = height + 'px';
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', resizeCanvas);
+        resizeCanvas();
+
+        // Try to detect gamepads on load
+        window.addEventListener('load', () => {
+            // Poll for gamepads every 500ms initially
+            const pollInterval = setInterval(() => {
+                pollGamepads();
+                if (activeGamepadIndex !== -1) {
+                    clearInterval(pollInterval);
+                }
+            }, 500);
+            
+            // Stop polling after 10 seconds
+            setTimeout(() => clearInterval(pollInterval), 10000);
+        });
+
+        // Hide controls after 5 seconds
+        setTimeout(() => {
+            if (showControls) {
+                showControls = false;
+                controlsDiv.classList.add('hidden');
+            }
+        }, 5000);
+
+        // Start game
+        gameLoop();
+        
+        // Initial gamepad check
+        pollGamepads();
+    </script>
+</body>
+</html>

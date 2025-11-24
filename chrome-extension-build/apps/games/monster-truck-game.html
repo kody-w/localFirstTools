@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Monster Truck Hand Gesture Game</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial Black', sans-serif;
+            overflow: hidden;
+            background: #87CEEB;
+        }
+
+        #gameCanvas {
+            display: block;
+            cursor: none;
+        }
+
+        #videoCanvas {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            width: 200px;
+            height: 150px;
+            border: 3px solid #fff;
+            border-radius: 10px;
+            transform: scaleX(-1);
+        }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 14px;
+        }
+
+        #startButton {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            padding: 20px 40px;
+            font-size: 24px;
+            background: #ff6b6b;
+            color: white;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: bold;
+            text-transform: uppercase;
+            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.3);
+        }
+
+        #startButton:hover {
+            background: #ff5252;
+            transform: translate(-50%, -50%) scale(1.05);
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        #voiceIndicator {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            padding: 10px 20px;
+            background: rgba(0, 255, 0, 0.8);
+            color: white;
+            border-radius: 5px;
+            font-weight: bold;
+            display: none;
+        }
+
+        #score {
+            position: absolute;
+            top: 10px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px 20px;
+            border-radius: 5px;
+            font-size: 20px;
+        }
+
+        #handPosition {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        #loadingMessage {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            color: white;
+            padding: 20px;
+            border-radius: 10px;
+            font-size: 18px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <video id="videoCanvas" autoplay></video>
+    
+    <div id="controls">
+        <h3>Controls:</h3>
+        <p>🖐️ Move hands left/right to steer</p>
+        <p>🎤 Say "VROOM" loudly to boost!</p>
+        <p>🏁 Collect flags for points</p>
+        <p>⚡ Avoid obstacles</p>
+    </div>
+    
+    <div id="score">Score: 0</div>
+    <div id="voiceIndicator">BOOST ACTIVATED!</div>
+    <div id="handPosition">Hand Position: Center</div>
+    <div id="loadingMessage">Loading hand tracking...</div>
+    
+    <button id="startButton">Start Game</button>
+
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const video = document.getElementById('videoCanvas');
+        const startButton = document.getElementById('startButton');
+        const scoreElement = document.getElementById('score');
+        const voiceIndicator = document.getElementById('voiceIndicator');
+        const handPositionElement = document.getElementById('handPosition');
+        const loadingMessage = document.getElementById('loadingMessage');
+
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        let gameStarted = false;
+        let score = 0;
+        let handX = 0.5;
+        let boosting = false;
+        let boostTimer = 0;
+        let hands = null;
+
+        // Game objects
+        const truck = {
+            x: canvas.width / 2,
+            y: canvas.height - 150,
+            width: 80,
+            height: 60,
+            speed: 0,
+            maxSpeed: 5,
+            acceleration: 0.1,
+            rotation: 0,
+            wheelRotation: 0
+        };
+
+        const road = {
+            width: 400,
+            stripeWidth: 10,
+            stripeHeight: 60,
+            stripeGap: 40,
+            offset: 0
+        };
+
+        const obstacles = [];
+        const collectibles = [];
+        const particles = [];
+
+        function onHandResults(results) {
+            if (results.multiHandLandmarks && results.multiHandLandmarks[0]) {
+                const hand = results.multiHandLandmarks[0];
+                const wrist = hand[0];
+                handX = wrist.x;
+                
+                // Update hand position indicator
+                if (handX < 0.3) {
+                    handPositionElement.textContent = 'Hand Position: Left';
+                } else if (handX > 0.7) {
+                    handPositionElement.textContent = 'Hand Position: Right';
+                } else {
+                    handPositionElement.textContent = 'Hand Position: Center';
+                }
+            }
+        }
+
+        // Initialize voice detection
+        let audioContext;
+        let analyser;
+        let microphone;
+        let javascriptNode;
+
+        async function initAudio() {
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            analyser = audioContext.createAnalyser();
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                microphone = audioContext.createMediaStreamSource(stream);
+                javascriptNode = audioContext.createScriptProcessor(2048, 1, 1);
+
+                analyser.smoothingTimeConstant = 0.8;
+                analyser.fftSize = 1024;
+
+                microphone.connect(analyser);
+                analyser.connect(javascriptNode);
+                javascriptNode.connect(audioContext.destination);
+
+                javascriptNode.onaudioprocess = function() {
+                    const array = new Uint8Array(analyser.frequencyBinCount);
+                    analyser.getByteFrequencyData(array);
+                    const values = array.reduce((a, b) => a + b, 0);
+                    const average = values / array.length;
+
+                    // Detect loud sounds (VROOM!)
+                    if (average > 50 && !boosting && gameStarted) {
+                        activateBoost();
+                    }
+                };
+            } catch (err) {
+                console.error('Audio initialization failed:', err);
+            }
+        }
+
+        function activateBoost() {
+            boosting = true;
+            boostTimer = 60;
+            voiceIndicator.style.display = 'block';
+            
+            // Create boost particles
+            for (let i = 0; i < 10; i++) {
+                particles.push({
+                    x: truck.x - 30 + Math.random() * 20,
+                    y: truck.y + truck.height,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: Math.random() * 3 + 2,
+                    life: 30,
+                    color: `hsl(${Math.random() * 60}, 100%, 50%)`
+                });
+            }
+        }
+
+        async function startGame() {
+            startButton.classList.add('hidden');
+            loadingMessage.style.display = 'block';
+            
+            try {
+                // Initialize MediaPipe Hands
+                hands = new window.Hands({
+                    locateFile: (file) => {
+                        return `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`;
+                    }
+                });
+
+                hands.setOptions({
+                    maxNumHands: 1,
+                    modelComplexity: 1,
+                    minDetectionConfidence: 0.5,
+                    minTrackingConfidence: 0.5
+                });
+
+                hands.onResults(onHandResults);
+
+                // Initialize camera
+                const camera = new Camera(video, {
+                    onFrame: async () => {
+                        if (hands) {
+                            await hands.send({ image: video });
+                        }
+                    },
+                    width: 640,
+                    height: 480
+                });
+                
+                await camera.start();
+                
+                // Initialize audio
+                await initAudio();
+                
+                loadingMessage.style.display = 'none';
+                gameStarted = true;
+                
+                // Start game loop
+                gameLoop();
+            } catch (error) {
+                console.error('Error starting game:', error);
+                loadingMessage.textContent = 'Error: Please allow camera/microphone access';
+            }
+        }
+
+        function generateObstacle() {
+            const roadCenter = canvas.width / 2;
+            const roadLeft = roadCenter - road.width / 2 + 50;
+            const roadRight = roadCenter + road.width / 2 - 50;
+            
+            obstacles.push({
+                x: roadLeft + Math.random() * (roadRight - roadLeft),
+                y: -50,
+                width: 40,
+                height: 40,
+                speed: 3
+            });
+        }
+
+        function generateCollectible() {
+            const roadCenter = canvas.width / 2;
+            const roadLeft = roadCenter - road.width / 2 + 50;
+            const roadRight = roadCenter + road.width / 2 - 50;
+            
+            collectibles.push({
+                x: roadLeft + Math.random() * (roadRight - roadLeft),
+                y: -50,
+                width: 30,
+                height: 40,
+                speed: 3,
+                collected: false
+            });
+        }
+
+        function updateGame() {
+            if (!gameStarted) return;
+
+            // Update boost
+            if (boostTimer > 0) {
+                boostTimer--;
+                if (boostTimer === 0) {
+                    boosting = false;
+                    voiceIndicator.style.display = 'none';
+                }
+            }
+
+            // Update truck position based on hand
+            const targetX = canvas.width * (1 - handX);
+            const diff = targetX - truck.x;
+            truck.x += diff * 0.1;
+            truck.rotation = -diff * 0.001;
+
+            // Keep truck on road
+            const roadCenter = canvas.width / 2;
+            const roadLeft = roadCenter - road.width / 2 + truck.width / 2;
+            const roadRight = roadCenter + road.width / 2 - truck.width / 2;
+            truck.x = Math.max(roadLeft, Math.min(roadRight, truck.x));
+
+            // Update truck speed
+            if (boosting) {
+                truck.speed = Math.min(truck.speed + truck.acceleration * 3, truck.maxSpeed * 2);
+            } else {
+                truck.speed = Math.min(truck.speed + truck.acceleration, truck.maxSpeed);
+            }
+
+            // Update wheel rotation
+            truck.wheelRotation += truck.speed * 0.1;
+
+            // Update road
+            road.offset += truck.speed;
+            if (road.offset > road.stripeHeight + road.stripeGap) {
+                road.offset = 0;
+            }
+
+            // Update obstacles
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                obstacles[i].y += obstacles[i].speed + truck.speed;
+                
+                // Check collision
+                if (checkCollision(truck, obstacles[i])) {
+                    score = Math.max(0, score - 10);
+                    obstacles.splice(i, 1);
+                    // Flash effect
+                    ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                } else if (obstacles[i].y > canvas.height) {
+                    obstacles.splice(i, 1);
+                }
+            }
+
+            // Update collectibles
+            for (let i = collectibles.length - 1; i >= 0; i--) {
+                collectibles[i].y += collectibles[i].speed + truck.speed;
+                
+                // Check collection
+                if (!collectibles[i].collected && checkCollision(truck, collectibles[i])) {
+                    collectibles[i].collected = true;
+                    score += 20;
+                    
+                    // Create collection particles
+                    for (let j = 0; j < 5; j++) {
+                        particles.push({
+                            x: collectibles[i].x,
+                            y: collectibles[i].y,
+                            vx: (Math.random() - 0.5) * 10,
+                            vy: (Math.random() - 0.5) * 10,
+                            life: 20,
+                            color: '#FFD700'
+                        });
+                    }
+                }
+                
+                if (collectibles[i].y > canvas.height) {
+                    collectibles.splice(i, 1);
+                }
+            }
+
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].x += particles[i].vx;
+                particles[i].y += particles[i].vy;
+                particles[i].life--;
+                
+                if (particles[i].life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            // Generate new obstacles and collectibles
+            if (Math.random() < 0.02) generateObstacle();
+            if (Math.random() < 0.015) generateCollectible();
+
+            // Update score
+            scoreElement.textContent = `Score: ${score}`;
+        }
+
+        function checkCollision(a, b) {
+            return a.x < b.x + b.width &&
+                   a.x + a.width > b.x &&
+                   a.y < b.y + b.height &&
+                   a.y + a.height > b.y;
+        }
+
+        function drawRoad() {
+            const roadCenter = canvas.width / 2;
+            const roadLeft = roadCenter - road.width / 2;
+            const roadRight = roadCenter + road.width / 2;
+
+            // Draw road
+            ctx.fillStyle = '#333';
+            ctx.fillRect(roadLeft, 0, road.width, canvas.height);
+
+            // Draw road edges
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.moveTo(roadLeft, 0);
+            ctx.lineTo(roadLeft, canvas.height);
+            ctx.moveTo(roadRight, 0);
+            ctx.lineTo(roadRight, canvas.height);
+            ctx.stroke();
+
+            // Draw center stripes
+            ctx.fillStyle = '#fff';
+            for (let y = -road.stripeHeight + road.offset; y < canvas.height; y += road.stripeHeight + road.stripeGap) {
+                ctx.fillRect(roadCenter - road.stripeWidth / 2, y, road.stripeWidth, road.stripeHeight);
+            }
+        }
+
+        function drawTruck() {
+            ctx.save();
+            ctx.translate(truck.x, truck.y);
+            ctx.rotate(truck.rotation);
+
+            // Draw truck body
+            const gradient = ctx.createLinearGradient(0, 0, 0, truck.height);
+            gradient.addColorStop(0, '#ff6b6b');
+            gradient.addColorStop(1, '#d63031');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(-truck.width / 2, -truck.height / 2, truck.width, truck.height);
+
+            // Draw windshield
+            ctx.fillStyle = '#4a69bd';
+            ctx.fillRect(-truck.width / 2 + 10, -truck.height / 2 + 5, truck.width - 20, 15);
+
+            // Draw wheels
+            const wheelSize = 20;
+            ctx.fillStyle = '#000';
+            
+            // Front wheels
+            ctx.save();
+            ctx.translate(-truck.width / 2 + 15, truck.height / 2);
+            ctx.rotate(truck.wheelRotation);
+            ctx.fillRect(-wheelSize / 2, -wheelSize / 2, wheelSize, wheelSize);
+            ctx.restore();
+
+            ctx.save();
+            ctx.translate(truck.width / 2 - 15, truck.height / 2);
+            ctx.rotate(truck.wheelRotation);
+            ctx.fillRect(-wheelSize / 2, -wheelSize / 2, wheelSize, wheelSize);
+            ctx.restore();
+
+            // Rear wheels
+            ctx.save();
+            ctx.translate(-truck.width / 2 + 15, -truck.height / 2);
+            ctx.rotate(truck.wheelRotation);
+            ctx.fillRect(-wheelSize / 2, -wheelSize / 2, wheelSize, wheelSize);
+            ctx.restore();
+
+            ctx.save();
+            ctx.translate(truck.width / 2 - 15, -truck.height / 2);
+            ctx.rotate(truck.wheelRotation);
+            ctx.fillRect(-wheelSize / 2, -wheelSize / 2, wheelSize, wheelSize);
+            ctx.restore();
+
+            // Draw boost flames
+            if (boosting) {
+                ctx.fillStyle = '#ff6348';
+                ctx.beginPath();
+                ctx.moveTo(-truck.width / 2 - 10, truck.height / 2 - 10);
+                ctx.lineTo(-truck.width / 2 - 20 - Math.random() * 10, truck.height / 2);
+                ctx.lineTo(-truck.width / 2 - 10, truck.height / 2 + 10);
+                ctx.closePath();
+                ctx.fill();
+
+                ctx.beginPath();
+                ctx.moveTo(truck.width / 2 + 10, truck.height / 2 - 10);
+                ctx.lineTo(truck.width / 2 + 20 + Math.random() * 10, truck.height / 2);
+                ctx.lineTo(truck.width / 2 + 10, truck.height / 2 + 10);
+                ctx.closePath();
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        function drawObstacles() {
+            ctx.fillStyle = '#e74c3c';
+            obstacles.forEach(obstacle => {
+                ctx.fillRect(obstacle.x - obstacle.width / 2, obstacle.y, obstacle.width, obstacle.height);
+                
+                // Draw warning stripes
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.moveTo(obstacle.x - obstacle.width / 2, obstacle.y);
+                ctx.lineTo(obstacle.x + obstacle.width / 2, obstacle.y + obstacle.height);
+                ctx.moveTo(obstacle.x + obstacle.width / 2, obstacle.y);
+                ctx.lineTo(obstacle.x - obstacle.width / 2, obstacle.y + obstacle.height);
+                ctx.stroke();
+            });
+        }
+
+        function drawCollectibles() {
+            collectibles.forEach(collectible => {
+                if (!collectible.collected) {
+                    // Draw flag pole
+                    ctx.fillStyle = '#8b6914';
+                    ctx.fillRect(collectible.x - 2, collectible.y, 4, collectible.height);
+                    
+                    // Draw flag
+                    ctx.fillStyle = '#FFD700';
+                    ctx.beginPath();
+                    ctx.moveTo(collectible.x + 2, collectible.y);
+                    ctx.lineTo(collectible.x + collectible.width, collectible.y + 10);
+                    ctx.lineTo(collectible.x + 2, collectible.y + 20);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+            });
+        }
+
+        function drawParticles() {
+            particles.forEach(particle => {
+                ctx.globalAlpha = particle.life / 20;
+                ctx.fillStyle = particle.color;
+                ctx.fillRect(particle.x - 2, particle.y - 2, 4, 4);
+            });
+            ctx.globalAlpha = 1;
+        }
+
+        function drawBackground() {
+            // Sky gradient
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#87CEEB');
+            gradient.addColorStop(1, '#98D8E8');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw clouds
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.7)';
+            for (let i = 0; i < 5; i++) {
+                const x = (i * 300 + road.offset * 0.2) % (canvas.width + 100) - 50;
+                const y = 50 + i * 30;
+                ctx.beginPath();
+                ctx.arc(x, y, 30, 0, Math.PI * 2);
+                ctx.arc(x + 25, y, 35, 0, Math.PI * 2);
+                ctx.arc(x + 50, y, 30, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Draw ground
+            ctx.fillStyle = '#8FBC8F';
+            ctx.fillRect(0, canvas.height - 100, canvas.width, 100);
+        }
+
+        function gameLoop() {
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Draw everything
+            drawBackground();
+            drawRoad();
+            drawObstacles();
+            drawCollectibles();
+            drawParticles();
+            drawTruck();
+
+            // Update game state
+            updateGame();
+
+            // Continue loop
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Event listeners
+        startButton.addEventListener('click', startGame);
+
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+    </script>
+</body>
+</html>

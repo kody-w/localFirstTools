@@ -1,0 +1,195 @@
+name: Release Chrome Extension
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.0.0)'
+        required: true
+        type: string
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: 🏷️ Get Version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION=${GITHUB_REF#refs/tags/v}
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "📌 Version: $VERSION"
+
+      - name: 🐍 Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: 📝 Update Version in Manifest
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Update chrome-extension/manifest.json
+          if [ -f "chrome-extension/manifest.json" ]; then
+            jq --arg version "$VERSION" '.version = $version' chrome-extension/manifest.json > tmp.json
+            mv tmp.json chrome-extension/manifest.json
+            echo "✅ Updated manifest.json to version $VERSION"
+          fi
+
+      - name: 📊 Run Meta Analysis
+        run: |
+          python3 scripts/meta-analyzer.py
+
+      - name: 🏗️ Build Extension
+        run: |
+          chmod +x scripts/build-chrome-extension.sh
+          ./scripts/build-chrome-extension.sh
+
+      - name: 📦 Create Release Package
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Create versioned ZIP
+          cd chrome-extension-build
+          zip -r ../local-first-tools-extension-v${VERSION}.zip .
+          cd ..
+
+          # Also create a 'latest' version
+          cp local-first-tools-extension-v${VERSION}.zip local-first-tools-extension.zip
+
+          echo "✅ Created release packages"
+          ls -lh local-first-tools-extension*.zip
+
+      - name: 📈 Generate Release Notes
+        id: release_notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          APP_COUNT=$(find chrome-extension-build/apps -name "*.html" | wc -l)
+          ZIP_SIZE=$(ls -lh local-first-tools-extension.zip | awk '{print $5}')
+
+          cat > release-notes.md << EOF
+          # 🚀 Local First Tools Chrome Extension v${VERSION}
+
+          ## What's New
+
+          This release includes **${APP_COUNT} applications** across multiple categories:
+
+          ### 📊 Statistics
+          - **Total Apps:** ${APP_COUNT}
+          - **Package Size:** ${ZIP_SIZE}
+          - **Categories:** 10+
+          - **Technologies:** localStorage, Canvas, Three.js, WebGL, WebRTC, and more
+
+          ### 🎮 Categories
+          - 🎮 **Games:** 43 apps
+          - 🤖 **AI Tools:** 17 apps
+          - 💻 **Development:** 16 apps (including Meta Dashboard & Presentation)
+          - 🎓 **Education:** 16 apps
+          - 📋 **Productivity:** 14 apps
+          - 🔧 **Utilities:** 11 apps
+          - 🌌 **Quantum Worlds:** 10 apps
+          - 🎨 **Media:** 7 apps
+          - 💼 **Business:** 6 apps
+          - 💪 **Health:** 2 apps
+
+          ### ✨ Highlights
+          - **Meta Dashboard** - Comprehensive ecosystem analytics with 7 interactive tabs
+          - **Meta Presentation** - Cinematic 11-slide showcase
+          - **Quantum Worlds** - 10 multiplayer P2P universes
+          - **100% Offline** - No external dependencies
+          - **Privacy-First** - All data stays local
+
+          ## 📦 Installation
+
+          1. Download \`local-first-tools-extension-v${VERSION}.zip\`
+          2. Extract to a permanent location
+          3. Open Chrome and go to \`chrome://extensions/\`
+          4. Enable "Developer mode"
+          5. Click "Load unpacked"
+          6. Select the extracted folder
+
+          For detailed instructions, see the [Download Page](https://github.com/${{ github.repository }}/blob/main/extension-download.html)
+
+          ## 📊 Full Analysis
+
+          Download \`meta-analysis.json\` for complete ecosystem insights including:
+          - Technology adoption statistics
+          - Pattern analysis
+          - Category distribution
+          - Performance metrics
+          - Recommendations for new apps
+
+          ## 🔗 Links
+
+          - [Installation Guide](https://github.com/${{ github.repository }}/blob/main/extension-download.html)
+          - [Main Gallery](https://github.com/${{ github.repository }})
+          - [Report Issues](https://github.com/${{ github.repository }}/issues)
+
+          ---
+
+          **🤖 Built automatically with Claude Code & GitHub Actions**
+          EOF
+
+          cat release-notes.md
+
+      - name: 🎉 Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: Local First Tools v${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          files: |
+            local-first-tools-extension-v${{ steps.version.outputs.version }}.zip
+            local-first-tools-extension.zip
+            data/meta-analysis.json
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 💾 Commit Version Updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git add chrome-extension/manifest.json
+          git add data/meta-analysis.json
+          git add local-first-tools-extension.zip
+
+          if ! git diff --staged --quiet; then
+            git commit -m "chore: release v${{ steps.version.outputs.version }}
+
+          - Updated manifest version
+          - Regenerated meta-analysis
+          - Updated extension package
+
+          🤖 Auto-generated by GitHub Actions"
+
+            git push origin main
+          fi
+
+      - name: 📊 Release Summary
+        run: |
+          echo "### 🎉 Release v${{ steps.version.outputs.version }} Published!" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Apps:** $(find chrome-extension-build/apps -name "*.html" | wc -l)" >> $GITHUB_STEP_SUMMARY
+          echo "**Size:** $(ls -lh local-first-tools-extension.zip | awk '{print $5}')" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Downloads" >> $GITHUB_STEP_SUMMARY
+          echo "- [\`local-first-tools-extension-v${{ steps.version.outputs.version }}.zip\`](https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/local-first-tools-extension-v${{ steps.version.outputs.version }}.zip)" >> $GITHUB_STEP_SUMMARY
+          echo "- [\`local-first-tools-extension.zip\`](https://github.com/${{ github.repository }}/releases/download/v${{ steps.version.outputs.version }}/local-first-tools-extension.zip) (latest)" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🔗 Links" >> $GITHUB_STEP_SUMMARY
+          echo "- [Release Page](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.version.outputs.version }})" >> $GITHUB_STEP_SUMMARY
+          echo "- [Download Page](https://github.com/${{ github.repository }}/blob/main/extension-download.html)" >> $GITHUB_STEP_SUMMARY
