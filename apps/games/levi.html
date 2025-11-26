@@ -4092,7 +4092,7 @@
         //        Star Wars-style 3D text crawl for voice responses
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '5.11.1';
+        const VERSION = '5.12.0';
 
         // ============================================
         // THREE.js Extensions: FontLoader & TextGeometry
@@ -9766,6 +9766,154 @@
         const MAX_AGENTS = 10;
         const AGENT_NAMES = ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa'];
 
+        // v5.12.1: Endpoint configuration registry - allows different AI providers per agent
+        const ENDPOINT_REGISTRY = {
+            default: {
+                name: 'RAPPID (Default)',
+                urlKey: 'rappid-agent-url',  // localStorage key for URL
+                apiKeyKey: 'rappid-api-key', // localStorage key for API key
+                headerStyle: 'x-functions-key',
+                bodyFormat: 'rappid' // rappid | openai | anthropic | custom
+            },
+            openai: {
+                name: 'OpenAI',
+                urlKey: 'openai-agent-url',
+                apiKeyKey: 'openai-api-key',
+                headerStyle: 'Authorization',
+                headerPrefix: 'Bearer ',
+                bodyFormat: 'openai'
+            },
+            anthropic: {
+                name: 'Anthropic',
+                urlKey: 'anthropic-agent-url',
+                apiKeyKey: 'anthropic-api-key',
+                headerStyle: 'x-api-key',
+                bodyFormat: 'anthropic'
+            },
+            azure: {
+                name: 'Azure OpenAI',
+                urlKey: 'azure-agent-url',
+                apiKeyKey: 'azure-api-key',
+                headerStyle: 'api-key',
+                bodyFormat: 'openai'
+            },
+            local: {
+                name: 'Local LLM',
+                urlKey: 'local-agent-url',
+                apiKeyKey: 'local-api-key',
+                headerStyle: 'Authorization',
+                headerPrefix: 'Bearer ',
+                bodyFormat: 'openai' // Most local servers use OpenAI-compatible format
+            },
+            custom: {
+                name: 'Custom Endpoint',
+                urlKey: 'custom-agent-url',
+                apiKeyKey: 'custom-api-key',
+                headerStyle: 'Authorization',
+                bodyFormat: 'custom'
+            }
+        };
+
+        // Get endpoint configuration for an agent
+        function getAgentEndpoint(agent) {
+            // Check if agent has custom endpoint from transcript
+            if (agent.endpointConfig) {
+                const config = agent.endpointConfig;
+                return {
+                    url: config.url || localStorage.getItem(config.urlKey) || '',
+                    key: config.apiKey || localStorage.getItem(config.apiKeyKey) || '',
+                    headerStyle: config.headerStyle || 'x-functions-key',
+                    headerPrefix: config.headerPrefix || '',
+                    bodyFormat: config.bodyFormat || 'rappid',
+                    name: config.name || 'Custom'
+                };
+            }
+
+            // Check if agent type has default endpoint
+            const typeConfig = AGENT_TYPES[agent.type];
+            if (typeConfig?.endpoint) {
+                const registryEntry = ENDPOINT_REGISTRY[typeConfig.endpoint] || ENDPOINT_REGISTRY.default;
+                return {
+                    url: localStorage.getItem(registryEntry.urlKey) || '',
+                    key: localStorage.getItem(registryEntry.apiKeyKey) || '',
+                    headerStyle: registryEntry.headerStyle,
+                    headerPrefix: registryEntry.headerPrefix || '',
+                    bodyFormat: registryEntry.bodyFormat,
+                    name: registryEntry.name
+                };
+            }
+
+            // Fall back to global RAPPID endpoint
+            const globalEndpoint = getActiveEndpoint();
+            return {
+                url: globalEndpoint?.url || '',
+                key: globalEndpoint?.key || '',
+                headerStyle: 'x-functions-key',
+                headerPrefix: '',
+                bodyFormat: 'rappid',
+                name: 'RAPPID'
+            };
+        }
+
+        // Format request body based on endpoint type
+        function formatAgentRequestBody(endpoint, contextMessage, conversationHistory, agent) {
+            switch (endpoint.bodyFormat) {
+                case 'openai':
+                    return JSON.stringify({
+                        model: agent.endpointConfig?.model || 'gpt-4o-mini',
+                        messages: conversationHistory,
+                        max_tokens: 500,
+                        temperature: 0.7
+                    });
+
+                case 'anthropic':
+                    // Anthropic uses 'human' and 'assistant' roles
+                    const anthropicMessages = conversationHistory.slice(1).map(m => ({
+                        role: m.role === 'user' ? 'human' : m.role,
+                        content: m.content
+                    }));
+                    return JSON.stringify({
+                        model: agent.endpointConfig?.model || 'claude-3-haiku-20240307',
+                        messages: anthropicMessages,
+                        system: conversationHistory[0]?.content || '',
+                        max_tokens: 500
+                    });
+
+                case 'custom':
+                    // Allow custom body format from transcript config
+                    if (agent.endpointConfig?.customBody) {
+                        const body = { ...agent.endpointConfig.customBody };
+                        body.messages = conversationHistory;
+                        body.input = contextMessage.content;
+                        return JSON.stringify(body);
+                    }
+                    // Fall through to default
+
+                case 'rappid':
+                default:
+                    return JSON.stringify({
+                        user_input: contextMessage.content,
+                        conversation_history: conversationHistory,
+                        user_guid: `agent-${agent.id}`
+                    });
+            }
+        }
+
+        // Parse response based on endpoint type
+        function parseAgentResponse(endpoint, data) {
+            switch (endpoint.bodyFormat) {
+                case 'openai':
+                    return data.choices?.[0]?.message?.content || data.response || '';
+
+                case 'anthropic':
+                    return data.content?.[0]?.text || data.completion || '';
+
+                case 'rappid':
+                default:
+                    return data.assistant_response || data.response || '';
+            }
+        }
+
         // Agent type definitions with canned transcript templates
         const AGENT_TYPES = {
             gatherer: {
@@ -14739,6 +14887,9 @@
             initCopilotCompanion();
             createCopilotMesh();
 
+            // v5.12: Initialize hypnosis effects
+            initHypnosisEffects();
+
             // v5.0: Initialize weather system
             initWeatherSystem();
 
@@ -14877,6 +15028,48 @@
                 aura.position.y = 0.1;
                 mob.add(aura);
                 mob.userData.auraRing = aura;
+            }
+
+            // v5.12: Hypnotist special eye appearance
+            if (enemyData.isHypnotist) {
+                // Create eye-like structure with iris and pupil
+                const irisGeo = new THREE.CircleGeometry(0.5, 32);
+                const irisMat = new THREE.MeshBasicMaterial({
+                    color: 0x8800ff,
+                    side: THREE.DoubleSide
+                });
+                const iris = new THREE.Mesh(irisGeo, irisMat);
+                iris.position.z = 0.75;
+                mob.add(iris);
+
+                // Pupil (inner dark circle that moves)
+                const pupilGeo = new THREE.CircleGeometry(0.25, 32);
+                const pupilMat = new THREE.MeshBasicMaterial({
+                    color: 0x000000,
+                    side: THREE.DoubleSide
+                });
+                const pupil = new THREE.Mesh(pupilGeo, pupilMat);
+                pupil.position.z = 0.76;
+                mob.add(pupil);
+                mob.userData.pupil = pupil;
+                mob.userData.iris = iris;
+
+                // Glowing concentric rings around the eye
+                for (let i = 0; i < 3; i++) {
+                    const ringGeo = new THREE.RingGeometry(0.9 + i * 0.3, 1.0 + i * 0.3, 32);
+                    const ringMat = new THREE.MeshBasicMaterial({
+                        color: i % 2 === 0 ? 0xff00ff : 0x8800ff,
+                        side: THREE.DoubleSide,
+                        transparent: true,
+                        opacity: 0.5 - i * 0.1
+                    });
+                    const ring = new THREE.Mesh(ringGeo, ringMat);
+                    ring.position.z = 0.74 - i * 0.02;
+                    mob.add(ring);
+                }
+
+                // Give it a floating, creepy movement
+                mob.userData.isHypnotist = true;
             }
 
             // Health bar above mob (larger for elites)
@@ -15476,6 +15669,63 @@
                     }
                 }
 
+                // v5.12: Hypnotist special behavior - hypnotize player when in range
+                const enemyType = ENEMY_TYPES[mob.userData.name];
+                if (enemyType?.isHypnotist && !HYPNOSIS_STATE.active) {
+                    const hypnosisRange = enemyType.hypnosisRange || 12;
+                    const hypnosisCooldown = enemyType.hypnosisCooldown || 15000;
+
+                    if (distToPlayer < hypnosisRange && distToPlayer > 3) {
+                        // Check cooldown
+                        if (!mob.userData.lastHypnosis || time - mob.userData.lastHypnosis > hypnosisCooldown) {
+                            mob.userData.lastHypnosis = time;
+
+                            // Start hypnosis!
+                            const duration = enemyType.hypnosisDuration || 8000;
+                            startHypnosis(mob, duration);
+
+                            // Visual effect on hypnotist
+                            spawnFloater(mob.position, '👁️ HYPNOSIS', '#ff00ff');
+                            if (particles) particles.emit(mob.position, 30, 0xff00ff, { spread: 5, lifetime: 1000 });
+
+                            // Pulsing eye effect on the mob itself
+                            mob.material.emissive.setHex(0xff00ff);
+                            mob.userData.hypnotizing = true;
+                        }
+                    }
+                }
+
+                // Animate hypnotist while hypnotizing
+                if (mob.userData.hypnotizing && HYPNOSIS_STATE.active && HYPNOSIS_STATE.hypnotistMob === mob) {
+                    // Pulsing glow
+                    const pulse = 0.3 + Math.sin(time * 0.01) * 0.2;
+                    mob.material.emissiveIntensity = pulse;
+
+                    // Slowly rotate
+                    mob.rotation.y += dt * 0.5;
+                } else if (mob.userData.hypnotizing && !HYPNOSIS_STATE.active) {
+                    mob.userData.hypnotizing = false;
+                    mob.material.emissive.setHex(enemyType?.emissive || 0x660066);
+                    mob.material.emissiveIntensity = 0.2;
+                }
+
+                // v5.12: Animate hypnotist eye - pupil tracks player
+                if (mob.userData.isHypnotist && mob.userData.pupil) {
+                    // Make the eye look toward the player
+                    const lookDir = _tempVec3A.subVectors(p.position, mob.position).normalize();
+
+                    // Calculate pupil offset based on look direction (limited movement)
+                    const maxOffset = 0.2;
+                    mob.userData.pupil.position.x = lookDir.x * maxOffset;
+                    mob.userData.pupil.position.y = Math.max(-maxOffset, lookDir.y * maxOffset + 0.1);
+
+                    // Make the whole mob face the player
+                    mob.lookAt(p.position.x, mob.position.y, p.position.z);
+
+                    // Subtle creepy floating animation
+                    mob.position.y += Math.sin(time * 0.003 + mob.id) * 0.002;
+                }
+
                 // Update HP bar rotation to face camera
                 if (mob.userData.hpBar) {
                     mob.userData.hpBar.lookAt(camera.position);
@@ -15502,6 +15752,9 @@
 
             // v5.6: Update Copilot Companion
             updateCopilotCompanion(dt, time);
+
+            // v5.12: Update hypnosis effects
+            updateHypnosis(dt);
 
             // v5.9: Update Copilot task progress
             updateCopilotTask(dt);
