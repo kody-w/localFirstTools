@@ -1760,6 +1760,28 @@
         </div>
     </div>
 
+    <!-- v5.5: 3D Ship Landing Mini-Game Overlay -->
+    <div id="landing-overlay" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 1000;">
+        <div id="landing-scene-container" style="width: 100%; height: 100%;"></div>
+
+        <!-- Landing HUD -->
+        <div id="landing-info" style="position: absolute; top: 20px; left: 20px; color: white; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 10px; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1);">
+            <div style="font-size: 18px; font-weight: bold; color: #00ff88; margin-bottom: 10px;" id="landing-planet-name">Landing Sequence</div>
+            <div style="margin: 5px 0; font-size: 14px;"><span style="color: #00ff88; font-weight: bold;">Altitude:</span> <span id="landing-altitude">0</span>m</div>
+            <div style="margin: 5px 0; font-size: 14px;"><span style="color: #00ff88; font-weight: bold;">Speed:</span> <span id="landing-speed">0</span>m/s</div>
+            <div style="margin: 5px 0; font-size: 14px;"><span style="color: #00ff88; font-weight: bold;">Fuel:</span> <span id="landing-fuel">100</span>%</div>
+            <div style="margin: 5px 0; font-size: 14px;"><span style="color: #00ff88; font-weight: bold;">Mode:</span> <span id="landing-mode">Autonomous</span></div>
+            <div style="margin: 5px 0; font-size: 14px;"><span style="color: #00ff88; font-weight: bold;">Distance:</span> <span id="landing-distance">0</span>m</div>
+        </div>
+
+        <!-- Landing Controls -->
+        <div id="landing-controls" style="position: absolute; bottom: 20px; left: 50%; transform: translateX(-50%); background: rgba(0,0,0,0.8); padding: 15px 25px; border-radius: 10px; color: white; display: flex; gap: 20px; align-items: center; backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,0.1);">
+            <button onclick="toggleLandingMode()" id="landing-mode-btn" style="background: #00ff88; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: #000;">Switch to Manual</button>
+            <button onclick="abortLanding()" style="background: #ff4444; border: none; padding: 8px 16px; border-radius: 5px; cursor: pointer; font-weight: bold; color: #fff;">Abort Landing</button>
+            <div style="color: #888; font-size: 12px;">Manual: Arrow Keys + Space/Shift</div>
+        </div>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
         // === LEVIATHAN: OMNIVERSE v4.9 ===
@@ -1779,9 +1801,10 @@
         // v5.2: Talent Tree System (3 trees: Combat/Survival/Fortune, 15 talents)
         // v5.3: Mastery System (skill milestones), Realm Portals (endgame dungeons), Loot Rarity System (item modifiers)
         // v5.4: Companion Evolution System (pets evolve at bond levels), World Events (random spawning events), Achievement Showcase (badges & points)
+        // v5.5: Ship Landing Mini-Game (physics-based landing sequence with biome-specific terrain when visiting planets)
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '5.4.0';
+        const VERSION = '5.5.0';
 
         // --- AUDIO SYSTEM (Web Audio API - No external dependencies) ---
         const AudioSystem = {
@@ -3165,7 +3188,18 @@
             'Dimension Shard': { icon: '💠', stackable: true, maxStack: 30 },
             'Celestial Essence': { icon: '✨', stackable: true, maxStack: 10 },
             'Star Fragment': { icon: '⭐', stackable: true, maxStack: 20 },
-            'Mythic Orb': { icon: '🔮', stackable: false, combatBonus: 25, element: 'cosmic', defenseBonus: 10 }
+            'Mythic Orb': { icon: '🔮', stackable: false, combatBonus: 25, element: 'cosmic', defenseBonus: 10 },
+            // v5.4: World Event items
+            'Meteor Ore': { icon: '☄️', stackable: true, maxStack: 30, description: 'Rare ore from a meteor shower' },
+            'Cosmic Dust': { icon: '🌟', stackable: true, maxStack: 99, description: 'Glittering cosmic particles' },
+            'Gold Chest': { icon: '📦', stackable: true, maxStack: 10, description: 'A treasure chest filled with gold' },
+            'Silver Chest': { icon: '📦', stackable: true, maxStack: 20, description: 'A treasure chest with silver' },
+            'Ancient Relic': { icon: '🗿', stackable: true, maxStack: 10, description: 'An ancient relic of power' },
+            'Rune Stone': { icon: '🪨', stackable: true, maxStack: 20, description: 'Stone inscribed with ancient runes' },
+            'Lost Technology': { icon: '🔧', stackable: true, maxStack: 10, description: 'Advanced technology from a lost civilization' },
+            'Rainbow Crystal': { icon: '💎', stackable: true, maxStack: 15, description: 'A crystal that shimmers with all colors' },
+            'Pure Crystal': { icon: '💠', stackable: true, maxStack: 20, description: 'A perfectly pure crystal' },
+            'Crystal Shard': { icon: '🔹', stackable: true, maxStack: 50, description: 'A small crystal fragment' }
         };
 
         const RECIPES = {
@@ -4326,6 +4360,591 @@
             return bonuses;
         }
 
+        // v5.5: 3D Ship Landing Mini-Game System (Drone-style)
+        let landingGame = {
+            active: false,
+            targetCiv: null,
+            scene: null,
+            camera: null,
+            renderer: null,
+            ship: null,
+            landingPad: null,
+            animFrame: null,
+            lastTime: 0,
+            isManual: false,
+            fuel: 100,
+            velocity: null,
+            targetPosition: null,
+            propellers: [],
+            thrustLight: null,
+            environmentObjects: []
+        };
+
+        const LANDING_CONFIG = {
+            startAltitude: 60,
+            maxSpeed: 8,
+            safeSpeed: 2.5,
+            gravity: 0.02,          // Much slower gravity
+            thrustPower: 0.06,      // Gentler thrust
+            manualControl: 0.25,    // Slower manual movement
+            fuelConsumption: 0.02,  // Slower fuel drain
+            landingPadSize: 18,     // Bigger landing pad
+            bounds: 100,
+            biomeColors: {
+                Terra: { sky: 0x87CEEB, ground: 0x3a8c3a, fog: 0x87CEEB },
+                Desert: { sky: 0xffcc99, ground: 0xc2a060, fog: 0xffcc99 },
+                Ice: { sky: 0xddeeff, ground: 0xe8f4f8, fog: 0xddeeff },
+                Volcanic: { sky: 0x330000, ground: 0x2a1a1a, fog: 0x330000 },
+                Alien: { sky: 0x220044, ground: 0x440066, fog: 0x220044 }
+            }
+        };
+
+        function startLandingGame(civ) {
+            // Cleanup any existing landing game
+            if (landingGame.animFrame) {
+                cancelAnimationFrame(landingGame.animFrame);
+            }
+            if (landingGame.renderer) {
+                landingGame.renderer.dispose();
+            }
+
+            landingGame.active = true;
+            landingGame.targetCiv = civ;
+            landingGame.isManual = false;
+            landingGame.fuel = 100;
+            landingGame.velocity = new THREE.Vector3(0, -0.1, 0);  // Very slow initial descent
+            landingGame.targetPosition = new THREE.Vector3(0, 20, 0);
+            landingGame.lastTime = 0;
+            mode = 'landing';
+
+            // Show landing UI
+            const overlay = document.getElementById('landing-overlay');
+            overlay.style.display = 'block';
+            document.getElementById('landing-planet-name').textContent = `Landing on ${civ.name} (${civ.biomeName})`;
+            document.getElementById('landing-mode').textContent = 'Autonomous';
+            document.getElementById('landing-mode-btn').textContent = 'Switch to Manual';
+
+            // Get biome colors
+            const biomeColors = LANDING_CONFIG.biomeColors[civ.biome] || LANDING_CONFIG.biomeColors.Terra;
+
+            // Create separate Three.js scene for landing
+            landingGame.scene = new THREE.Scene();
+            landingGame.scene.fog = new THREE.Fog(biomeColors.fog, 100, 500);
+
+            // Isometric camera
+            const container = document.getElementById('landing-scene-container');
+            const aspect = container.clientWidth / container.clientHeight;
+            const d = 50;
+            landingGame.camera = new THREE.OrthographicCamera(
+                -d * aspect, d * aspect, d, -d, 1, 1000
+            );
+            landingGame.camera.position.set(100, 100, 100);
+            landingGame.camera.lookAt(0, 0, 0);
+
+            // Renderer
+            landingGame.renderer = new THREE.WebGLRenderer({ antialias: true });
+            landingGame.renderer.setSize(container.clientWidth, container.clientHeight);
+            landingGame.renderer.shadowMap.enabled = true;
+            landingGame.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            landingGame.renderer.setClearColor(biomeColors.sky);
+            container.innerHTML = '';
+            container.appendChild(landingGame.renderer.domElement);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+            landingGame.scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(50, 100, 50);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.camera.left = -100;
+            directionalLight.shadow.camera.right = 100;
+            directionalLight.shadow.camera.top = 100;
+            directionalLight.shadow.camera.bottom = -100;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            landingGame.scene.add(directionalLight);
+
+            // Ground
+            const groundGeometry = new THREE.PlaneGeometry(300, 300);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: biomeColors.ground });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            landingGame.scene.add(ground);
+
+            // Create landing pad
+            createLandingPad();
+
+            // Create environment based on biome
+            createLandingEnvironment(civ.biome);
+
+            // Create ship
+            createLandingShip();
+
+            // Start animation loop
+            landingGameLoop(0);
+
+            // Simple short blip sound instead of ringing tone
+            AudioSystem.click();
+            showNotification(`Approaching ${civ.name}... Land on the green pad!`, 'info');
+        }
+
+        function createLandingPad() {
+            const padGroup = new THREE.Group();
+
+            // Main pad
+            const padGeometry = new THREE.CylinderGeometry(LANDING_CONFIG.landingPadSize, LANDING_CONFIG.landingPadSize, 1, 32);
+            const padMaterial = new THREE.MeshLambertMaterial({ color: 0x44ff44 });
+            const pad = new THREE.Mesh(padGeometry, padMaterial);
+            pad.position.y = 0.5;
+            pad.receiveShadow = true;
+            padGroup.add(pad);
+
+            // Center marker
+            const markerGeometry = new THREE.CylinderGeometry(3, 3, 0.5, 32);
+            const markerMaterial = new THREE.MeshLambertMaterial({ color: 0xffffff });
+            const marker = new THREE.Mesh(markerGeometry, markerMaterial);
+            marker.position.y = 1.2;
+            padGroup.add(marker);
+
+            // Beacon light
+            const beaconGeometry = new THREE.CylinderGeometry(1, 1, 5, 8);
+            const beaconMaterial = new THREE.MeshLambertMaterial({ color: 0x888888 });
+            const beacon = new THREE.Mesh(beaconGeometry, beaconMaterial);
+            beacon.position.set(LANDING_CONFIG.landingPadSize - 2, 3, 0);
+            beacon.castShadow = true;
+            padGroup.add(beacon);
+
+            // Beacon light
+            const lightGeometry = new THREE.SphereGeometry(1.5, 16, 16);
+            const lightMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+            landingGame.beaconLight = new THREE.Mesh(lightGeometry, lightMaterial);
+            landingGame.beaconLight.position.set(LANDING_CONFIG.landingPadSize - 2, 6, 0);
+            padGroup.add(landingGame.beaconLight);
+
+            landingGame.landingPad = padGroup;
+            landingGame.scene.add(padGroup);
+        }
+
+        function createLandingEnvironment(biome) {
+            landingGame.environmentObjects = [];
+
+            // Add trees/structures based on biome
+            if (biome === 'Terra' || biome === 'Alien') {
+                for (let i = 0; i < 15; i++) {
+                    const x = (Math.random() - 0.5) * 250;
+                    const z = (Math.random() - 0.5) * 250;
+                    if (Math.abs(x) > 30 || Math.abs(z) > 30) {
+                        const tree = createLandingTree(biome);
+                        tree.position.set(x, 0, z);
+                        landingGame.scene.add(tree);
+                        landingGame.environmentObjects.push(tree);
+                    }
+                }
+            }
+
+            // Add rocks/obstacles for all biomes
+            for (let i = 0; i < 8; i++) {
+                const x = (Math.random() - 0.5) * 200;
+                const z = (Math.random() - 0.5) * 200;
+                if (Math.abs(x) > 25 || Math.abs(z) > 25) {
+                    const rock = createLandingRock(biome);
+                    rock.position.set(x, 0, z);
+                    landingGame.scene.add(rock);
+                    landingGame.environmentObjects.push(rock);
+                }
+            }
+        }
+
+        function createLandingTree(biome) {
+            const group = new THREE.Group();
+
+            // Trunk
+            const trunkGeometry = new THREE.CylinderGeometry(2, 3, 15);
+            const trunkColor = biome === 'Alien' ? 0x8800ff : 0x8B4513;
+            const trunkMaterial = new THREE.MeshLambertMaterial({ color: trunkColor });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.y = 7.5;
+            trunk.castShadow = true;
+            group.add(trunk);
+
+            // Foliage
+            const foliageGeometry = new THREE.SphereGeometry(8, 8, 6);
+            const foliageColor = biome === 'Alien' ? 0xff00ff : 0x228B22;
+            const foliageMaterial = new THREE.MeshLambertMaterial({ color: foliageColor });
+            const foliage = new THREE.Mesh(foliageGeometry, foliageMaterial);
+            foliage.position.y = 18;
+            foliage.castShadow = true;
+            group.add(foliage);
+
+            return group;
+        }
+
+        function createLandingRock(biome) {
+            const rockColors = {
+                Terra: 0x888888,
+                Desert: 0xaa5522,
+                Ice: 0xaaccff,
+                Volcanic: 0x333333,
+                Alien: 0x00ffcc
+            };
+            const height = 5 + Math.random() * 15;
+            const geometry = new THREE.DodecahedronGeometry(3 + Math.random() * 5, 0);
+            const material = new THREE.MeshLambertMaterial({ color: rockColors[biome] || 0x888888 });
+            const rock = new THREE.Mesh(geometry, material);
+            rock.position.y = height / 2;
+            rock.rotation.set(Math.random() * Math.PI, Math.random() * Math.PI, Math.random() * Math.PI);
+            rock.scale.y = height / 10;
+            rock.castShadow = true;
+            rock.receiveShadow = true;
+            return rock;
+        }
+
+        function createLandingShip() {
+            const shipGroup = new THREE.Group();
+
+            // Body
+            const bodyGeometry = new THREE.BoxGeometry(6, 2, 6);
+            const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.castShadow = true;
+            shipGroup.add(body);
+
+            // Cockpit
+            const cockpitGeometry = new THREE.SphereGeometry(2, 16, 16);
+            const cockpitMaterial = new THREE.MeshLambertMaterial({ color: 0x00ffff });
+            const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+            cockpit.position.y = 1.5;
+            cockpit.scale.y = 0.6;
+            shipGroup.add(cockpit);
+
+            // Propeller arms and propellers
+            landingGame.propellers = [];
+            const propPositions = [
+                [-4, 0.5, -4], [4, 0.5, -4],
+                [-4, 0.5, 4], [4, 0.5, 4]
+            ];
+
+            propPositions.forEach(pos => {
+                // Arm
+                const armGeometry = new THREE.BoxGeometry(1, 0.5, 1);
+                const armMaterial = new THREE.MeshLambertMaterial({ color: 0x666666 });
+                const arm = new THREE.Mesh(armGeometry, armMaterial);
+                arm.position.set(pos[0] * 0.6, pos[1], pos[2] * 0.6);
+                shipGroup.add(arm);
+
+                // Propeller
+                const propGeometry = new THREE.CylinderGeometry(0.2, 0.2, 4);
+                const propMaterial = new THREE.MeshLambertMaterial({ color: 0xaaaaaa });
+                const propeller = new THREE.Mesh(propGeometry, propMaterial);
+                propeller.rotation.z = Math.PI / 2;
+                propeller.position.set(...pos);
+                propeller.castShadow = true;
+                landingGame.propellers.push(propeller);
+                shipGroup.add(propeller);
+            });
+
+            // Engine light
+            landingGame.thrustLight = new THREE.PointLight(0x00ff00, 1, 15);
+            landingGame.thrustLight.position.y = -1;
+            shipGroup.add(landingGame.thrustLight);
+
+            // Position ship at start
+            shipGroup.position.set(
+                (Math.random() - 0.5) * 40,
+                LANDING_CONFIG.startAltitude,
+                (Math.random() - 0.5) * 40
+            );
+
+            landingGame.ship = shipGroup;
+            landingGame.scene.add(shipGroup);
+        }
+
+        function landingGameLoop(currentTime) {
+            if (!landingGame.active) return;
+
+            const deltaTime = (currentTime - landingGame.lastTime) / 1000;
+            landingGame.lastTime = currentTime;
+
+            if (deltaTime > 0 && deltaTime < 0.1) {
+                updateLandingShip(deltaTime);
+                checkLandingConditions();
+                updateLandingUI();
+            }
+
+            // Rotate propellers
+            landingGame.propellers.forEach(prop => {
+                prop.rotation.y += deltaTime * 50;
+            });
+
+            // Blink beacon
+            const blinkOn = Math.floor(currentTime / 500) % 2 === 0;
+            if (landingGame.beaconLight) {
+                landingGame.beaconLight.material.color.setHex(blinkOn ? 0xff0000 : 0x440000);
+            }
+
+            // Camera follow
+            const cameraTarget = new THREE.Vector3(
+                landingGame.ship.position.x * 0.3,
+                0,
+                landingGame.ship.position.z * 0.3
+            );
+            landingGame.camera.position.x = 100 + cameraTarget.x;
+            landingGame.camera.position.z = 100 + cameraTarget.z;
+            landingGame.camera.lookAt(cameraTarget);
+
+            landingGame.renderer.render(landingGame.scene, landingGame.camera);
+            landingGame.animFrame = requestAnimationFrame(landingGameLoop);
+        }
+
+        function updateLandingShip(deltaTime) {
+            const ship = landingGame.ship;
+
+            // Slow fuel drain
+            landingGame.fuel = Math.max(0, landingGame.fuel - deltaTime * LANDING_CONFIG.fuelConsumption * 3);
+
+            if (!landingGame.isManual && landingGame.fuel > 0) {
+                // Autonomous flight - navigate to landing pad
+                runLandingAutopilot(deltaTime);
+            } else if (landingGame.isManual && landingGame.fuel > 0) {
+                // Manual controls via keyboard
+                applyManualLandingControls(deltaTime);
+            }
+
+            // Apply gentle gravity
+            landingGame.velocity.y -= LANDING_CONFIG.gravity * deltaTime * 20;
+
+            // Apply velocity (slower multiplier)
+            ship.position.add(landingGame.velocity.clone().multiplyScalar(deltaTime * 25));
+
+            // Tilt based on velocity
+            ship.rotation.z = landingGame.velocity.x * 0.05;
+            ship.rotation.x = -landingGame.velocity.z * 0.05;
+
+            // Strong damping for smoother movement
+            landingGame.velocity.multiplyScalar(0.96);
+
+            // Keep within bounds
+            ship.position.clamp(
+                new THREE.Vector3(-LANDING_CONFIG.bounds, 2, -LANDING_CONFIG.bounds),
+                new THREE.Vector3(LANDING_CONFIG.bounds, 100, LANDING_CONFIG.bounds)
+            );
+
+            // Update thrust light color based on mode
+            if (landingGame.thrustLight) {
+                landingGame.thrustLight.color.setHex(landingGame.isManual ? 0xff8800 : 0x00ff88);
+                landingGame.thrustLight.intensity = 1 + Math.sin(Date.now() * 0.005) * 0.3;
+            }
+        }
+
+        function runLandingAutopilot(deltaTime) {
+            const ship = landingGame.ship;
+            const padPos = new THREE.Vector3(0, 4, 0); // Target slightly above pad
+
+            // Calculate direction to landing pad
+            const direction = new THREE.Vector3().subVectors(padPos, ship.position);
+            const horizontalDist = Math.sqrt(direction.x * direction.x + direction.z * direction.z);
+            const verticalDist = ship.position.y;
+
+            // Desired velocity based on position - MUCH slower and gentler
+            const desiredVelocity = new THREE.Vector3();
+
+            // Horizontal movement - very gentle drift toward pad
+            if (horizontalDist > 3) {
+                desiredVelocity.x = direction.x * 0.015;  // Very slow horizontal
+                desiredVelocity.z = direction.z * 0.015;
+            }
+
+            // Vertical movement - very controlled slow descent
+            const slowDescent = -0.15;  // Very slow descent speed
+            if (verticalDist > 25) {
+                // High altitude - still slow descent
+                desiredVelocity.y = slowDescent * 1.5;
+            } else if (horizontalDist > 8) {
+                // Not over pad yet - hover and drift
+                desiredVelocity.y = -0.05;
+            } else {
+                // Over pad - very slow final descent
+                desiredVelocity.y = slowDescent * 0.5;
+            }
+
+            // Very gentle lerp toward desired velocity
+            landingGame.velocity.lerp(desiredVelocity, deltaTime * 0.8);
+
+            // Counter gravity gently when needed
+            if (landingGame.velocity.y < desiredVelocity.y - 0.05) {
+                landingGame.velocity.y += LANDING_CONFIG.thrustPower * deltaTime * 30;
+                landingGame.fuel -= LANDING_CONFIG.fuelConsumption * 0.5;
+            }
+        }
+
+        function applyManualLandingControls(deltaTime) {
+            const controlForce = LANDING_CONFIG.manualControl * deltaTime * 60;
+
+            if (landingKeys['ArrowUp'] || landingKeys['w']) {
+                landingGame.velocity.z -= controlForce;
+            }
+            if (landingKeys['ArrowDown'] || landingKeys['s']) {
+                landingGame.velocity.z += controlForce;
+            }
+            if (landingKeys['ArrowLeft'] || landingKeys['a']) {
+                landingGame.velocity.x -= controlForce;
+            }
+            if (landingKeys['ArrowRight'] || landingKeys['d']) {
+                landingGame.velocity.x += controlForce;
+            }
+            if (landingKeys[' ']) {
+                landingGame.velocity.y += controlForce * 1.5;
+                landingGame.fuel -= LANDING_CONFIG.fuelConsumption * 2;
+            }
+            if (landingKeys['Shift']) {
+                landingGame.velocity.y -= controlForce * 0.5;
+            }
+        }
+
+        const landingKeys = {};
+
+        function handleLandingKeyDown(e) {
+            if (!landingGame.active) return;
+            landingKeys[e.key] = true;
+
+            if (e.key === 'Escape') {
+                abortLanding();
+            }
+            if (e.key === 'm' || e.key === 'M') {
+                toggleLandingMode();
+            }
+
+            // Auto-switch to manual if keys pressed
+            if (!landingGame.isManual && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' ', 'w', 'a', 's', 'd'].includes(e.key)) {
+                landingGame.isManual = true;
+                updateLandingModeUI();
+                showNotification('MANUAL OVERRIDE - Autopilot disengaged', 'info');
+            }
+
+            e.preventDefault();
+        }
+
+        function handleLandingKeyUp(e) {
+            landingKeys[e.key] = false;
+        }
+
+        function toggleLandingMode() {
+            landingGame.isManual = !landingGame.isManual;
+            updateLandingModeUI();
+            showNotification(landingGame.isManual ? 'MANUAL CONTROL' : 'AUTOPILOT ENGAGED', 'info');
+        }
+
+        function updateLandingModeUI() {
+            document.getElementById('landing-mode').textContent = landingGame.isManual ? 'Manual' : 'Autonomous';
+            document.getElementById('landing-mode-btn').textContent = landingGame.isManual ? 'Switch to Autonomous' : 'Switch to Manual';
+        }
+
+        function updateLandingUI() {
+            const ship = landingGame.ship;
+            const altitude = Math.max(0, ship.position.y - 1).toFixed(1);
+            const speed = landingGame.velocity.length().toFixed(1);
+            const padPos = new THREE.Vector3(0, 0, 0);
+            const distance = Math.sqrt(
+                Math.pow(ship.position.x - padPos.x, 2) +
+                Math.pow(ship.position.z - padPos.z, 2)
+            ).toFixed(1);
+
+            document.getElementById('landing-altitude').textContent = altitude;
+            document.getElementById('landing-speed').textContent = speed;
+            document.getElementById('landing-fuel').textContent = Math.floor(landingGame.fuel);
+            document.getElementById('landing-distance').textContent = distance;
+        }
+
+        function checkLandingConditions() {
+            const ship = landingGame.ship;
+            const altitude = ship.position.y;
+            const speed = landingGame.velocity.length();
+            const horizontalDist = Math.sqrt(ship.position.x * ship.position.x + ship.position.z * ship.position.z);
+
+            // Check if landed
+            if (altitude <= 3) {
+                const onPad = horizontalDist < LANDING_CONFIG.landingPadSize;
+                const slowEnough = speed < LANDING_CONFIG.safeSpeed;
+
+                if (onPad && slowEnough) {
+                    landingSuccess();
+                } else if (!slowEnough) {
+                    landingCrash('Too fast! Reduce speed before landing.');
+                } else {
+                    landingCrash('Missed the landing pad!');
+                }
+            }
+
+            // Out of fuel
+            if (landingGame.fuel <= 0 && altitude > 10) {
+                landingCrash('Out of fuel!');
+            }
+        }
+
+        function landingSuccess() {
+            landingGame.active = false;
+            cancelAnimationFrame(landingGame.animFrame);
+
+            const civ = landingGame.targetCiv;
+            const bonusXp = Math.floor(landingGame.fuel * 2);
+
+            cleanupLandingGame();
+
+            showNotification(`Perfect landing on ${civ.name}! +${bonusXp} XP bonus!`, 'success');
+            AudioSystem.levelUp();
+
+            // Grant landing bonus XP
+            Object.keys(gameData.skills).forEach(skill => {
+                addXp(skill, Math.floor(bonusXp / 6));
+            });
+
+            // Track successful landings
+            gameData.statistics.successfulLandings = (gameData.statistics.successfulLandings || 0) + 1;
+
+            // Now actually enter the world
+            initWorld(civ);
+        }
+
+        function landingCrash(reason) {
+            landingGame.active = false;
+            cancelAnimationFrame(landingGame.animFrame);
+
+            cleanupLandingGame();
+
+            showNotification(`Crash landing! ${reason}`, 'error');
+            AudioSystem.error();
+
+            // Take damage
+            gameData.player.hp = Math.max(1, gameData.player.hp - 20);
+            updateHealthUI();
+
+            // Track crashes
+            gameData.statistics.crashLandings = (gameData.statistics.crashLandings || 0) + 1;
+
+            mode = 'galaxy';
+        }
+
+        function abortLanding() {
+            landingGame.active = false;
+            cancelAnimationFrame(landingGame.animFrame);
+            cleanupLandingGame();
+            mode = 'galaxy';
+            showNotification('Landing aborted. Returning to orbit.', 'info');
+        }
+
+        function cleanupLandingGame() {
+            document.getElementById('landing-overlay').style.display = 'none';
+            if (landingGame.renderer) {
+                landingGame.renderer.dispose();
+                const container = document.getElementById('landing-scene-container');
+                if (container) container.innerHTML = '';
+            }
+            // Reset keys
+            Object.keys(landingKeys).forEach(k => landingKeys[k] = false);
+        }
+
         // Math Utils
         class SeededRNG {
             constructor(seed) { this.seed = this.hash(seed); }
@@ -4379,6 +4998,132 @@
             lastActionTime: 0, // v4.0: Cooldown-based interactions
             lastPlayerPos: null // v4.2: For distance tracking
         };
+
+        // v5.5: Autonomous Exploration System
+        let autoExplore = {
+            enabled: true,  // Start in auto mode
+            currentTarget: null,
+            lastTargetTime: 0,
+            targetCooldown: 3000,  // Time between target switches
+            idleTime: 0,
+            state: 'exploring',  // exploring, gathering, combat, idle
+            combatTarget: null
+        };
+
+        function toggleAutoExplore() {
+            autoExplore.enabled = !autoExplore.enabled;
+            autoExplore.currentTarget = null;
+            updateAutoExploreUI();
+            showNotification(autoExplore.enabled ? 'AUTOPILOT: Exploring automatically' : 'MANUAL: You have control', 'info');
+        }
+
+        function updateAutoExploreUI() {
+            const btn = document.getElementById('auto-explore-btn');
+            const indicator = document.getElementById('auto-explore-indicator');
+            if (btn) {
+                btn.textContent = autoExplore.enabled ? 'Take Manual Control' : 'Enable Autopilot';
+                btn.style.background = autoExplore.enabled ? '#00ff88' : '#ff8844';
+            }
+            if (indicator) {
+                indicator.textContent = autoExplore.enabled ? '🤖 AUTOPILOT' : '🎮 MANUAL';
+                indicator.style.color = autoExplore.enabled ? '#00ff88' : '#ff8844';
+            }
+        }
+
+        function runAutoExplore(dt) {
+            if (!autoExplore.enabled || mode !== 'world' || !worldState.player) return false;
+
+            const player = worldState.player;
+            const now = performance.now();
+
+            // Priority 1: Combat - attack nearby enemies
+            if (worldState.mobs.length > 0) {
+                let nearestMob = null;
+                let nearestDist = Infinity;
+
+                worldState.mobs.forEach(mob => {
+                    if (!mob.parent) return;
+                    const dist = player.position.distanceTo(mob.position);
+                    if (dist < 20 && dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestMob = mob;
+                    }
+                });
+
+                if (nearestMob) {
+                    autoExplore.state = 'combat';
+                    autoExplore.combatTarget = nearestMob;
+
+                    // Move toward mob if not in range
+                    if (nearestDist > CONFIG.INTERACTION_RANGE) {
+                        worldState.target = nearestMob.position.clone();
+                    } else {
+                        // Attack!
+                        worldState.target = null;
+                        if (now - worldState.lastActionTime > CONFIG.INTERACTION_COOLDOWN) {
+                            performAction(nearestMob);
+                            worldState.lastActionTime = now;
+                        }
+                    }
+                    return true;
+                }
+            }
+
+            // Priority 2: Gather nearby resources
+            let nearestResource = null;
+            let nearestResourceDist = Infinity;
+
+            worldState.interactables.forEach(obj => {
+                if (!obj.parent) return;
+                const dist = player.position.distanceTo(obj.position);
+                if (dist < 25 && dist < nearestResourceDist) {
+                    nearestResourceDist = dist;
+                    nearestResource = obj;
+                }
+            });
+
+            if (nearestResource) {
+                autoExplore.state = 'gathering';
+
+                if (nearestResourceDist > CONFIG.INTERACTION_RANGE) {
+                    worldState.target = nearestResource.position.clone();
+                } else {
+                    if (now - worldState.lastActionTime > CONFIG.INTERACTION_COOLDOWN) {
+                        performAction(nearestResource);
+                        worldState.lastActionTime = now;
+                    }
+                }
+                return true;
+            }
+
+            // Priority 3: Explore - wander to new areas
+            autoExplore.state = 'exploring';
+
+            // Pick a new random target periodically
+            if (!autoExplore.currentTarget || now - autoExplore.lastTargetTime > autoExplore.targetCooldown) {
+                // Pick a random point on the terrain
+                const angle = Math.random() * Math.PI * 2;
+                const distance = 15 + Math.random() * 25;
+                autoExplore.currentTarget = new THREE.Vector3(
+                    player.position.x + Math.cos(angle) * distance,
+                    0,
+                    player.position.z + Math.sin(angle) * distance
+                );
+                // Clamp to world bounds
+                autoExplore.currentTarget.x = Math.max(-45, Math.min(45, autoExplore.currentTarget.x));
+                autoExplore.currentTarget.z = Math.max(-45, Math.min(45, autoExplore.currentTarget.z));
+                autoExplore.lastTargetTime = now;
+            }
+
+            worldState.target = autoExplore.currentTarget;
+
+            // Check if reached target
+            if (player.position.distanceTo(autoExplore.currentTarget) < 3) {
+                autoExplore.currentTarget = null;
+            }
+
+            return true;
+        }
 
         // WASD Keyboard controls
         const keys = { w: false, a: false, s: false, d: false };
@@ -5583,6 +6328,919 @@
             }
         }
 
+        // ============================================
+        // v5.4: COMPANION EVOLUTION SYSTEM
+        // ============================================
+        const PET_EVOLUTIONS = {
+            slime: {
+                stages: [
+                    { name: 'Slime Hatchling', icon: '🟢', bondRequired: 0, abilities: ['regen'], statMult: 1.0 },
+                    { name: 'Gel Guardian', icon: '🧪', bondRequired: 50, abilities: ['regen', 'shield'], statMult: 1.5 },
+                    { name: 'Slime Sovereign', icon: '👑', bondRequired: 150, abilities: ['regen', 'shield', 'absorb'], statMult: 2.5 }
+                ]
+            },
+            wisp: {
+                stages: [
+                    { name: 'Tiny Wisp', icon: '✨', bondRequired: 0, abilities: ['luck'], statMult: 1.0 },
+                    { name: 'Bright Spirit', icon: '💫', bondRequired: 60, abilities: ['luck', 'illuminate'], statMult: 1.6 },
+                    { name: 'Radiant Beacon', icon: '🌟', bondRequired: 180, abilities: ['luck', 'illuminate', 'fortune'], statMult: 2.8 }
+                ]
+            },
+            bat: {
+                stages: [
+                    { name: 'Cave Bat', icon: '🦇', bondRequired: 0, abilities: ['dodge'], statMult: 1.0 },
+                    { name: 'Shadow Wing', icon: '🖤', bondRequired: 55, abilities: ['dodge', 'swoop'], statMult: 1.4 },
+                    { name: 'Vampire Lord', icon: '🧛', bondRequired: 165, abilities: ['dodge', 'swoop', 'lifesteal'], statMult: 2.4 }
+                ]
+            },
+            phoenix: {
+                stages: [
+                    { name: 'Mini Phoenix', icon: '🔥', bondRequired: 0, abilities: ['damage'], statMult: 1.0 },
+                    { name: 'Flame Herald', icon: '🌋', bondRequired: 70, abilities: ['damage', 'burn'], statMult: 1.7 },
+                    { name: 'Inferno Avatar', icon: '☀️', bondRequired: 200, abilities: ['damage', 'burn', 'rebirth'], statMult: 3.0 }
+                ]
+            },
+            dragon: {
+                stages: [
+                    { name: 'Baby Dragon', icon: '🐲', bondRequired: 0, abilities: ['attack'], statMult: 1.0 },
+                    { name: 'Drake Champion', icon: '🐉', bondRequired: 80, abilities: ['attack', 'firebreath'], statMult: 1.8 },
+                    { name: 'Elder Wyrm', icon: '🔱', bondRequired: 250, abilities: ['attack', 'firebreath', 'devastation'], statMult: 3.5 }
+                ]
+            },
+            void: {
+                stages: [
+                    { name: 'Void Entity', icon: '🌀', bondRequired: 0, abilities: ['absorb'], statMult: 1.0 },
+                    { name: 'Void Walker', icon: '🕳️', bondRequired: 100, abilities: ['absorb', 'phase'], statMult: 2.0 },
+                    { name: 'Void Sovereign', icon: '⚫', bondRequired: 300, abilities: ['absorb', 'phase', 'annihilate'], statMult: 4.0 }
+                ]
+            },
+            celestial: {
+                stages: [
+                    { name: 'Celestial Star', icon: '⭐', bondRequired: 0, abilities: ['allStats'], statMult: 1.0 },
+                    { name: 'Constellation Spirit', icon: '🌌', bondRequired: 120, abilities: ['allStats', 'blessing'], statMult: 2.2 },
+                    { name: 'Cosmic Deity', icon: '💎', bondRequired: 400, abilities: ['allStats', 'blessing', 'transcendence'], statMult: 5.0 }
+                ]
+            }
+        };
+
+        const EVOLUTION_ABILITIES = {
+            regen: { name: 'Regeneration', desc: '+1 HP/5s', icon: '💚' },
+            shield: { name: 'Shield Aura', desc: '+5% damage reduction', icon: '🛡️' },
+            absorb: { name: 'Soul Absorb', desc: '+25% XP gain', icon: '👻' },
+            luck: { name: 'Lucky Charm', desc: '+10% loot bonus', icon: '🍀' },
+            illuminate: { name: 'Illuminate', desc: 'Reveals hidden items', icon: '💡' },
+            fortune: { name: 'Fortune', desc: '+20% rare item chance', icon: '💰' },
+            dodge: { name: 'Evasion', desc: '+5% dodge chance', icon: '💨' },
+            swoop: { name: 'Swoop Attack', desc: 'Pet deals bonus damage', icon: '🎯' },
+            lifesteal: { name: 'Lifesteal', desc: '+8% life on hit', icon: '🩸' },
+            damage: { name: 'Power Boost', desc: '+15% damage', icon: '⚔️' },
+            burn: { name: 'Burning Aura', desc: 'Enemies take fire damage', icon: '🔥' },
+            rebirth: { name: 'Rebirth', desc: 'Revive once per fight', icon: '🌅' },
+            attack: { name: 'Pet Attack', desc: 'Pet attacks enemies', icon: '👊' },
+            firebreath: { name: 'Fire Breath', desc: 'AoE fire damage', icon: '🐲' },
+            devastation: { name: 'Devastation', desc: '+50% boss damage', icon: '💀' },
+            phase: { name: 'Phase Shift', desc: 'Ignore 10% damage', icon: '🌀' },
+            annihilate: { name: 'Annihilate', desc: 'Execute low HP enemies', icon: '⚫' },
+            allStats: { name: 'All Stats', desc: '+10% all stats', icon: '✨' },
+            blessing: { name: 'Blessing', desc: '+15% all bonuses', icon: '🙏' },
+            transcendence: { name: 'Transcendence', desc: 'Ultimate power', icon: '🌈' }
+        };
+
+        function initPetEvolutionSystem() {
+            if (!gameData.petEvolution) {
+                gameData.petEvolution = {};
+            }
+            // Initialize bond for each owned pet
+            if (gameData.pets?.owned) {
+                for (const petId of gameData.pets.owned) {
+                    if (!gameData.petEvolution[petId]) {
+                        gameData.petEvolution[petId] = {
+                            bond: 0,
+                            stage: 0
+                        };
+                    }
+                }
+            }
+        }
+
+        function getPetEvolutionStage(petId) {
+            initPetEvolutionSystem();
+            return gameData.petEvolution[petId]?.stage || 0;
+        }
+
+        function getPetBond(petId) {
+            initPetEvolutionSystem();
+            return gameData.petEvolution[petId]?.bond || 0;
+        }
+
+        function addPetBond(petId, amount) {
+            initPetEvolutionSystem();
+            if (!gameData.petEvolution[petId]) {
+                gameData.petEvolution[petId] = { bond: 0, stage: 0 };
+            }
+            gameData.petEvolution[petId].bond += amount;
+            saveGameData();
+        }
+
+        function canEvolvePet(petId) {
+            const evolution = PET_EVOLUTIONS[petId];
+            if (!evolution) return false;
+
+            const currentStage = getPetEvolutionStage(petId);
+            const nextStage = evolution.stages[currentStage + 1];
+            if (!nextStage) return false;
+
+            const currentBond = getPetBond(petId);
+            return currentBond >= nextStage.bondRequired;
+        }
+
+        function evolvePet(petId) {
+            if (!canEvolvePet(petId)) return false;
+
+            const evolution = PET_EVOLUTIONS[petId];
+            const currentStage = getPetEvolutionStage(petId);
+            const nextStage = evolution.stages[currentStage + 1];
+
+            gameData.petEvolution[petId].stage = currentStage + 1;
+            saveGameData();
+
+            // Show evolution popup
+            showNotification(`${nextStage.icon} ${nextStage.name} EVOLVED!`, 'success');
+            AudioSystem.levelUp();
+
+            if (particles && worldState.player) {
+                particles.emit(worldState.player.position, 60, 0xaa44ff, { spread: 8, lifetime: 2000 });
+            }
+
+            updateEvolutionDisplay();
+            return true;
+        }
+
+        function getCurrentPetData(petId) {
+            const basePet = PET_TYPES[petId];
+            if (!basePet) return null;
+
+            const evolution = PET_EVOLUTIONS[petId];
+            if (!evolution) return basePet;
+
+            const stage = getPetEvolutionStage(petId);
+            const stageData = evolution.stages[stage];
+
+            return {
+                ...basePet,
+                name: stageData.name,
+                icon: stageData.icon,
+                abilities: stageData.abilities,
+                statMult: stageData.statMult
+            };
+        }
+
+        function getEvolutionBonuses() {
+            const bonuses = {
+                damageReduction: 0,
+                xpBonus: 0,
+                lootBonus: 0,
+                rareChance: 0,
+                dodgeBonus: 0,
+                lifesteal: 0,
+                damageBonus: 0,
+                burnDamage: false,
+                canRevive: false,
+                bossDamage: 0,
+                phaseShift: 0,
+                executeThreshold: 0,
+                allStatsBonus: 0,
+                blessingMult: 1.0
+            };
+
+            if (!gameData.pets?.active) return bonuses;
+
+            const petData = getCurrentPetData(gameData.pets.active);
+            if (!petData?.abilities) return bonuses;
+
+            for (const ability of petData.abilities) {
+                switch (ability) {
+                    case 'shield': bonuses.damageReduction += 0.05; break;
+                    case 'absorb': bonuses.xpBonus += 0.25; break;
+                    case 'luck': bonuses.lootBonus += 0.1; break;
+                    case 'fortune': bonuses.rareChance += 0.2; break;
+                    case 'dodge': bonuses.dodgeBonus += 0.05; break;
+                    case 'lifesteal': bonuses.lifesteal += 0.08; break;
+                    case 'damage': bonuses.damageBonus += 0.15; break;
+                    case 'burn': bonuses.burnDamage = true; break;
+                    case 'rebirth': bonuses.canRevive = true; break;
+                    case 'devastation': bonuses.bossDamage += 0.5; break;
+                    case 'phase': bonuses.phaseShift += 0.1; break;
+                    case 'annihilate': bonuses.executeThreshold = 0.15; break;
+                    case 'allStats': bonuses.allStatsBonus += 0.1; break;
+                    case 'blessing': bonuses.blessingMult = 1.15; break;
+                    case 'transcendence':
+                        bonuses.allStatsBonus += 0.2;
+                        bonuses.blessingMult = 1.3;
+                        break;
+                }
+            }
+
+            // Apply blessing multiplier
+            bonuses.damageBonus *= bonuses.blessingMult;
+            bonuses.xpBonus *= bonuses.blessingMult;
+            bonuses.lootBonus *= bonuses.blessingMult;
+
+            return bonuses;
+        }
+
+        function openEvolutionModal() {
+            initPetEvolutionSystem();
+            updateEvolutionDisplay();
+            document.getElementById('evolution-modal').style.display = 'flex';
+            AudioSystem.click();
+        }
+
+        function closeEvolutionModal() {
+            document.getElementById('evolution-modal').style.display = 'none';
+        }
+
+        function updateEvolutionDisplay() {
+            const container = document.getElementById('evolution-list');
+            if (!container) return;
+
+            initPetEvolutionSystem();
+            const ownedPets = gameData.pets?.owned || [];
+
+            if (ownedPets.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: #888; padding: 20px;">No companions yet. Defeat enemies to find pets!</div>';
+                return;
+            }
+
+            let html = '';
+            for (const petId of ownedPets) {
+                const evolution = PET_EVOLUTIONS[petId];
+                if (!evolution) continue;
+
+                const currentStage = getPetEvolutionStage(petId);
+                const stageData = evolution.stages[currentStage];
+                const nextStage = evolution.stages[currentStage + 1];
+                const bond = getPetBond(petId);
+                const canEvolve = canEvolvePet(petId);
+                const isActive = gameData.pets?.active === petId;
+
+                const bondForNext = nextStage ? nextStage.bondRequired : bond;
+                const bondProgress = nextStage ? Math.min(100, (bond / bondForNext) * 100) : 100;
+
+                html += `
+                    <div class="evolution-card ${canEvolve ? 'can-evolve' : ''}" style="${isActive ? 'border-color: #ff8800;' : ''}">
+                        <div class="evolution-header">
+                            <div class="evolution-icon">${stageData.icon}</div>
+                            <div class="evolution-info">
+                                <div class="evolution-name">${stageData.name}</div>
+                                <div class="evolution-stage">Stage ${currentStage + 1}/${evolution.stages.length} ${isActive ? '(ACTIVE)' : ''}</div>
+                            </div>
+                            <div style="text-align: right;">
+                                <div style="color: #ffd700; font-size: 14px;">${bond} Bond</div>
+                                <div style="color: #888; font-size: 11px;">x${stageData.statMult.toFixed(1)} Stats</div>
+                            </div>
+                        </div>
+                        <div class="evolution-bond">
+                            <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 4px;">
+                                <span>Bond Progress</span>
+                                <span>${bond}/${bondForNext}</span>
+                            </div>
+                            <div class="bond-bar">
+                                <div class="bond-fill" style="width: ${bondProgress}%;"></div>
+                            </div>
+                        </div>
+                        <div class="evolution-abilities">
+                            ${stageData.abilities.map(ab => {
+                                const abilityData = EVOLUTION_ABILITIES[ab];
+                                return `<div class="evolution-ability" title="${abilityData?.desc || ''}">${abilityData?.icon || ''} ${abilityData?.name || ab}</div>`;
+                            }).join('')}
+                            ${nextStage ? nextStage.abilities.filter(ab => !stageData.abilities.includes(ab)).map(ab => {
+                                const abilityData = EVOLUTION_ABILITIES[ab];
+                                return `<div class="evolution-ability locked" title="Unlock at next evolution">${abilityData?.icon || ''} ???</div>`;
+                            }).join('') : ''}
+                        </div>
+                        ${nextStage ? `
+                            <button class="evolve-btn" onclick="evolvePet('${petId}')" ${canEvolve ? '' : 'disabled'}>
+                                ${canEvolve ? `EVOLVE to ${nextStage.name}` : `Need ${bondForNext - bond} more bond`}
+                            </button>
+                        ` : '<div style="text-align: center; color: #ffd700; margin-top: 10px; font-size: 12px;">MAX EVOLUTION</div>'}
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Gain bond from various activities
+        function gainPetBond(amount) {
+            if (!gameData.pets?.active) return;
+            addPetBond(gameData.pets.active, amount);
+        }
+
+        // ============================================
+        // v5.4: WORLD EVENTS SYSTEM
+        // ============================================
+        const WORLD_EVENTS = {
+            meteorShower: {
+                name: 'Meteor Shower',
+                icon: '☄️',
+                desc: 'Meteors rain from the sky! Collect rare ores.',
+                duration: 120000, // 2 minutes
+                minLevel: 3,
+                spawnItems: ['Meteor Ore', 'Star Fragment', 'Cosmic Dust'],
+                rewards: { xp: 500, lootBonus: 0.5 },
+                color: 0xff4400
+            },
+            treasureHunt: {
+                name: 'Treasure Hunt',
+                icon: '🗺️',
+                desc: 'Hidden treasure chests have appeared!',
+                duration: 180000, // 3 minutes
+                minLevel: 2,
+                spawnItems: ['Gold Chest', 'Silver Chest', 'Ancient Relic'],
+                rewards: { xp: 400, goldBonus: 2.0 },
+                color: 0xffd700
+            },
+            invasionWave: {
+                name: 'Monster Invasion',
+                icon: '👹',
+                desc: 'Powerful monsters are invading! Defend the area!',
+                duration: 150000, // 2.5 minutes
+                minLevel: 5,
+                spawnMobs: true,
+                mobMultiplier: 2.0,
+                rewards: { xp: 800, combatXp: 300 },
+                color: 0xff0044
+            },
+            harvestMoon: {
+                name: 'Harvest Moon',
+                icon: '🌕',
+                desc: 'Resources yield double during the Harvest Moon!',
+                duration: 240000, // 4 minutes
+                minLevel: 1,
+                resourceMultiplier: 2.0,
+                rewards: { xp: 300 },
+                color: 0xffcc00
+            },
+            ancientRuins: {
+                name: 'Ancient Ruins Emerge',
+                icon: '🏛️',
+                desc: 'Ancient ruins have surfaced! Explore for rare artifacts.',
+                duration: 200000, // 3.33 minutes
+                minLevel: 7,
+                spawnItems: ['Ancient Artifact', 'Rune Stone', 'Lost Technology'],
+                rewards: { xp: 1000, rareChance: 0.3 },
+                color: 0x8844aa
+            },
+            crystalBloom: {
+                name: 'Crystal Bloom',
+                icon: '💎',
+                desc: 'Rare crystals are blooming across the land!',
+                duration: 160000, // 2.66 minutes
+                minLevel: 4,
+                spawnItems: ['Rainbow Crystal', 'Pure Crystal', 'Crystal Shard'],
+                rewards: { xp: 600, craftBonus: 0.5 },
+                color: 0x44ffff
+            },
+            bossRush: {
+                name: 'Boss Rush',
+                icon: '💀',
+                desc: 'Multiple bosses have spawned! Great rewards await!',
+                duration: 300000, // 5 minutes
+                minLevel: 10,
+                spawnBosses: true,
+                rewards: { xp: 2000, rareLoot: true },
+                color: 0xff00ff
+            },
+            peacefulDay: {
+                name: 'Peaceful Day',
+                icon: '🌸',
+                desc: 'A peaceful day with bonus XP and healing!',
+                duration: 180000, // 3 minutes
+                minLevel: 1,
+                xpMultiplier: 1.5,
+                healingBonus: 2.0,
+                rewards: { xp: 200 },
+                color: 0xff88aa
+            }
+        };
+
+        let activeWorldEvent = null;
+        let worldEventEndTime = 0;
+        let worldEventProgress = { collected: 0, killed: 0, explored: 0 };
+        let lastWorldEventCheck = 0;
+        let worldEventSpawns = [];
+
+        function initWorldEventSystem() {
+            if (!gameData.worldEvents) {
+                gameData.worldEvents = {
+                    completed: {},
+                    totalEventsCompleted: 0,
+                    lastEventTime: 0
+                };
+            }
+        }
+
+        function canSpawnWorldEvent() {
+            if (activeWorldEvent) return false;
+            if (mode !== 'world') return false;
+
+            const timeSinceLastEvent = performance.now() - (gameData.worldEvents?.lastEventTime || 0);
+            return timeSinceLastEvent > 180000; // 3 minute cooldown between events
+        }
+
+        function trySpawnWorldEvent() {
+            if (!canSpawnWorldEvent()) return false;
+
+            // 2% chance per check (checked every ~5 seconds in game loop)
+            if (Math.random() > 0.02) return false;
+
+            const playerLevel = Math.max(...Object.values(gameData.skills).map(s => s.level));
+            const eligibleEvents = Object.entries(WORLD_EVENTS).filter(([id, event]) => {
+                return playerLevel >= event.minLevel;
+            });
+
+            if (eligibleEvents.length === 0) return false;
+
+            const [eventId, eventData] = eligibleEvents[Math.floor(Math.random() * eligibleEvents.length)];
+            startWorldEvent(eventId);
+            return true;
+        }
+
+        function startWorldEvent(eventId) {
+            const eventData = WORLD_EVENTS[eventId];
+            if (!eventData) return;
+
+            activeWorldEvent = { id: eventId, ...eventData };
+            worldEventEndTime = performance.now() + eventData.duration;
+            worldEventProgress = { collected: 0, killed: 0, explored: 0 };
+            worldEventSpawns = [];
+
+            // Show event notification
+            showWorldEventNotification(eventData);
+
+            // Spawn event-specific content
+            if (eventData.spawnItems) {
+                spawnEventItems(eventData);
+            }
+            if (eventData.spawnMobs) {
+                spawnEventMobs(eventData);
+            }
+            if (eventData.spawnBosses) {
+                spawnEventBosses();
+            }
+
+            // Update UI
+            updateEventIndicator();
+
+            gameData.worldEvents.lastEventTime = performance.now();
+            saveGameData();
+        }
+
+        function showWorldEventNotification(eventData) {
+            const notification = document.createElement('div');
+            notification.className = 'event-notification';
+            notification.innerHTML = `
+                <div class="event-title">${eventData.icon} ${eventData.name}!</div>
+                <div class="event-desc">${eventData.desc}</div>
+                <div class="event-timer">Duration: ${Math.floor(eventData.duration / 1000)}s</div>
+            `;
+            document.body.appendChild(notification);
+
+            AudioSystem.levelUp();
+            if (particles && worldState.player) {
+                particles.emit(worldState.player.position, 40, eventData.color, { spread: 10, lifetime: 2000 });
+            }
+
+            setTimeout(() => notification.remove(), 5000);
+        }
+
+        function spawnEventItems(eventData) {
+            if (!worldState.player) return;
+
+            const itemCount = 5 + Math.floor(Math.random() * 5);
+            for (let i = 0; i < itemCount; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const dist = 20 + Math.random() * 40;
+                const x = worldState.player.position.x + Math.cos(angle) * dist;
+                const z = worldState.player.position.z + Math.sin(angle) * dist;
+
+                const itemType = eventData.spawnItems[Math.floor(Math.random() * eventData.spawnItems.length)];
+
+                // Create visual marker
+                const geometry = new THREE.SphereGeometry(0.5, 8, 8);
+                const material = new THREE.MeshStandardMaterial({
+                    color: eventData.color,
+                    emissive: eventData.color,
+                    emissiveIntensity: 0.5
+                });
+                const marker = new THREE.Mesh(geometry, material);
+                marker.position.set(x, 1, z);
+                marker.userData = { type: 'eventItem', itemType, eventId: activeWorldEvent.id, hp: 1, maxHp: 1 };
+                scene.add(marker);
+                worldEventSpawns.push(marker);
+                // Add to interactables so player can target them
+                worldState.interactables.push(marker);
+            }
+        }
+
+        function spawnEventMobs(eventData) {
+            // Spawn extra mobs during invasion
+            const extraMobs = Math.floor(10 * (eventData.mobMultiplier || 1));
+            for (let i = 0; i < extraMobs; i++) {
+                if (typeof spawnMob === 'function') {
+                    spawnMob(true); // Force spawn stronger mobs
+                }
+            }
+        }
+
+        function spawnEventBosses() {
+            // Spawn multiple bosses during boss rush
+            for (let i = 0; i < 3; i++) {
+                if (typeof spawnBoss === 'function') {
+                    setTimeout(() => spawnBoss(), i * 30000);
+                }
+            }
+        }
+
+        function updateWorldEvent(dt, time) {
+            if (!activeWorldEvent) {
+                // Check for new event every 5 seconds
+                if (time - lastWorldEventCheck > 5000) {
+                    lastWorldEventCheck = time;
+                    trySpawnWorldEvent();
+                }
+                return;
+            }
+
+            // Check if event ended
+            if (performance.now() >= worldEventEndTime) {
+                endWorldEvent();
+                return;
+            }
+
+            // Update event indicator
+            updateEventIndicator();
+
+            // Apply event bonuses
+            applyEventBonuses();
+
+            // Animate event spawns
+            worldEventSpawns.forEach(spawn => {
+                if (spawn && spawn.position) {
+                    spawn.position.y = 1 + Math.sin(time * 0.003) * 0.3;
+                    spawn.rotation.y += dt * 2;
+                }
+            });
+        }
+
+        function applyEventBonuses() {
+            // Bonuses are applied in relevant game functions
+            // This function tracks active bonuses
+        }
+
+        function getWorldEventBonuses() {
+            if (!activeWorldEvent) return {};
+
+            return {
+                resourceMultiplier: activeWorldEvent.resourceMultiplier || 1,
+                xpMultiplier: activeWorldEvent.xpMultiplier || 1,
+                lootBonus: activeWorldEvent.rewards?.lootBonus || 0,
+                healingBonus: activeWorldEvent.healingBonus || 1
+            };
+        }
+
+        function collectEventItem(marker) {
+            if (!marker.userData.itemType) return;
+
+            const itemType = marker.userData.itemType;
+            worldEventProgress.collected++;
+
+            // Add item to inventory
+            addItem(itemType);
+            showNotification(`Collected: ${itemType}`, 'success');
+            AudioSystem.collect();
+
+            if (particles) {
+                particles.emit(marker.position, 15, activeWorldEvent?.color || 0xffd700);
+            }
+
+            // Remove marker
+            scene.remove(marker);
+            worldEventSpawns = worldEventSpawns.filter(s => s !== marker);
+            worldState.interactables = worldState.interactables.filter(i => i !== marker);
+
+            // Gain pet bond
+            gainPetBond(2);
+        }
+
+        function endWorldEvent() {
+            if (!activeWorldEvent) return;
+
+            initWorldEventSystem();
+
+            // Apply completion rewards
+            const rewards = activeWorldEvent.rewards;
+            if (rewards.xp) {
+                addXp('combat', rewards.xp);
+            }
+            if (rewards.combatXp) {
+                addXp('combat', rewards.combatXp);
+            }
+
+            // Track completion
+            if (!gameData.worldEvents.completed[activeWorldEvent.id]) {
+                gameData.worldEvents.completed[activeWorldEvent.id] = 0;
+            }
+            gameData.worldEvents.completed[activeWorldEvent.id]++;
+            gameData.worldEvents.totalEventsCompleted++;
+
+            showNotification(`${activeWorldEvent.icon} Event Complete! +${rewards.xp || 0} XP`, 'success');
+
+            // Clean up event spawns
+            worldEventSpawns.forEach(spawn => {
+                if (spawn && spawn.parent) scene.remove(spawn);
+                // Remove from interactables
+                worldState.interactables = worldState.interactables.filter(i => i !== spawn);
+            });
+            worldEventSpawns = [];
+
+            // Gain pet bond for completion
+            gainPetBond(10);
+
+            activeWorldEvent = null;
+            updateEventIndicator();
+            saveGameData();
+        }
+
+        function updateEventIndicator() {
+            const indicator = document.getElementById('event-indicator');
+            if (!indicator) return;
+
+            if (!activeWorldEvent) {
+                indicator.classList.remove('active');
+                return;
+            }
+
+            indicator.classList.add('active');
+
+            const timeLeft = Math.max(0, worldEventEndTime - performance.now());
+            const minutes = Math.floor(timeLeft / 60000);
+            const seconds = Math.floor((timeLeft % 60000) / 1000);
+            const progress = (timeLeft / activeWorldEvent.duration) * 100;
+
+            document.getElementById('event-ind-icon').textContent = activeWorldEvent.icon;
+            document.getElementById('event-ind-name').textContent = activeWorldEvent.name;
+            document.getElementById('event-ind-time').textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            document.getElementById('event-ind-fill').style.width = `${progress}%`;
+        }
+
+        // ============================================
+        // v5.4: ACHIEVEMENT SHOWCASE SYSTEM
+        // ============================================
+        const ACHIEVEMENT_POINTS = {
+            // Basic achievements
+            'first_landing': { points: 10, tier: 'common' },
+            'explorer_10': { points: 25, tier: 'common' },
+            'explorer_30': { points: 50, tier: 'rare' },
+            'lumberjack_25': { points: 15, tier: 'common' },
+            'lumberjack_100': { points: 40, tier: 'rare' },
+            'miner_25': { points: 15, tier: 'common' },
+            'miner_100': { points: 40, tier: 'rare' },
+            'angler_10': { points: 15, tier: 'common' },
+            'angler_50': { points: 35, tier: 'rare' },
+            'slayer_10': { points: 20, tier: 'common' },
+            'slayer_50': { points: 50, tier: 'rare' },
+            'crafter_10': { points: 15, tier: 'common' },
+            'crafter_50': { points: 45, tier: 'rare' },
+            'max_skill': { points: 75, tier: 'legendary' },
+            'playtime_1h': { points: 30, tier: 'common' },
+            'survivor': { points: 35, tier: 'rare' },
+            'daily_3': { points: 25, tier: 'common' },
+            'daily_7': { points: 60, tier: 'rare' }
+        };
+
+        const AP_MILESTONES = [
+            { points: 50, name: 'Novice Achiever', reward: { type: 'cosmetic', id: 'sparkle' } },
+            { points: 100, name: 'Rising Star', reward: { type: 'xpBonus', value: 0.05 } },
+            { points: 200, name: 'Accomplished', reward: { type: 'cosmetic', id: 'aura_blue' } },
+            { points: 350, name: 'Elite Achiever', reward: { type: 'lootBonus', value: 0.1 } },
+            { points: 500, name: 'Master Achiever', reward: { type: 'cosmetic', id: 'aura_gold' } },
+            { points: 750, name: 'Legendary Status', reward: { type: 'allBonus', value: 0.1 } },
+            { points: 1000, name: 'Achievement God', reward: { type: 'cosmetic', id: 'aura_rainbow' } }
+        ];
+
+        const COSMETIC_EFFECTS = {
+            sparkle: { name: 'Sparkle Trail', desc: 'Leave sparkles as you move', icon: '✨' },
+            aura_blue: { name: 'Blue Aura', desc: 'Mystical blue glow around player', icon: '💙' },
+            aura_gold: { name: 'Golden Aura', desc: 'Prestigious golden glow', icon: '💛' },
+            aura_rainbow: { name: 'Rainbow Aura', desc: 'Ultimate rainbow effect', icon: '🌈' }
+        };
+
+        function initAchievementShowcase() {
+            if (!gameData.achievementShowcase) {
+                gameData.achievementShowcase = {
+                    activeCosmetic: null,
+                    unlockedCosmetics: [],
+                    bonuses: {
+                        xpBonus: 0,
+                        lootBonus: 0,
+                        allBonus: 0
+                    }
+                };
+            }
+        }
+
+        function calculateTotalAP() {
+            let total = 0;
+            for (const [achId, achPoints] of Object.entries(ACHIEVEMENT_POINTS)) {
+                if (gameData.achievements[achId]) {
+                    total += achPoints.points;
+                }
+            }
+            return total;
+        }
+
+        function getCurrentMilestone() {
+            const totalAP = calculateTotalAP();
+            let current = null;
+            let next = AP_MILESTONES[0];
+
+            for (let i = 0; i < AP_MILESTONES.length; i++) {
+                if (totalAP >= AP_MILESTONES[i].points) {
+                    current = AP_MILESTONES[i];
+                    next = AP_MILESTONES[i + 1] || null;
+                } else {
+                    break;
+                }
+            }
+
+            return { current, next };
+        }
+
+        function checkMilestoneRewards() {
+            initAchievementShowcase();
+            const totalAP = calculateTotalAP();
+
+            for (const milestone of AP_MILESTONES) {
+                if (totalAP >= milestone.points) {
+                    const reward = milestone.reward;
+
+                    if (reward.type === 'cosmetic') {
+                        if (!gameData.achievementShowcase.unlockedCosmetics.includes(reward.id)) {
+                            gameData.achievementShowcase.unlockedCosmetics.push(reward.id);
+                            showNotification(`Cosmetic Unlocked: ${COSMETIC_EFFECTS[reward.id]?.name}!`, 'success');
+                        }
+                    } else if (reward.type === 'xpBonus') {
+                        gameData.achievementShowcase.bonuses.xpBonus = Math.max(
+                            gameData.achievementShowcase.bonuses.xpBonus,
+                            reward.value
+                        );
+                    } else if (reward.type === 'lootBonus') {
+                        gameData.achievementShowcase.bonuses.lootBonus = Math.max(
+                            gameData.achievementShowcase.bonuses.lootBonus,
+                            reward.value
+                        );
+                    } else if (reward.type === 'allBonus') {
+                        gameData.achievementShowcase.bonuses.allBonus = Math.max(
+                            gameData.achievementShowcase.bonuses.allBonus,
+                            reward.value
+                        );
+                    }
+                }
+            }
+
+            saveGameData();
+        }
+
+        function getShowcaseBonuses() {
+            initAchievementShowcase();
+            return {
+                xpBonus: gameData.achievementShowcase.bonuses?.xpBonus || 0,
+                lootBonus: gameData.achievementShowcase.bonuses?.lootBonus || 0,
+                allBonus: gameData.achievementShowcase.bonuses?.allBonus || 0
+            };
+        }
+
+        function setActiveCosmetic(cosmeticId) {
+            initAchievementShowcase();
+            if (cosmeticId && !gameData.achievementShowcase.unlockedCosmetics.includes(cosmeticId)) {
+                return false;
+            }
+
+            gameData.achievementShowcase.activeCosmetic = cosmeticId;
+            saveGameData();
+            updateShowcaseDisplay();
+
+            if (cosmeticId) {
+                const cosmetic = COSMETIC_EFFECTS[cosmeticId];
+                showNotification(`Cosmetic equipped: ${cosmetic?.name}`, 'info');
+            } else {
+                showNotification('Cosmetic removed', 'info');
+            }
+
+            return true;
+        }
+
+        function openShowcaseModal() {
+            initAchievementShowcase();
+            checkMilestoneRewards();
+            updateShowcaseDisplay();
+            document.getElementById('showcase-modal').style.display = 'flex';
+            AudioSystem.click();
+        }
+
+        function closeShowcaseModal() {
+            document.getElementById('showcase-modal').style.display = 'none';
+        }
+
+        function updateShowcaseDisplay() {
+            const totalAP = calculateTotalAP();
+            const milestones = getCurrentMilestone();
+
+            document.getElementById('total-ap').textContent = totalAP;
+
+            if (milestones.next) {
+                document.getElementById('next-milestone-name').textContent =
+                    `${milestones.next.name} (${milestones.next.points} AP)`;
+                const progress = ((totalAP - (milestones.current?.points || 0)) /
+                    (milestones.next.points - (milestones.current?.points || 0))) * 100;
+                document.getElementById('milestone-progress').style.width = `${Math.min(100, progress)}%`;
+            } else {
+                document.getElementById('next-milestone-name').textContent = 'All milestones complete!';
+                document.getElementById('milestone-progress').style.width = '100%';
+            }
+
+            // Active cosmetic
+            const activeCosmetic = gameData.achievementShowcase?.activeCosmetic;
+            document.getElementById('active-cosmetic').textContent =
+                activeCosmetic ? COSMETIC_EFFECTS[activeCosmetic]?.name : 'None';
+
+            // Render badges
+            const container = document.getElementById('showcase-badges');
+            let html = '';
+
+            // Cosmetics section
+            html += '<div style="grid-column: 1 / -1; font-weight: bold; color: #aa44ff; margin: 10px 0;">Cosmetics</div>';
+            for (const [cosId, cosmetic] of Object.entries(COSMETIC_EFFECTS)) {
+                const unlocked = gameData.achievementShowcase?.unlockedCosmetics?.includes(cosId);
+                const isActive = activeCosmetic === cosId;
+                html += `
+                    <div class="showcase-badge ${unlocked ? 'earned' : ''} ${isActive ? 'legendary' : ''}"
+                         onclick="${unlocked ? `setActiveCosmetic('${isActive ? '' : cosId}')` : ''}"
+                         title="${unlocked ? cosmetic.desc : 'Locked - earn more AP!'}">
+                        <div class="showcase-badge-icon">${cosmetic.icon}</div>
+                        <div class="showcase-badge-name">${unlocked ? cosmetic.name : '???'}</div>
+                    </div>
+                `;
+            }
+
+            // Achievements section
+            html += '<div style="grid-column: 1 / -1; font-weight: bold; color: #ffd700; margin: 10px 0;">Achievements</div>';
+            for (const [achId, achData] of Object.entries(ACHIEVEMENT_POINTS)) {
+                const achievement = ACHIEVEMENTS[achId];
+                if (!achievement) continue;
+
+                const unlocked = gameData.achievements[achId];
+                const tierClass = achData.tier === 'legendary' ? 'legendary' :
+                                 achData.tier === 'rare' ? 'rare' : '';
+
+                html += `
+                    <div class="showcase-badge ${unlocked ? 'earned' : ''} ${unlocked && tierClass}"
+                         title="${achievement.desc} (${achData.points} AP)">
+                        <div class="showcase-badge-icon">${achievement.icon}</div>
+                        <div class="showcase-badge-name">${unlocked ? achievement.name : '???'}</div>
+                        ${unlocked ? `<div style="font-size: 9px; color: #ffd700;">+${achData.points} AP</div>` : ''}
+                    </div>
+                `;
+            }
+
+            container.innerHTML = html;
+        }
+
+        // Apply cosmetic effect visuals
+        let lastCosmeticUpdate = 0;
+        function updateCosmeticEffects(time) {
+            if (!worldState.player) return;
+
+            const activeCosmetic = gameData.achievementShowcase?.activeCosmetic;
+            if (!activeCosmetic) return;
+
+            if (time - lastCosmeticUpdate < 100) return;
+            lastCosmeticUpdate = time;
+
+            if (activeCosmetic === 'sparkle' && particles) {
+                particles.emit(worldState.player.position, 2, 0xffffff, { spread: 1, lifetime: 500 });
+            } else if (activeCosmetic.startsWith('aura_') && particles) {
+                const colors = {
+                    aura_blue: 0x4488ff,
+                    aura_gold: 0xffd700,
+                    aura_rainbow: Math.random() > 0.5 ? 0xff4488 : (Math.random() > 0.5 ? 0x44ff88 : 0x4488ff)
+                };
+                particles.emit(worldState.player.position, 1, colors[activeCosmetic] || 0xffffff, { spread: 2, lifetime: 800 });
+            }
+        }
+
         // v5.0: Dynamic Weather System
         const WEATHER_TYPES = {
             clear: {
@@ -6684,6 +8342,11 @@
             // v5.0: Initialize weather system
             initWeatherSystem();
 
+            // v5.4: Initialize new systems
+            initPetEvolutionSystem();
+            initWorldEventSystem();
+            initAchievementShowcase();
+
             // v4.4: Start environmental particles
             if (envParticles) envParticles.startBiome(civ.biome);
 
@@ -7156,6 +8819,21 @@
             const hasKeyInput = keys.w || keys.a || keys.s || keys.d;
             const hasJoystickInput = joystickActive && (Math.abs(joystickInput.x) > 0.1 || Math.abs(joystickInput.y) > 0.1);
 
+            // v5.5: Disable autopilot if player takes manual control
+            if (hasKeyInput || hasJoystickInput) {
+                if (autoExplore.enabled) {
+                    autoExplore.enabled = false;
+                    autoExplore.currentTarget = null;
+                    updateAutoExploreUI();
+                    showNotification('MANUAL OVERRIDE - Autopilot disengaged', 'info');
+                }
+            }
+
+            // v5.5: Run autonomous exploration if enabled
+            if (autoExplore.enabled) {
+                runAutoExplore(dt);
+            }
+
             if (hasKeyInput || hasJoystickInput) {
                 _tempVec3A.set(0, 0, 0);
                 if (hasKeyInput) {
@@ -7424,6 +9102,12 @@
 
             // v5.0: Update weather system
             updateWeather(dt, time);
+
+            // v5.4: Update world events
+            updateWorldEvent(dt, time);
+
+            // v5.4: Update cosmetic effects
+            updateCosmeticEffects(time);
         }
 
         function snapToGround(obj) {
@@ -7539,6 +9223,16 @@
                 }
             }
 
+            // v5.4: Apply evolution damage bonus
+            const evolutionBonuses = getEvolutionBonuses();
+            if (evolutionBonuses.damageBonus > 0) {
+                totalDamage = Math.floor(totalDamage * (1 + evolutionBonuses.damageBonus));
+            }
+            // v5.4: Apply evolution boss damage bonus
+            if (isBoss && evolutionBonuses.bossDamage > 0) {
+                totalDamage = Math.floor(totalDamage * (1 + evolutionBonuses.bossDamage));
+            }
+
             return totalDamage;
         }
 
@@ -7579,6 +9273,12 @@
 
         function performAction(target) {
             const data = target.userData;
+
+            // v5.4: Handle event item collection
+            if (data.type === 'eventItem') {
+                collectEventItem(target);
+                return;
+            }
 
             // v4.2: Handle POI interactions differently
             if (data.type === 'poi') {
@@ -7719,6 +9419,7 @@
                     for (let i = 0; i < totalYield; i++) addItem('Log');
                     addXp('wood', 50);
                     gameData.statistics.treesChopped++;
+                    gainPetBond(1); // v5.4: Pet bond from gathering
                     spawnFloater(target.position, `+${totalYield} LOG`, '#da5');
                     AudioSystem.collect();
                     if (particles) particles.emit(target.position, 12, 0xdd9955, { spread: 4, lifetime: 1000 });
@@ -7733,6 +9434,7 @@
                     for (let i = 0; i < totalYield; i++) addItem('Ore');
                     addXp('mining', 50);
                     gameData.statistics.oresMined++;
+                    gainPetBond(1); // v5.4: Pet bond from gathering
                     spawnFloater(target.position, `+${totalYield} ORE`, '#888');
                     AudioSystem.collect();
                     if (particles) particles.emit(target.position, 15, 0x888888, { spread: 3, lifetime: 800 });
@@ -7823,6 +9525,8 @@
                         }
                         // v5.0: Try to drop a pet
                         tryDropPet(data.name);
+                        // v5.4: Gain pet bond from kills
+                        gainPetBond(data.isElite ? 3 : 1);
                         // v4.7: Track elite kills
                         if (data.isElite) {
                             gameData.statistics.elitesKilled = (gameData.statistics.elitesKilled || 0) + 1;
@@ -7883,6 +9587,7 @@
                         for (let i = 0; i < fishCount; i++) addItem('Raw Fish');
                         addXp('fishing', 40);
                         gameData.statistics.fishCaught += fishCount;
+                        gainPetBond(1); // v5.4: Pet bond from fishing
                         spawnFloater(target.position, `+${fishCount} FISH`, '#44f');
                         AudioSystem.collect();
                         if (particles) particles.emit(target.position, 8, 0x4488ff, { spread: 2, lifetime: 800, gravity: 5 });
@@ -7919,6 +9624,18 @@
                 reducedAmount = Math.floor(amount * (1 - COMBAT_ABILITIES.shieldWall.damageReduction));
                 if (worldState.player) {
                     spawnFloater(worldState.player.position, `🛡️ BLOCKED!`, '#4488ff');
+                }
+            }
+
+            // v5.4: Apply evolution damage reduction and phase shift
+            const evolutionBonuses = getEvolutionBonuses();
+            if (evolutionBonuses.damageReduction > 0) {
+                reducedAmount = Math.floor(reducedAmount * (1 - evolutionBonuses.damageReduction));
+            }
+            if (evolutionBonuses.phaseShift > 0 && Math.random() < evolutionBonuses.phaseShift) {
+                reducedAmount = Math.floor(reducedAmount * 0.5);
+                if (worldState.player) {
+                    spawnFloater(worldState.player.position, '🌀 PHASED!', '#4400ff');
                 }
             }
 
@@ -8005,7 +9722,7 @@
                         tooltip.style.display = 'block';
                         tooltip.style.left = e.clientX + 10 + 'px';
                         tooltip.style.top = e.clientY + 10 + 'px';
-                        tooltip.innerHTML = `<strong>${civ.name}</strong><br>Biome: ${civ.biomeName}<br>Pop: ${civ.pop}M${civ.visited ? '<br><span style="color:#0f0">Visited</span>' : ''}<br><span style="color:#888">Click to Land</span>`;
+                        tooltip.innerHTML = `<strong>${civ.name}</strong><br>Biome: ${civ.biomeName}<br>Pop: ${civ.pop}M${civ.visited ? '<br><span style="color:#0f0">Visited</span>' : ''}<br><span style="color:#888">🚀 Click to Begin Landing Sequence</span>`;
                         document.body.style.cursor = 'pointer';
 
                         selectionRing.visible = true;
@@ -8045,7 +9762,8 @@
                     let obj = intersects[0].object;
                     while(obj.parent && obj.parent !== galaxyGroup) obj = obj.parent;
                     if(obj.userData.type === 'civ') {
-                        initWorld(obj.userData.data);
+                        // v5.5: Landing mini-game before entering world
+                        startLandingGame(obj.userData.data);
                     }
                 }
             }
@@ -8121,6 +9839,12 @@
         }
 
         function onKeyDown(e) {
+            // v5.5: Landing mini-game controls
+            if (landingGame.active) {
+                handleLandingKeyDown(e);
+                return;
+            }
+
             // WASD movement
             const key = e.key.toLowerCase();
             if (key in keys) {
@@ -8196,6 +9920,12 @@
         }
 
         function onKeyUp(e) {
+            // v5.5: Landing mini-game controls
+            if (landingGame.active) {
+                handleLandingKeyUp(e);
+                return;
+            }
+
             const key = e.key.toLowerCase();
             if (key in keys) {
                 keys[key] = false;
@@ -8398,6 +10128,18 @@
             // v5.3: Apply rarity item XP bonus
             const rarityBonuses = getRarityBonuses();
             multiplier *= (1 + (rarityBonuses.xpBonus || 0));
+
+            // v5.4: Apply showcase milestone XP bonus
+            const showcaseBonuses = getShowcaseBonuses();
+            multiplier *= (1 + (showcaseBonuses.xpBonus || 0) + (showcaseBonuses.allBonus || 0));
+
+            // v5.4: Apply world event XP bonus
+            const eventBonuses = getWorldEventBonuses();
+            multiplier *= (eventBonuses.xpMultiplier || 1);
+
+            // v5.4: Apply evolution XP bonus
+            const evolutionBonuses = getEvolutionBonuses();
+            multiplier *= (1 + (evolutionBonuses.xpBonus || 0));
 
             const adjustedAmt = Math.round(amt * multiplier);
 
