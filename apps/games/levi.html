@@ -498,9 +498,10 @@
         .ai-status-msg.error { color: #f44; }
 
         /* Player Health Bar - v5.15.2: Updated for PROBE INTEGRITY design */
+        /* v5.16.3: Moved below button row to fix UI overlap */
         .player-health-bar {
             position: fixed;
-            top: 10px;
+            top: 45px;
             left: 50%;
             transform: translateX(-50%);
             width: clamp(200px, 35vw, 320px);
@@ -512,6 +513,7 @@
             pointer-events: none;
             backdrop-filter: blur(5px);
             box-shadow: 0 0 20px rgba(0, 255, 255, 0.2);
+            z-index: 99;
         }
 
         .player-health-bar.critical {
@@ -5219,7 +5221,7 @@
         //        Smooth restoration of autonomous state on exit
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '5.16.3';
+        const VERSION = '5.17.0';
 
         // ============================================
         // THREE.js Extensions: FontLoader & TextGeometry
@@ -12404,7 +12406,17 @@
                 profileId: customConfig?.profileId || null,
                 // v5.15.2: Try Again replay system - store full interaction history
                 interactionHistory: [],  // Full request/response pairs with context
-                replayState: null        // Current replay comparison if active
+                replayState: null,       // Current replay comparison if active
+                // v5.17: Agent experience and efficiency system
+                agentXP: 0,
+                agentLevel: 1,
+                efficiency: 1.0,         // Multiplier for action success rate
+                combo: 0,                // Consecutive successful actions
+                maxCombo: 0,             // Best combo achieved
+                lastActionSuccess: false,
+                actionsPerformed: 0,
+                successfulActions: 0,
+                lastHealthRegen: performance.now()
             };
 
             // Create 3D mesh for the agent
@@ -12901,102 +12913,154 @@
             saveGameData();
         }
 
-        // Simulate agent decision (fallback when no API)
+        // v5.17: Simulate agent decision with efficiency system (fallback when no API)
         function simulateAgentDecision(agent, context) {
             const taskType = agent.typeConfig.taskType;
 
-            // Random results based on task type
+            // v5.17: Use efficiency-modified success rates
             const rand = Math.random();
             let result = {};
+            let success = false;
 
             switch (taskType) {
                 case 'gather':
-                    if (rand < 0.4) {
+                    // v5.17: Base rate 0.4, modified by efficiency
+                    const gatherRate = getAgentSuccessRate(agent, 0.4);
+                    if (rand < gatherRate) {
                         const items = ['Logs', 'Fiber', 'Stone', 'Herbs'];
-                        result = { item: items[Math.floor(Math.random() * items.length)], amount: Math.floor(Math.random() * 2) + 1 };
+                        // v5.17: Amount scales with agent level
+                        const bonusAmount = Math.floor(agent.agentLevel / 3);
+                        result = { item: items[Math.floor(Math.random() * items.length)], amount: Math.floor(Math.random() * 2) + 1 + bonusAmount };
                         addToInventory(result.item, result.amount);
                         agent.totalEarnings.items.push(result);
                         agent.results.push(result);
+                        success = true;
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
                     }
-                    agent.statusMessage = rand < 0.4 ? `Found ${result.amount} ${result.item}!` : 'Searching for resources...';
+                    agent.statusMessage = success ? `Found ${result.amount} ${result.item}!` : 'Searching for resources...';
+                    trackAgentAction(agent, success, 5);
                     break;
 
                 case 'hunt':
-                    if (rand < 0.3) {
-                        result.xp = Math.floor(Math.random() * 20) + 10;
-                        result.gold = Math.floor(Math.random() * 10) + 3;
+                    // v5.17: Base rate 0.3, modified by efficiency
+                    const huntRate = getAgentSuccessRate(agent, 0.3);
+                    if (rand < huntRate) {
+                        // v5.17: XP and gold scale with agent level
+                        result.xp = Math.floor(Math.random() * 20) + 10 + agent.agentLevel * 2;
+                        result.gold = Math.floor(Math.random() * 10) + 3 + agent.agentLevel;
                         gainSkillXP('combat', result.xp);
                         gameData.gold = (gameData.gold || 0) + result.gold;
                         agent.totalEarnings.xp += result.xp;
                         agent.totalEarnings.gold += result.gold;
                         agent.results.push(result);
+                        success = true;
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
                     }
-                    agent.statusMessage = rand < 0.3 ? `Defeated enemy! +${result.xp} XP` : 'Hunting enemies...';
+                    agent.statusMessage = success ? `Defeated enemy! +${result.xp} XP` : 'Hunting enemies...';
+                    trackAgentAction(agent, success, 8);
                     break;
 
                 case 'scout':
-                    if (rand < 0.25) {
+                    // v5.17: Base rate 0.25, modified by efficiency
+                    const scoutRate = getAgentSuccessRate(agent, 0.25);
+                    if (rand < scoutRate) {
                         const discoveries = ['Found a resource deposit', 'Spotted enemy camp', 'Discovered safe path', 'Located point of interest'];
                         const disc = discoveries[Math.floor(Math.random() * discoveries.length)];
                         agent.results.push({ discovery: disc });
                         agent.statusMessage = disc;
+                        success = true;
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
                     } else {
                         agent.statusMessage = 'Surveying the area...';
                     }
+                    trackAgentAction(agent, success, 4);
                     break;
 
                 case 'protect':
                     const nearbyEnemies = countNearbyEnemies(agent);
-                    if (nearbyEnemies > 0 && rand < 0.5) {
+                    // v5.17: Base rate 0.5, modified by efficiency
+                    const protectRate = getAgentSuccessRate(agent, 0.5);
+                    if (nearbyEnemies > 0 && rand < protectRate) {
                         agent.statusMessage = `Engaging ${nearbyEnemies} threat(s)!`;
-                        // Attack a nearby enemy
+                        // v5.17: Damage scales with agent level
+                        const damage = 8 + agent.agentLevel * 2;
                         if (worldState.mobs) {
                             const nearMob = worldState.mobs.find(m => m.mesh && m.mesh.position.distanceTo(agent.position) < 15);
                             if (nearMob) {
-                                nearMob.hp -= 8;
-                                if (agent.mesh) spawnFloater(agent.mesh.position, '-8', agent.typeConfig.color.toString(16));
+                                nearMob.hp -= damage;
+                                if (agent.mesh) {
+                                    spawnFloater(agent.mesh.position, `-${damage}`, agent.typeConfig.color.toString(16));
+                                    spawnAgentParticleEffect(agent, 'success');
+                                }
+                                success = true;
                             }
                         }
                     } else {
                         agent.statusMessage = nearbyEnemies > 0 ? 'Alert! Enemies nearby.' : 'Area secure.';
                     }
+                    trackAgentAction(agent, success, 6);
                     break;
 
                 case 'heal':
-                    if (gameData.player.hp < gameData.player.maxHp && rand < 0.5) {
-                        const healAmt = Math.floor(Math.random() * 8) + 5;
+                    // v5.17: Base rate 0.5, modified by efficiency
+                    const healRate = getAgentSuccessRate(agent, 0.5);
+                    if (gameData.player.hp < gameData.player.maxHp && rand < healRate) {
+                        // v5.17: Heal amount scales with agent level
+                        const healAmt = Math.floor(Math.random() * 8) + 5 + agent.agentLevel * 2;
                         gameData.player.hp = Math.min(gameData.player.maxHp, gameData.player.hp + healAmt);
                         updateHealthUI();
                         agent.results.push({ heal: healAmt });
                         agent.statusMessage = `Healed player for ${healAmt} HP!`;
+                        success = true;
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'heal');
                     } else {
                         agent.statusMessage = gameData.player.hp < gameData.player.maxHp ? 'Channeling healing energy...' : 'Player at full health.';
                     }
+                    trackAgentAction(agent, success, 5);
                     break;
 
                 case 'fish':
-                    if (rand < 0.3) {
-                        result = { item: 'Raw Fish', amount: 1 };
+                    // v5.17: Base rate 0.3, modified by efficiency
+                    const fishRate = getAgentSuccessRate(agent, 0.3);
+                    if (rand < fishRate) {
+                        // v5.17: Chance for rare fish at higher levels
+                        const fishTypes = ['Raw Fish', 'Raw Fish', 'Raw Fish'];
+                        if (agent.agentLevel >= 3) fishTypes.push('Large Fish');
+                        if (agent.agentLevel >= 5) fishTypes.push('Golden Fish');
+                        result = { item: fishTypes[Math.floor(Math.random() * fishTypes.length)], amount: 1 };
                         addToInventory(result.item, result.amount);
                         agent.totalEarnings.items.push(result);
                         agent.results.push(result);
-                        agent.statusMessage = 'Caught a fish!';
+                        success = true;
+                        agent.statusMessage = result.item === 'Golden Fish' ? '🌟 Caught a Golden Fish!' : 'Caught a fish!';
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
                     } else {
                         agent.statusMessage = rand < 0.5 ? 'Waiting for a bite...' : 'Casting line...';
                     }
+                    trackAgentAction(agent, success, 4);
                     break;
 
                 case 'mine':
-                    if (rand < 0.35) {
+                    // v5.17: Base rate 0.35, modified by efficiency
+                    const mineRate = getAgentSuccessRate(agent, 0.35);
+                    if (rand < mineRate) {
+                        // v5.17: Better ores at higher levels
                         const ores = ['Iron Ore', 'Copper Ore', 'Stone'];
-                        result = { item: ores[Math.floor(Math.random() * ores.length)], amount: Math.floor(Math.random() * 2) + 1 };
+                        if (agent.agentLevel >= 3) ores.push('Silver Ore');
+                        if (agent.agentLevel >= 5) ores.push('Gold Ore');
+                        if (agent.agentLevel >= 7) ores.push('Crystal');
+                        const bonusAmount = Math.floor(agent.agentLevel / 4);
+                        result = { item: ores[Math.floor(Math.random() * ores.length)], amount: Math.floor(Math.random() * 2) + 1 + bonusAmount };
                         addToInventory(result.item, result.amount);
                         agent.totalEarnings.items.push(result);
                         agent.results.push(result);
+                        success = true;
                         agent.statusMessage = `Mined ${result.amount} ${result.item}!`;
+                        if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
                     } else {
                         agent.statusMessage = 'Mining deposit...';
                     }
+                    trackAgentAction(agent, success, 6);
                     break;
             }
 
@@ -13005,6 +13069,194 @@
 
             saveGameData();
             updateAgentCardUI(agent);
+        }
+
+        // v5.17: Agent Experience and Efficiency System
+        // XP required for each level (exponential curve)
+        function getAgentXPForLevel(level) {
+            return Math.floor(50 * Math.pow(1.5, level - 1));
+        }
+
+        // Grant XP to an agent and handle level ups
+        function grantAgentXP(agent, amount) {
+            if (!agent) return;
+            agent.agentXP += amount;
+
+            // Check for level up
+            let xpNeeded = getAgentXPForLevel(agent.agentLevel);
+            while (agent.agentXP >= xpNeeded && agent.agentLevel < 10) {
+                agent.agentXP -= xpNeeded;
+                agent.agentLevel++;
+                agent.efficiency = 1.0 + (agent.agentLevel - 1) * 0.1; // +10% efficiency per level
+
+                // Level up effects
+                if (agent.mesh) {
+                    spawnAgentParticleEffect(agent, 'levelup');
+                }
+                addCopilotMessage(`🎉 ${agent.typeConfig.icon} ${agent.name} reached Level ${agent.agentLevel}! Efficiency: ${Math.round(agent.efficiency * 100)}%`, 'ai');
+
+                xpNeeded = getAgentXPForLevel(agent.agentLevel);
+            }
+        }
+
+        // Track action success and update combo
+        function trackAgentAction(agent, success, xpAmount = 5) {
+            agent.actionsPerformed++;
+
+            if (success) {
+                agent.successfulActions++;
+                agent.combo++;
+                agent.maxCombo = Math.max(agent.maxCombo, agent.combo);
+                agent.lastActionSuccess = true;
+
+                // Combo XP bonus: +1 XP per combo level (max +10)
+                const comboBonus = Math.min(agent.combo, 10);
+                grantAgentXP(agent, xpAmount + comboBonus);
+
+                // Spawn combo particle effect at milestones
+                if (agent.combo === 5 || agent.combo === 10 || agent.combo === 25 || agent.combo % 50 === 0) {
+                    if (agent.mesh) {
+                        spawnAgentParticleEffect(agent, 'combo');
+                    }
+                    if (agent.combo >= 10) {
+                        addCopilotMessage(`🔥 ${agent.typeConfig.icon} ${agent.name} ${agent.combo}x COMBO!`, 'ai');
+                    }
+                }
+            } else {
+                // Reset combo on failure
+                if (agent.combo >= 5) {
+                    // Lost significant combo - notify player
+                    agent.statusMessage = `Combo lost at ${agent.combo}x`;
+                }
+                agent.combo = 0;
+                agent.lastActionSuccess = false;
+                // Still grant minimal XP for effort
+                grantAgentXP(agent, 1);
+            }
+        }
+
+        // Get effective success rate based on agent efficiency and combo
+        function getAgentSuccessRate(agent, baseRate) {
+            // Efficiency from level
+            let rate = baseRate * agent.efficiency;
+
+            // Combo bonus: up to +20% at 10+ combo
+            const comboBonus = Math.min(agent.combo, 10) * 0.02;
+            rate += comboBonus;
+
+            // Cap at 95%
+            return Math.min(0.95, rate);
+        }
+
+        // v5.17: Particle effects for agent actions
+        function spawnAgentParticleEffect(agent, effectType) {
+            if (!agent.mesh || !worldState.scene) return;
+
+            const particleCount = effectType === 'levelup' ? 20 : (effectType === 'combo' ? 12 : 8);
+            const particleGroup = new THREE.Group();
+
+            // Choose color based on effect type
+            let color;
+            switch (effectType) {
+                case 'levelup':
+                    color = 0xffd700; // Gold
+                    break;
+                case 'combo':
+                    color = 0xff8800; // Orange
+                    break;
+                case 'success':
+                    color = agent.typeConfig.color;
+                    break;
+                case 'heal':
+                    color = 0x00ff88;
+                    break;
+                default:
+                    color = 0xffffff;
+            }
+
+            // Create particles
+            for (let i = 0; i < particleCount; i++) {
+                const size = 0.05 + Math.random() * 0.1;
+                const geom = new THREE.SphereGeometry(size, 4, 4);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                const particle = new THREE.Mesh(geom, mat);
+
+                // Random spread
+                particle.position.set(
+                    (Math.random() - 0.5) * 0.5,
+                    0.5 + Math.random() * 0.5,
+                    (Math.random() - 0.5) * 0.5
+                );
+
+                // Store velocity for animation
+                particle.userData.velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 2,
+                    1 + Math.random() * 2,
+                    (Math.random() - 0.5) * 2
+                );
+
+                particleGroup.add(particle);
+            }
+
+            particleGroup.position.copy(agent.mesh.position);
+            worldState.scene.add(particleGroup);
+
+            // Animate and remove
+            let elapsed = 0;
+            const duration = effectType === 'levelup' ? 1500 : 800;
+
+            function animateParticles() {
+                elapsed += 16;
+                const progress = elapsed / duration;
+
+                if (progress >= 1) {
+                    worldState.scene.remove(particleGroup);
+                    particleGroup.children.forEach(p => {
+                        p.geometry.dispose();
+                        p.material.dispose();
+                    });
+                    return;
+                }
+
+                particleGroup.children.forEach(p => {
+                    p.position.add(p.userData.velocity.clone().multiplyScalar(0.016));
+                    p.userData.velocity.y -= 3 * 0.016; // Gravity
+                    p.material.opacity = 0.9 * (1 - progress);
+                    p.scale.setScalar(1 - progress * 0.5);
+                });
+
+                requestAnimationFrame(animateParticles);
+            }
+
+            requestAnimationFrame(animateParticles);
+        }
+
+        // v5.17: Agent health regeneration (passive)
+        function updateAgentHealthRegen(agent) {
+            if (!agent || !agent.taskState) return;
+
+            const now = performance.now();
+            const regenInterval = 5000; // Regen every 5 seconds
+
+            if (now - agent.lastHealthRegen >= regenInterval) {
+                agent.lastHealthRegen = now;
+
+                const task = agent.taskState;
+                if (task.hp < task.maxHp) {
+                    // Regen rate: 2 HP base + 1 HP per level
+                    const regenAmount = 2 + agent.agentLevel;
+                    task.hp = Math.min(task.maxHp, task.hp + regenAmount);
+
+                    // Show heal effect for significant heals
+                    if (regenAmount >= 3 && agent.mesh) {
+                        spawnAgentParticleEffect(agent, 'heal');
+                    }
+                }
+            }
         }
 
         // Recall an agent
@@ -14432,6 +14684,9 @@
                     task.lastTaskTime = now;
                     runAgentAutonomousTask(agent, deltaTime);
                 }
+
+                // v5.17: Agent health regeneration
+                updateAgentHealthRegen(agent);
 
                 // Check if stuck
                 if (task.lastPosition) {
