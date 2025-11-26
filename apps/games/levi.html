@@ -3002,6 +3002,32 @@
             <div id="player-health-fill" class="player-health-fill"></div>
         </div>
 
+        <!-- v5.13: Ship Status Panel -->
+        <div id="ship-status" style="display: none; position: fixed; top: 80px; left: 10px; z-index: 100;
+            background: rgba(10, 20, 30, 0.9); padding: 12px; border-radius: 10px; border: 1px solid #0ff;
+            min-width: 160px; backdrop-filter: blur(5px);">
+            <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                <span style="font-size: 20px;">🚀</span>
+                <span style="color: #0ff; font-weight: bold; font-size: 14px;">SHIP STATUS</span>
+            </div>
+            <div style="margin-bottom: 8px;">
+                <div style="display: flex; justify-content: space-between; font-size: 11px; color: #888; margin-bottom: 3px;">
+                    <span>Hull Integrity</span>
+                    <span id="ship-hp-text">100/100</span>
+                </div>
+                <div style="height: 8px; background: rgba(0,0,0,0.5); border-radius: 4px; overflow: hidden;">
+                    <div id="ship-hp-fill" style="width: 100%; height: 100%; background: #00ff88; transition: width 0.3s, background 0.3s;"></div>
+                </div>
+            </div>
+            <div style="display: flex; gap: 5px;">
+                <button id="ship-defense-btn" onclick="toggleShipAutoDefend()" style="flex: 1; padding: 6px 8px; background: rgba(0, 255, 136, 0.2); border: 1px solid #00ff88; color: #00ff88; border-radius: 5px; cursor: pointer; font-size: 11px;">🛡️ Defense: ON</button>
+                <button onclick="repairShip()" style="padding: 6px 8px; background: rgba(255, 170, 0, 0.2); border: 1px solid #ffaa00; color: #ffaa00; border-radius: 5px; cursor: pointer; font-size: 11px;">🔧 Repair</button>
+            </div>
+            <div style="margin-top: 6px; font-size: 10px; color: #666; text-align: center;">
+                Laser Range: 35m | DMG: 15
+            </div>
+        </div>
+
         <div id="tooltip" class="context-tooltip">Target</div>
 
         <!-- Minimap -->
@@ -4090,9 +4116,11 @@
         // v5.10: Multi-Agent Fleet System (spawn up to 10 AI-driven autonomous agents)
         //        Transcript export system for debugging agent conversations
         //        Star Wars-style 3D text crawl for voice responses
+        // v5.13: Visible Ship on World Map with Defensive Laser System
+        //        Ship HP and damage mechanics - protect your landing zone!
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '5.12.0';
+        const VERSION = '5.13.0';
 
         // ============================================
         // THREE.js Extensions: FontLoader & TextGeometry
@@ -6519,6 +6547,516 @@
             }
 
             return bonuses;
+        }
+
+        // ============================================
+        // v5.13: SHIP DEFENSE SYSTEM
+        // Visible ship on world map with defensive laser
+        // ============================================
+        const SHIP_STATE = {
+            mesh: null,
+            landingPad: null,
+            hp: 100,
+            maxHp: 100,
+            position: new THREE.Vector3(0, 0, 0),
+            laser: {
+                active: false,
+                target: null,
+                beam: null,
+                cooldown: 0,
+                lastFire: 0,
+                damage: 15,
+                range: 35,
+                fireRate: 800,  // ms between shots
+                autoDefend: true
+            },
+            propellers: [],
+            thrustLight: null,
+            damaged: false,
+            repairCost: 50  // gold to repair
+        };
+
+        // Create ship mesh for world map
+        function createWorldShip(spawnPosition) {
+            const shipGroup = new THREE.Group();
+
+            // Main body - sleek fuselage
+            const bodyGeometry = new THREE.BoxGeometry(4, 1.5, 5);
+            const bodyMaterial = new THREE.MeshStandardMaterial({
+                color: 0x2a2a3a,
+                metalness: 0.7,
+                roughness: 0.3
+            });
+            const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            body.castShadow = true;
+            body.receiveShadow = true;
+            shipGroup.add(body);
+
+            // Cockpit dome
+            const cockpitGeometry = new THREE.SphereGeometry(1.2, 16, 16);
+            const cockpitMaterial = new THREE.MeshStandardMaterial({
+                color: 0x00ffff,
+                metalness: 0.9,
+                roughness: 0.1,
+                emissive: 0x004444,
+                emissiveIntensity: 0.5
+            });
+            const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+            cockpit.position.set(0, 0.8, 0.5);
+            cockpit.scale.set(1, 0.5, 1.2);
+            shipGroup.add(cockpit);
+
+            // Wings
+            const wingGeometry = new THREE.BoxGeometry(8, 0.2, 2);
+            const wingMaterial = new THREE.MeshStandardMaterial({
+                color: 0x3a3a4a,
+                metalness: 0.6,
+                roughness: 0.4
+            });
+            const wings = new THREE.Mesh(wingGeometry, wingMaterial);
+            wings.position.set(0, 0.3, -0.5);
+            wings.castShadow = true;
+            shipGroup.add(wings);
+
+            // Wing tips with lights
+            const tipGeometry = new THREE.BoxGeometry(0.5, 0.3, 0.5);
+            const tipMaterialL = new THREE.MeshStandardMaterial({
+                color: 0xff0000,
+                emissive: 0xff0000,
+                emissiveIntensity: 1
+            });
+            const tipMaterialR = new THREE.MeshStandardMaterial({
+                color: 0x00ff00,
+                emissive: 0x00ff00,
+                emissiveIntensity: 1
+            });
+            const tipL = new THREE.Mesh(tipGeometry, tipMaterialL);
+            const tipR = new THREE.Mesh(tipGeometry, tipMaterialR);
+            tipL.position.set(-4, 0.3, -0.5);
+            tipR.position.set(4, 0.3, -0.5);
+            shipGroup.add(tipL, tipR);
+
+            // Tail fin
+            const tailGeometry = new THREE.BoxGeometry(0.3, 2, 1);
+            const tail = new THREE.Mesh(tailGeometry, wingMaterial);
+            tail.position.set(0, 1, -2);
+            tail.castShadow = true;
+            shipGroup.add(tail);
+
+            // Engine pods
+            const engineGeometry = new THREE.CylinderGeometry(0.4, 0.5, 2, 8);
+            const engineMaterial = new THREE.MeshStandardMaterial({
+                color: 0x1a1a2a,
+                metalness: 0.8,
+                roughness: 0.2
+            });
+            [-2, 2].forEach(x => {
+                const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+                engine.rotation.x = Math.PI / 2;
+                engine.position.set(x, 0, -2);
+                engine.castShadow = true;
+                shipGroup.add(engine);
+
+                // Engine glow
+                const glowGeometry = new THREE.CircleGeometry(0.4, 16);
+                const glowMaterial = new THREE.MeshBasicMaterial({
+                    color: 0x00ff88,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+                glow.rotation.x = -Math.PI / 2;
+                glow.position.set(x, 0, -3);
+                shipGroup.add(glow);
+            });
+
+            // Laser turret on top
+            const turretBaseGeo = new THREE.CylinderGeometry(0.5, 0.6, 0.4, 8);
+            const turretMaterial = new THREE.MeshStandardMaterial({
+                color: 0x444455,
+                metalness: 0.8
+            });
+            const turretBase = new THREE.Mesh(turretBaseGeo, turretMaterial);
+            turretBase.position.set(0, 1.1, -0.5);
+            shipGroup.add(turretBase);
+
+            const turretBarrelGeo = new THREE.CylinderGeometry(0.15, 0.15, 1.5, 8);
+            const turretBarrel = new THREE.Mesh(turretBarrelGeo, turretMaterial);
+            turretBarrel.rotation.z = Math.PI / 2;
+            turretBarrel.position.set(0, 1.5, -0.5);
+            shipGroup.add(turretBarrel);
+            shipGroup.userData.turretBarrel = turretBarrel;
+
+            // Laser beam (initially invisible)
+            const laserGeometry = new THREE.CylinderGeometry(0.05, 0.05, 1, 8);
+            const laserMaterial = new THREE.MeshBasicMaterial({
+                color: 0xff0000,
+                transparent: true,
+                opacity: 0.9
+            });
+            const laserBeam = new THREE.Mesh(laserGeometry, laserMaterial);
+            laserBeam.visible = false;
+            shipGroup.add(laserBeam);
+            SHIP_STATE.laser.beam = laserBeam;
+
+            // Landing gear
+            const gearGeometry = new THREE.BoxGeometry(0.3, 0.8, 0.3);
+            const gearMaterial = new THREE.MeshStandardMaterial({ color: 0x333333 });
+            [[-1.5, -1, 1], [1.5, -1, 1], [0, -1, -2]].forEach(pos => {
+                const gear = new THREE.Mesh(gearGeometry, gearMaterial);
+                gear.position.set(...pos);
+                gear.castShadow = true;
+                shipGroup.add(gear);
+            });
+
+            // Position ship at spawn point (landing zone)
+            shipGroup.position.copy(spawnPosition);
+            shipGroup.position.y = spawnPosition.y + 2;  // Slightly above ground
+            shipGroup.rotation.y = Math.random() * Math.PI * 2;
+
+            SHIP_STATE.mesh = shipGroup;
+            SHIP_STATE.position.copy(spawnPosition);
+
+            return shipGroup;
+        }
+
+        // Create landing pad/zone marker
+        function createLandingZone(position) {
+            const padGroup = new THREE.Group();
+
+            // Landing pad - circular platform
+            const padGeometry = new THREE.CylinderGeometry(10, 10, 0.3, 32);
+            const padMaterial = new THREE.MeshStandardMaterial({
+                color: 0x333344,
+                metalness: 0.5,
+                roughness: 0.5
+            });
+            const pad = new THREE.Mesh(padGeometry, padMaterial);
+            pad.receiveShadow = true;
+            padGroup.add(pad);
+
+            // Landing markings - concentric rings
+            [8, 6, 4].forEach((r, i) => {
+                const ringGeo = new THREE.RingGeometry(r - 0.2, r, 32);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: i === 0 ? 0xffff00 : 0x00ff00,
+                    side: THREE.DoubleSide,
+                    transparent: true,
+                    opacity: 0.7
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.rotation.x = -Math.PI / 2;
+                ring.position.y = 0.2;
+                padGroup.add(ring);
+            });
+
+            // Corner beacons
+            for (let i = 0; i < 4; i++) {
+                const angle = (i / 4) * Math.PI * 2;
+                const beaconGeo = new THREE.CylinderGeometry(0.3, 0.4, 2, 8);
+                const beaconMat = new THREE.MeshStandardMaterial({
+                    color: 0x444444,
+                    metalness: 0.6
+                });
+                const beacon = new THREE.Mesh(beaconGeo, beaconMat);
+                beacon.position.set(Math.cos(angle) * 9, 1, Math.sin(angle) * 9);
+                padGroup.add(beacon);
+
+                // Beacon light
+                const lightGeo = new THREE.SphereGeometry(0.35, 8, 8);
+                const lightMat = new THREE.MeshBasicMaterial({
+                    color: 0x00ff88,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                const light = new THREE.Mesh(lightGeo, lightMat);
+                light.position.set(Math.cos(angle) * 9, 2.2, Math.sin(angle) * 9);
+                light.userData.isBeacon = true;
+                light.userData.phase = i * Math.PI / 2;
+                padGroup.add(light);
+            }
+
+            // HP shield dome (visible when damaged)
+            const shieldGeo = new THREE.SphereGeometry(12, 32, 32);
+            const shieldMat = new THREE.MeshBasicMaterial({
+                color: 0x00aaff,
+                transparent: true,
+                opacity: 0,
+                side: THREE.DoubleSide,
+                wireframe: true
+            });
+            const shield = new THREE.Mesh(shieldGeo, shieldMat);
+            shield.position.y = 5;
+            padGroup.add(shield);
+            padGroup.userData.shield = shield;
+
+            padGroup.position.copy(position);
+
+            SHIP_STATE.landingPad = padGroup;
+            return padGroup;
+        }
+
+        // Update ship defense system
+        function updateShipDefense(dt, time) {
+            if (!SHIP_STATE.mesh || mode !== 'world') return;
+
+            // Animate beacon lights
+            if (SHIP_STATE.landingPad) {
+                SHIP_STATE.landingPad.children.forEach(child => {
+                    if (child.userData.isBeacon) {
+                        const pulse = (Math.sin(time * 0.003 + child.userData.phase) + 1) / 2;
+                        child.material.opacity = 0.5 + pulse * 0.5;
+                    }
+                });
+
+                // Shield visibility based on recent damage
+                const shield = SHIP_STATE.landingPad.userData.shield;
+                if (shield) {
+                    if (SHIP_STATE.damaged) {
+                        shield.material.opacity = Math.min(0.3, shield.material.opacity + dt * 0.5);
+                        shield.rotation.y += dt * 0.5;
+                    } else {
+                        shield.material.opacity = Math.max(0, shield.material.opacity - dt * 0.2);
+                    }
+                }
+            }
+
+            // Auto-defend: Find and shoot nearby mobs
+            if (SHIP_STATE.laser.autoDefend && time - SHIP_STATE.laser.lastFire > SHIP_STATE.laser.fireRate) {
+                let nearestMob = null;
+                let nearestDist = SHIP_STATE.laser.range;
+
+                worldState.mobs.forEach(mob => {
+                    if (!mob.parent || mob.userData.hp <= 0) return;
+                    const dist = SHIP_STATE.mesh.position.distanceTo(mob.position);
+                    if (dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestMob = mob;
+                    }
+                });
+
+                if (nearestMob) {
+                    fireShipLaser(nearestMob, time);
+                }
+            }
+
+            // Update laser beam visual
+            updateLaserBeam(dt, time);
+
+            // Mobs attacking ship
+            worldState.mobs.forEach(mob => {
+                if (!mob.parent || mob.userData.hp <= 0) return;
+
+                const distToShip = mob.position.distanceTo(SHIP_STATE.mesh.position);
+
+                // Mobs occasionally target ship if player is far away
+                if (distToShip < 20 && !mob.userData.targetingPlayer) {
+                    const distToPlayer = worldState.player ? mob.position.distanceTo(worldState.player.position) : Infinity;
+                    if (distToPlayer > 30 && Math.random() < 0.01) {  // Small chance to attack ship
+                        mob.userData.targetingShip = true;
+                        mob.userData.targetPos.copy(SHIP_STATE.mesh.position);
+                    }
+                }
+
+                // Damage ship when in melee range
+                if (mob.userData.targetingShip && distToShip < 5) {
+                    const now = performance.now();
+                    if (!mob.userData.lastShipAttack || now - mob.userData.lastShipAttack > 2000) {
+                        damageShip(mob.userData.damage || 5);
+                        mob.userData.lastShipAttack = now;
+                    }
+                }
+            });
+
+            // Gentle hover animation for ship
+            if (SHIP_STATE.mesh) {
+                SHIP_STATE.mesh.position.y = SHIP_STATE.position.y + 2 + Math.sin(time * 0.002) * 0.2;
+                SHIP_STATE.mesh.rotation.z = Math.sin(time * 0.001) * 0.02;
+            }
+        }
+
+        // Fire ship's defensive laser
+        function fireShipLaser(target, time) {
+            if (!SHIP_STATE.mesh || !target) return;
+
+            SHIP_STATE.laser.lastFire = time;
+            SHIP_STATE.laser.target = target;
+            SHIP_STATE.laser.active = true;
+
+            // Rotate turret toward target
+            const turret = SHIP_STATE.mesh.userData.turretBarrel;
+            if (turret) {
+                const dir = new THREE.Vector3().subVectors(target.position, SHIP_STATE.mesh.position).normalize();
+                turret.lookAt(target.position);
+            }
+
+            // Deal damage
+            target.userData.hp -= SHIP_STATE.laser.damage;
+
+            // Visual feedback
+            if (particles) {
+                particles.emit(target.position, 10, 0xff0000, { spread: 2, lifetime: 300 });
+            }
+
+            spawnFloater(target.position, `-${SHIP_STATE.laser.damage}`, '#ff4444');
+
+            // Sound effect placeholder
+            AudioSystem.play('spell');
+
+            // Check if killed
+            if (target.userData.hp <= 0) {
+                const xpReward = target.userData.xpReward || 50;
+                addXp('combat', Math.floor(xpReward * 0.5));  // Half XP for ship kills
+                spawnFloater(target.position, `SHIP KILL! +${Math.floor(xpReward * 0.5)}XP`, '#ff8800');
+            }
+        }
+
+        // Update laser beam visual effect
+        function updateLaserBeam(dt, time) {
+            const beam = SHIP_STATE.laser.beam;
+            if (!beam) return;
+
+            if (SHIP_STATE.laser.active && SHIP_STATE.laser.target) {
+                beam.visible = true;
+
+                const start = SHIP_STATE.mesh.position.clone();
+                start.y += 1.5;
+                const end = SHIP_STATE.laser.target.position.clone();
+                end.y += 1;
+
+                const dir = new THREE.Vector3().subVectors(end, start);
+                const length = dir.length();
+
+                beam.scale.set(1, length, 1);
+                beam.position.copy(start).add(dir.multiplyScalar(0.5));
+                beam.lookAt(end);
+                beam.rotateX(Math.PI / 2);
+
+                // Flash effect
+                beam.material.opacity = 0.9;
+
+                // Deactivate after short duration
+                setTimeout(() => {
+                    SHIP_STATE.laser.active = false;
+                    beam.visible = false;
+                }, 100);
+            } else {
+                beam.visible = false;
+            }
+        }
+
+        // Damage the ship
+        function damageShip(amount) {
+            SHIP_STATE.hp = Math.max(0, SHIP_STATE.hp - amount);
+            SHIP_STATE.damaged = true;
+
+            // Clear damaged flag after 2 seconds
+            setTimeout(() => { SHIP_STATE.damaged = false; }, 2000);
+
+            // Visual feedback
+            if (SHIP_STATE.mesh) {
+                // Flash red
+                SHIP_STATE.mesh.children.forEach(child => {
+                    if (child.material && child.material.emissive) {
+                        const originalColor = child.material.emissive.getHex();
+                        child.material.emissive.setHex(0xff0000);
+                        setTimeout(() => {
+                            child.material.emissive.setHex(originalColor);
+                        }, 200);
+                    }
+                });
+            }
+
+            // Particles
+            if (particles && SHIP_STATE.mesh) {
+                particles.emit(SHIP_STATE.mesh.position, 15, 0xff4400, { spread: 3, lifetime: 500 });
+            }
+
+            spawnFloater(SHIP_STATE.mesh.position, `-${amount}`, '#ff0000');
+            showNotification(`Ship taking damage! (${SHIP_STATE.hp}/${SHIP_STATE.maxHp} HP)`, 'warning');
+
+            // Update UI
+            updateShipHPUI();
+
+            // Ship destroyed
+            if (SHIP_STATE.hp <= 0) {
+                shipDestroyed();
+            }
+        }
+
+        // Handle ship destruction
+        function shipDestroyed() {
+            showNotification('SHIP DESTROYED! Repair required to leave planet.', 'error');
+
+            // Disable ship mesh
+            if (SHIP_STATE.mesh) {
+                SHIP_STATE.mesh.children.forEach(child => {
+                    if (child.material) {
+                        child.material.opacity = 0.3;
+                        child.material.transparent = true;
+                    }
+                });
+            }
+
+            // Large explosion
+            if (particles && SHIP_STATE.mesh) {
+                particles.emit(SHIP_STATE.mesh.position, 50, 0xff4400, { spread: 8, lifetime: 1500 });
+                particles.emit(SHIP_STATE.mesh.position, 30, 0xffff00, { spread: 6, lifetime: 1000 });
+            }
+        }
+
+        // Repair ship (costs gold)
+        function repairShip() {
+            if (SHIP_STATE.hp >= SHIP_STATE.maxHp) {
+                showNotification('Ship is already at full health!', 'info');
+                return;
+            }
+
+            if (gameData.currency >= SHIP_STATE.repairCost) {
+                gameData.currency -= SHIP_STATE.repairCost;
+                SHIP_STATE.hp = SHIP_STATE.maxHp;
+
+                // Restore ship visuals
+                if (SHIP_STATE.mesh) {
+                    SHIP_STATE.mesh.children.forEach(child => {
+                        if (child.material) {
+                            child.material.opacity = 1;
+                            child.material.transparent = false;
+                        }
+                    });
+                }
+
+                showNotification(`Ship repaired! -${SHIP_STATE.repairCost} Gold`, 'success');
+                updateShipHPUI();
+                saveGame();
+            } else {
+                showNotification(`Need ${SHIP_STATE.repairCost} Gold to repair ship!`, 'warning');
+            }
+        }
+
+        // Update ship HP UI
+        function updateShipHPUI() {
+            const bar = document.getElementById('ship-hp-fill');
+            const text = document.getElementById('ship-hp-text');
+            if (bar) {
+                const percent = (SHIP_STATE.hp / SHIP_STATE.maxHp) * 100;
+                bar.style.width = `${percent}%`;
+                bar.style.background = percent > 50 ? '#00ff88' : percent > 25 ? '#ffaa00' : '#ff4444';
+            }
+            if (text) {
+                text.textContent = `${SHIP_STATE.hp}/${SHIP_STATE.maxHp}`;
+            }
+        }
+
+        // Toggle ship auto-defend
+        function toggleShipAutoDefend() {
+            SHIP_STATE.laser.autoDefend = !SHIP_STATE.laser.autoDefend;
+            showNotification(`Ship Auto-Defense: ${SHIP_STATE.laser.autoDefend ? 'ENABLED' : 'DISABLED'}`, 'info');
+            const btn = document.getElementById('ship-defense-btn');
+            if (btn) {
+                btn.textContent = SHIP_STATE.laser.autoDefend ? '🛡️ Defense: ON' : '🛡️ Defense: OFF';
+                btn.style.background = SHIP_STATE.laser.autoDefend ? 'rgba(0, 255, 136, 0.2)' : 'rgba(255, 68, 68, 0.2)';
+            }
         }
 
         // v5.11: RTS Panel Toggle System
@@ -10018,8 +10556,9 @@
             panel.classList.toggle('active', agentFleetPanelOpen);
         }
 
-        // Spawn a new agent
-        function spawnAgent(agentType) {
+        // v5.12.1: Spawn a new agent with optional custom transcript and endpoint config
+        // customConfig: { transcript: [...], endpoint: {...}, name: 'Custom Name' }
+        function spawnAgent(agentType, customConfig = null) {
             if (agentFleet.length >= MAX_AGENTS) {
                 addCopilotMessage(`Fleet capacity reached (${MAX_AGENTS} agents). Recall an agent first.`, 'ai');
                 return null;
@@ -10030,7 +10569,25 @@
 
             // Find next available name
             const usedNames = agentFleet.map(a => a.name);
-            const availableName = AGENT_NAMES.find(n => !usedNames.includes(n)) || `Agent-${agentFleet.length + 1}`;
+            const availableName = customConfig?.name ||
+                                  AGENT_NAMES.find(n => !usedNames.includes(n)) ||
+                                  `Agent-${agentFleet.length + 1}`;
+
+            // Merge custom transcript with base if provided
+            let transcript = [...typeConfig.baseTranscript];
+            if (customConfig?.transcript) {
+                transcript = customConfig.transcript;
+            }
+
+            // Extract endpoint config from transcript if present
+            let endpointConfig = customConfig?.endpoint || null;
+            if (!endpointConfig && transcript.length > 0) {
+                // Check if first message contains endpoint config
+                const systemMsg = transcript[0];
+                if (systemMsg.endpoint) {
+                    endpointConfig = systemMsg.endpoint;
+                }
+            }
 
             const agent = {
                 id: Date.now().toString(36) + Math.random().toString(36).substr(2, 9),
@@ -10040,14 +10597,17 @@
                 status: 'initializing',
                 statusMessage: 'Preparing to deploy...',
                 progress: 0,
-                conversationHistory: [...typeConfig.baseTranscript],
+                conversationHistory: transcript,
                 results: [],
                 lastDecisionTime: 0,
                 mesh: null,
                 position: worldState.player ? worldState.player.position.clone() : new THREE.Vector3(0, 0, 0),
                 targetPosition: null,
                 totalEarnings: { xp: 0, gold: 0, items: [] },
-                spawnTime: performance.now()
+                spawnTime: performance.now(),
+                // v5.12.1: Endpoint configuration
+                endpointConfig: endpointConfig,
+                activeEndpoint: null
             };
 
             // Create 3D mesh for the agent
@@ -10138,9 +10698,10 @@
             }, 1500);
         }
 
-        // Make an autonomous decision for an agent via RAPPID API
+        // v5.12.1: Make an autonomous decision for an agent via configurable API endpoint
         async function makeAgentDecision(agent) {
-            const endpoint = getActiveEndpoint();
+            // Get agent-specific endpoint (may differ from global)
+            const endpoint = getAgentEndpoint(agent);
 
             // Build real-time context
             const gameContext = buildGameContextForAgent(agent);
@@ -10154,7 +10715,7 @@
             // Build conversation for API
             const conversationForApi = [...agent.conversationHistory, contextMessage];
 
-            // If no RAPPID endpoint, use simulated local decisions
+            // If no endpoint configured, use simulated local decisions
             if (!endpoint || !endpoint.url || !endpoint.key) {
                 simulateAgentDecision(agent, gameContext);
                 return;
@@ -10162,24 +10723,35 @@
 
             try {
                 agent.status = 'thinking';
+                agent.activeEndpoint = endpoint.name; // Track which endpoint is being used
                 updateAgentCardUI(agent);
+
+                // Build headers based on endpoint configuration
+                const headers = {
+                    'Content-Type': 'application/json'
+                };
+
+                // Add auth header based on endpoint style
+                if (endpoint.headerPrefix) {
+                    headers[endpoint.headerStyle] = endpoint.headerPrefix + endpoint.key;
+                } else {
+                    headers[endpoint.headerStyle] = endpoint.key;
+                }
+
+                // Format body based on endpoint type
+                const requestBody = formatAgentRequestBody(endpoint, contextMessage, conversationForApi, agent);
 
                 const response = await fetch(endpoint.url, {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                        'x-functions-key': endpoint.key
-                    },
-                    body: JSON.stringify({
-                        user_input: contextMessage.content,
-                        conversation_history: conversationForApi,
-                        user_guid: `agent-${agent.id}`
-                    })
+                    headers: headers,
+                    body: requestBody
                 });
 
                 if (response.ok) {
                     const data = await response.json();
-                    const textResponse = data.assistant_response || data.response || '';
+
+                    // Parse response based on endpoint type
+                    const textResponse = parseAgentResponse(endpoint, data);
 
                     // Add to conversation history (keep last 20 messages to avoid token overflow)
                     agent.conversationHistory.push(contextMessage);
@@ -10195,11 +10767,11 @@
                     // Parse and execute the decision
                     parseAndExecuteAgentDecision(agent, textResponse);
                 } else {
-                    console.warn(`Agent ${agent.name} API error:`, response.status);
+                    console.warn(`Agent ${agent.name} API error (${endpoint.name}):`, response.status);
                     simulateAgentDecision(agent, gameContext);
                 }
             } catch (error) {
-                console.error(`Agent ${agent.name} decision error:`, error);
+                console.error(`Agent ${agent.name} decision error (${endpoint.name}):`, error);
                 simulateAgentDecision(agent, gameContext);
             }
 
@@ -10723,15 +11295,16 @@
         // ============================================
         let currentTranscriptAgentId = null;
 
-        // Build a standard transcript JSON for an agent
+        // v5.12.1: Build a standard transcript JSON for an agent (includes endpoint config)
         function buildAgentTranscript(agent) {
             const elapsed = (performance.now() - agent.spawnTime) / 1000;
+            const agentEndpoint = getAgentEndpoint(agent);
 
             return {
-                transcript_version: "1.0",
+                transcript_version: "1.1",
                 export_timestamp: new Date().toISOString(),
                 application: "LEVIATHAN: OMNIVERSE",
-                application_version: "5.10",
+                application_version: VERSION,
                 agent: {
                     id: agent.id,
                     name: agent.name,
@@ -10747,6 +11320,19 @@
                     progress_percent: Math.round(agent.progress),
                     spawn_time: new Date(Date.now() - elapsed * 1000).toISOString(),
                     runtime_seconds: Math.floor(elapsed)
+                },
+                // v5.12.1: Endpoint configuration for spawning agents with different AI providers
+                endpoint_config: {
+                    name: agentEndpoint.name,
+                    url: agent.endpointConfig?.url || '${URL_PLACEHOLDER}',
+                    apiKey: agent.endpointConfig?.apiKey ? '${API_KEY_PLACEHOLDER}' : null,
+                    urlKey: agent.endpointConfig?.urlKey || null,
+                    apiKeyKey: agent.endpointConfig?.apiKeyKey || null,
+                    headerStyle: agentEndpoint.headerStyle,
+                    headerPrefix: agentEndpoint.headerPrefix || '',
+                    bodyFormat: agentEndpoint.bodyFormat,
+                    model: agent.endpointConfig?.model || null,
+                    active_endpoint: agent.activeEndpoint || 'default'
                 },
                 game_context: {
                     player_hp: gameData.player?.hp || 100,
@@ -10768,11 +11354,19 @@
                     index: idx,
                     role: msg.role,
                     content: msg.content,
-                    timestamp: null // Could add timestamps if we track them
+                    // Include endpoint in first message for transcript re-import
+                    endpoint: idx === 0 && agent.endpointConfig ? {
+                        url: agent.endpointConfig.url || '${URL_PLACEHOLDER}',
+                        apiKey: '${API_KEY_PLACEHOLDER}',
+                        headerStyle: agent.endpointConfig.headerStyle,
+                        bodyFormat: agent.endpointConfig.bodyFormat,
+                        model: agent.endpointConfig.model
+                    } : undefined,
+                    timestamp: null
                 })),
                 system_prompt: agent.conversationHistory.length > 0 ? agent.conversationHistory[0].content : null,
                 total_messages: agent.conversationHistory.length,
-                api_endpoint: getActiveEndpoint()?.url || 'local-simulation'
+                api_endpoint: agentEndpoint.url || 'local-simulation'
             };
         }
 
@@ -14890,6 +15484,26 @@
             // v5.12: Initialize hypnosis effects
             initHypnosisEffects();
 
+            // v5.13: Create ship and landing zone
+            const landingSpot = new THREE.Vector3(
+                (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
+                10,
+                (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE
+            );
+            // Find ground height at landing spot
+            const lx = Math.floor(CONFIG.WORLD_SIZE / 4);
+            const lz = Math.floor(CONFIG.WORLD_SIZE / 4);
+            if (worldState.terrain[lx] && worldState.terrain[lx][lz] !== undefined) {
+                landingSpot.y = worldState.terrain[lx][lz] > 0 ? worldState.terrain[lx][lz] : 5;
+            }
+            const landingPad = createLandingZone(landingSpot);
+            scene.add(landingPad);
+            const ship = createWorldShip(landingSpot);
+            scene.add(ship);
+            SHIP_STATE.hp = SHIP_STATE.maxHp;  // Reset ship HP for new world
+            updateShipHPUI();
+            document.getElementById('ship-status').style.display = 'block';
+
             // v5.0: Initialize weather system
             initWeatherSystem();
 
@@ -15755,6 +16369,9 @@
 
             // v5.12: Update hypnosis effects
             updateHypnosis(dt);
+
+            // v5.13: Update ship defense system
+            updateShipDefense(dt, time);
 
             // v5.9: Update Copilot task progress
             updateCopilotTask(dt);
@@ -17234,6 +17851,38 @@
                     ctx.stroke();
                 }
             });
+
+            // v5.13: Draw ship and landing zone
+            if (SHIP_STATE.mesh) {
+                const shipX = (SHIP_STATE.mesh.position.x + CONFIG.WORLD_SIZE) * scale;
+                const shipY = (SHIP_STATE.mesh.position.z + CONFIG.WORLD_SIZE) * scale;
+
+                // Landing zone circle
+                ctx.strokeStyle = '#00ffff';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(shipX, shipY, 6, 0, Math.PI * 2);
+                ctx.stroke();
+
+                // Ship icon
+                ctx.fillStyle = SHIP_STATE.hp > 0 ? '#00ffff' : '#444';
+                ctx.beginPath();
+                ctx.moveTo(shipX, shipY - 4);
+                ctx.lineTo(shipX + 3, shipY + 3);
+                ctx.lineTo(shipX - 3, shipY + 3);
+                ctx.closePath();
+                ctx.fill();
+
+                // Defense range indicator (subtle)
+                if (SHIP_STATE.laser.autoDefend) {
+                    ctx.strokeStyle = 'rgba(0, 255, 136, 0.3)';
+                    ctx.setLineDash([2, 2]);
+                    ctx.beginPath();
+                    ctx.arc(shipX, shipY, SHIP_STATE.laser.range * scale, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
+                }
+            }
 
             // Draw player
             ctx.fillStyle = '#ff0';
