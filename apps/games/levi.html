@@ -13279,8 +13279,9 @@
 
             let html = `
                 <!-- v5.16.1: Body Cam Preview + v5.16.2: Takeover Controls -->
-                <div class="agent-bodycam-container" title="Agent Body Cam">
-                    <canvas class="agent-bodycam-canvas" id="bodycam-${agent.id}" width="320" height="120"></canvas>
+                <!-- v5.16.3: Enhanced with streaming pattern for real-time view -->
+                <div class="agent-bodycam-container" title="Agent Body Cam - Click to Locate">
+                    <canvas class="agent-bodycam-canvas" id="bodycam-${agent.id}" width="320" height="150"></canvas>
                     <div class="agent-bodycam-overlay">
                         <div class="agent-bodycam-label">
                             <span class="rec-dot"></span>
@@ -13588,83 +13589,179 @@
         }
 
         // v5.16.1: Agent body cam renderer and camera system
+        // v5.16.3: Rewritten using streaming pattern from AI Companion Hub
         let agentBodyCamCamera = null;
         let agentBodyCamRenderer = null;
+        let bodyCamInitialized = false;
 
-        // Initialize body cam rendering system
+        // Body cam streaming state (similar to Show Mode pattern)
+        const bodyCamState = {
+            activeStreams: new Map(), // agentId -> { lastRender: timestamp, canvas: element }
+            updateInterval: 100, // ms between frame updates
+            isRendering: false
+        };
+
+        // Initialize body cam rendering system (streaming pattern)
         function initAgentBodyCamSystem() {
-            if (!worldState.scene) return;
+            if (bodyCamInitialized) return true;
+            if (!worldState.scene) {
+                console.log('Body cam init: waiting for scene...');
+                return false;
+            }
 
-            // Create a dedicated camera for body cam views
-            agentBodyCamCamera = new THREE.PerspectiveCamera(70, 320/120, 0.1, 100);
+            try {
+                // Create a dedicated camera for body cam views
+                agentBodyCamCamera = new THREE.PerspectiveCamera(70, 320/150, 0.1, 150);
 
-            // Create a dedicated renderer (smaller for performance)
-            agentBodyCamRenderer = new THREE.WebGLRenderer({
-                alpha: true,
-                antialias: false,
-                powerPreference: 'low-power'
-            });
-            agentBodyCamRenderer.setSize(320, 120);
-            agentBodyCamRenderer.setPixelRatio(1); // Lower for performance
+                // Create a dedicated renderer with preserveDrawingBuffer for canvas copy
+                // This is the key fix - similar to AI Companion Hub's renderer setup
+                agentBodyCamRenderer = new THREE.WebGLRenderer({
+                    alpha: true,
+                    antialias: false,
+                    powerPreference: 'low-power',
+                    preserveDrawingBuffer: true // Critical for canvas streaming!
+                });
+                agentBodyCamRenderer.setSize(320, 150);
+                agentBodyCamRenderer.setPixelRatio(1);
+                agentBodyCamRenderer.setClearColor(0x000000, 1);
+
+                bodyCamInitialized = true;
+                console.log('Body cam system initialized successfully');
+                return true;
+            } catch (error) {
+                console.error('Failed to initialize body cam system:', error);
+                return false;
+            }
         }
 
-        // v5.16.1: Render agent's POV to body cam canvas
+        // v5.16.3: Stream agent's POV to body cam canvas (AI Companion Hub pattern)
         function renderAgentBodyCam(agent) {
-            if (!worldState.scene || !agent.mesh) return;
+            if (!agent || !agent.mesh) {
+                renderBodyCamPlaceholder(agent);
+                return;
+            }
+
+            if (!worldState.scene) {
+                renderBodyCamPlaceholder(agent, 'Waiting for world...');
+                return;
+            }
 
             const canvas = document.getElementById(`bodycam-${agent.id}`);
             if (!canvas) return;
 
             // Initialize body cam system if needed
-            if (!agentBodyCamRenderer) {
-                initAgentBodyCamSystem();
+            if (!bodyCamInitialized && !initAgentBodyCamSystem()) {
+                renderBodyCamPlaceholder(agent, 'Initializing...');
+                return;
             }
-            if (!agentBodyCamRenderer || !agentBodyCamCamera) return;
 
-            // Position camera at agent's head level, looking in their facing direction
-            const agentPos = agent.mesh.position;
-            const agentRotation = agent.mesh.rotation.y;
+            if (!agentBodyCamRenderer || !agentBodyCamCamera) {
+                renderBodyCamPlaceholder(agent, 'Renderer unavailable');
+                return;
+            }
 
-            // Camera position: slightly behind and above agent
-            const cameraOffset = new THREE.Vector3(
-                -Math.sin(agentRotation) * 0.5,
-                1.2, // Eye level
-                -Math.cos(agentRotation) * 0.5
-            );
-            agentBodyCamCamera.position.copy(agentPos).add(cameraOffset);
+            try {
+                // Position camera at agent's head level, looking in their facing direction
+                const agentPos = agent.mesh.position;
+                const agentRotation = agent.mesh.rotation.y || 0;
 
-            // Look in the direction the agent is facing
-            const lookTarget = new THREE.Vector3(
-                agentPos.x + Math.sin(agentRotation) * 5,
-                agentPos.y + 0.8,
-                agentPos.z + Math.cos(agentRotation) * 5
-            );
-            agentBodyCamCamera.lookAt(lookTarget);
+                // Camera position: at agent's eye level, looking forward
+                agentBodyCamCamera.position.set(
+                    agentPos.x + Math.sin(agentRotation) * 0.3,
+                    agentPos.y + 1.5, // Eye level
+                    agentPos.z + Math.cos(agentRotation) * 0.3
+                );
 
-            // Render the scene from agent's perspective
-            agentBodyCamRenderer.render(worldState.scene, agentBodyCamCamera);
+                // Look in the direction the agent is facing
+                const lookTarget = new THREE.Vector3(
+                    agentPos.x + Math.sin(agentRotation) * 10,
+                    agentPos.y + 1.0,
+                    agentPos.z + Math.cos(agentRotation) * 10
+                );
+                agentBodyCamCamera.lookAt(lookTarget);
 
-            // Copy to the canvas element
-            const ctx = canvas.getContext('2d');
-            if (ctx) {
-                ctx.drawImage(agentBodyCamRenderer.domElement, 0, 0, 320, 120);
+                // Render the scene from agent's perspective
+                agentBodyCamRenderer.render(worldState.scene, agentBodyCamCamera);
 
-                // Add scan line effect for retro feel
-                ctx.strokeStyle = 'rgba(0, 255, 255, 0.03)';
-                for (let y = 0; y < 120; y += 3) {
-                    ctx.beginPath();
-                    ctx.moveTo(0, y);
-                    ctx.lineTo(320, y);
-                    ctx.stroke();
+                // Stream to the canvas element (AI Companion Hub pattern)
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                    // Clear and draw the rendered frame
+                    ctx.clearRect(0, 0, canvas.width, canvas.height);
+                    ctx.drawImage(agentBodyCamRenderer.domElement, 0, 0, canvas.width, canvas.height);
+
+                    // Add scan line effect for retro feel
+                    ctx.strokeStyle = 'rgba(0, 255, 255, 0.03)';
+                    for (let y = 0; y < canvas.height; y += 3) {
+                        ctx.beginPath();
+                        ctx.moveTo(0, y);
+                        ctx.lineTo(canvas.width, y);
+                        ctx.stroke();
+                    }
+
+                    // Add vignette effect
+                    const gradient = ctx.createRadialGradient(canvas.width/2, canvas.height/2, 30, canvas.width/2, canvas.height/2, 180);
+                    gradient.addColorStop(0, 'rgba(0,0,0,0)');
+                    gradient.addColorStop(1, 'rgba(0,0,0,0.4)');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+                    // Update stream state
+                    bodyCamState.activeStreams.set(agent.id, {
+                        lastRender: performance.now(),
+                        canvas: canvas
+                    });
                 }
-
-                // Add vignette effect
-                const gradient = ctx.createRadialGradient(160, 60, 30, 160, 60, 180);
-                gradient.addColorStop(0, 'rgba(0,0,0,0)');
-                gradient.addColorStop(1, 'rgba(0,0,0,0.4)');
-                ctx.fillStyle = gradient;
-                ctx.fillRect(0, 0, 320, 120);
+            } catch (error) {
+                console.error(`Body cam render error for ${agent.name}:`, error);
+                renderBodyCamPlaceholder(agent, 'Render error');
             }
+        }
+
+        // v5.16.3: Render placeholder when body cam can't display real view
+        function renderBodyCamPlaceholder(agent, message = 'No signal') {
+            if (!agent) return;
+            const canvas = document.getElementById(`bodycam-${agent.id}`);
+            if (!canvas) return;
+
+            const ctx = canvas.getContext('2d');
+            if (!ctx) return;
+
+            // Dark background with noise effect
+            ctx.fillStyle = '#0a0a0f';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Add static noise effect
+            const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            const data = imageData.data;
+            for (let i = 0; i < data.length; i += 4) {
+                if (Math.random() < 0.05) {
+                    const noise = Math.random() * 30;
+                    data[i] = noise;     // R
+                    data[i + 1] = noise; // G
+                    data[i + 2] = noise; // B
+                }
+            }
+            ctx.putImageData(imageData, 0, 0);
+
+            // Draw status text
+            ctx.fillStyle = '#0af';
+            ctx.font = 'bold 14px monospace';
+            ctx.textAlign = 'center';
+            ctx.fillText(message, canvas.width/2, canvas.height/2);
+
+            // Draw agent info if available
+            if (agent.taskState) {
+                ctx.font = '10px monospace';
+                ctx.fillStyle = '#888';
+                const state = agent.taskState.state || 'initializing';
+                ctx.fillText(`State: ${state}`, canvas.width/2, canvas.height/2 + 20);
+            }
+
+            // Draw border
+            ctx.strokeStyle = '#0af';
+            ctx.lineWidth = 2;
+            ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
         }
 
         // v5.16.1: Focus camera on an agent (click to locate)
@@ -20734,8 +20831,9 @@
             // v5.16: Check for agent troubleshooting interactions
             checkAgentTroubleshooting();
 
-            // v5.16.1: Update body cams periodically (every 500ms for performance)
-            if (Math.floor(time * 2) !== Math.floor((time - dt) * 2)) {
+            // v5.16.3: Update body cams more frequently for streaming effect (every ~100ms)
+            // Similar to AI Companion Hub's broadcastCameraUpdate pattern
+            if (Math.floor(time * 10) !== Math.floor((time - dt) * 10)) {
                 updateAllAgentBodyCams();
             }
 
