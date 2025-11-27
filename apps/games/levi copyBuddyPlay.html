@@ -17407,61 +17407,25 @@
 
             copilotAnimTime += dt;
 
-            // v6.0: Check viewer modes
-            const isViewer = multiplayerState.enabled && !multiplayerState.isHost;
-            const isViewerFollowMode = isViewer && multiplayerState.followMode;
-            const isViewerIndependentMode = isViewer && !multiplayerState.followMode;
+            // Calculate target position (behind and above player)
+            const playerPos = worldState.player.position;
+            const playerRotY = worldState.player.rotation.y;
 
-            // Determine what the copilot follows
-            let followTarget = worldState.player.position;
-            let followRotY = worldState.player.rotation.y;
+            // Orbit slightly around the player
+            const orbitAngle = copilotAnimTime * COPILOT_CONFIG.orbitSpeed;
+            const offsetX = Math.sin(playerRotY + orbitAngle + Math.PI) * COPILOT_CONFIG.followDistance;
+            const offsetZ = Math.cos(playerRotY + orbitAngle + Math.PI) * COPILOT_CONFIG.followDistance;
 
-            if (isViewerFollowMode) {
-                // In follow mode: Copilot follows the HOST's avatar (viewer is "inside" the host)
-                const hostAvatar = multiplayerState.remotePlayers.get(multiplayerState.hostId);
-                if (hostAvatar) {
-                    followTarget = hostAvatar.position;
-                    followRotY = hostAvatar.rotation?.y || 0;
-                }
-            }
+            const targetX = playerPos.x + offsetX;
+            const targetZ = playerPos.z + offsetZ;
+            const targetY = playerPos.y + COPILOT_CONFIG.floatHeight +
+                           Math.sin(copilotAnimTime * COPILOT_CONFIG.floatSpeed) * COPILOT_CONFIG.floatAmplitude;
 
-            if (!isViewerIndependentMode) {
-                // Normal/Follow mode: Copilot orbits around the target
-                const orbitAngle = copilotAnimTime * COPILOT_CONFIG.orbitSpeed;
-                const offsetX = Math.sin(followRotY + orbitAngle + Math.PI) * COPILOT_CONFIG.followDistance;
-                const offsetZ = Math.cos(followRotY + orbitAngle + Math.PI) * COPILOT_CONFIG.followDistance;
-
-                const targetX = followTarget.x + offsetX;
-                const targetZ = followTarget.z + offsetZ;
-                const targetY = followTarget.y + COPILOT_CONFIG.floatHeight +
-                               Math.sin(copilotAnimTime * COPILOT_CONFIG.floatSpeed) * COPILOT_CONFIG.floatAmplitude;
-
-                // Smooth follow
-                const smoothing = COPILOT_CONFIG.followSmoothing * dt;
-                copilotMesh.position.x += (targetX - copilotMesh.position.x) * smoothing;
-                copilotMesh.position.z += (targetZ - copilotMesh.position.z) * smoothing;
-                copilotMesh.position.y += (targetY - copilotMesh.position.y) * smoothing;
-            } else {
-                // v6.0: Independent mode - Viewer controls copilot, robot follows copilot
-                const floatOffset = Math.sin(copilotAnimTime * COPILOT_CONFIG.floatSpeed) * COPILOT_CONFIG.floatAmplitude * 0.5;
-                const groundY = getTerrainHeight(copilotMesh.position.x, copilotMesh.position.z);
-                copilotMesh.position.y = groundY + COPILOT_CONFIG.floatHeight + floatOffset;
-
-                // Robot follows the copilot
-                const copilotPos = copilotMesh.position;
-                const orbitAngle = copilotAnimTime * COPILOT_CONFIG.orbitSpeed * 0.5;
-                const followDist = COPILOT_CONFIG.followDistance * 1.5;
-
-                const robotTargetX = copilotPos.x + Math.sin(orbitAngle + Math.PI) * followDist;
-                const robotTargetZ = copilotPos.z + Math.cos(orbitAngle + Math.PI) * followDist;
-                const robotGroundY = getTerrainHeight(robotTargetX, robotTargetZ);
-
-                const smoothing = COPILOT_CONFIG.followSmoothing * dt * 0.8;
-                worldState.player.position.x += (robotTargetX - worldState.player.position.x) * smoothing;
-                worldState.player.position.z += (robotTargetZ - worldState.player.position.z) * smoothing;
-                worldState.player.position.y = robotGroundY;
-                worldState.player.lookAt(copilotPos.x, worldState.player.position.y, copilotPos.z);
-            }
+            // Smooth follow
+            const smoothing = COPILOT_CONFIG.followSmoothing * dt;
+            copilotMesh.position.x += (targetX - copilotMesh.position.x) * smoothing;
+            copilotMesh.position.z += (targetZ - copilotMesh.position.z) * smoothing;
+            copilotMesh.position.y += (targetY - copilotMesh.position.y) * smoothing;
 
             // Rotate particles
             if (copilotMesh.userData.particles) {
@@ -17480,10 +17444,8 @@
                 copilotMesh.userData.orb.material.emissiveIntensity = 0.4 + pulse * 0.4;
             }
 
-            // Copilot faces camera
-            if (!isViewerIndependentMode) {
-                copilotMesh.lookAt(camera.position);
-            }
+            // Make copilot face camera
+            copilotMesh.lookAt(camera.position);
         }
 
         function toggleCopilotChat() {
@@ -19787,11 +19749,6 @@
 
         function changeWeather() {
             if (!activeCiv) return;
-
-            // v6.0: Viewers don't change weather - they receive it from host
-            if (multiplayerState.enabled && !multiplayerState.isHost) {
-                return;
-            }
 
             const biomeWeathers = BIOME_WEATHER[activeCiv.biome] || ['clear'];
             const newWeather = biomeWeathers[Math.floor(Math.random() * biomeWeathers.length)];
@@ -22271,14 +22228,7 @@
             connectionTimeout: 10000,     // Connection timeout in ms
             // WORLD SEED - ensures identical procedural generation across all clients
             // All terrain, props, mobs, and civilizations use this seed
-            worldSeed: 'OMNIVERSE',       // Default seed, can be overridden via URL
-
-            // FOLLOW MODE - allows viewers to switch between following host and independent control
-            followMode: true,              // true = camera follows host, false = independent control
-            savedHostPosition: null,       // Cache host's last position for snap-back
-            lastHostRotation: 0,           // Cache host's last rotation
-            lastModeToggleTime: 0,         // Debounce rapid mode switching
-            viewerSpawnedAt: null          // Position where viewer spawned for independent mode
+            worldSeed: 'OMNIVERSE'        // Default seed, can be overridden via URL
         };
 
         // Remote player colors for distinguishing players
@@ -22444,17 +22394,15 @@
             };
         }
 
-        // Capture player movement delta - v6.0: NOW SYNCS ALL VISUAL STATE
+        // Capture player movement delta
         function capturePlayerDelta() {
             // Safety checks
             if (typeof worldState === 'undefined' || !worldState.player) return null;
-            const safeGameData = typeof gameData !== 'undefined' ? gameData : { player: { hp: 100, maxHp: 100 } };
-            const safeRobotEnergy = typeof robotEnergy !== 'undefined' ? robotEnergy : { current: 100, max: 100 };
+            const safeGameData = typeof gameData !== 'undefined' ? gameData : { player: {} };
+            const safeRobotEnergy = typeof robotEnergy !== 'undefined' ? robotEnergy : { current: 100 };
             const safeCamera = typeof camera !== 'undefined' ? camera : null;
-            const safeWeather = typeof currentWeather !== 'undefined' ? currentWeather : 'clear';
 
             return createDelta('playerMove', {
-                // Position and rotation
                 position: {
                     x: worldState.player.position?.x || 0,
                     y: worldState.player.position?.y || 0,
@@ -22473,33 +22421,8 @@
                         z: safeCamera.rotation?.z || 0
                     }
                 } : null,
-
-                // v6.0: FULL STATE SYNC - All visual indicators
-                // Probe Integrity (HP)
                 hp: safeGameData.player?.hp || 100,
-                maxHp: safeGameData.player?.maxHp || 100,
-
-                // Energy
-                energy: safeRobotEnergy.current || 100,
-                maxEnergy: safeRobotEnergy.max || 100,
-
-                // Time and Weather
-                timeOfDay: worldState.timeOfDay || 0,
-                weather: safeWeather,
-
-                // Daily Challenge progress
-                dailyChallenge: safeGameData.dailyChallenge ? {
-                    current: safeGameData.dailyChallenge.current,
-                    completed: safeGameData.dailyChallenge.completed,
-                    streak: safeGameData.dailyChallenge.streak
-                } : null,
-
-                // Ship status
-                ship: typeof SHIP_STATE !== 'undefined' ? {
-                    hp: SHIP_STATE.hp,
-                    maxHp: SHIP_STATE.maxHp,
-                    defenseOn: SHIP_STATE.laser?.autoDefend || false
-                } : null
+                energy: safeRobotEnergy.current || 100
             });
         }
 
@@ -22629,9 +22552,9 @@
                 if (typeof currentWeather !== 'undefined' && state.weather.current !== currentWeather) {
                     currentWeather = state.weather.current;
                     console.log('Synced weather from host:', currentWeather);
-                    // Update weather UI indicator
-                    if (typeof updateWeatherUI === 'function') {
-                        updateWeatherUI();
+                    // Trigger weather change visuals if function exists
+                    if (typeof updateWeatherEffects === 'function') {
+                        updateWeatherEffects(currentWeather);
                     }
                 }
                 if (typeof weatherChangeTime !== 'undefined') {
@@ -22671,11 +22594,6 @@
 
             // Update multiplayer UI
             updateMultiplayerUI();
-
-            // v6.0: Create follow mode button for viewers
-            if (!multiplayerState.isHost) {
-                createFollowModeButton();
-            }
         }
 
         // Sync interactables (trees, rocks, fishing spots) from host
@@ -22777,10 +22695,6 @@
 
             switch (delta.deltaType) {
                 case 'playerMove':
-                    // Check if this is the host's position update
-                    const isHostPosition = (delta.senderId === multiplayerState.hostId);
-
-                    // Always update the remote player avatar
                     updateRemotePlayer(delta.senderId, {
                         position: delta.data.position,
                         rotation: delta.data.rotation,
@@ -22788,87 +22702,6 @@
                         hp: delta.data.hp,
                         energy: delta.data.energy
                     });
-
-                    // If this is the host, sync ALL their state to viewer
-                    if (isHostPosition && !multiplayerState.isHost) {
-                        multiplayerState.savedHostPosition = {
-                            x: delta.data.position.x,
-                            y: delta.data.position.y,
-                            z: delta.data.position.z
-                        };
-                        multiplayerState.lastHostRotation = delta.data.rotation || 0;
-
-                        // In follow mode, sync local player position to follow host
-                        if (multiplayerState.followMode && worldState.player) {
-                            const offsetDist = 5;
-                            const offsetX = Math.sin(delta.data.rotation || 0) * offsetDist;
-                            const offsetZ = Math.cos(delta.data.rotation || 0) * offsetDist;
-                            const targetX = delta.data.position.x + offsetX;
-                            const targetZ = delta.data.position.z + offsetZ;
-                            worldState.player.position.x += (targetX - worldState.player.position.x) * 0.1;
-                            worldState.player.position.z += (targetZ - worldState.player.position.z) * 0.1;
-                            worldState.player.position.y = delta.data.position.y;
-                        }
-
-                        // ========================================
-                        // v6.0: SYNC ALL HOST STATE TO VIEWER
-                        // ========================================
-
-                        // Time of Day
-                        if (delta.data.timeOfDay !== undefined) {
-                            worldState.timeOfDay = delta.data.timeOfDay;
-                        }
-
-                        // Weather
-                        if (delta.data.weather && typeof currentWeather !== 'undefined') {
-                            if (currentWeather !== delta.data.weather) {
-                                currentWeather = delta.data.weather;
-                                if (typeof updateWeatherUI === 'function') {
-                                    updateWeatherUI();
-                                }
-                            }
-                        }
-
-                        // PROBE INTEGRITY (HP)
-                        if (delta.data.hp !== undefined && delta.data.maxHp !== undefined) {
-                            gameData.player.hp = delta.data.hp;
-                            gameData.player.maxHp = delta.data.maxHp;
-                            if (typeof updateHealthUI === 'function') {
-                                updateHealthUI();
-                            }
-                        }
-
-                        // ENERGY
-                        if (delta.data.energy !== undefined && delta.data.maxEnergy !== undefined) {
-                            robotEnergy.current = delta.data.energy;
-                            robotEnergy.max = delta.data.maxEnergy;
-                            if (typeof updateEnergyUI === 'function') {
-                                updateEnergyUI();
-                            }
-                        }
-
-                        // SHIP STATUS
-                        if (delta.data.ship && typeof SHIP_STATE !== 'undefined') {
-                            SHIP_STATE.hp = delta.data.ship.hp;
-                            SHIP_STATE.maxHp = delta.data.ship.maxHp;
-                            if (SHIP_STATE.laser) {
-                                SHIP_STATE.laser.autoDefend = delta.data.ship.defenseOn;
-                            }
-                            if (typeof updateShipHPUI === 'function') {
-                                updateShipHPUI();
-                            }
-                        }
-
-                        // DAILY CHALLENGE
-                        if (delta.data.dailyChallenge && typeof gameData !== 'undefined') {
-                            gameData.dailyChallenge.current = delta.data.dailyChallenge.current;
-                            gameData.dailyChallenge.completed = delta.data.dailyChallenge.completed;
-                            gameData.dailyChallenge.streak = delta.data.dailyChallenge.streak;
-                            if (typeof updateDailyChallengeUI === 'function') {
-                                updateDailyChallengeUI();
-                            }
-                        }
-                    }
                     break;
 
                 case 'mobUpdate':
@@ -23370,127 +23203,6 @@
                     showNotification('Connection error: ' + err.message, 'error');
                 });
             }
-        }
-
-        // ==========================================
-        // FOLLOW MODE TOGGLE SYSTEM
-        // Allows viewers to switch between following host and independent control
-        // ==========================================
-
-        function toggleFollowMode() {
-            // Only works for non-host players in multiplayer
-            if (!multiplayerState.enabled || multiplayerState.isHost) {
-                showNotification('Follow mode only available for viewers', 'info');
-                return;
-            }
-
-            const now = Date.now();
-            // Debounce rapid toggling (500ms)
-            if (now - multiplayerState.lastModeToggleTime < 500) return;
-            multiplayerState.lastModeToggleTime = now;
-
-            multiplayerState.followMode = !multiplayerState.followMode;
-
-            if (multiplayerState.followMode) {
-                // Returning to follow mode
-                showNotification('👁️ FOLLOW MODE - Watching host', 'info');
-
-                // Snap copilot back near host position if available
-                if (multiplayerState.savedHostPosition && copilotMesh) {
-                    const offsetDist = 5;
-                    const rot = multiplayerState.lastHostRotation || 0;
-                    copilotMesh.position.set(
-                        multiplayerState.savedHostPosition.x + Math.sin(rot) * offsetDist,
-                        multiplayerState.savedHostPosition.y + COPILOT_CONFIG.floatHeight,
-                        multiplayerState.savedHostPosition.z + Math.cos(rot) * offsetDist
-                    );
-                }
-            } else {
-                // Switching to independent control - viewer controls copilot
-                showNotification('🎮 CONTROL MODE - You ARE the Copilot! Use WASD to explore', 'info');
-
-                // Store current copilot position as spawn point
-                if (copilotMesh) {
-                    multiplayerState.viewerSpawnedAt = {
-                        x: copilotMesh.position.x,
-                        y: copilotMesh.position.y,
-                        z: copilotMesh.position.z
-                    };
-                }
-            }
-
-            updateFollowModeUI();
-        }
-
-        function updateFollowModeUI() {
-            const btn = document.getElementById('follow-mode-btn');
-            if (!btn) return;
-
-            if (multiplayerState.followMode) {
-                btn.innerHTML = '👁️ Following';
-                btn.style.background = 'rgba(0, 255, 255, 0.3)';
-                btn.style.borderColor = '#0ff';
-                btn.style.boxShadow = '0 0 15px rgba(0, 255, 255, 0.4)';
-            } else {
-                btn.innerHTML = '🎮 Control';
-                btn.style.background = 'rgba(255, 170, 0, 0.3)';
-                btn.style.borderColor = '#fa0';
-                btn.style.boxShadow = '0 0 15px rgba(255, 170, 0, 0.4)';
-            }
-        }
-
-        function createFollowModeButton() {
-            // Only create for non-host multiplayer viewers
-            if (multiplayerState.isHost) return;
-
-            // Remove existing button if any
-            const existing = document.getElementById('follow-mode-btn');
-            if (existing) existing.remove();
-
-            const btn = document.createElement('button');
-            btn.id = 'follow-mode-btn';
-            btn.innerHTML = '👁️ Following';
-            btn.title = 'Toggle Follow Mode (F)';
-            btn.style.cssText = `
-                position: fixed;
-                bottom: 80px;
-                right: 20px;
-                padding: 10px 16px;
-                font-size: 14px;
-                font-weight: bold;
-                color: #fff;
-                background: rgba(0, 255, 255, 0.3);
-                border: 2px solid #0ff;
-                border-radius: 10px;
-                cursor: pointer;
-                z-index: 10000;
-                transition: all 0.3s ease;
-                box-shadow: 0 0 15px rgba(0, 255, 255, 0.4);
-                font-family: 'Orbitron', sans-serif;
-            `;
-
-            btn.addEventListener('click', toggleFollowMode);
-            btn.addEventListener('mouseenter', () => {
-                btn.style.transform = 'scale(1.05)';
-            });
-            btn.addEventListener('mouseleave', () => {
-                btn.style.transform = 'scale(1)';
-            });
-
-            document.body.appendChild(btn);
-            updateFollowModeUI();
-        }
-
-        // Check if viewer can control (not in follow mode)
-        function canViewerControl() {
-            // Host always has control
-            if (multiplayerState.isHost) return true;
-            // Non-host in multiplayer: check follow mode
-            if (multiplayerState.enabled && !multiplayerState.isHost) {
-                return !multiplayerState.followMode;
-            }
-            // Single player: always has control
-            return true;
         }
 
         // Broadcast delta to all connected players
@@ -24142,11 +23854,7 @@
 
         function updateWorld(dt, time) {
             // Day/Night Cycle
-            // v6.0: Viewers use synced timeOfDay from host, don't calculate locally
-            const isMultiplayerViewer = multiplayerState.enabled && !multiplayerState.isHost;
-            if (!isMultiplayerViewer) {
-                worldState.timeOfDay = (time * 0.00005) % 1;
-            }
+            worldState.timeOfDay = (time * 0.00005) % 1;
             const angle = worldState.timeOfDay * Math.PI * 2;
             const radius = 80;
 
@@ -24158,10 +23866,6 @@
             const nightColor = new THREE.Color(0x050510);
             scene.background.lerpColors(nightColor, dayColor, Math.max(0.1, Math.sin(angle)));
             scene.fog.color.copy(scene.background);
-
-            // v6.0: For viewers, skip automatic weather changes - use synced weather from host
-            // The updateWeather() function is still called normally but won't change weather
-            // because weatherChangeTime is synced from host
 
             // Player Movement
             const p = worldState.player;
@@ -24176,20 +23880,11 @@
             const speed = 12 * playerState.moveSpeedMult * getWeatherSpeedMod() * equipStats.moveSpeed;
 
             // v4.0: WASD keyboard movement + v4.3: Virtual joystick
-            // v6.0: Input gating for follow mode - viewers can't move when following host
-            const viewerCanControl = canViewerControl();
-            const rawKeyInput = keys.w || keys.a || keys.s || keys.d;
-            const rawJoystickInput = joystickActive && (Math.abs(joystickInput.x) > 0.1 || Math.abs(joystickInput.y) > 0.1);
-
-            // v6.0: In independent mode, viewer controls the copilot companion as their avatar
-            const isViewerIndependentMode = multiplayerState.enabled && !multiplayerState.isHost && !multiplayerState.followMode;
-
-            // Gated input for normal player control
-            const hasKeyInput = viewerCanControl && !isViewerIndependentMode && rawKeyInput;
-            const hasJoystickInput = viewerCanControl && !isViewerIndependentMode && rawJoystickInput;
+            const hasKeyInput = keys.w || keys.a || keys.s || keys.d;
+            const hasJoystickInput = joystickActive && (Math.abs(joystickInput.x) > 0.1 || Math.abs(joystickInput.y) > 0.1);
 
             // v5.5: Disable autopilot if player takes manual control
-            if ((hasKeyInput || hasJoystickInput) && !isViewerIndependentMode) {
+            if (hasKeyInput || hasJoystickInput) {
                 if (autoExplore.enabled) {
                     autoExplore.enabled = false;
                     autoExplore.currentTarget = null;
@@ -24198,39 +23893,11 @@
                 }
             }
 
-            // v5.5: Run autonomous exploration if enabled (only for host/single player)
-            if (autoExplore.enabled && !isViewerIndependentMode) {
+            // v5.5: Run autonomous exploration if enabled
+            if (autoExplore.enabled) {
                 runAutoExplore(dt);
             }
 
-            // v6.0: VIEWER INDEPENDENT MODE - Control copilot companion as avatar
-            if (isViewerIndependentMode && copilotMesh && (rawKeyInput || rawJoystickInput)) {
-                _tempVec3A.set(0, 0, 0);
-                if (rawKeyInput) {
-                    if (keys.w) _tempVec3A.z -= 1;
-                    if (keys.s) _tempVec3A.z += 1;
-                    if (keys.a) _tempVec3A.x -= 1;
-                    if (keys.d) _tempVec3A.x += 1;
-                } else if (rawJoystickInput) {
-                    _tempVec3A.x = joystickInput.x;
-                    _tempVec3A.z = joystickInput.y;
-                }
-                _tempVec3A.normalize().multiplyScalar(speed * dt * 1.2); // Copilot moves slightly faster
-
-                // Move copilot companion
-                copilotMesh.position.x += _tempVec3A.x;
-                copilotMesh.position.z += _tempVec3A.z;
-
-                // Snap copilot to terrain height (with float offset)
-                const copilotGroundY = getTerrainHeight(copilotMesh.position.x, copilotMesh.position.z);
-                copilotMesh.position.y = copilotGroundY + COPILOT_CONFIG.floatHeight;
-
-                // Update viewer's worldState.player position to match copilot for syncing
-                worldState.player.position.copy(copilotMesh.position);
-                worldState.player.position.y = copilotGroundY;
-            }
-
-            // Normal player movement (host or single player)
             if (hasKeyInput || hasJoystickInput) {
                 _tempVec3A.set(0, 0, 0);
                 if (hasKeyInput) {
@@ -24254,8 +23921,7 @@
             }
 
             // Click-to-move (using pre-allocated vector)
-            // v6.0: Gated by follow mode - viewers can't click-to-move when following
-            if(worldState.target && viewerCanControl) {
+            if(worldState.target) {
                 _tempVec3A.subVectors(worldState.target, p.position);
                 _tempVec3A.y = 0;
                 const dist = _tempVec3A.length();
@@ -24267,9 +23933,6 @@
                 } else {
                     worldState.target = null;
                 }
-            } else if (worldState.target && !viewerCanControl) {
-                // Clear target if viewer can't control
-                worldState.target = null;
             }
 
             snapToGround(p);
@@ -24293,46 +23956,8 @@
             }
 
             // v5.11: Cinematic Camera Follow - player higher in frame
-            // v6.0: Camera target depends on viewer mode
-            let cameraTarget = p.position; // Default: follow local player
-
-            if (multiplayerState.enabled && !multiplayerState.isHost) {
-                if (multiplayerState.followMode) {
-                    // v6.0: FOLLOW MODE - Viewer's robot represents the host
-                    // Keep viewer's robot VISIBLE - it IS the host's robot on their screen
-                    if (p.visible !== true) {
-                        p.visible = true;
-                    }
-
-                    // Hide the HOST's duplicate avatar - viewer's robot represents the host
-                    const hostAvatar = multiplayerState.remotePlayers.get(multiplayerState.hostId);
-                    if (hostAvatar) {
-                        if (hostAvatar.visible !== false) {
-                            hostAvatar.visible = false;
-                        }
-                        // Sync viewer's robot to host position - this IS the host on viewer's screen
-                        p.position.copy(hostAvatar.position);
-                        p.rotation.y = hostAvatar.rotation?.y || 0;
-                    }
-
-                    // Camera follows the viewer's robot (which represents the host)
-                    cameraTarget = p.position;
-                } else if (copilotMesh) {
-                    // Independent mode: Show viewer's robot, camera follows copilot
-                    if (p.visible !== true) {
-                        p.visible = true;
-                    }
-                    // Show host avatar again in independent mode
-                    const hostAvatar = multiplayerState.remotePlayers.get(multiplayerState.hostId);
-                    if (hostAvatar && hostAvatar.visible !== true) {
-                        hostAvatar.visible = true;
-                    }
-                    cameraTarget = copilotMesh.position;
-                }
-            }
-
-            camera.position.lerp(cameraTarget.clone().add(_camOffset), 0.08);
-            camera.lookAt(cameraTarget.clone().add(_camLookOffset)); // Look below/ahead for cinematic view
+            camera.position.lerp(p.position.clone().add(_camOffset), 0.08);
+            camera.lookAt(p.position.clone().add(_camLookOffset)); // Look below/ahead for cinematic view
 
             // v5.15: COMPREHENSIVE ROBOT ANIMATION SYSTEM
             if (p.userData.isRobot && p.userData.bones && p.userData.animation) {
@@ -25698,15 +25323,6 @@
                 return;
             }
 
-            // v6.0: F key for Follow Mode toggle (multiplayer viewers only)
-            if (e.key === 'f' || e.key === 'F') {
-                if (multiplayerState.enabled && !multiplayerState.isHost && mode === 'world') {
-                    e.preventDefault();
-                    toggleFollowMode();
-                    return;
-                }
-            }
-
             // v5.5: Landing mini-game controls
             if (landingGame.active) {
                 handleLandingKeyDown(e);
@@ -26500,47 +26116,13 @@
                 }
             });
 
-            // v6.0: Draw multiplayer positions - host and copilot in viewer mode
-            if (multiplayerState.enabled && !multiplayerState.isHost) {
-                // Draw host avatar position (cyan with label)
-                const hostAvatar = multiplayerState.remotePlayers.get(multiplayerState.hostId);
-                if (hostAvatar) {
-                    const hx = (hostAvatar.position.x + CONFIG.WORLD_SIZE) * scale;
-                    const hy = (hostAvatar.position.z + CONFIG.WORLD_SIZE) * scale;
-                    ctx.fillStyle = '#0ff';
-                    ctx.beginPath();
-                    ctx.arc(hx, hy, 4, 0, Math.PI * 2);
-                    ctx.fill();
-                    // HOST label
-                    ctx.fillStyle = '#fff';
-                    ctx.font = '7px Arial';
-                    ctx.fillText('HOST', hx - 10, hy - 6);
-                }
-
-                // Draw copilot position (viewer's avatar) - yellow when active, dimmer when following
-                if (copilotMesh) {
-                    const cx = (copilotMesh.position.x + CONFIG.WORLD_SIZE) * scale;
-                    const cy = (copilotMesh.position.z + CONFIG.WORLD_SIZE) * scale;
-                    const isActiveMode = !multiplayerState.followMode;
-                    ctx.fillStyle = isActiveMode ? '#ff0' : 'rgba(255, 255, 0, 0.4)';
-                    ctx.beginPath();
-                    ctx.arc(cx, cy, isActiveMode ? 3 : 2, 0, Math.PI * 2);
-                    ctx.fill();
-                    if (isActiveMode) {
-                        ctx.fillStyle = '#fff';
-                        ctx.font = '7px Arial';
-                        ctx.fillText('YOU', cx - 8, cy - 6);
-                    }
-                }
-            } else {
-                // Draw player (host or single player mode)
-                ctx.fillStyle = '#ff0';
-                const px = (worldState.player.position.x + CONFIG.WORLD_SIZE) * scale;
-                const py = (worldState.player.position.z + CONFIG.WORLD_SIZE) * scale;
-                ctx.beginPath();
-                ctx.arc(px, py, 3, 0, Math.PI * 2);
-                ctx.fill();
-            }
+            // Draw player
+            ctx.fillStyle = '#ff0';
+            const px = (worldState.player.position.x + CONFIG.WORLD_SIZE) * scale;
+            const py = (worldState.player.position.z + CONFIG.WORLD_SIZE) * scale;
+            ctx.beginPath();
+            ctx.arc(px, py, 3, 0, Math.PI * 2);
+            ctx.fill();
         }
 
         // Start
