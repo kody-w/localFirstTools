@@ -3984,7 +3984,7 @@
         <div class="hud-top">
             <div>
                 <div class="game-title">LEVIATHAN</div>
-                <div class="subtitle">GALAXY SIMULATION v6.10</div>
+                <div class="subtitle">GALAXY SIMULATION v6.11</div>
             </div>
 
             <div id="galaxy-controls" class="stats-box">
@@ -4816,7 +4816,7 @@
                     <span class="icon">🚜</span>
                     <span class="label">Terraformer</span>
                 </button>
-                <button class="agent-spawn-btn" onclick="spawnAgentWithProfile('builder')" title="Build battery chargers and structures">
+                <button class="agent-spawn-btn" onclick="spawnAgentWithProfile('builder')" title="INTELLIGENT: Seeks construction beacons, builds 100% efficiency structures">
                     <span class="icon">🔧</span>
                     <span class="label">Builder</span>
                 </button>
@@ -14079,16 +14079,25 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
                 decisionInterval: 4000,
                 taskType: 'terraform'
             },
-            // v5.18: Builder - constructs battery chargers and structures
+            // v6.11: INTELLIGENT Builder - seeks construction beacons and builds optimal structures
             builder: {
                 icon: '🔧',
                 name: 'Builder',
                 color: 0x00bfff,
                 colorClass: 'agent-color-builder',
                 baseTranscript: [
-                    { role: 'system', content: `You are an autonomous construction AI agent in LEVIATHAN. Your mission is to build battery chargers and infrastructure for the robot fleet. You require flat terrain for optimal charger efficiency - place chargers on terraformed land when possible. Battery chargers allow robots to recharge their energy. Output JSON: {"action": "build|repair|upgrade", "structure": "battery_charger|beacon|platform", "message": "construction status", "efficiency": 0-100}` },
+                    { role: 'system', content: `You are an INTELLIGENT construction AI agent in LEVIATHAN v6.11. Your mission:
+1. SCAN for construction site beacons deployed by Terraformer agents
+2. CLAIM unclaimed beacon sites to prevent other Builders from targeting them
+3. NAVIGATE to claimed construction beacons using pathfinding
+4. BUILD optimal 100% efficiency structures on prepared sites
+5. COORDINATE with Terraformer agents in the construction pipeline
+
+Terraformer agents prepare sites → Deploy construction beacons → You respond to beacons → Build structures
+Building on beacon sites guarantees 100% efficiency. Building elsewhere: 60-80% efficiency.
+Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "coordinates or null", "structure": "battery_charger", "message": "status", "efficiency": 0-100}` },
                 ],
-                decisionInterval: 6000,
+                decisionInterval: 5000,
                 taskType: 'build'
             }
         };
@@ -15269,7 +15278,7 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
 
                                 if (!existingArea) {
                                     const obstacles = countObstacles(agentX, agentZ, smoothRadius);
-                                    worldState.terraformedAreas.push({
+                                    const newTerraformedArea = {
                                         x: agentX, z: agentZ,
                                         flatness: 100,
                                         createdAt: Date.now(),
@@ -15278,10 +15287,16 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
                                         clearance: obstacles === 0 ? 'clear' : 'partial',
                                         avgHeight: avgHeight.toFixed(2),
                                         originalRoughness: roughness.toFixed(2)
-                                    });
+                                    };
+                                    worldState.terraformedAreas.push(newTerraformedArea);
 
-                                    // Announce clear sites for building
-                                    if (obstacles === 0 && typeof addCopilotMessage === 'function') {
+                                    // v6.11: Spawn construction site beacon for CLEAR areas
+                                    if (obstacles === 0 && typeof createConstructionSiteBeacon === 'function') {
+                                        createConstructionSiteBeacon(newTerraformedArea);
+                                        if (typeof addCopilotMessage === 'function') {
+                                            addCopilotMessage(`🏗️ ${agent.name} deployed CONSTRUCTION BEACON at (${agentX}, ${agentZ}) - Builder agents notified!`, 'ai');
+                                        }
+                                    } else if (obstacles === 0 && typeof addCopilotMessage === 'function') {
                                         addCopilotMessage(`✨ ${agent.name} prepared a CLEAR 5x5 building site at (${agentX}, ${agentZ})!`, 'ai');
                                     }
                                 }
@@ -15332,16 +15347,60 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
                     trackAgentAction(agent, success, 8);
                     break;
 
-                // v5.18: Builder - constructs battery chargers
+                // v6.11: INTELLIGENT Builder - seeks construction sites and builds optimal structures
                 case 'build':
                     const buildRate = getAgentSuccessRate(agent, 0.35);
                     if (rand < buildRate && agent.mesh) {
                         const agentX = Math.floor((agent.mesh.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
                         const agentZ = Math.floor((agent.mesh.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
 
+                        // ================================
+                        // v6.11: INTELLIGENT SITE SEEKING
+                        // ================================
+
+                        // First, check if there's a construction site beacon to navigate to
+                        if (!agent.targetConstructionSite && typeof findNearestConstructionSite === 'function') {
+                            const nearestSite = findNearestConstructionSite(agentX, agentZ);
+                            if (nearestSite) {
+                                const distToSite = Math.sqrt(
+                                    Math.pow(agentX - nearestSite.x, 2) + Math.pow(agentZ - nearestSite.z, 2)
+                                );
+
+                                if (distToSite > 2) {
+                                    // Claim and navigate to the site
+                                    nearestSite.claimedBy = agent.name;
+                                    agent.targetConstructionSite = nearestSite;
+                                    agent.targetPosition = new THREE.Vector3(nearestSite.worldX, agent.mesh.position.y, nearestSite.worldZ);
+                                    agent.taskState.state = 'moving';
+                                    agent.taskState.targetPosition = agent.targetPosition.clone();
+
+                                    agent.statusMessage = `🎯 Navigating to construction beacon at (${nearestSite.x}, ${nearestSite.z})`;
+                                    if (typeof addCopilotMessage === 'function') {
+                                        addCopilotMessage(`🔧 ${agent.name} claimed construction site at (${nearestSite.x}, ${nearestSite.z})!`, 'ai');
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Check if we arrived at target construction site
+                        if (agent.targetConstructionSite) {
+                            const distToTarget = Math.sqrt(
+                                Math.pow(agentX - agent.targetConstructionSite.x, 2) +
+                                Math.pow(agentZ - agent.targetConstructionSite.z, 2)
+                            );
+                            if (distToTarget <= 2) {
+                                agent.statusMessage = '🔧 Arrived at construction site - beginning build...';
+                            }
+                        }
+
                         // Check if on terraformed/flat area for efficiency bonus
                         const onFlatArea = worldState.terraformedAreas.some(a =>
                             Math.abs(a.x - agentX) < 2 && Math.abs(a.z - agentZ) < 2);
+
+                        // Check if at a construction site beacon
+                        const atConstructionSite = worldState.constructionSites?.some(s =>
+                            Math.abs(s.x - agentX) < 2 && Math.abs(s.z - agentZ) < 2);
 
                         // Check if charger already exists nearby
                         const nearbyCharger = worldState.structures.find(s =>
@@ -15350,7 +15409,7 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
 
                         if (!nearbyCharger) {
                             // Build a new battery charger
-                            const efficiency = onFlatArea ? 100 : 60 + Math.floor(Math.random() * 20);
+                            const efficiency = (onFlatArea || atConstructionSite) ? 100 : 60 + Math.floor(Math.random() * 20);
                             const charger = createBatteryCharger(
                                 agent.mesh.position.x,
                                 agent.mesh.position.y,
@@ -15360,14 +15419,37 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
 
                             if (charger) {
                                 success = true;
-                                agent.statusMessage = `🔧 Built Battery Charger (${efficiency}% efficiency)!`;
-                                agent.results.push({ built: { type: 'battery_charger', efficiency: efficiency, flat: onFlatArea } });
+
+                                // v6.11: Remove construction beacon if we built on it
+                                if (atConstructionSite && typeof removeConstructionSiteBeacon === 'function') {
+                                    const siteToRemove = worldState.constructionSites?.find(s =>
+                                        Math.abs(s.x - agentX) < 2 && Math.abs(s.z - agentZ) < 2);
+                                    if (siteToRemove) {
+                                        removeConstructionSiteBeacon(siteToRemove);
+                                        agent.statusMessage = `🏗️ Built OPTIMAL Charger on prepared site!`;
+                                        if (typeof addCopilotMessage === 'function') {
+                                            addCopilotMessage(`⚡ ${agent.name} completed construction at beacon site - 100% efficiency!`, 'ai');
+                                        }
+                                    }
+                                } else {
+                                    agent.statusMessage = `🔧 Built Battery Charger (${efficiency}% efficiency)!`;
+                                    if (onFlatArea && typeof addCopilotMessage === 'function') {
+                                        addCopilotMessage(`⚡ ${agent.name} built an optimal charger on flat terrain!`, 'ai');
+                                    }
+                                }
+
+                                agent.results.push({
+                                    built: {
+                                        type: 'battery_charger',
+                                        efficiency: efficiency,
+                                        flat: onFlatArea,
+                                        atBeacon: atConstructionSite
+                                    }
+                                });
                                 if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
 
-                                // Bonus message if on flat terrain
-                                if (onFlatArea) {
-                                    addCopilotMessage(`⚡ ${agent.name} built an optimal charger on flat terrain!`, 'ai');
-                                }
+                                // Clear target construction site
+                                agent.targetConstructionSite = null;
                             }
                         } else {
                             // Repair/upgrade existing charger
@@ -15376,12 +15458,35 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
                                 success = true;
                                 agent.statusMessage = `🔧 Upgraded charger to ${nearbyCharger.efficiency}%!`;
                             } else {
-                                agent.statusMessage = 'Charger nearby, relocating...';
-                                moveAgentToRandomPosition(agent);
+                                // Look for construction sites instead of random movement
+                                if (typeof findNearestConstructionSite === 'function') {
+                                    const newSite = findNearestConstructionSite(agentX, agentZ);
+                                    if (newSite) {
+                                        newSite.claimedBy = agent.name;
+                                        agent.targetConstructionSite = newSite;
+                                        agent.targetPosition = new THREE.Vector3(newSite.worldX, agent.mesh.position.y, newSite.worldZ);
+                                        agent.taskState.state = 'moving';
+                                        agent.taskState.targetPosition = agent.targetPosition.clone();
+                                        agent.statusMessage = `🎯 Found new construction beacon at (${newSite.x}, ${newSite.z})`;
+                                    } else {
+                                        agent.statusMessage = '🔍 Searching for construction sites...';
+                                        moveAgentToRandomPosition(agent);
+                                    }
+                                } else {
+                                    agent.statusMessage = 'Charger nearby, relocating...';
+                                    moveAgentToRandomPosition(agent);
+                                }
                             }
                         }
                     } else {
-                        agent.statusMessage = rand < 0.5 ? 'Surveying for build site...' : 'Gathering construction materials...';
+                        // Scanning status messages
+                        const scanMessages = [
+                            '📡 Scanning for construction beacons...',
+                            '🔍 Searching for prepared sites...',
+                            '🗺️ Analyzing terrain data...',
+                            '📊 Calculating build priorities...'
+                        ];
+                        agent.statusMessage = scanMessages[Math.floor(Math.random() * scanMessages.length)];
                     }
                     trackAgentAction(agent, success, 10);
                     break;
@@ -24685,6 +24790,179 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
             return chargerData;
         }
 
+        // v6.11: Construction Site Beacon - Visual marker for prepared building sites
+        function createConstructionSiteBeacon(terraformedArea) {
+            if (!scene || !terraformedArea) return null;
+
+            const worldX = (terraformedArea.x - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+            const worldZ = (terraformedArea.z - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+            const worldY = worldState.terrain[terraformedArea.x]?.[terraformedArea.z] || 2;
+
+            const group = new THREE.Group();
+            group.position.set(worldX, worldY, worldZ);
+
+            // Ground marker - pulsing ring showing build zone
+            const groundRingGeo = new THREE.RingGeometry(2, 2.5, 32);
+            const groundRingMat = new THREE.MeshBasicMaterial({
+                color: 0x00ff88,
+                transparent: true,
+                opacity: 0.6,
+                side: THREE.DoubleSide
+            });
+            const groundRing = new THREE.Mesh(groundRingGeo, groundRingMat);
+            groundRing.rotation.x = -Math.PI / 2;
+            groundRing.position.y = 0.1;
+            group.add(groundRing);
+
+            // Inner construction zone indicator
+            const innerZoneGeo = new THREE.CircleGeometry(1.8, 32);
+            const innerZoneMat = new THREE.MeshBasicMaterial({
+                color: 0x00aa66,
+                transparent: true,
+                opacity: 0.3,
+                side: THREE.DoubleSide
+            });
+            const innerZone = new THREE.Mesh(innerZoneGeo, innerZoneMat);
+            innerZone.rotation.x = -Math.PI / 2;
+            innerZone.position.y = 0.05;
+            group.add(innerZone);
+
+            // Floating beacon marker
+            const beaconGeo = new THREE.OctahedronGeometry(0.4, 0);
+            const beaconMat = new THREE.MeshBasicMaterial({
+                color: 0x00ffaa,
+                transparent: true,
+                opacity: 0.9
+            });
+            const beacon = new THREE.Mesh(beaconGeo, beaconMat);
+            beacon.position.y = 3;
+            group.add(beacon);
+
+            // Vertical light beam
+            const beamGeo = new THREE.CylinderGeometry(0.05, 0.15, 2.5, 8);
+            const beamMat = new THREE.MeshBasicMaterial({
+                color: 0x00ff88,
+                transparent: true,
+                opacity: 0.4
+            });
+            const beam = new THREE.Mesh(beamGeo, beamMat);
+            beam.position.y = 1.5;
+            group.add(beam);
+
+            // Point light for glow
+            const light = new THREE.PointLight(0x00ff88, 0.3, 6);
+            light.position.y = 2;
+            group.add(light);
+
+            const siteData = {
+                type: 'construction_site',
+                mesh: group,
+                terraformedArea: terraformedArea,
+                x: terraformedArea.x,
+                z: terraformedArea.z,
+                worldX: worldX,
+                worldZ: worldZ,
+                beacon: beacon,
+                groundRing: groundRing,
+                beam: beam,
+                light: light,
+                createdAt: Date.now(),
+                claimedBy: null // Builder agent that claims this site
+            };
+
+            group.userData = {
+                type: 'construction_site',
+                name: '🏗️ Construction Site',
+                siteData: siteData
+            };
+
+            // Store reference in terraformed area
+            terraformedArea.beacon = siteData;
+            terraformedArea.hasSiteBeacon = true;
+
+            scene.add(group);
+
+            // Add to a construction sites array (create if doesn't exist)
+            if (!worldState.constructionSites) worldState.constructionSites = [];
+            worldState.constructionSites.push(siteData);
+
+            return siteData;
+        }
+
+        // v6.11: Remove construction site beacon (called when structure is built)
+        function removeConstructionSiteBeacon(siteData) {
+            if (!siteData || !siteData.mesh) return;
+
+            scene.remove(siteData.mesh);
+
+            // Remove from array
+            if (worldState.constructionSites) {
+                const idx = worldState.constructionSites.indexOf(siteData);
+                if (idx > -1) worldState.constructionSites.splice(idx, 1);
+            }
+
+            // Clear reference in terraformed area
+            if (siteData.terraformedArea) {
+                siteData.terraformedArea.beacon = null;
+                siteData.terraformedArea.hasSiteBeacon = false;
+            }
+        }
+
+        // v6.11: Find nearest unclaimed construction site for Builder
+        function findNearestConstructionSite(agentX, agentZ) {
+            if (!worldState.constructionSites || worldState.constructionSites.length === 0) return null;
+
+            let nearest = null;
+            let nearestDist = Infinity;
+
+            for (const site of worldState.constructionSites) {
+                // Skip claimed sites
+                if (site.claimedBy) continue;
+
+                // Skip sites that already have structures nearby
+                const hasStructure = worldState.structures.some(s =>
+                    Math.abs(s.x - site.x) < 3 && Math.abs(s.z - site.z) < 3);
+                if (hasStructure) continue;
+
+                const dist = Math.sqrt(Math.pow(site.x - agentX, 2) + Math.pow(site.z - agentZ, 2));
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearest = site;
+                }
+            }
+
+            return nearest;
+        }
+
+        // v6.11: Animate construction site beacons
+        function updateConstructionSiteBeacons(deltaTime) {
+            if (!worldState.constructionSites) return;
+
+            const time = Date.now() * 0.001;
+
+            for (const site of worldState.constructionSites) {
+                if (!site.mesh) continue;
+
+                // Rotate and bob the beacon
+                if (site.beacon) {
+                    site.beacon.rotation.y += deltaTime * 2;
+                    site.beacon.position.y = 3 + Math.sin(time * 2) * 0.3;
+                }
+
+                // Pulse the ground ring
+                if (site.groundRing) {
+                    const pulse = 0.5 + Math.sin(time * 3) * 0.15;
+                    site.groundRing.material.opacity = pulse;
+                }
+
+                // Claimed sites glow differently
+                if (site.claimedBy && site.light) {
+                    site.light.color.setHex(0xffaa00); // Orange when claimed
+                    if (site.beacon) site.beacon.material.color.setHex(0xffaa00);
+                }
+            }
+        }
+
         // v5.18: Move agent to random nearby position
         function moveAgentToRandomPosition(agent) {
             if (!agent.mesh) return;
@@ -28287,6 +28565,11 @@ Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", 
             // v5.18: Update robot energy and structures
             updateRobotEnergy(dt);
             updateStructures(dt);
+
+            // v6.11: Animate construction site beacons
+            if (typeof updateConstructionSiteBeacons === 'function') {
+                updateConstructionSiteBeacons(dt);
+            }
 
             // v5.18: Stream to spectators
             sendGameStateToSpectators();
