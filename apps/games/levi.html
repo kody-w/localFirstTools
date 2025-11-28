@@ -4325,6 +4325,8 @@
             <div id="time-effect" style="color: #666; font-size: 9px; margin-top: 4px;"></div>
         </div>
 
+        <!-- v6.13: Wave system is implicit - no UI display, discoverable through exploration -->
+
         <!-- v4.8: Combat Abilities Bar (v4.9: Extended with Tier 2) -->
         <div id="ability-bar" style="position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); display: none; z-index: 100;">
             <div style="display: flex; gap: 8px; background: rgba(0,0,0,0.7); padding: 8px 12px; border-radius: 8px; border: 1px solid #333;">
@@ -4356,7 +4358,7 @@
                     <div class="ability-cooldown" id="cooldown-t"></div>
                     <span class="ability-cooldown-text" id="cooldown-text-t"></span>
                 </div>
-                <div id="ability-f" class="ability-slot" onclick="useAbility('dash')" title="Combat Dash (F) - Dash forward">
+                <div id="ability-f" class="ability-slot" onclick="useAbility('dash')" title="Dash (F) - Surge forward, destroying obstacles and knocking back enemies">
                     <span class="ability-icon">💨</span>
                     <span class="ability-key">F</span>
                     <div class="ability-cooldown" id="cooldown-f"></div>
@@ -6877,6 +6879,387 @@
             return gameData.bestiaryBonuses[bonusKey] || 0;
         }
 
+        // ============================================
+        // v6.13: WAVE MOMENTUM SYSTEM (DOTA-style creep pushing)
+        // ============================================
+        // Players influence territorial control by defeating enemies and helping allies
+        // Momentum shifts determine world bonuses and spawn rates
+
+        const WAVE_CONFIG = {
+            WAVE_INTERVAL: 30000,       // New wave every 30 seconds
+            CREEPS_PER_WAVE: 3,         // Creeps spawned per side per wave
+            MOMENTUM_DECAY: 0.5,        // Momentum decays toward 50 per second
+            PLAYER_INFLUENCE: 5,        // Momentum gained per enemy defeated near front
+            CLASH_DAMAGE: 5,            // Damage creeps deal to each other per tick
+            CLASH_INTERVAL: 1500,       // Creeps attack every 1.5 seconds
+            FRONT_LINE_SPEED: 0.3,      // How fast front line moves based on momentum
+            MOMENTUM_XP_BONUS: 0.5,     // +50% XP when momentum > 70
+            MOMENTUM_RESOURCE_BONUS: 0.3, // +30% resources when momentum > 60
+
+            // Faction definitions
+            FACTIONS: {
+                explorer: {
+                    name: 'Explorer Drones',
+                    color: 0x00ff88,
+                    icon: '🤖',
+                    baseHp: 30,
+                    damage: 8
+                },
+                horde: {
+                    name: 'Void Horde',
+                    color: 0xff4488,
+                    icon: '👾',
+                    baseHp: 35,
+                    damage: 10
+                }
+            }
+        };
+
+        // Wave system state
+        let waveState = {
+            enabled: false,
+            momentum: 50,               // 0-100: 0=horde winning, 100=explorers winning
+            frontLineZ: 0,              // Z position of the "front line"
+            explorerCreeps: [],         // Active friendly creeps
+            hordeCreeps: [],            // Active enemy creeps
+            lastWaveTime: 0,
+            waveNumber: 0,
+            totalExplorerDefeats: 0,
+            totalHordeDefeats: 0,
+            playerContribution: 0,      // Track player's influence
+            lastClashTime: 0
+        };
+
+        // Initialize wave system when entering world
+        function initWaveSystem() {
+            waveState = {
+                enabled: true,
+                momentum: 50,
+                frontLineZ: 0,
+                explorerCreeps: [],
+                hordeCreeps: [],
+                lastWaveTime: performance.now(),
+                waveNumber: 0,
+                totalExplorerDefeats: 0,
+                totalHordeDefeats: 0,
+                playerContribution: 0,
+                lastClashTime: 0
+            };
+            updateWaveMomentumUI();
+        }
+
+        // Create a creep for a faction
+        function createWaveCreep(faction, waveNum) {
+            const factionData = WAVE_CONFIG.FACTIONS[faction];
+            const isExplorer = faction === 'explorer';
+
+            // Scale stats with wave number
+            const scaleFactor = 1 + (waveNum * 0.1);
+            const hp = Math.floor(factionData.baseHp * scaleFactor);
+            const damage = Math.floor(factionData.damage * scaleFactor);
+
+            // Create mesh
+            const geo = new THREE.SphereGeometry(0.5, 12, 12);
+            const mat = new THREE.MeshStandardMaterial({
+                color: factionData.color,
+                emissive: factionData.color,
+                emissiveIntensity: 0.3,
+                roughness: 0.4
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+
+            // Position: explorers spawn from player side, horde from opposite
+            const spawnZ = isExplorer ? -30 : 30;
+            const spawnX = (Math.random() - 0.5) * 20;
+            mesh.position.set(spawnX, 1.2, spawnZ);
+            mesh.castShadow = true;
+
+            // Add faction indicator ring
+            const ringGeo = new THREE.RingGeometry(0.6, 0.8, 16);
+            const ringMat = new THREE.MeshBasicMaterial({
+                color: factionData.color,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.5
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.y = -0.3;
+            mesh.add(ring);
+
+            const creep = {
+                mesh: mesh,
+                faction: faction,
+                hp: hp,
+                maxHp: hp,
+                damage: damage,
+                isAlive: true,
+                target: null,
+                waveNum: waveNum
+            };
+
+            if (scene) scene.add(mesh);
+            return creep;
+        }
+
+        // Spawn a wave of creeps for both factions
+        function spawnWave() {
+            if (!waveState.enabled || mode !== 'world') return;
+
+            waveState.waveNumber++;
+            const waveNum = waveState.waveNumber;
+
+            // Spawn explorer drones (friendly)
+            for (let i = 0; i < WAVE_CONFIG.CREEPS_PER_WAVE; i++) {
+                const creep = createWaveCreep('explorer', waveNum);
+                waveState.explorerCreeps.push(creep);
+            }
+
+            // Spawn horde creeps (enemy)
+            for (let i = 0; i < WAVE_CONFIG.CREEPS_PER_WAVE; i++) {
+                const creep = createWaveCreep('horde', waveNum);
+                waveState.hordeCreeps.push(creep);
+            }
+
+            // Announce wave
+            if (waveNum % 5 === 0) {
+                showNotification(`⚔️ Wave ${waveNum} incoming!`, 'info');
+            }
+
+            waveState.lastWaveTime = performance.now();
+        }
+
+        // Update wave system each frame
+        function updateWaveSystem(dt) {
+            if (!waveState.enabled || mode !== 'world') return;
+
+            const now = performance.now();
+
+            // Spawn new waves periodically
+            if (now - waveState.lastWaveTime > WAVE_CONFIG.WAVE_INTERVAL) {
+                spawnWave();
+            }
+
+            // Move creeps toward front line
+            const frontZ = waveState.frontLineZ;
+
+            // Explorer creeps move toward positive Z (toward horde)
+            for (const creep of waveState.explorerCreeps) {
+                if (!creep.isAlive) continue;
+                if (creep.mesh.position.z < frontZ + 5) {
+                    creep.mesh.position.z += dt * 2;
+                }
+                // Rotate ring for visual effect
+                if (creep.mesh.children[0]) {
+                    creep.mesh.children[0].rotation.z += dt * 2;
+                }
+            }
+
+            // Horde creeps move toward negative Z (toward explorers)
+            for (const creep of waveState.hordeCreeps) {
+                if (!creep.isAlive) continue;
+                if (creep.mesh.position.z > frontZ - 5) {
+                    creep.mesh.position.z -= dt * 2;
+                }
+                if (creep.mesh.children[0]) {
+                    creep.mesh.children[0].rotation.z -= dt * 2;
+                }
+            }
+
+            // Creep combat (clash at front line)
+            if (now - waveState.lastClashTime > WAVE_CONFIG.CLASH_INTERVAL) {
+                processCreepClash();
+                waveState.lastClashTime = now;
+            }
+
+            // Update front line based on momentum
+            const momentumForce = (waveState.momentum - 50) / 50; // -1 to 1
+            waveState.frontLineZ += momentumForce * WAVE_CONFIG.FRONT_LINE_SPEED * dt;
+            waveState.frontLineZ = Math.max(-25, Math.min(25, waveState.frontLineZ));
+
+            // Decay momentum toward 50 (balance)
+            if (waveState.momentum > 50) {
+                waveState.momentum = Math.max(50, waveState.momentum - WAVE_CONFIG.MOMENTUM_DECAY * dt);
+            } else if (waveState.momentum < 50) {
+                waveState.momentum = Math.min(50, waveState.momentum + WAVE_CONFIG.MOMENTUM_DECAY * dt);
+            }
+
+            // Clean up defeated creeps
+            cleanupDefeatedCreeps();
+
+            // Update UI
+            updateWaveMomentumUI();
+        }
+
+        // Process combat between creeps at front line
+        function processCreepClash() {
+            const clashRange = 8;
+
+            // Each explorer attacks nearest horde creep in range
+            for (const explorer of waveState.explorerCreeps) {
+                if (!explorer.isAlive) continue;
+
+                let nearestHorde = null;
+                let nearestDist = Infinity;
+
+                for (const horde of waveState.hordeCreeps) {
+                    if (!horde.isAlive) continue;
+                    const dist = explorer.mesh.position.distanceTo(horde.mesh.position);
+                    if (dist < clashRange && dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestHorde = horde;
+                    }
+                }
+
+                if (nearestHorde) {
+                    nearestHorde.hp -= explorer.damage;
+
+                    // Visual feedback
+                    if (particles) {
+                        particles.emit(nearestHorde.mesh.position, 2, 0x00ff88, { spread: 0.5, lifetime: 300 });
+                    }
+
+                    if (nearestHorde.hp <= 0) {
+                        nearestHorde.isAlive = false;
+                        waveState.totalHordeDefeats++;
+                        waveState.momentum = Math.min(100, waveState.momentum + 2);
+                    }
+                }
+            }
+
+            // Each horde attacks nearest explorer in range
+            for (const horde of waveState.hordeCreeps) {
+                if (!horde.isAlive) continue;
+
+                let nearestExplorer = null;
+                let nearestDist = Infinity;
+
+                for (const explorer of waveState.explorerCreeps) {
+                    if (!explorer.isAlive) continue;
+                    const dist = horde.mesh.position.distanceTo(explorer.mesh.position);
+                    if (dist < clashRange && dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestExplorer = explorer;
+                    }
+                }
+
+                if (nearestExplorer) {
+                    nearestExplorer.hp -= horde.damage;
+
+                    // Visual feedback
+                    if (particles) {
+                        particles.emit(nearestExplorer.mesh.position, 2, 0xff4488, { spread: 0.5, lifetime: 300 });
+                    }
+
+                    if (nearestExplorer.hp <= 0) {
+                        nearestExplorer.isAlive = false;
+                        waveState.totalExplorerDefeats++;
+                        waveState.momentum = Math.max(0, waveState.momentum - 2);
+                    }
+                }
+            }
+        }
+
+        // Clean up defeated creeps
+        function cleanupDefeatedCreeps() {
+            // Remove defeated explorer creeps
+            waveState.explorerCreeps = waveState.explorerCreeps.filter(creep => {
+                if (!creep.isAlive && creep.mesh) {
+                    scene.remove(creep.mesh);
+                    return false;
+                }
+                return true;
+            });
+
+            // Remove defeated horde creeps
+            waveState.hordeCreeps = waveState.hordeCreeps.filter(creep => {
+                if (!creep.isAlive && creep.mesh) {
+                    scene.remove(creep.mesh);
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        // Player defeats a horde creep - gains momentum
+        function onPlayerDefeatHordeCreep(creep) {
+            if (!waveState.enabled) return;
+
+            waveState.momentum = Math.min(100, waveState.momentum + WAVE_CONFIG.PLAYER_INFLUENCE);
+            waveState.playerContribution++;
+            waveState.totalHordeDefeats++;
+
+            // Bonus XP for wave contribution
+            const bonusXP = 15 + (waveState.waveNumber * 2);
+            if (typeof addXp === 'function') {
+                addXp('combat', bonusXP);
+            }
+
+            spawnFloater(creep.mesh.position, `⚔️ +${bonusXP} WAVE XP`, '#00ff88');
+
+            // Milestone rewards
+            if (waveState.playerContribution % 10 === 0) {
+                showNotification(`🎖️ Wave Hero! ${waveState.playerContribution} enemies pushed back!`, 'success');
+            }
+        }
+
+        // Get momentum bonuses for player
+        function getWaveMomentumBonuses() {
+            if (!waveState.enabled) return { xp: 1, resources: 1 };
+
+            const momentum = waveState.momentum;
+            let xpMult = 1;
+            let resourceMult = 1;
+
+            if (momentum >= 70) {
+                xpMult = 1 + WAVE_CONFIG.MOMENTUM_XP_BONUS;
+            }
+            if (momentum >= 60) {
+                resourceMult = 1 + WAVE_CONFIG.MOMENTUM_RESOURCE_BONUS;
+            }
+
+            return { xp: xpMult, resources: resourceMult };
+        }
+
+        // v6.13: Wave momentum UI - HIDDEN for implicit discovery
+        // Players discover the wave/momentum system through exploration
+        // The creeps fighting in the world ARE the visual feedback
+        function updateWaveMomentumUI() {
+            // UI intentionally hidden - system is discoverable through gameplay
+            // The creeps fighting, visual effects, and momentum bonuses are the feedback
+            // Players who observe and engage learn the system organically
+        }
+
+        // Check if a mob is a horde creep (for player combat integration)
+        function isHordeCreep(target) {
+            if (!waveState.enabled) return false;
+            for (const creep of waveState.hordeCreeps) {
+                if (creep.mesh === target && creep.isAlive) {
+                    return creep;
+                }
+            }
+            return null;
+        }
+
+        // Cleanup wave system when leaving world
+        function cleanupWaveSystem() {
+            // Remove all creep meshes
+            for (const creep of waveState.explorerCreeps) {
+                if (creep.mesh && scene) scene.remove(creep.mesh);
+            }
+            for (const creep of waveState.hordeCreeps) {
+                if (creep.mesh && scene) scene.remove(creep.mesh);
+            }
+
+            waveState.enabled = false;
+            waveState.explorerCreeps = [];
+            waveState.hordeCreeps = [];
+        }
+
+        // ============================================
+        // END WAVE MOMENTUM SYSTEM
+        // ============================================
+
         // v4.8: Combat Abilities System
         const COMBAT_ABILITIES = {
             powerStrike: {
@@ -7091,11 +7474,17 @@
                 updateHealthUI();
                 AudioSystem.levelUp();
             } else if (abilityKey === 'dash') {
-                // Combat dash - move forward and damage enemies in path
+                // v6.13: LEVIATHAN PULSE - Ancient tech combat dash that DESTROYS obstacles!
                 const dir = new THREE.Vector3(0, 0, -1);
                 dir.applyQuaternion(p.quaternion);
                 const startPos = p.position.clone();
+                const dashDir = dir.clone().normalize();
                 const endPos = p.position.clone().add(dir.multiplyScalar(ability.distance));
+
+                // ==========================================
+                // LEVIATHAN PULSE VISUAL EFFECT
+                // ==========================================
+                createFusRoDahEffect(startPos, dashDir, ability.distance);
 
                 // Damage enemies in path
                 let dashHits = 0;
@@ -7103,14 +7492,19 @@
                     const mobPos = mob.position.clone();
                     // Check if mob is roughly between start and end
                     const toMob = mobPos.sub(startPos);
-                    const projection = toMob.dot(dir.clone().normalize());
+                    const projection = toMob.dot(dashDir);
                     if (projection > 0 && projection < ability.distance) {
-                        const perpDist = toMob.clone().sub(dir.clone().normalize().multiplyScalar(projection)).length();
-                        if (perpDist < 2) {
+                        const perpDist = toMob.clone().sub(dashDir.clone().multiplyScalar(projection)).length();
+                        if (perpDist < 3) { // Wider hitbox for Leviathan Pulse
                             const damage = Math.floor(getPlayerDamage() * ability.damageMultiplier);
                             mob.userData.hp -= damage;
-                            spawnFloater(mob.position, `${ability.icon} -${damage}`, '#88ffff');
+                            spawnFloater(mob.position, `💨 -${damage}`, '#88ffff');
                             dashHits++;
+
+                            // Knockback mobs in the dash direction
+                            const knockbackForce = dashDir.clone().multiplyScalar(8);
+                            mob.position.add(knockbackForce);
+
                             if (mob.userData.hp <= 0) {
                                 setTimeout(() => { if (mob.userData.hp <= 0) performAction(mob); }, 100);
                             }
@@ -7118,14 +7512,89 @@
                     }
                 });
 
+                // ==========================================
+                // DESTROY TREES AND ROCKS IN PATH
+                // ==========================================
+                let obstaclesDestroyed = 0;
+                const obstaclesToRemove = [];
+
+                if (worldState.interactables) {
+                    worldState.interactables.forEach(obj => {
+                        if (!obj.parent) return;
+                        if (obj.userData && (obj.userData.type === 'tree' || obj.userData.type === 'rock')) {
+                            const objPos = obj.position.clone();
+                            const toObj = objPos.sub(startPos.clone());
+                            const projection = toObj.dot(dashDir);
+
+                            // Check if object is in the dash path
+                            if (projection > -1 && projection < ability.distance + 2) {
+                                const perpDist = toObj.clone().sub(dashDir.clone().multiplyScalar(projection)).length();
+                                if (perpDist < 3.5) { // Wide destruction path
+                                    obstaclesToRemove.push(obj);
+                                }
+                            }
+                        }
+                    });
+                }
+
+                // Remove obstacles with visual effects
+                obstaclesToRemove.forEach(obj => {
+                    const objType = obj.userData.type;
+                    const objPos = obj.position.clone();
+
+                    // Spawn destruction particles
+                    if (particles) {
+                        const color = objType === 'tree' ? 0x228b22 : 0x888888;
+                        particles.emit(objPos, 25, color, { spread: 5, lifetime: 800 });
+                    }
+
+                    // Spawn debris floater
+                    const icon = objType === 'tree' ? '🌲' : '🪨';
+                    spawnFloater(objPos, `${icon} SHATTERED!`, objType === 'tree' ? '#228b22' : '#888888');
+
+                    // Give small resource reward for destruction
+                    const resourceType = objType === 'tree' ? '🪵 Wood' : '🪨 Stone';
+                    addToInventory(resourceType, 1);
+
+                    // Track stats
+                    if (objType === 'tree') {
+                        gameData.statistics.treesChopped = (gameData.statistics.treesChopped || 0) + 1;
+                    }
+
+                    // Remove from scene and array
+                    scene.remove(obj);
+                    obstaclesDestroyed++;
+                });
+
+                // Filter out removed obstacles
+                if (obstaclesToRemove.length > 0) {
+                    worldState.interactables = worldState.interactables.filter(
+                        x => !obstaclesToRemove.includes(x)
+                    );
+                }
+
                 // Move player
                 p.position.copy(endPos);
-                spawnFloater(p.position, `${ability.icon} DASH!`, '#88ffff');
-                if (dashHits > 0) {
-                    showNotification(`Dash hit ${dashHits} enemies!`, 'success');
-                    triggerHitStop(HIT_STOP_LIGHT);
+
+                // Show results
+                const totalHits = dashHits + obstaclesDestroyed;
+                if (totalHits > 0) {
+                    let msg = '';
+                    if (dashHits > 0 && obstaclesDestroyed > 0) {
+                        msg = `DASH! ${dashHits} enemies + ${obstaclesDestroyed} obstacles!`;
+                    } else if (dashHits > 0) {
+                        msg = `DASH! ${dashHits} enemies sent flying!`;
+                    } else {
+                        msg = `DASH! ${obstaclesDestroyed} obstacles pulverized!`;
+                    }
+                    showNotification(msg, 'success');
+                    triggerHitStop(obstaclesDestroyed > 2 ? HIT_STOP_BOSS : HIT_STOP_LIGHT);
+                    screenShake(0.5 + obstaclesDestroyed * 0.2);
+                } else {
+                    spawnFloater(p.position, `💨 DASH! 💨`, '#88ffff');
                 }
-                if (particles) particles.emit(startPos, 15, 0x88ffff, { spread: 2, lifetime: 400 });
+
+                if (particles) particles.emit(startPos, 20, 0x88ffff, { spread: 3, lifetime: 500 });
                 AudioSystem.hit();
             } else if (abilityKey === 'shieldWall') {
                 // Activate damage reduction buff
@@ -7574,6 +8043,190 @@
             }
         }
 
+        // ============================================
+        // v6.13: RIFT SURGE - Omniverse Gate Dash Effect
+        // Channels energy from the dimensional rift to reshape reality
+        // Creates an epic shockwave/force blast effect
+        // ============================================
+        let leviathanPulseEffects = [];
+
+        function createFusRoDahEffect(startPos, direction, distance) {
+            if (!scene) return;
+
+            // Create multiple expanding rings that travel along dash path
+            const ringCount = 5;
+            const ringSpacing = distance / ringCount;
+
+            for (let i = 0; i < ringCount; i++) {
+                // Position along dash path
+                const ringPos = startPos.clone().add(direction.clone().multiplyScalar(i * ringSpacing));
+                ringPos.y += 1;
+
+                // Create expanding ring geometry
+                const ringGeo = new THREE.RingGeometry(0.5, 1.5, 32);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: 0x88ffff,
+                    transparent: true,
+                    opacity: 0.8 - i * 0.1,
+                    side: THREE.DoubleSide
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.position.copy(ringPos);
+
+                // Orient ring perpendicular to dash direction
+                ring.lookAt(ringPos.clone().add(direction));
+
+                ring.userData = {
+                    createdAt: performance.now(),
+                    lifetime: 600,
+                    initialScale: 1 + i * 0.5,
+                    expandRate: 3 + i * 0.5,
+                    index: i
+                };
+
+                scene.add(ring);
+                leviathanPulseEffects.push(ring);
+            }
+
+            // Create central force cone/beam
+            const coneGeo = new THREE.ConeGeometry(2, distance * 1.2, 16, 1, true);
+            const coneMat = new THREE.MeshBasicMaterial({
+                color: 0x00ffff,
+                transparent: true,
+                opacity: 0.4,
+                side: THREE.DoubleSide
+            });
+            const cone = new THREE.Mesh(coneGeo, coneMat);
+
+            // Position and orient cone
+            const coneCenter = startPos.clone().add(direction.clone().multiplyScalar(distance * 0.6));
+            coneCenter.y += 1;
+            cone.position.copy(coneCenter);
+
+            // Point cone in dash direction (rotate so tip faces forward)
+            const upVector = new THREE.Vector3(0, 1, 0);
+            const quaternion = new THREE.Quaternion().setFromUnitVectors(upVector, direction);
+            cone.quaternion.copy(quaternion);
+            cone.rotateX(Math.PI / 2); // Adjust so cone opens in direction of travel
+
+            cone.userData = {
+                createdAt: performance.now(),
+                lifetime: 400,
+                type: 'cone'
+            };
+
+            scene.add(cone);
+            leviathanPulseEffects.push(cone);
+
+            // Create debris particles flying outward
+            const debrisCount = 20;
+            for (let i = 0; i < debrisCount; i++) {
+                const debrisGeo = new THREE.BoxGeometry(0.2, 0.2, 0.2);
+                const debrisMat = new THREE.MeshBasicMaterial({
+                    color: Math.random() > 0.5 ? 0x88ffff : 0xffffff,
+                    transparent: true,
+                    opacity: 0.9
+                });
+                const debris = new THREE.Mesh(debrisGeo, debrisMat);
+
+                // Random position along path
+                const t = Math.random();
+                const debrisPos = startPos.clone().add(direction.clone().multiplyScalar(t * distance));
+                debrisPos.y += 0.5 + Math.random() * 2;
+                debris.position.copy(debrisPos);
+
+                // Random velocity perpendicular to dash direction
+                const perpX = direction.z;
+                const perpZ = -direction.x;
+                const lateralVel = (Math.random() - 0.5) * 8;
+                const upVel = 2 + Math.random() * 4;
+
+                debris.userData = {
+                    createdAt: performance.now(),
+                    lifetime: 800,
+                    type: 'debris',
+                    velocity: new THREE.Vector3(
+                        perpX * lateralVel + direction.x * 2,
+                        upVel,
+                        perpZ * lateralVel + direction.z * 2
+                    ),
+                    rotationSpeed: new THREE.Vector3(
+                        (Math.random() - 0.5) * 10,
+                        (Math.random() - 0.5) * 10,
+                        (Math.random() - 0.5) * 10
+                    )
+                };
+
+                scene.add(debris);
+                leviathanPulseEffects.push(debris);
+            }
+
+            // Create text floater with dramatic styling
+            spawnFloater(startPos.clone().add(new THREE.Vector3(0, 3, 0)), '💨 DASH! 💨', '#00ffff');
+
+            // Screen flash effect
+            const flash = document.getElementById('damage-overlay');
+            if (flash) {
+                flash.style.background = 'radial-gradient(ellipse at center, rgba(136,255,255,0.5) 0%, transparent 70%)';
+                flash.style.opacity = '0.6';
+                setTimeout(() => {
+                    flash.style.background = 'linear-gradient(rgba(255,0,0,0.3), rgba(255,0,0,0))';
+                    flash.style.opacity = '0';
+                }, 200);
+            }
+        }
+
+        // Update Rift Surge effects each frame
+        function updateFusRoDahEffects(dt) {
+            const now = performance.now();
+            const toRemove = [];
+
+            for (const effect of leviathanPulseEffects) {
+                const age = now - effect.userData.createdAt;
+                const progress = age / effect.userData.lifetime;
+
+                if (progress >= 1) {
+                    toRemove.push(effect);
+                    continue;
+                }
+
+                if (effect.userData.type === 'debris') {
+                    // Update debris physics
+                    const vel = effect.userData.velocity;
+                    effect.position.x += vel.x * dt;
+                    effect.position.y += vel.y * dt;
+                    effect.position.z += vel.z * dt;
+                    vel.y -= 15 * dt; // Gravity
+
+                    // Rotation
+                    const rot = effect.userData.rotationSpeed;
+                    effect.rotation.x += rot.x * dt;
+                    effect.rotation.y += rot.y * dt;
+                    effect.rotation.z += rot.z * dt;
+
+                    // Fade out
+                    effect.material.opacity = 0.9 * (1 - progress);
+                } else if (effect.userData.type === 'cone') {
+                    // Fade out cone
+                    effect.material.opacity = 0.4 * (1 - progress);
+                    effect.scale.setScalar(1 + progress * 0.5);
+                } else {
+                    // Expanding rings
+                    const scale = effect.userData.initialScale + effect.userData.expandRate * progress;
+                    effect.scale.setScalar(scale);
+                    effect.material.opacity = (0.8 - effect.userData.index * 0.1) * (1 - progress);
+                }
+            }
+
+            // Remove finished effects
+            for (const effect of toRemove) {
+                scene.remove(effect);
+                effect.geometry?.dispose();
+                effect.material?.dispose();
+            }
+            leviathanPulseEffects = leviathanPulseEffects.filter(e => !toRemove.includes(e));
+        }
+
         // v4.1: Create nebula clouds for galaxy atmosphere
         function createNebulae() {
             const nebulaColors = [0xff3366, 0x3366ff, 0x66ff33, 0xff6633, 0x9933ff, 0x33ffff];
@@ -7780,7 +8433,41 @@
             breakDamage: 25,
             tranceOverlay: null,
             spiralRings: [],
-            companionEyeOffset: { x: 0, y: 0 }
+            companionEyeOffset: { x: 0, y: 0 },
+            // v6.13: Enhanced mind control effects
+            mindControlEffect: null,           // Current active effect
+            controlsInverted: false,           // Inverted movement
+            lastMindControlAction: 0,          // Timestamp of last involuntary action
+            resourcesDrained: 0,               // Track resources lost during hypnosis
+            attackedAllies: 0                  // Track friendly fire incidents
+        };
+
+        // v6.13: Mind Control Effect Types - Robot performs actions against its mission
+        const MIND_CONTROL_EFFECTS = {
+            invertControls: {
+                name: 'Inverted Controls',
+                icon: '🔄',
+                message: 'Your controls are reversed!',
+                color: '#ff00ff'
+            },
+            resourceDrain: {
+                name: 'Resource Leak',
+                icon: '💸',
+                message: 'You are dropping resources!',
+                color: '#ffaa00'
+            },
+            friendlyFire: {
+                name: 'Confused Targeting',
+                icon: '🎯',
+                message: 'You might attack allies!',
+                color: '#ff4444'
+            },
+            selfSabotage: {
+                name: 'Self Sabotage',
+                icon: '⚠️',
+                message: 'Your systems are compromised!',
+                color: '#ff6600'
+            }
         };
 
         // Autopilot mode flag (disables player control during certain states)
@@ -7832,6 +8519,17 @@
             HYPNOSIS_STATE.eyePhase = 0;
             HYPNOSIS_STATE.breakAttempts = 0;
 
+            // v6.13: Select random mind control effect
+            const effectKeys = Object.keys(MIND_CONTROL_EFFECTS);
+            const randomEffect = effectKeys[Math.floor(Math.random() * effectKeys.length)];
+            HYPNOSIS_STATE.mindControlEffect = randomEffect;
+            HYPNOSIS_STATE.controlsInverted = (randomEffect === 'invertControls');
+            HYPNOSIS_STATE.lastMindControlAction = performance.now();
+            HYPNOSIS_STATE.resourcesDrained = 0;
+            HYPNOSIS_STATE.attackedAllies = 0;
+
+            const effectData = MIND_CONTROL_EFFECTS[randomEffect];
+
             // Random eye pattern
             hypnoEyePattern = Math.floor(Math.random() * HYPNO_EYE_PATTERNS.length);
 
@@ -7846,12 +8544,17 @@
             // Show UI notification
             showHypnosisUI();
 
-            // Notification
+            // v6.13: Show mind control effect notification
             if (typeof showNotification === 'function') {
-                showNotification('👁️ You are being hypnotized! Press SPACE rapidly to break free!', 'warning');
+                showNotification(`${effectData.icon} MIND CONTROL: ${effectData.message}`, 'error');
             }
 
-            console.log('Hypnosis started - break free with SPACE!');
+            // Copilot warning about the specific effect
+            if (typeof addCopilotMessage === 'function') {
+                addCopilotMessage(`⚠️ ALERT: Hypnotist is using ${effectData.name}! Press SPACE rapidly to break free!`, 'ai');
+            }
+
+            console.log('Hypnosis started with effect:', randomEffect);
         }
 
         // Create swirling spiral rings effect
@@ -7943,6 +8646,146 @@
             if (HYPNOSIS_STATE.tranceOverlay) {
                 const pulse = 0.7 + Math.sin(HYPNOSIS_STATE.spiralAngle * 3) * 0.3;
                 HYPNOSIS_STATE.tranceOverlay.style.opacity = pulse.toString();
+            }
+
+            // ==========================================
+            // v6.13: MIND CONTROL BEHAVIORAL EFFECTS
+            // Robot performs involuntary actions based on hypnotist's agenda
+            // ==========================================
+            const now = performance.now();
+            const timeSinceLastAction = now - HYPNOSIS_STATE.lastMindControlAction;
+            const actionInterval = 1500; // Involuntary action every 1.5 seconds
+
+            if (timeSinceLastAction >= actionInterval && HYPNOSIS_STATE.mindControlEffect) {
+                HYPNOSIS_STATE.lastMindControlAction = now;
+
+                switch (HYPNOSIS_STATE.mindControlEffect) {
+                    case 'resourceDrain':
+                        // Robot drops resources involuntarily
+                        applyResourceDrainEffect();
+                        break;
+
+                    case 'friendlyFire':
+                        // Robot might attack nearby allies (agents)
+                        applyFriendlyFireEffect();
+                        break;
+
+                    case 'selfSabotage':
+                        // Robot damages itself or loses progress
+                        applySelfSabotageEffect();
+                        break;
+
+                    // invertControls is handled in movement code
+                }
+            }
+        }
+
+        // v6.13: Resource Drain - Robot drops items from inventory
+        function applyResourceDrainEffect() {
+            if (!gameData.inventory || gameData.inventory.length === 0) return;
+
+            // Find a random item to drop
+            const filledSlots = gameData.inventory.filter(item => item && item.name);
+            if (filledSlots.length === 0) return;
+
+            const randomItem = filledSlots[Math.floor(Math.random() * filledSlots.length)];
+            const itemIdx = gameData.inventory.indexOf(randomItem);
+
+            if (itemIdx >= 0 && randomItem.amount > 0) {
+                // Reduce amount or remove item
+                randomItem.amount--;
+                if (randomItem.amount <= 0) {
+                    gameData.inventory.splice(itemIdx, 1);
+                }
+
+                HYPNOSIS_STATE.resourcesDrained++;
+
+                // Visual feedback
+                if (worldState.player) {
+                    const dropPos = worldState.player.position.clone();
+                    dropPos.y += 1.5;
+                    spawnFloater(dropPos, `💸 Dropped: ${randomItem.name}`, '#ffaa00');
+
+                    if (particles) {
+                        particles.emit(dropPos, 10, 0xffaa00, { spread: 3, lifetime: 600 });
+                    }
+                }
+
+                updateInventoryUI();
+            }
+        }
+
+        // v6.13: Friendly Fire - Robot might attack nearby agents
+        function applyFriendlyFireEffect() {
+            if (!worldState.agents || worldState.agents.length === 0) return;
+
+            // 40% chance to actually attack
+            if (Math.random() > 0.4) return;
+
+            // Find nearest agent
+            let nearestAgent = null;
+            let nearestDist = 15;
+
+            for (const agent of worldState.agents) {
+                if (!agent.mesh || !agent.active) continue;
+                const dist = agent.mesh.position.distanceTo(worldState.player.position);
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestAgent = agent;
+                }
+            }
+
+            if (nearestAgent && nearestAgent.mesh) {
+                // Deal damage to the agent
+                const damage = Math.floor(5 + Math.random() * 10);
+                if (nearestAgent.hp !== undefined) {
+                    nearestAgent.hp = Math.max(0, nearestAgent.hp - damage);
+                }
+
+                HYPNOSIS_STATE.attackedAllies++;
+
+                // Visual feedback
+                const agentPos = nearestAgent.mesh.position.clone();
+                spawnFloater(agentPos, `🎯 Confused Attack! -${damage}`, '#ff4444');
+
+                if (particles) {
+                    particles.emit(agentPos, 15, 0xff4444, { spread: 2, lifetime: 500 });
+                }
+
+                // Copilot warning
+                if (typeof addCopilotMessage === 'function' && Math.random() < 0.5) {
+                    addCopilotMessage(`⚠️ Commander! You're attacking our own units! Break free!`, 'ai');
+                }
+            }
+        }
+
+        // v6.13: Self Sabotage - Robot takes self-damage or loses XP
+        function applySelfSabotageEffect() {
+            // 60% chance to take damage, 40% chance to lose XP
+            if (Math.random() < 0.6) {
+                // Self-damage
+                const damage = Math.floor(3 + Math.random() * 7);
+                gameData.player.hp = Math.max(1, gameData.player.hp - damage);
+
+                if (worldState.player) {
+                    spawnFloater(worldState.player.position, `⚠️ Malfunction! -${damage}`, '#ff6600');
+
+                    if (particles) {
+                        particles.emit(worldState.player.position, 12, 0xff6600, { spread: 2, lifetime: 400 });
+                    }
+                }
+
+                updateHealthUI();
+            } else {
+                // Lose XP
+                const xpLoss = Math.floor(5 + Math.random() * 15);
+                gameData.player.xp = Math.max(0, gameData.player.xp - xpLoss);
+
+                if (worldState.player) {
+                    spawnFloater(worldState.player.position, `⚠️ Memory Leak! -${xpLoss} XP`, '#ff6600');
+                }
+
+                updateXPUI();
             }
         }
 
@@ -13326,7 +14169,140 @@
             saveGameData();
         }
 
-        // Helper: Add item to inventory
+        // ============================================
+        // v6.13: ITEM PRIORITY SYSTEM - "Cream Rises to the Top"
+        // Low priority items auto-drop when inventory is full
+        // ============================================
+        const ITEM_PRIORITIES = {
+            // Legendary/Epic (Priority 5 - NEVER auto-drop)
+            '⚗️ Rare Crystal': 5,
+            '💎 Diamond': 5,
+            '🌟 Legendary Ore': 5,
+            '📜 Ancient Scroll': 5,
+            '🔮 Magic Essence': 5,
+            '⚡ Power Core': 5,
+            '🎭 Artifact Fragment': 5,
+            'Antidote Sample': 5,
+            'Rare Crystal': 5,
+
+            // High Value (Priority 4)
+            '⛏️ Gold Ore': 4,
+            '🪙 Gold Coins': 4,
+            '💰 Treasure': 4,
+            '🔷 Sapphire': 4,
+            '🔶 Ruby': 4,
+            '🟢 Emerald': 4,
+            '🧪 Elixir': 4,
+            '✨ Stardust': 4,
+
+            // Medium-High (Priority 3)
+            '⛏️ Iron Ore': 3,
+            '🥩 Meat': 3,
+            '🐟 Fish': 3,
+            '🍖 Cooked Meat': 3,
+            '🧱 Brick': 3,
+            '🔩 Metal Parts': 3,
+            '⚙️ Gears': 3,
+            'Charcoal': 3,
+
+            // Medium (Priority 2 - Standard resources)
+            '🪵 Wood': 2,
+            '🪨 Stone': 2,
+            '🌿 Fiber': 2,
+            '🍃 Herbs': 2,
+            '🌾 Wheat': 2,
+            '🥕 Vegetable': 2,
+
+            // Low Priority (Priority 1 - First to be auto-dropped)
+            '🍂 Leaves': 1,
+            '💧 Water': 1,
+            '🪶 Feather': 1,
+            '🦴 Bone': 1,
+            '🧵 Thread': 1,
+            '🧱 Dirt': 1,
+            '🌱 Seeds': 1,
+            '🍄 Mushroom': 1,
+
+            // Default for unknown items
+            '_default': 2
+        };
+
+        // Get priority of an item (higher = more valuable)
+        function getItemPriority(itemName) {
+            if (!itemName) return 0;
+            // Check exact match first
+            if (ITEM_PRIORITIES[itemName] !== undefined) {
+                return ITEM_PRIORITIES[itemName];
+            }
+            // Check partial matches
+            for (const [key, priority] of Object.entries(ITEM_PRIORITIES)) {
+                if (key !== '_default' && itemName.includes(key.replace(/^[^\w]+/, ''))) {
+                    return priority;
+                }
+            }
+            return ITEM_PRIORITIES._default;
+        }
+
+        // Find the lowest priority item in inventory
+        function findLowestPriorityItem() {
+            if (!gameData.inventory || gameData.inventory.length === 0) return null;
+
+            let lowestIdx = -1;
+            let lowestPriority = Infinity;
+
+            for (let i = 0; i < gameData.inventory.length; i++) {
+                const item = gameData.inventory[i];
+                if (!item) continue;
+
+                const priority = getItemPriority(item.name);
+                if (priority < lowestPriority) {
+                    lowestPriority = priority;
+                    lowestIdx = i;
+                }
+            }
+
+            return lowestIdx >= 0 ? { index: lowestIdx, item: gameData.inventory[lowestIdx], priority: lowestPriority } : null;
+        }
+
+        // Auto-drop lowest priority item to make room
+        function autoDropLowestPriorityItem(incomingItemName) {
+            const incoming = getItemPriority(incomingItemName);
+            const lowest = findLowestPriorityItem();
+
+            if (!lowest) return false;
+
+            // Only drop if incoming item is higher priority
+            if (incoming <= lowest.priority) {
+                // New item is same or lower priority - don't pick it up
+                return false;
+            }
+
+            // Drop the lowest priority item
+            const droppedItem = lowest.item;
+            const droppedAmount = droppedItem.amount || 1;
+
+            // Visual feedback for dropping
+            if (worldState.player) {
+                const dropPos = worldState.player.position.clone();
+                dropPos.y += 1.5;
+                spawnFloater(dropPos, `📤 Dropped: ${droppedItem.name}`, '#ff8800');
+
+                // Particle effect for dropped item
+                if (particles) {
+                    particles.emit(dropPos, 8, 0xff8800, { spread: 2, lifetime: 500 });
+                }
+            }
+
+            // Remove from inventory
+            gameData.inventory.splice(lowest.index, 1);
+
+            // Optional: Could spawn a pickup on the ground here for realism
+            // For now, item is just "lost"
+
+            return true;
+        }
+
+        // Helper: Add item to inventory (v6.13: with auto-drop for low priority)
         function addToInventory(itemName, amount) {
             if (!gameData.inventory) gameData.inventory = [];
 
@@ -13335,7 +14311,29 @@
             if (existingIdx >= 0) {
                 gameData.inventory[existingIdx].amount = (gameData.inventory[existingIdx].amount || 1) + amount;
             } else {
-                // Find empty slot
+                // v6.13: Check if inventory is full (20 slots max)
+                const MAX_INVENTORY = 20;
+                const filledSlots = gameData.inventory.filter(item => item !== null && item !== undefined).length;
+
+                if (filledSlots >= MAX_INVENTORY) {
+                    // Inventory full - try auto-drop system
+                    const didDrop = autoDropLowestPriorityItem(itemName);
+                    if (!didDrop) {
+                        // Couldn't drop anything (new item is too low priority)
+                        if (worldState.player) {
+                            spawnFloater(worldState.player.position, `📦 Inventory full! ${itemName} skipped`, '#888888');
+                        }
+                        return false;
+                    }
+                    // Successfully dropped something, show upgrade message
+                    if (worldState.player) {
+                        const dropPos = worldState.player.position.clone();
+                        dropPos.y += 2;
+                        spawnFloater(dropPos, `⬆️ Upgraded: +${itemName}`, '#00ff88');
+                    }
+                }
+
+                // Find empty slot (might have been created by auto-drop)
                 let emptyIdx = gameData.inventory.findIndex(item => !item);
                 if (emptyIdx < 0) {
                     emptyIdx = gameData.inventory.length;
@@ -13344,6 +14342,7 @@
             }
 
             updateInventoryUI();
+            return true;
         }
 
         // Parse natural language for task commands
@@ -24640,6 +25639,11 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             initWorldEventSystem();
             initAchievementShowcase();
 
+            // v6.13: Initialize wave momentum system (DOTA-style creep pushing)
+            if (typeof initWaveSystem === 'function') {
+                initWaveSystem();
+            }
+
             // v4.4: Start environmental particles
             if (envParticles) envParticles.startBiome(civ.biome);
 
@@ -27947,14 +28951,26 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             if (hasKeyInput || hasJoystickInput) {
                 _tempVec3A.set(0, 0, 0);
                 if (hasKeyInput) {
-                    if (keys.w) _tempVec3A.z -= 1;
-                    if (keys.s) _tempVec3A.z += 1;
-                    if (keys.a) _tempVec3A.x -= 1;
-                    if (keys.d) _tempVec3A.x += 1;
+                    // v6.13: Check for hypnosis inverted controls
+                    const inverted = HYPNOSIS_STATE.active && HYPNOSIS_STATE.controlsInverted;
+                    if (inverted) {
+                        // Controls are reversed!
+                        if (keys.w) _tempVec3A.z += 1;  // Forward becomes back
+                        if (keys.s) _tempVec3A.z -= 1;  // Back becomes forward
+                        if (keys.a) _tempVec3A.x += 1;  // Left becomes right
+                        if (keys.d) _tempVec3A.x -= 1;  // Right becomes left
+                    } else {
+                        if (keys.w) _tempVec3A.z -= 1;
+                        if (keys.s) _tempVec3A.z += 1;
+                        if (keys.a) _tempVec3A.x -= 1;
+                        if (keys.d) _tempVec3A.x += 1;
+                    }
                 } else if (hasJoystickInput) {
                     // v4.3: Joystick input (x is left/right, y is up/down on screen = forward/back in 3D)
-                    _tempVec3A.x = joystickInput.x;
-                    _tempVec3A.z = joystickInput.y;
+                    // v6.13: Also invert joystick if hypnotized
+                    const inverted = HYPNOSIS_STATE.active && HYPNOSIS_STATE.controlsInverted;
+                    _tempVec3A.x = inverted ? -joystickInput.x : joystickInput.x;
+                    _tempVec3A.z = inverted ? -joystickInput.y : joystickInput.y;
                 }
                 _tempVec3A.normalize().multiplyScalar(speed * dt);
                 p.position.add(_tempVec3A);
@@ -28584,6 +29600,16 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             // v6.11: Animate construction site beacons
             if (typeof updateConstructionSiteBeacons === 'function') {
                 updateConstructionSiteBeacons(dt);
+            }
+
+            // v6.13: Update wave momentum system (DOTA-style creep pushing)
+            if (typeof updateWaveSystem === 'function') {
+                updateWaveSystem(dt);
+            }
+
+            // v6.13: Update Fus Ro Dah visual effects
+            if (typeof updateFusRoDahEffects === 'function') {
+                updateFusRoDahEffects(dt);
             }
 
             // v5.18: Stream to spectators
