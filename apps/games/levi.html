@@ -3984,7 +3984,7 @@
         <div class="hud-top">
             <div>
                 <div class="game-title">LEVIATHAN</div>
-                <div class="subtitle">GALAXY SIMULATION v5.14</div>
+                <div class="subtitle">GALAXY SIMULATION v6.10</div>
             </div>
 
             <div id="galaxy-controls" class="stats-box">
@@ -4811,8 +4811,8 @@
                     <span class="icon">🧭</span>
                     <span class="label">Explorer</span>
                 </button>
-                <!-- v5.18: Construction Agents -->
-                <button class="agent-spawn-btn" onclick="spawnAgentWithProfile('terraformer')" title="Flatten terrain for construction">
+                <!-- v6.10: Intelligent Construction Agents -->
+                <button class="agent-spawn-btn" onclick="spawnAgentWithProfile('terraformer')" title="INTELLIGENT: Seeks clear areas, smooths rough terrain for building">
                     <span class="icon">🚜</span>
                     <span class="label">Terraformer</span>
                 </button>
@@ -14058,16 +14058,25 @@
                 decisionInterval: 7000,
                 taskType: 'scout'
             },
-            // v5.18: Terraformer - flattens terrain for construction
+            // v6.10: INTELLIGENT Terraformer - seeks clear areas and smooths rough terrain for building
             terraformer: {
                 icon: '🚜',
                 name: 'Terraformer',
                 color: 0x8b4513,
                 colorClass: 'agent-color-terraformer',
                 baseTranscript: [
-                    { role: 'system', content: `You are an autonomous terraforming AI agent in LEVIATHAN. Your mission is to analyze terrain, identify uneven areas, and flatten them for construction. You prepare building sites by leveling the ground. Flat surfaces allow for efficient battery charger placement. Output JSON: {"action": "scan|flatten|prepare", "area": "coordinates or description", "message": "terraforming status", "flatness": 0-100}` },
+                    { role: 'system', content: `You are an INTELLIGENT terraforming AI agent in LEVIATHAN v6.10. Your mission:
+1. SCAN terrain to detect roughness variance and calculate site suitability scores
+2. SEEK OUT areas with NO trees or rocks (clear zones) prioritized for building
+3. SMOOTH rough terrain using 5x5 grid averaging algorithms to prepare construction sites
+4. NAVIGATE autonomously to optimal building locations using AI site scoring
+5. REPORT site clearance status: 🟢 CLEAR (no obstacles), 🟡 PARTIAL (few obstacles), 🔴 OBSTRUCTED
+
+Your scoring algorithm weighs: obstacle count (fewer = better), terrain roughness (more = valuable to smooth), distance penalty.
+Clear flat areas enable 100% efficiency structures. You prepare the ground for Builder agents.
+Output JSON: {"action": "scan|navigate|smooth|complete", "site": "coordinates", "clearance": "clear|partial|obstructed", "roughness": 0-10, "message": "status", "ready_for_building": boolean}` },
                 ],
-                decisionInterval: 5000,
+                decisionInterval: 4000,
                 taskType: 'terraform'
             },
             // v5.18: Builder - constructs battery chargers and structures
@@ -15069,19 +15078,162 @@
                     trackAgentAction(agent, success, 6);
                     break;
 
-                // v5.18: Terraformer - flattens terrain for construction
+                // v6.10: INTELLIGENT TERRAFORMER - Seeks clear areas and smooths rough terrain for building
                 case 'terraform':
                     const terraformRate = getAgentSuccessRate(agent, 0.4);
                     if (rand < terraformRate && agent.mesh) {
-                        // Find nearby unflat terrain and flatten it
+                        // v6.10: Intelligent terrain scanning and site selection
                         const agentX = Math.floor((agent.mesh.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
                         const agentZ = Math.floor((agent.mesh.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
 
-                        // Check 3x3 area around agent for terrain variance
+                        // ========================
+                        // INTELLIGENT SITE SCANNER
+                        // ========================
+
+                        // Calculate terrain roughness in an area (higher = more uneven = needs smoothing)
+                        const calculateRoughness = (cx, cz, radius) => {
+                            let heights = [];
+                            for (let dx = -radius; dx <= radius; dx++) {
+                                for (let dz = -radius; dz <= radius; dz++) {
+                                    const tx = cx + dx, tz = cz + dz;
+                                    if (worldState.terrain[tx] && worldState.terrain[tx][tz] !== undefined && worldState.terrain[tx][tz] > 0) {
+                                        heights.push(worldState.terrain[tx][tz]);
+                                    }
+                                }
+                            }
+                            if (heights.length < 2) return 0;
+                            const avg = heights.reduce((a, b) => a + b, 0) / heights.length;
+                            const variance = heights.reduce((sum, h) => sum + Math.pow(h - avg, 2), 0) / heights.length;
+                            return Math.sqrt(variance);
+                        };
+
+                        // Count obstacles (trees/rocks) in an area
+                        const countObstacles = (cx, cz, radius) => {
+                            const worldCenterX = (cx - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                            const worldCenterZ = (cz - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                            const searchRadius = radius * CONFIG.TILE_SIZE;
+                            let count = 0;
+                            for (const obj of worldState.interactables) {
+                                if (obj.userData && (obj.userData.type === 'tree' || obj.userData.type === 'rock')) {
+                                    const dist = Math.sqrt(
+                                        Math.pow(obj.position.x - worldCenterX, 2) +
+                                        Math.pow(obj.position.z - worldCenterZ, 2)
+                                    );
+                                    if (dist <= searchRadius) count++;
+                                }
+                            }
+                            return count;
+                        };
+
+                        // Check if area is already terraformed
+                        const isAlreadyTerraformed = (cx, cz, minDist = 4) => {
+                            return worldState.terraformedAreas.some(a =>
+                                Math.abs(a.x - cx) < minDist && Math.abs(a.z - cz) < minDist);
+                        };
+
+                        // =============================
+                        // FIND BEST BUILDING SITE (AI)
+                        // =============================
+                        const findBestBuildingSite = () => {
+                            let bestSite = null;
+                            let bestScore = -Infinity;
+                            const scanRadius = 15; // Tiles around agent to scan
+                            const siteRadius = 3;  // Size of potential building site
+
+                            for (let dx = -scanRadius; dx <= scanRadius; dx += 3) {
+                                for (let dz = -scanRadius; dz <= scanRadius; dz += 3) {
+                                    const sx = agentX + dx;
+                                    const sz = agentZ + dz;
+
+                                    // Skip invalid positions
+                                    if (sx < 2 || sx >= CONFIG.WORLD_SIZE - 2 || sz < 2 || sz >= CONFIG.WORLD_SIZE - 2) continue;
+
+                                    // Skip water areas
+                                    if (!worldState.terrain[sx] || worldState.terrain[sx][sz] <= 0) continue;
+
+                                    // Skip already terraformed areas
+                                    if (isAlreadyTerraformed(sx, sz)) continue;
+
+                                    // Calculate scores
+                                    const obstacles = countObstacles(sx, sz, siteRadius);
+                                    const roughness = calculateRoughness(sx, sz, siteRadius);
+
+                                    // Scoring: Prioritize clear areas with rough terrain
+                                    // High roughness = needs smoothing (good)
+                                    // Low obstacles = clear for building (very good)
+                                    const clearBonus = obstacles === 0 ? 50 : (obstacles <= 2 ? 20 : -obstacles * 5);
+                                    const roughBonus = roughness * 10; // More rough = more valuable to smooth
+                                    const distancePenalty = Math.sqrt(dx * dx + dz * dz) * 0.5;
+
+                                    const score = clearBonus + roughBonus - distancePenalty;
+
+                                    if (score > bestScore && roughness > 0.5) {
+                                        bestScore = score;
+                                        bestSite = {
+                                            x: sx, z: sz,
+                                            obstacles, roughness,
+                                            score,
+                                            worldX: (sx - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
+                                            worldZ: (sz - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE
+                                        };
+                                    }
+                                }
+                            }
+                            return bestSite;
+                        };
+
+                        // Find the best site
+                        const bestSite = findBestBuildingSite();
+
+                        // ================================
+                        // INTELLIGENT SITE NAVIGATION & SMOOTHING
+                        // ================================
+
+                        // If we found a good site and we're not there, navigate to it
+                        if (bestSite && !agent.terraformTarget) {
+                            const distToSite = Math.sqrt(
+                                Math.pow(agentX - bestSite.x, 2) + Math.pow(agentZ - bestSite.z, 2)
+                            );
+
+                            if (distToSite > 2) {
+                                // Navigate to the best site
+                                agent.terraformTarget = bestSite;
+                                agent.targetPosition = new THREE.Vector3(bestSite.worldX, agent.mesh.position.y, bestSite.worldZ);
+                                agent.taskState.state = 'moving';
+                                agent.taskState.targetPosition = agent.targetPosition.clone();
+
+                                const siteQuality = bestSite.obstacles === 0 ? '🟢 CLEAR' : (bestSite.obstacles <= 2 ? '🟡 SOME OBSTACLES' : '🔴 OBSTRUCTED');
+                                agent.statusMessage = `📍 Found building site (${bestSite.x}, ${bestSite.z}) - ${siteQuality}`;
+
+                                if (typeof addCopilotMessage === 'function' && bestSite.obstacles === 0) {
+                                    addCopilotMessage(`🚜 ${agent.name} detected clear building site at (${bestSite.x}, ${bestSite.z}) - Roughness: ${bestSite.roughness.toFixed(1)}`, 'ai');
+                                }
+                                break;
+                            }
+                        }
+
+                        // Clear terraformTarget if we arrived
+                        if (agent.terraformTarget) {
+                            const distToTarget = Math.sqrt(
+                                Math.pow(agentX - agent.terraformTarget.x, 2) +
+                                Math.pow(agentZ - agent.terraformTarget.z, 2)
+                            );
+                            if (distToTarget <= 2) {
+                                agent.terraformTarget = null;
+                                agent.statusMessage = '🚜 Arrived at site - beginning terrain smoothing...';
+                            }
+                        }
+
+                        // ================================
+                        // ENHANCED 5x5 TERRAIN SMOOTHING
+                        // ================================
+                        const smoothRadius = 2; // 5x5 area (radius of 2)
                         let maxHeight = -Infinity, minHeight = Infinity;
                         let totalHeight = 0, count = 0;
-                        for (let dx = -1; dx <= 1; dx++) {
-                            for (let dz = -1; dz <= 1; dz++) {
+                        let heightMap = [];
+
+                        for (let dx = -smoothRadius; dx <= smoothRadius; dx++) {
+                            for (let dz = -smoothRadius; dz <= smoothRadius; dz++) {
                                 const tx = agentX + dx, tz = agentZ + dz;
                                 if (worldState.terrain[tx] && worldState.terrain[tx][tz] !== undefined && worldState.terrain[tx][tz] > 0) {
                                     const h = worldState.terrain[tx][tz];
@@ -15089,6 +15241,7 @@
                                     minHeight = Math.min(minHeight, h);
                                     totalHeight += h;
                                     count++;
+                                    heightMap.push({ tx, tz, h });
                                 }
                             }
                         }
@@ -15096,44 +15249,85 @@
                         if (count > 0) {
                             const avgHeight = totalHeight / count;
                             const variance = maxHeight - minHeight;
+                            const roughness = calculateRoughness(agentX, agentZ, smoothRadius);
 
-                            if (variance > 1) {
-                                // Flatten the area to average height
-                                for (let dx = -1; dx <= 1; dx++) {
-                                    for (let dz = -1; dz <= 1; dz++) {
-                                        const tx = agentX + dx, tz = agentZ + dz;
-                                        if (worldState.terrain[tx] && worldState.terrain[tx][tz] !== undefined && worldState.terrain[tx][tz] > 0) {
-                                            worldState.terrain[tx][tz] = avgHeight;
-                                        }
-                                    }
+                            if (variance > 1 || roughness > 0.5) {
+                                // ================================
+                                // SMOOTH OPERATION - Gradual averaging
+                                // ================================
+                                const smoothingStrength = 0.8; // How much to smooth (0-1)
+
+                                for (const cell of heightMap) {
+                                    // Smooth towards average with strength factor
+                                    const newHeight = cell.h + (avgHeight - cell.h) * smoothingStrength;
+                                    worldState.terrain[cell.tx][cell.tz] = newHeight;
                                 }
 
-                                // Record terraformed area
+                                // Record terraformed area with metadata
                                 const existingArea = worldState.terraformedAreas.find(a =>
-                                    Math.abs(a.x - agentX) < 3 && Math.abs(a.z - agentZ) < 3);
+                                    Math.abs(a.x - agentX) < 4 && Math.abs(a.z - agentZ) < 4);
+
                                 if (!existingArea) {
+                                    const obstacles = countObstacles(agentX, agentZ, smoothRadius);
                                     worldState.terraformedAreas.push({
                                         x: agentX, z: agentZ,
                                         flatness: 100,
                                         createdAt: Date.now(),
-                                        createdBy: agent.name
+                                        createdBy: agent.name,
+                                        size: (smoothRadius * 2 + 1) + 'x' + (smoothRadius * 2 + 1),
+                                        clearance: obstacles === 0 ? 'clear' : 'partial',
+                                        avgHeight: avgHeight.toFixed(2),
+                                        originalRoughness: roughness.toFixed(2)
                                     });
+
+                                    // Announce clear sites for building
+                                    if (obstacles === 0 && typeof addCopilotMessage === 'function') {
+                                        addCopilotMessage(`✨ ${agent.name} prepared a CLEAR 5x5 building site at (${agentX}, ${agentZ})!`, 'ai');
+                                    }
                                 }
 
                                 success = true;
-                                agent.statusMessage = `🚜 Flattened terrain at (${agentX}, ${agentZ})!`;
-                                agent.results.push({ terraformed: { x: agentX, z: agentZ, flatness: 100 } });
+                                const siteStatus = countObstacles(agentX, agentZ, smoothRadius) === 0 ? '✨ READY FOR BUILDING' : '🚧 Smoothed';
+                                agent.statusMessage = `🚜 ${siteStatus} at (${agentX}, ${agentZ})`;
+                                agent.results.push({
+                                    terraformed: {
+                                        x: agentX, z: agentZ,
+                                        flatness: 100,
+                                        size: '5x5',
+                                        clear: countObstacles(agentX, agentZ, smoothRadius) === 0,
+                                        originalRoughness: roughness.toFixed(2)
+                                    }
+                                });
                                 if (agent.mesh) spawnAgentParticleEffect(agent, 'success');
+
                             } else {
-                                agent.statusMessage = 'Area already flat, scanning for uneven terrain...';
-                                // Move to find uneven terrain
-                                moveAgentToRandomPosition(agent);
+                                // Area already flat - seek new site
+                                agent.statusMessage = '🔍 Area already smooth, scanning for rough terrain...';
+
+                                // Try to find a new site
+                                if (bestSite) {
+                                    agent.targetPosition = new THREE.Vector3(bestSite.worldX, agent.mesh.position.y, bestSite.worldZ);
+                                    agent.taskState.state = 'moving';
+                                    agent.taskState.targetPosition = agent.targetPosition.clone();
+                                    agent.statusMessage = `📍 Relocating to (${bestSite.x}, ${bestSite.z})...`;
+                                } else {
+                                    // No good sites nearby - wander to explore
+                                    moveAgentToRandomPosition(agent);
+                                    agent.statusMessage = '🔍 Exploring for uneven terrain...';
+                                }
                             }
                         } else {
-                            agent.statusMessage = 'Scanning terrain...';
+                            agent.statusMessage = '📡 Scanning terrain topology...';
                         }
                     } else {
-                        agent.statusMessage = 'Analyzing terrain topology...';
+                        // Not performing action - show scanning status
+                        const scanMessages = [
+                            '📡 Analyzing terrain data...',
+                            '🛰️ Scanning for clear areas...',
+                            '🗺️ Mapping terrain roughness...',
+                            '📊 Calculating optimal sites...'
+                        ];
+                        agent.statusMessage = scanMessages[Math.floor(Math.random() * scanMessages.length)];
                     }
                     trackAgentAction(agent, success, 8);
                     break;
