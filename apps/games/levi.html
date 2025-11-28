@@ -8662,6 +8662,164 @@
             leviathanPulseEffects = leviathanPulseEffects.filter(e => !toRemove.includes(e));
         }
 
+        // ============================================
+        // v6.16: FOG CLEARING EFFECT
+        // Thermal shockwave from dash disperses nearby fog
+        // Creates a temporary clear zone that slowly refills
+        // ============================================
+        let fogClearEffects = [];
+        let fogClearActive = false;
+        let fogClearStartTime = 0;
+        const FOG_CLEAR_DURATION = 8000; // 8 seconds of clear visibility
+        const FOG_CLEAR_FADE_TIME = 3000; // 3 seconds to fade back
+
+        function createFogClearingEffect(startPos, direction, distance) {
+            if (!scene || !scene.fog) return;
+
+            fogClearActive = true;
+            fogClearStartTime = performance.now();
+
+            // Store original fog values
+            const originalNear = scene.fog.near;
+            const originalFar = scene.fog.far;
+
+            // Immediately push fog back significantly
+            scene.fog.near = 60;
+            scene.fog.far = 200;
+
+            // Create visual fog dispersal effect - expanding thermal rings
+            const ringCount = 4;
+            for (let i = 0; i < ringCount; i++) {
+                const ringPos = startPos.clone().add(direction.clone().multiplyScalar(i * distance / ringCount));
+                ringPos.y += 1.5;
+
+                // White/yellow thermal wave rings
+                const ringGeo = new THREE.RingGeometry(1, 3, 32);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: 0xffffaa,
+                    transparent: true,
+                    opacity: 0.5 - i * 0.1,
+                    side: THREE.DoubleSide
+                });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.position.copy(ringPos);
+                ring.lookAt(ringPos.clone().add(new THREE.Vector3(0, 1, 0)));
+                ring.rotation.x = Math.PI / 2; // Horizontal rings
+
+                ring.userData = {
+                    createdAt: performance.now(),
+                    lifetime: 1500,
+                    initialScale: 1 + i * 0.8,
+                    expandRate: 8,
+                    type: 'fogRing'
+                };
+
+                scene.add(ring);
+                fogClearEffects.push(ring);
+            }
+
+            // Create rising heat distortion particles
+            const particleCount = 30;
+            for (let i = 0; i < particleCount; i++) {
+                const t = Math.random();
+                const particlePos = startPos.clone().add(direction.clone().multiplyScalar(t * distance));
+                particlePos.x += (Math.random() - 0.5) * 6;
+                particlePos.z += (Math.random() - 0.5) * 6;
+                particlePos.y += Math.random() * 2;
+
+                const particleGeo = new THREE.SphereGeometry(0.15, 4, 4);
+                const particleMat = new THREE.MeshBasicMaterial({
+                    color: Math.random() > 0.5 ? 0xffff88 : 0xffffff,
+                    transparent: true,
+                    opacity: 0.6
+                });
+                const particle = new THREE.Mesh(particleGeo, particleMat);
+                particle.position.copy(particlePos);
+
+                particle.userData = {
+                    createdAt: performance.now(),
+                    lifetime: 2000,
+                    type: 'heatParticle',
+                    velocity: new THREE.Vector3(
+                        (Math.random() - 0.5) * 2,
+                        3 + Math.random() * 4, // Rising heat
+                        (Math.random() - 0.5) * 2
+                    )
+                };
+
+                scene.add(particle);
+                fogClearEffects.push(particle);
+            }
+
+            // Show notification
+            spawnFloater(startPos.clone().add(new THREE.Vector3(0, 4, 0)), '🔥 FOG CLEARED! 🔥', '#ffff00');
+            showNotification('Thermal shockwave dispersed the fog!', 'success');
+
+            // Schedule fog return
+            setTimeout(() => {
+                if (scene.fog && currentWeather === 'fog') {
+                    // Gradually restore fog
+                    const restoreStart = performance.now();
+                    const restoreInterval = setInterval(() => {
+                        const elapsed = performance.now() - restoreStart;
+                        const progress = Math.min(1, elapsed / FOG_CLEAR_FADE_TIME);
+
+                        if (scene.fog) {
+                            scene.fog.near = 60 - progress * (60 - originalNear);
+                            scene.fog.far = 200 - progress * (200 - originalFar);
+                        }
+
+                        if (progress >= 1) {
+                            clearInterval(restoreInterval);
+                            fogClearActive = false;
+                        }
+                    }, 50);
+                } else {
+                    fogClearActive = false;
+                }
+            }, FOG_CLEAR_DURATION);
+        }
+
+        // Update fog clear visual effects
+        function updateFogClearEffects(dt) {
+            const now = performance.now();
+            const toRemove = [];
+
+            for (const effect of fogClearEffects) {
+                const age = now - effect.userData.createdAt;
+                const progress = age / effect.userData.lifetime;
+
+                if (progress >= 1) {
+                    toRemove.push(effect);
+                    continue;
+                }
+
+                if (effect.userData.type === 'fogRing') {
+                    // Expanding horizontal rings
+                    const scale = effect.userData.initialScale + effect.userData.expandRate * progress;
+                    effect.scale.setScalar(scale);
+                    effect.material.opacity = 0.5 * (1 - progress);
+                } else if (effect.userData.type === 'heatParticle') {
+                    // Rising heat particles
+                    const vel = effect.userData.velocity;
+                    effect.position.x += vel.x * dt;
+                    effect.position.y += vel.y * dt;
+                    effect.position.z += vel.z * dt;
+                    vel.y -= 2 * dt; // Slight deceleration
+                    effect.material.opacity = 0.6 * (1 - progress);
+                    effect.scale.setScalar(1 - progress * 0.5);
+                }
+            }
+
+            // Cleanup
+            for (const effect of toRemove) {
+                scene.remove(effect);
+                effect.geometry?.dispose();
+                effect.material?.dispose();
+            }
+            fogClearEffects = fogClearEffects.filter(e => !toRemove.includes(e));
+        }
+
         // v4.1: Create nebula clouds for galaxy atmosphere
         function createNebulae() {
             const nebulaColors = [0xff3366, 0x3366ff, 0x66ff33, 0xff6633, 0x9933ff, 0x33ffff];
@@ -30280,6 +30438,11 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             // v6.13: Update Fus Ro Dah visual effects
             if (typeof updateFusRoDahEffects === 'function') {
                 updateFusRoDahEffects(dt);
+            }
+
+            // v6.16: Update fog clearing effects
+            if (typeof updateFogClearEffects === 'function') {
+                updateFogClearEffects(dt);
             }
 
             // v5.18: Stream to spectators
