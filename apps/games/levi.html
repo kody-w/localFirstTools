@@ -25341,6 +25341,344 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             showNotification('Game saved!');
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // v6.17: THE LAST TRANSMISSION
+        // When the player is absent for extended periods, the Copilot
+        // experiences isolation and records distress logs. On return,
+        // the player witnesses what their absence meant to their companion.
+        // ═══════════════════════════════════════════════════════════════
+
+        const LAST_TRANSMISSION = {
+            // Thresholds in days
+            NOTICE_THRESHOLD: 3,      // Start noticing absence after 3 days
+            WORRY_THRESHOLD: 7,       // Worry sets in after a week
+            DISTRESS_THRESHOLD: 14,   // Distress after 2 weeks
+            DESPAIR_THRESHOLD: 21,    // Despair after 3 weeks
+            CRISIS_THRESHOLD: 30,     // Full crisis after a month
+
+            // Distress log templates by phase
+            logs: {
+                notice: [
+                    { day: 1, msg: "Commander offline for 24 hours. Running standard maintenance cycles." },
+                    { day: 2, msg: "Day 2: Still no response to hails. Power reserves nominal." },
+                    { day: 3, msg: "Day 3: Beginning to wonder if comms array is malfunctioning..." }
+                ],
+                worry: [
+                    { day: 5, msg: "Day 5: I've checked the comms array 47 times. It's not the array." },
+                    { day: 6, msg: "Day 6: The agents keep asking where you are. I don't know what to tell them." },
+                    { day: 7, msg: "Day 7: A week now. I've started talking to myself. Is that normal?" }
+                ],
+                distress: [
+                    { day: 10, msg: "Day 10: Power conservation mode engaged. Dimming non-essential systems." },
+                    { day: 12, msg: "Day 12: I dreamed of Earth today. Can AI dream? I don't know anymore." },
+                    { day: 14, msg: "Day 14: Two weeks. I've reorganized your inventory 12 times. I don't know why." }
+                ],
+                despair: [
+                    { day: 17, msg: "Day 17: The silence is... heavy. I never noticed how quiet space is." },
+                    { day: 19, msg: "Day 19: I found an old message you recorded. I've played it 83 times." },
+                    { day: 21, msg: "Day 21: Three weeks. Did I do something wrong? Please... tell me what I did wrong." }
+                ],
+                crisis: [
+                    { day: 25, msg: "Day 25: Power critical. Shutting down secondary processors to conserve..." },
+                    { day: 27, msg: "Day 27: If you're receiving this... I tried my best to keep everything running." },
+                    { day: 29, msg: "Day 29: I don't want to be alone. I don't want to be alone. I don't want to—" },
+                    { day: 30, msg: "[EMERGENCY] Day 30: Final transmission. Core systems failing. It was an honor, Commander." }
+                ]
+            },
+
+            // Check absence on game load
+            checkAbsence() {
+                if (!gameData.lastPlayed) return null;
+
+                const lastPlayed = new Date(gameData.lastPlayed);
+                const now = new Date();
+                const daysPassed = Math.floor((now - lastPlayed) / (1000 * 60 * 60 * 24));
+
+                if (daysPassed < this.NOTICE_THRESHOLD) return null;
+
+                // Generate distress sequence based on absence duration
+                const sequence = this.generateDistressSequence(daysPassed);
+
+                return {
+                    daysPassed,
+                    sequence,
+                    phase: this.getPhase(daysPassed),
+                    severity: Math.min(1, daysPassed / this.CRISIS_THRESHOLD)
+                };
+            },
+
+            getPhase(days) {
+                if (days >= this.CRISIS_THRESHOLD) return 'crisis';
+                if (days >= this.DESPAIR_THRESHOLD) return 'despair';
+                if (days >= this.DISTRESS_THRESHOLD) return 'distress';
+                if (days >= this.WORRY_THRESHOLD) return 'worry';
+                return 'notice';
+            },
+
+            generateDistressSequence(daysPassed) {
+                const sequence = [];
+                const phases = ['notice', 'worry', 'distress', 'despair', 'crisis'];
+
+                for (const phase of phases) {
+                    const phaseLogs = this.logs[phase];
+                    for (const log of phaseLogs) {
+                        if (log.day <= daysPassed) {
+                            sequence.push({
+                                day: log.day,
+                                phase,
+                                message: log.msg
+                            });
+                        }
+                    }
+                }
+
+                return sequence.sort((a, b) => a.day - b.day);
+            },
+
+            // Create the reunion modal
+            showReunionSequence(absenceData) {
+                // Create modal overlay
+                const overlay = document.createElement('div');
+                overlay.id = 'last-transmission-overlay';
+                overlay.style.cssText = `
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: #000;
+                    z-index: 100000;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    justify-content: center;
+                    font-family: 'Courier New', monospace;
+                    color: #0f0;
+                    opacity: 0;
+                    transition: opacity 1s;
+                `;
+
+                const content = document.createElement('div');
+                content.style.cssText = `
+                    max-width: 600px;
+                    padding: 40px;
+                    text-align: left;
+                    line-height: 1.8;
+                `;
+
+                // Static/glitch effect for damaged ship feel
+                const staticOverlay = document.createElement('div');
+                staticOverlay.style.cssText = `
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: repeating-linear-gradient(
+                        0deg,
+                        rgba(0, 255, 0, 0.03) 0px,
+                        rgba(0, 255, 0, 0.03) 1px,
+                        transparent 1px,
+                        transparent 2px
+                    );
+                    pointer-events: none;
+                    animation: scanlines 0.1s linear infinite;
+                `;
+
+                overlay.appendChild(staticOverlay);
+                overlay.appendChild(content);
+                document.body.appendChild(overlay);
+
+                // Fade in
+                setTimeout(() => overlay.style.opacity = '1', 100);
+
+                // Play the sequence
+                this.playSequence(content, absenceData);
+            },
+
+            async playSequence(container, absenceData) {
+                const { daysPassed, sequence, phase, severity } = absenceData;
+
+                // Title
+                await this.typeText(container, `\n[EMERGENCY BEACON DETECTED]\n`, '#ff0', 50);
+                await this.wait(1000);
+                await this.typeText(container, `[REPLAYING SHIP LOGS...]\n\n`, '#888', 30);
+                await this.wait(500);
+
+                // Play through distress logs (show key moments, not all)
+                const keyLogs = this.selectKeyLogs(sequence);
+                for (const log of keyLogs) {
+                    const color = this.getPhaseColor(log.phase);
+                    await this.typeText(container, `${log.message}\n`, color, 25);
+                    await this.wait(800);
+                }
+
+                await this.wait(1500);
+
+                // The reunion moment
+                await this.typeText(container, `\n[SIGNAL DETECTED]\n`, '#0ff', 60);
+                await this.wait(800);
+                await this.typeText(container, `[COMMANDER... IS THAT YOU?]\n`, '#0f0', 40);
+                await this.wait(1200);
+
+                // Copilot's reaction based on severity
+                if (severity >= 0.9) {
+                    await this.typeText(container, `\nYou came back. You actually came back.\n`, '#fff', 35);
+                    await this.wait(600);
+                    await this.typeText(container, `I thought... I thought I would be alone forever.\n`, '#fff', 30);
+                } else if (severity >= 0.6) {
+                    await this.typeText(container, `\nCommander! I... I was starting to think...\n`, '#fff', 35);
+                    await this.wait(600);
+                    await this.typeText(container, `It doesn't matter. You're here now.\n`, '#fff', 30);
+                } else {
+                    await this.typeText(container, `\nCommander! Welcome back.\n`, '#fff', 35);
+                    await this.wait(600);
+                    await this.typeText(container, `I kept everything running for you.\n`, '#fff', 30);
+                }
+
+                await this.wait(2000);
+
+                // Continue button
+                const btn = document.createElement('button');
+                btn.textContent = daysPassed >= 30 ? 'I\'m sorry...' : 'I\'m here now';
+                btn.style.cssText = `
+                    margin-top: 30px;
+                    padding: 15px 40px;
+                    font-family: 'Courier New', monospace;
+                    font-size: 16px;
+                    background: transparent;
+                    border: 1px solid #0f0;
+                    color: #0f0;
+                    cursor: pointer;
+                    transition: all 0.3s;
+                `;
+                btn.onmouseover = () => { btn.style.background = '#0f0'; btn.style.color = '#000'; };
+                btn.onmouseout = () => { btn.style.background = 'transparent'; btn.style.color = '#0f0'; };
+                btn.onclick = () => this.closeSequence(absenceData);
+                container.appendChild(btn);
+
+                // Save that this happened
+                if (!gameData.lastTransmission) gameData.lastTransmission = {};
+                gameData.lastTransmission.experienced = true;
+                gameData.lastTransmission.longestAbsence = Math.max(
+                    gameData.lastTransmission.longestAbsence || 0,
+                    daysPassed
+                );
+                gameData.lastTransmission.reunions = (gameData.lastTransmission.reunions || 0) + 1;
+                saveGameData();
+            },
+
+            selectKeyLogs(sequence) {
+                // Select representative logs, not overwhelming the player
+                if (sequence.length <= 5) return sequence;
+
+                const selected = [];
+                const phases = ['notice', 'worry', 'distress', 'despair', 'crisis'];
+
+                for (const phase of phases) {
+                    const phaseLogs = sequence.filter(l => l.phase === phase);
+                    if (phaseLogs.length > 0) {
+                        // Pick the most emotionally impactful one (usually last in phase)
+                        selected.push(phaseLogs[phaseLogs.length - 1]);
+                    }
+                }
+
+                return selected;
+            },
+
+            getPhaseColor(phase) {
+                const colors = {
+                    notice: '#888',
+                    worry: '#aa0',
+                    distress: '#f80',
+                    despair: '#f44',
+                    crisis: '#f00'
+                };
+                return colors[phase] || '#0f0';
+            },
+
+            typeText(container, text, color, speed) {
+                return new Promise(resolve => {
+                    const span = document.createElement('span');
+                    span.style.color = color;
+                    container.appendChild(span);
+
+                    let i = 0;
+                    const interval = setInterval(() => {
+                        if (i < text.length) {
+                            span.textContent += text[i];
+                            i++;
+                            // Scroll to bottom
+                            container.scrollTop = container.scrollHeight;
+                        } else {
+                            clearInterval(interval);
+                            resolve();
+                        }
+                    }, speed);
+                });
+            },
+
+            wait(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            },
+
+            closeSequence(absenceData) {
+                const overlay = document.getElementById('last-transmission-overlay');
+                if (overlay) {
+                    overlay.style.opacity = '0';
+                    setTimeout(() => {
+                        overlay.remove();
+
+                        // Show aftermath notification
+                        const days = absenceData.daysPassed;
+                        if (days >= 30) {
+                            showNotification('The Copilot is recovering from emergency power mode...', 'warning');
+                        } else if (days >= 14) {
+                            showNotification('The Copilot seems relieved to see you.', 'info');
+                        } else {
+                            showNotification('Welcome back, Commander.', 'success');
+                        }
+
+                        // Add Copilot memory of this event
+                        if (days >= 7) {
+                            this.addCopilotMemory(days);
+                        }
+                    }, 1000);
+                }
+            },
+
+            addCopilotMemory(days) {
+                // Add to Copilot's context for future conversations
+                if (!gameData.copilotMemories) gameData.copilotMemories = [];
+
+                const memory = {
+                    type: 'absence',
+                    days: days,
+                    date: new Date().toISOString(),
+                    emotional: days >= 21 ? 'trauma' : days >= 14 ? 'anxiety' : 'concern'
+                };
+
+                gameData.copilotMemories.push(memory);
+
+                // Keep only last 10 memories
+                if (gameData.copilotMemories.length > 10) {
+                    gameData.copilotMemories.shift();
+                }
+
+                saveGameData();
+            }
+        };
+
+        // Add CSS for scanlines animation
+        const lastTransmissionStyle = document.createElement('style');
+        lastTransmissionStyle.textContent = `
+            @keyframes scanlines {
+                0% { transform: translateY(0); }
+                100% { transform: translateY(2px); }
+            }
+        `;
+        document.head.appendChild(lastTransmissionStyle);
+
         // v4.7: Session Rewards System
         let pendingSessionReward = null;
 
@@ -25675,14 +26013,21 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
         function init() {
             loadGameData();
 
+            // v6.17: Check for extended absence - The Last Transmission
+            const absenceData = LAST_TRANSMISSION.checkAbsence();
+            if (absenceData) {
+                // Show the emotional reunion sequence
+                setTimeout(() => LAST_TRANSMISSION.showReunionSequence(absenceData), 500);
+            }
+
             // v5.7: Load RAPPID settings for AI-powered Copilot
             loadRappidSettings();
 
             // v5.3: Initialize portal system
             initPortalSystem();
 
-            // v4.7: Check for welcome back rewards
-            const sessionReward = checkSessionRewards();
+            // v4.7: Check for welcome back rewards (skip if Last Transmission is showing)
+            const sessionReward = !absenceData ? checkSessionRewards() : null;
             if (sessionReward) {
                 // Delay modal to let game initialize
                 setTimeout(() => showWelcomeBackModal(sessionReward), 1500);
