@@ -8000,6 +8000,14 @@
                     );
                 }
 
+                // ==========================================
+                // v6.16: DASH CLEARS FOG
+                // The thermal shockwave from the dash disperses fog
+                // ==========================================
+                if (currentWeather === 'fog' && scene.fog) {
+                    createFogClearingEffect(startPos, dashDir, ability.distance);
+                }
+
                 // Move player
                 p.position.copy(endPos);
 
@@ -9981,6 +9989,238 @@
             'Fishing Rod': { slot: 'tool', stats: { fishingBonus: 2 } },
             'Master Rod': { slot: 'tool', stats: { fishingBonus: 4 } }
         };
+
+        // ═══════════════════════════════════════════════════════════════
+        // v6.16: AUTO-CRAFT & AUTO-EQUIP SYSTEM
+        // "Cream rises to the top" - automatically craft and equip best items
+        // No manual inventory management needed
+        // ═══════════════════════════════════════════════════════════════
+
+        // Item power rankings by slot (higher = better, auto-equips over lower)
+        const ITEM_POWER = {
+            // Weapons (by damage output)
+            'Sword': 5,
+            'Frost Blade': 10,
+            'Magma Sword': 15,
+            'Void Dagger': 18,
+            'Legendary Blade': 30,
+
+            // Armor (by defense)
+            'Iron Armor': 5,
+            'Chitin Armor': 8,
+            'Steel Armor': 12,
+            'Guardian Armor': 25,
+
+            // Accessories (by overall utility)
+            'Lucky Charm': 10,
+            'Swift Boots': 12,
+            'Power Ring': 14,
+            'Frost Heart': 16,
+            'Berserker Badge': 20,
+            'Vampiric Fang': 22,
+
+            // Tools (by bonus effectiveness)
+            'Pickaxe': 5,
+            'Crystal Pickaxe': 12,
+            'Fishing Rod': 5,
+            'Master Rod': 15
+        };
+
+        // Recipe crafting priority (higher = craft first when materials available)
+        const RECIPE_CRAFT_PRIORITY = {
+            // Legendary tier (always craft if possible)
+            'legendaryBlade': 100,
+            'guardianArmor': 95,
+
+            // Elite tier
+            'vampiricFang': 80,
+            'berserkerBadge': 75,
+            'frostHeart': 70,
+
+            // High tier weapons/armor
+            'voidDagger': 60,
+            'steelArmor': 55,
+            'magmaSword': 50,
+            'masterRod': 45,
+
+            // Mid tier
+            'frostBlade': 40,
+            'crystalPickaxe': 38,
+            'powerRing': 35,
+            'luckyCharm': 32,
+            'swiftBoots': 30,
+            'chitinArmor': 28,
+
+            // Base tier (essential early game)
+            'ironArmor': 20,
+            'sword': 15,
+            'pickaxe': 10,
+            'rod': 8,
+
+            // Consumables (lower priority, craft for sustain)
+            'superPotion': 6,
+            'potion': 4
+        };
+
+        // Check if a recipe can be crafted right now
+        function canCraftRecipe(recipeId) {
+            const recipe = RECIPES[recipeId];
+            if (!recipe) return false;
+
+            // Check crafting level
+            if (recipe.craftingLevel && gameData.skills.crafting.level < recipe.craftingLevel) {
+                return false;
+            }
+
+            // Skip alchemy recipes (handled by alchemy system)
+            if (recipe.isAlchemy) return false;
+
+            // Check all required materials
+            for (const [item, count] of Object.entries(recipe.requires)) {
+                if (!hasItem(item, count)) return false;
+            }
+
+            return true;
+        }
+
+        // Check if item is currently equipped
+        function isItemEquipped(itemName) {
+            const gear = getEquippedGear();
+            return Object.values(gear).includes(itemName);
+        }
+
+        // Auto-craft the best available items (cream rises)
+        function autoCraftBestItems() {
+            // Sort recipes by priority (highest first)
+            const sortedRecipes = Object.keys(RECIPE_CRAFT_PRIORITY)
+                .sort((a, b) => RECIPE_CRAFT_PRIORITY[b] - RECIPE_CRAFT_PRIORITY[a]);
+
+            let craftedSomething = false;
+
+            for (const recipeId of sortedRecipes) {
+                if (!canCraftRecipe(recipeId)) continue;
+
+                const recipe = RECIPES[recipeId];
+                const resultName = recipe.result;
+                const equipData = EQUIPMENT_MAP[resultName];
+
+                // For equipment: only craft if it's better than what we have
+                if (equipData) {
+                    const slot = equipData.slot;
+                    const gear = getEquippedGear();
+                    const currentItem = gear[slot];
+                    const currentPower = currentItem ? (ITEM_POWER[currentItem] || 0) : 0;
+                    const newPower = ITEM_POWER[resultName] || 0;
+
+                    // Don't craft if we already have this or better equipped
+                    if (currentPower >= newPower) continue;
+
+                    // Don't craft duplicates in inventory
+                    if (countItem(resultName) > 0) continue;
+                }
+
+                // For consumables: maintain a small stock
+                if (!equipData) {
+                    const currentCount = countItem(resultName);
+                    // Keep max 5 potions, don't over-craft
+                    if (currentCount >= 5) continue;
+                }
+
+                // Craft it!
+                craft(recipeId, 1);
+                craftedSomething = true;
+
+                // Visual/audio feedback for auto-craft
+                if (worldState.player) {
+                    spawnFloater(worldState.player.position, `🔨 Auto: ${resultName}`, '#a0f');
+                }
+
+                break; // Only craft one thing per tick (pace the automation)
+            }
+
+            return craftedSomething;
+        }
+
+        // Auto-equip the best items in inventory (cream rises to top)
+        function autoEquipBestItems() {
+            const gear = getEquippedGear();
+            let equippedSomething = false;
+
+            // Check each equipment slot
+            for (const slotName of ['weapon', 'armor', 'accessory', 'tool']) {
+                const currentItem = gear[slotName];
+                const currentPower = currentItem ? (ITEM_POWER[currentItem] || 0) : 0;
+
+                // Find best unequipped item in inventory for this slot
+                let bestItem = null;
+                let bestPower = currentPower;
+
+                // Scan inventory for better items
+                const inventoryCounts = {};
+                gameData.inventory.forEach(itemName => {
+                    inventoryCounts[itemName] = (inventoryCounts[itemName] || 0) + 1;
+                });
+
+                for (const itemName of Object.keys(inventoryCounts)) {
+                    const equipData = EQUIPMENT_MAP[itemName];
+                    if (!equipData || equipData.slot !== slotName) continue;
+
+                    const power = ITEM_POWER[itemName] || 0;
+                    if (power > bestPower) {
+                        bestPower = power;
+                        bestItem = itemName;
+                    }
+                }
+
+                // Equip if we found something better
+                if (bestItem) {
+                    // Silent equip (don't spam notifications during auto)
+                    const slot = getEquipmentSlot(bestItem);
+                    const gearRef = getEquippedGear();
+
+                    // Return current item to inventory if any
+                    if (gearRef[slot]) {
+                        addItem(gearRef[slot]);
+                    }
+
+                    // Remove new item from inventory and equip
+                    if (removeItem(bestItem, 1)) {
+                        gearRef[slot] = bestItem;
+                        updateEquipmentUI();
+                        saveGameData();
+                        equippedSomething = true;
+
+                        // Visual feedback
+                        if (worldState.player) {
+                            spawnFloater(worldState.player.position, `⬆️ ${bestItem}`, '#4f4');
+                        }
+                        AudioSystem.collect();
+                    }
+                }
+            }
+
+            return equippedSomething;
+        }
+
+        // Auto-craft/equip timer state
+        let lastAutoCraftEquipTime = 0;
+        const AUTO_CRAFT_EQUIP_INTERVAL = 2000; // Check every 2 seconds
+
+        // Main auto-craft/equip runner (called from game loop)
+        function runAutoCraftEquip(now) {
+            // Only run when autopilot is enabled (matches player intent for automation)
+            if (!autoExplore.enabled) return;
+
+            // Throttle checks
+            if (now - lastAutoCraftEquipTime < AUTO_CRAFT_EQUIP_INTERVAL) return;
+            lastAutoCraftEquipTime = now;
+
+            // First auto-equip (immediate upgrade)
+            autoEquipBestItems();
+
+            // Then auto-craft (prepare for future)
+            autoCraftBestItems();
+        }
 
         // v5.1: Equipment state getter (uses gameData for persistence)
         function getEquippedGear() {
@@ -29346,6 +29586,9 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             if (autoExplore.enabled && !isViewerIndependentMode) {
                 runAutoExplore(dt);
             }
+
+            // v6.16: Auto-craft and auto-equip (cream rises to top)
+            runAutoCraftEquip(time);
 
             // v6.0: VIEWER INDEPENDENT MODE - Control copilot companion as avatar
             if (isViewerIndependentMode && copilotMesh && (rawKeyInput || rawJoystickInput)) {
