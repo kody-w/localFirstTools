@@ -4252,7 +4252,16 @@
             Kepler's Third Law: Angular velocity from gravity
         </div>
 
-        <div class="physics-hint">Move mouse to show • Auto-hides after 3 seconds</div>
+        <!-- Escaped planets counter -->
+        <div id="escape-counter" style="margin-top: 12px; padding: 8px; background: rgba(255, 100, 0, 0.15); border: 1px solid rgba(255, 100, 0, 0.3); border-radius: 6px; display: none;">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #ff6600; font-size: 12px;">🚀 Escaped Planets</span>
+                <span id="escape-count" style="color: #ffaa00; font-weight: bold; font-size: 14px;">0</span>
+            </div>
+            <div style="color: #886644; font-size: 9px; margin-top: 4px;">Drop G or M quickly to launch more!</div>
+        </div>
+
+        <div class="physics-hint">Move mouse to show • Drop G/M fast to launch planets!</div>
     </div>
 
     <div class="ui-layer">
@@ -21876,7 +21885,7 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     toneMapped: false
                 });
 
-                const subtitleGeometry = new THREE.TextGeometry('GALAXY SIMULATION v6.29', {
+                const subtitleGeometry = new THREE.TextGeometry('GALAXY SIMULATION v6.30', {
                     font: titleTextFont,
                     size: 0.35 * GALAXY_SCALE,
                     height: 0.05 * GALAXY_SCALE,
@@ -27039,9 +27048,15 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
         let physicsTutorialTimeout = null;
         let physicsTutorialVisible = false;
 
+        // v6.30: Escape trails for dramatic effect
+        let escapeTrails = [];
+        const MAX_ESCAPE_TRAILS = 200;
+
         function updateOrbitalPositions(dt) {
             // v6.29: Use global physicsParams for interactive control
             const timeScale = physicsParams.timeScale;
+            const G = physicsParams.G;
+            const M = physicsParams.M;
 
             for (let i = 0; i < civilizations.length; i++) {
                 const civ = civilizations[i];
@@ -27049,25 +27064,87 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
 
                 if (!orbital) continue;
 
+                // v6.30: Handle ESCAPED planets - they fly off in straight lines
+                if (orbital.escaped) {
+                    // Apply velocity (with slight deceleration from distant gravity)
+                    const currentR = Math.sqrt(civ.x * civ.x + civ.y * civ.y + civ.z * civ.z);
+
+                    // Very weak gravity at distance (inverse square)
+                    const gravAccel = (G * M) / (currentR * currentR + 1000);
+                    const dirX = -civ.x / (currentR + 0.001);
+                    const dirY = -civ.y / (currentR + 0.001);
+                    const dirZ = -civ.z / (currentR + 0.001);
+
+                    // Update velocity with gravity pull
+                    orbital.vx += dirX * gravAccel * dt * timeScale * 0.00001;
+                    orbital.vy += dirY * gravAccel * dt * timeScale * 0.00001;
+                    orbital.vz += dirZ * gravAccel * dt * timeScale * 0.00001;
+
+                    // Move planet
+                    civ.x += orbital.vx * dt * timeScale;
+                    civ.y += orbital.vy * dt * timeScale;
+                    civ.z += orbital.vz * dt * timeScale;
+
+                    // Add trail particle
+                    if (escapeTrails.length < MAX_ESCAPE_TRAILS && Math.random() < 0.3) {
+                        addEscapeTrail(civ.x, civ.y, civ.z, civ.color);
+                    }
+
+                    // Check if planet can be recaptured (slowed down enough)
+                    const speed = Math.sqrt(orbital.vx * orbital.vx + orbital.vy * orbital.vy + orbital.vz * orbital.vz);
+                    const escapeVel = Math.sqrt(2 * G * M / currentR);
+
+                    if (speed < escapeVel * 0.7 && currentR < 2000) {
+                        // Recapture into orbit!
+                        orbital.escaped = false;
+                        orbital.radius = currentR;
+                        orbital.angle = Math.atan2(civ.z, civ.x);
+                        orbital.angularVelocity = Math.sqrt(G * M / Math.pow(currentR, 3));
+                        console.log(`Planet ${civ.name} recaptured into orbit!`);
+                    }
+
+                    // Update 3D position
+                    const sysGroup = galaxyGroup.children[i];
+                    if (sysGroup) {
+                        sysGroup.position.set(civ.x, civ.y, civ.z);
+                        // Add spin to escaped planets
+                        sysGroup.rotation.y += 0.05 * timeScale;
+                    }
+                    continue;
+                }
+
+                // Normal orbital motion
+                // First, calculate current velocity for escape checking
+                const e = orbital.eccentricity;
+                const a = orbital.radius;
+                const theta = orbital.angle;
+
+                // Current distance
+                const r = a * (1 - e * e) / (1 + e * Math.cos(theta));
+
+                // Linear velocity magnitude: v = r * ω for circular, modified for elliptical
+                const linearVel = r * orbital.angularVelocity;
+
+                // Store velocity components (tangent to orbit)
+                // Velocity is perpendicular to radius vector
+                const tangentAngle = theta + Math.PI / 2;
+                orbital.vx = linearVel * Math.cos(tangentAngle);
+                orbital.vz = linearVel * Math.sin(tangentAngle) * Math.cos(orbital.inclination);
+                orbital.vy = linearVel * Math.sin(tangentAngle) * Math.sin(orbital.inclination);
+
                 // Update orbital angle based on angular velocity
-                // Kepler's law: closer objects orbit faster
                 orbital.angle += orbital.angularVelocity * dt * timeScale;
 
                 // Keep angle in [0, 2π]
                 if (orbital.angle > Math.PI * 2) orbital.angle -= Math.PI * 2;
 
                 // Calculate new position using orbital elements
-                // For elliptical orbits: r = a(1-e²)/(1+e·cos(θ))
-                const e = orbital.eccentricity;
-                const a = orbital.radius;
-                const theta = orbital.angle;
-
-                // Distance from focus (black hole) for elliptical orbit
-                const r = a * (1 - e * e) / (1 + e * Math.cos(theta));
+                const newTheta = orbital.angle;
+                const newR = a * (1 - e * e) / (1 + e * Math.cos(newTheta));
 
                 // Position in orbital plane
-                const xOrbit = r * Math.cos(theta);
-                const zOrbit = r * Math.sin(theta);
+                const xOrbit = newR * Math.cos(newTheta);
+                const zOrbit = newR * Math.sin(newTheta);
 
                 // Apply orbital inclination
                 const inclination = orbital.inclination;
@@ -27084,6 +27161,42 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                 const sysGroup = galaxyGroup.children[i];
                 if (sysGroup) {
                     sysGroup.position.set(x, y, z);
+                }
+            }
+
+            // Update escape trails
+            updateEscapeTrails(dt);
+        }
+
+        // v6.30: Add glowing trail particle for escaped planets
+        function addEscapeTrail(x, y, z, color) {
+            const geometry = new THREE.SphereGeometry(3, 8, 8);
+            const material = new THREE.MeshBasicMaterial({
+                color: color || 0xffaa00,
+                transparent: true,
+                opacity: 0.8
+            });
+            const trail = new THREE.Mesh(geometry, material);
+            trail.position.set(x, y, z);
+            trail.userData.life = 1.0;
+            trail.userData.decay = 0.02;
+            scene.add(trail);
+            escapeTrails.push(trail);
+        }
+
+        // Update and fade escape trails
+        function updateEscapeTrails(dt) {
+            for (let i = escapeTrails.length - 1; i >= 0; i--) {
+                const trail = escapeTrails[i];
+                trail.userData.life -= trail.userData.decay;
+                trail.material.opacity = trail.userData.life * 0.8;
+                trail.scale.setScalar(trail.userData.life);
+
+                if (trail.userData.life <= 0) {
+                    scene.remove(trail);
+                    trail.geometry.dispose();
+                    trail.material.dispose();
+                    escapeTrails.splice(i, 1);
                 }
             }
         }
@@ -27144,17 +27257,80 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
 
         // v6.29: PHYSICS TUTORIAL PANEL FUNCTIONS
 
-        // Recalculate all orbital velocities when G or M change
+        // v6.30: Recalculate orbital velocities AND check for escape velocity!
+        // When G or M drops suddenly, planets may exceed escape velocity and fly off
         function recalculateOrbitalVelocities() {
             if (!civilizations || civilizations.length === 0) return;
+
+            const G = physicsParams.G;
+            const M = physicsParams.M;
+            let escapedCount = 0;
 
             for (let i = 0; i < civilizations.length; i++) {
                 const civ = civilizations[i];
                 if (!civ.orbital) continue;
 
-                const r = civ.orbital.radius;
-                // Kepler's law: ω = √(GM/r³)
-                civ.orbital.angularVelocity = Math.sqrt(physicsParams.G * physicsParams.M / Math.pow(r, 3));
+                // Skip already escaped planets
+                if (civ.orbital.escaped) continue;
+
+                // Get current position and velocity
+                const r = Math.sqrt(civ.x * civ.x + civ.y * civ.y + civ.z * civ.z);
+                if (r < 1) continue; // Too close to center
+
+                // Current speed (from stored velocity components)
+                const vx = civ.orbital.vx || 0;
+                const vy = civ.orbital.vy || 0;
+                const vz = civ.orbital.vz || 0;
+                const currentSpeed = Math.sqrt(vx * vx + vy * vy + vz * vz);
+
+                // Calculate NEW escape velocity with updated G and M
+                // v_escape = √(2GM/r)
+                const escapeVelocity = Math.sqrt(2 * G * M / r);
+
+                // If current speed exceeds escape velocity, LAUNCH INTO SPACE!
+                if (currentSpeed > escapeVelocity && currentSpeed > 0.1) {
+                    civ.orbital.escaped = true;
+                    // Boost velocity slightly for dramatic effect
+                    const boost = 1.2;
+                    civ.orbital.vx = vx * boost;
+                    civ.orbital.vy = vy * boost;
+                    civ.orbital.vz = vz * boost;
+                    escapedCount++;
+                    console.log(`🚀 ${civ.name} reached escape velocity! (${currentSpeed.toFixed(1)} > ${escapeVelocity.toFixed(1)})`);
+                } else {
+                    // Update orbital velocity to new equilibrium
+                    civ.orbital.angularVelocity = Math.sqrt(G * M / Math.pow(civ.orbital.radius, 3));
+                }
+            }
+
+            // Dramatic notification if planets escaped
+            if (escapedCount > 0) {
+                const msg = escapedCount === 1
+                    ? '🚀 A planet has escaped the galaxy!'
+                    : `🚀 ${escapedCount} planets have escaped the galaxy!`;
+                console.log(msg);
+            }
+
+            // Update escape counter UI
+            updateEscapeCounterUI();
+        }
+
+        // v6.30: Update the escaped planets counter in the UI
+        function updateEscapeCounterUI() {
+            const counter = document.getElementById('escape-counter');
+            const countEl = document.getElementById('escape-count');
+            if (!counter || !countEl || !civilizations) return;
+
+            const escapedPlanets = civilizations.filter(c => c.orbital && c.orbital.escaped).length;
+
+            if (escapedPlanets > 0) {
+                counter.style.display = 'block';
+                countEl.textContent = escapedPlanets;
+                // Pulse animation on new escape
+                countEl.style.transform = 'scale(1.3)';
+                setTimeout(() => countEl.style.transform = 'scale(1)', 200);
+            } else {
+                counter.style.display = 'none';
             }
         }
 
