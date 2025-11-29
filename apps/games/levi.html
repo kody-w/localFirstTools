@@ -989,6 +989,20 @@
             0%, 100% { box-shadow: 0 0 10px rgba(255, 68, 0, 0.5); }
             50% { box-shadow: 0 0 25px rgba(255, 68, 0, 0.9); }
         }
+        /* v6.42: Chrono-Echo ghost pulse animation */
+        @keyframes chrono-echo-pulse {
+            0%, 100% {
+                box-shadow: 0 0 10px rgba(0, 255, 255, 0.5), 0 0 20px rgba(136, 68, 255, 0.3);
+                border-color: #00ffff;
+            }
+            50% {
+                box-shadow: 0 0 25px rgba(0, 255, 255, 0.9), 0 0 40px rgba(136, 68, 255, 0.6);
+                border-color: #8844ff;
+            }
+        }
+        .chrono-echo-slot.active-buff {
+            animation: chrono-echo-pulse 0.8s infinite !important;
+        }
         .ability-slot {
             width: 50px;
             height: 50px;
@@ -5497,6 +5511,14 @@
                     <div class="ability-cooldown" id="cooldown-c"></div>
                     <span class="ability-cooldown-text" id="cooldown-text-c"></span>
                 </div>
+                <!-- v6.42: Chrono-Echo -->
+                <div style="width: 1px; background: #555; margin: 0 4px;"></div>
+                <div id="ability-b" class="ability-slot chrono-echo-slot" onclick="useAbility('chronoEcho')" title="Chrono-Echo (B) - Summon time-echoes">
+                    <span class="ability-icon">👻</span>
+                    <span class="ability-key">B</span>
+                    <div class="ability-cooldown" id="cooldown-b"></div>
+                    <span class="ability-cooldown-text" id="cooldown-text-b"></span>
+                </div>
             </div>
         </div>
 
@@ -9304,6 +9326,19 @@
                 damageBoost: 2.0,     // 100% more damage
                 attackSpeedBoost: 1.5,// 50% faster attacks
                 description: 'ULTIMATE: +100% damage, +50% attack speed for 8s'
+            },
+            // v6.42: CHRONO-ECHO COMBAT (Time + Sensory + Combat)
+            // Past actions replay as ghost clones that repeat your attacks
+            chronoEcho: {
+                name: 'Chrono-Echo',
+                key: 'B',
+                icon: '👻',
+                cooldown: 30000,      // 30 seconds
+                unlockLevel: 18,      // Combat level 18
+                duration: 6000,       // 6 seconds of ghost echoes
+                echoCount: 5,         // Number of ghost clones
+                damageMultiplier: 0.6,// Each ghost deals 60% damage
+                description: 'Summon time-echoes that replay your past attacks'
             }
         };
 
@@ -9316,7 +9351,162 @@
             dash: { lastUsed: 0 },
             shieldWall: { lastUsed: 0, activeUntil: 0 },
             execute: { lastUsed: 0 },
-            berserk: { lastUsed: 0, activeUntil: 0 }
+            berserk: { lastUsed: 0, activeUntil: 0 },
+            // v6.42: Chrono-Echo state
+            chronoEcho: { lastUsed: 0, activeUntil: 0 }
+        };
+
+        // ============================================
+        // v6.42: CHRONO-ECHO COMBAT SYSTEM
+        // Records player combat actions and replays them as ghost clones
+        // ============================================
+        const chronoEchoSystem = {
+            actionHistory: [],
+            maxHistorySize: 20,
+            recordingEnabled: true,
+            activeGhosts: [],
+
+            recordAction(actionType, position, rotation, targetPos, damage) {
+                if (!this.recordingEnabled || mode !== 'world') return;
+                this.actionHistory.push({
+                    type: actionType, position: position.clone(), rotation: rotation,
+                    targetPos: targetPos ? targetPos.clone() : null, damage: damage,
+                    timestamp: performance.now()
+                });
+                if (this.actionHistory.length > this.maxHistorySize) this.actionHistory.shift();
+            },
+
+            createGhostMesh(position, rotation, delay, actionData) {
+                if (!scene || !worldState.player) return null;
+                const ghostGroup = new THREE.Group();
+                const ghostMat = new THREE.MeshStandardMaterial({
+                    color: 0x00ffff, transparent: true, opacity: 0.4,
+                    emissive: 0x00aaff, emissiveIntensity: 0.8
+                });
+                const ghostBody = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.6), ghostMat);
+                ghostBody.position.y = 1;
+                ghostGroup.add(ghostBody);
+                const headMat = ghostMat.clone();
+                headMat.emissive = new THREE.Color(0x8844ff);
+                const ghostHead = new THREE.Mesh(new THREE.SphereGeometry(0.35, 8, 8), headMat);
+                ghostHead.position.y = 1.9;
+                ghostGroup.add(ghostHead);
+                const armGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.7, 6);
+                [-1, 1].forEach(side => {
+                    const arm = new THREE.Mesh(armGeo, ghostMat.clone());
+                    arm.position.set(side * 0.6, 1.3, 0);
+                    arm.rotation.z = -side * Math.PI / 4;
+                    ghostGroup.add(arm);
+                });
+                const legGeo = new THREE.CylinderGeometry(0.12, 0.12, 0.8, 6);
+                [-0.2, 0.2].forEach(x => {
+                    const leg = new THREE.Mesh(legGeo, ghostMat.clone());
+                    leg.position.set(x, 0.3, 0);
+                    ghostGroup.add(leg);
+                });
+                const ring = new THREE.Mesh(
+                    new THREE.RingGeometry(0.8, 1.0, 16),
+                    new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.3, side: THREE.DoubleSide })
+                );
+                ring.rotation.x = -Math.PI / 2;
+                ring.position.y = 0.1;
+                ghostGroup.add(ring);
+                ghostGroup.position.copy(position);
+                ghostGroup.rotation.y = rotation;
+                ghostGroup.userData = {
+                    isChronoGhost: true, spawnTime: performance.now(), delay,
+                    actionData, hasAttacked: false, lifetime: 3000 + delay, phase: 0
+                };
+                scene.add(ghostGroup);
+                this.activeGhosts.push(ghostGroup);
+                return ghostGroup;
+            },
+
+            spawnGhosts(count, baseDamage) {
+                if (!worldState.player || this.actionHistory.length === 0) return;
+                const p = worldState.player;
+                const actions = this.actionHistory.slice(-count);
+                actions.forEach((action, i) => {
+                    const delay = i * 400;
+                    const angle = (i / count) * Math.PI * 2;
+                    const spawnPos = new THREE.Vector3(
+                        p.position.x + Math.sin(angle) * 2, p.position.y, p.position.z + Math.cos(angle) * 2
+                    );
+                    setTimeout(() => {
+                        const ghost = this.createGhostMesh(spawnPos, p.rotation.y + angle, delay, { ...action, baseDamage });
+                        if (ghost) {
+                            spawnFloater(spawnPos, '👻', '#00ffff');
+                            if (particles) particles.emit(spawnPos, 15, 0x00ffff, { spread: 2, lifetime: 500 });
+                            setTimeout(() => this.executeGhostAttack(ghost), 500 + delay);
+                        }
+                    }, delay);
+                });
+                if (AudioSystem?.penta) {
+                    AudioSystem.playGentle(AudioSystem.penta.G4, 0.3, 0.2);
+                    setTimeout(() => AudioSystem.playGentle(AudioSystem.penta.C5, 0.25, 0.15), 100);
+                    setTimeout(() => AudioSystem.playGentle(AudioSystem.penta.E5, 0.2, 0.1), 200);
+                }
+            },
+
+            executeGhostAttack(ghost) {
+                if (!ghost?.userData || ghost.userData.hasAttacked) return;
+                if (!worldState.mobs?.length) return;
+                ghost.userData.hasAttacked = true;
+                const { actionData } = ghost.userData;
+                const ability = COMBAT_ABILITIES.chronoEcho;
+                let nearestMob = null, nearestDist = 8;
+                worldState.mobs.forEach(mob => {
+                    const mobPos = mob.mesh?.position || mob.position;
+                    if (!mobPos) return;
+                    const dist = ghost.position.distanceTo(mobPos);
+                    if (dist < nearestDist && mob.userData.hp > 0) { nearestDist = dist; nearestMob = mob; }
+                });
+                if (nearestMob) {
+                    const damage = Math.floor(actionData.baseDamage * ability.damageMultiplier);
+                    nearestMob.userData.hp -= damage;
+                    const mobPos = nearestMob.mesh?.position || nearestMob.position;
+                    spawnFloater(mobPos, `👻 -${damage}`, '#00ffff');
+                    this.animateGhostAttack(ghost, ghost.position.clone(), mobPos.clone().sub(ghost.position).normalize());
+                    if (particles) particles.emit(nearestMob.position, 10, 0x00ffff, { spread: 2, lifetime: 400 });
+                    if (nearestMob.userData.hp <= 0) {
+                        setTimeout(() => { if (nearestMob.userData.hp <= 0) performAction?.(nearestMob); }, 100);
+                    }
+                }
+                ghost.userData.fadeStart = performance.now();
+            },
+
+            animateGhostAttack(ghost, startPos, dir) {
+                const startTime = performance.now();
+                const animate = () => {
+                    if (!ghost.parent) return;
+                    const t = Math.min((performance.now() - startTime) / 200, 1);
+                    const phase = t < 0.5 ? (1 - Math.pow(1 - t, 3)) * 2 : 2 - (1 - Math.pow(1 - t, 3)) * 2;
+                    ghost.position.copy(startPos).addScaledVector(dir, phase * 1.5);
+                    ghost.traverse(c => { if (c.material?.emissiveIntensity !== undefined) c.material.emissiveIntensity = 0.8 + phase * 1.5; });
+                    if (t < 1) requestAnimationFrame(animate);
+                };
+                animate();
+            },
+
+            update(dt) {
+                const now = performance.now();
+                this.activeGhosts = this.activeGhosts.filter(ghost => {
+                    if (!ghost.parent) return false;
+                    ghost.userData.phase += dt * 3;
+                    ghost.position.y = (ghost.userData.actionData?.position?.y || 0) + Math.sin(ghost.userData.phase) * 0.15;
+                    ghost.children.find(c => c.geometry?.type === 'RingGeometry')?.rotation && (ghost.children.find(c => c.geometry?.type === 'RingGeometry').rotation.z += dt * 2);
+                    const fade = ghost.userData.hasAttacked ? Math.max(0, 1 - (now - ghost.userData.fadeStart) / 1000) : 1;
+                    ghost.traverse(c => { if (c.material?.opacity !== undefined) c.material.opacity = (0.3 + Math.sin(ghost.userData.phase * 2) * 0.1) * fade; });
+                    if (now - ghost.userData.spawnTime > ghost.userData.lifetime || fade <= 0) {
+                        if (particles) particles.emit(ghost.position, 8, 0x00ffff, { spread: 1.5, lifetime: 300 });
+                        scene.remove(ghost);
+                        return false;
+                    }
+                    return true;
+                });
+            },
+            clearGhosts() { this.activeGhosts.forEach(g => g.parent && scene.remove(g)); this.activeGhosts = []; },
+            clearHistory() { this.actionHistory = []; }
         };
 
         function isAbilityUnlocked(abilityKey) {
@@ -9354,6 +9544,11 @@
             abilityState[abilityKey].lastUsed = now;
             // v5.0: Track ability usage for quests
             trackAbilityUsage();
+
+            // v6.36: Track ability for daily challenges
+            if (typeof dailyChallenges !== 'undefined' && dailyChallenges.progress) {
+                dailyChallenges.updateProgress('ability');
+            }
 
             if (abilityKey === 'powerStrike') {
                 // Find nearest mob and deal massive damage
@@ -9437,6 +9632,11 @@
                 updateHealthUI();
                 AudioSystem.levelUp();
             } else if (abilityKey === 'dash') {
+                // v6.36: Track dash for daily challenges
+                if (typeof dailyChallenges !== 'undefined' && dailyChallenges.progress) {
+                    dailyChallenges.updateProgress('dash');
+                }
+
                 // v6.13: LEVIATHAN PULSE - Ancient tech combat dash that DESTROYS obstacles!
                 const dir = new THREE.Vector3(0, 0, -1);
                 dir.applyQuaternion(p.quaternion);
@@ -9611,6 +9811,43 @@
                 if (particles) particles.emit(p.position, 50, 0xff4400, { spread: 8, lifetime: 1500 });
                 AudioSystem.levelUp();
             }
+            // v6.42: CHRONO-ECHO - Summon time-echoes that replay past attacks
+            else if (abilityKey === 'chronoEcho') {
+                // Check if we have recorded actions to replay
+                if (chronoEchoSystem.actionHistory.length === 0) {
+                    showNotification('No combat history! Attack enemies first.', 'warning');
+                    abilityState[abilityKey].lastUsed = 0;
+                    return false;
+                }
+
+                abilityState.chronoEcho.activeUntil = now + ability.duration;
+                const baseDamage = getPlayerDamage();
+                const ghostCount = Math.min(ability.echoCount, chronoEchoSystem.actionHistory.length);
+
+                // Spawn ghost echoes
+                chronoEchoSystem.spawnGhosts(ghostCount, baseDamage);
+
+                // Visual activation effect
+                spawnFloater(p.position, `${ability.icon} CHRONO-ECHO!`, '#00ffff');
+                showNotification(`${ghostCount} time-echoes summoned!`, 'success');
+                triggerHitStop(HIT_STOP_HEAVY);
+                screenShake(0.8);
+
+                // Time distortion overlay effect
+                const container = document.getElementById('game-container');
+                if (container) {
+                    container.style.boxShadow = 'inset 0 0 100px rgba(0, 255, 255, 0.4)';
+                    setTimeout(() => { container.style.boxShadow = ''; }, 500);
+                }
+
+                // Particles emanating from player
+                if (particles) {
+                    particles.emit(p.position, 40, 0x00ffff, { spread: 6, lifetime: 1200 });
+                    particles.emit(p.position, 20, 0x8844ff, { spread: 4, lifetime: 800 });
+                }
+
+                AudioSystem.levelUp();
+            }
 
             updateAbilityUI();
             return true;
@@ -9628,6 +9865,12 @@
         // v4.9: Check if Berserk is active
         function isBerserkActive() {
             return performance.now() < abilityState.berserk.activeUntil;
+        }
+
+        // v6.42: Check if Chrono-Echo is active (ghosts are present)
+        function isChronoEchoActive() {
+            return performance.now() < abilityState.chronoEcho.activeUntil ||
+                   (typeof chronoEchoSystem !== 'undefined' && chronoEchoSystem.activeGhosts.length > 0);
         }
 
         function startDodge() {
@@ -11388,6 +11631,588 @@
                 this.currentCombo = 0;
             }
         };
+
+        // ============================================
+        // v6.36: IMPACT SCREEN SHAKE SYSTEM
+        // Camera shake proportional to damage dealt/received
+        // Consensus feature from Round 3 strategy analysis
+        // ============================================
+        const impactShake = {
+            enabled: true,
+            intensity: 0,
+            decay: 0.92,
+            maxIntensity: 15,
+            shakeOffset: { x: 0, y: 0 },
+
+            // Trigger shake based on damage
+            triggerDamageDealt(damage) {
+                if (!this.enabled) return;
+                // Scale shake by damage - big hits = big shake
+                const intensity = Math.min(damage * 0.8, this.maxIntensity * 0.6);
+                this.intensity = Math.max(this.intensity, intensity);
+            },
+
+            triggerDamageReceived(damage) {
+                if (!this.enabled) return;
+                // Taking damage shakes more than dealing it
+                const intensity = Math.min(damage * 1.2, this.maxIntensity);
+                this.intensity = Math.max(this.intensity, intensity);
+            },
+
+            triggerKill() {
+                if (!this.enabled) return;
+                // Satisfying kill shake
+                this.intensity = Math.max(this.intensity, 8);
+            },
+
+            triggerBossHit() {
+                if (!this.enabled) return;
+                // Boss hits feel massive
+                this.intensity = Math.max(this.intensity, 12);
+            },
+
+            update() {
+                if (this.intensity > 0.1) {
+                    // Random directional shake
+                    this.shakeOffset.x = (Math.random() - 0.5) * this.intensity * 2;
+                    this.shakeOffset.y = (Math.random() - 0.5) * this.intensity * 2;
+                    this.intensity *= this.decay;
+
+                    // Apply to camera or container
+                    const container = document.getElementById('container');
+                    if (container) {
+                        container.style.transform = `translate(${this.shakeOffset.x}px, ${this.shakeOffset.y}px)`;
+                    }
+                } else {
+                    this.intensity = 0;
+                    this.shakeOffset.x = 0;
+                    this.shakeOffset.y = 0;
+                    const container = document.getElementById('container');
+                    if (container) {
+                        container.style.transform = '';
+                    }
+                }
+            }
+        };
+
+        // ============================================
+        // v6.36: PERSONAL RECORDS DASHBOARD
+        // Track all-time stats, best combos, fastest kills
+        // Consensus feature from Round 3 strategy analysis
+        // ============================================
+        const personalRecords = {
+            storageKey: 'leviathan-records-v1',
+            records: null,
+
+            init() {
+                const saved = localStorage.getItem(this.storageKey);
+                this.records = saved ? JSON.parse(saved) : {
+                    totalKills: 0,
+                    totalDamageDealt: 0,
+                    totalDamageTaken: 0,
+                    highestCombo: 0,
+                    fastestBossKill: Infinity,
+                    longestSession: 0,
+                    totalPlayTime: 0,
+                    planetsConquered: 0,
+                    bestSingleHit: 0,
+                    totalDeaths: 0,
+                    dailyKills: 0,
+                    lastPlayDate: null,
+                    currentStreak: 0,
+                    bestStreak: 0,
+                    sessionsPlayed: 0
+                };
+                this.sessionStart = Date.now();
+
+                // Check daily reset
+                const today = new Date().toDateString();
+                if (this.records.lastPlayDate !== today) {
+                    if (this.records.lastPlayDate) {
+                        const lastDate = new Date(this.records.lastPlayDate);
+                        const todayDate = new Date(today);
+                        const daysDiff = Math.floor((todayDate - lastDate) / (1000 * 60 * 60 * 24));
+
+                        if (daysDiff === 1) {
+                            this.records.currentStreak++;
+                            if (this.records.currentStreak > this.records.bestStreak) {
+                                this.records.bestStreak = this.records.currentStreak;
+                                this.showStreakAchievement();
+                            }
+                        } else if (daysDiff > 1) {
+                            this.records.currentStreak = 1;
+                        }
+                    } else {
+                        this.records.currentStreak = 1;
+                    }
+                    this.records.dailyKills = 0;
+                    this.records.lastPlayDate = today;
+                }
+
+                this.records.sessionsPlayed++;
+                this.save();
+            },
+
+            save() {
+                localStorage.setItem(this.storageKey, JSON.stringify(this.records));
+            },
+
+            recordKill() {
+                this.records.totalKills++;
+                this.records.dailyKills++;
+                this.save();
+            },
+
+            recordDamageDealt(amount) {
+                this.records.totalDamageDealt += amount;
+                if (amount > this.records.bestSingleHit) {
+                    this.records.bestSingleHit = amount;
+                    this.showNewRecord('BEST HIT', amount);
+                }
+                this.save();
+            },
+
+            recordCombo(combo) {
+                if (combo > this.records.highestCombo) {
+                    this.records.highestCombo = combo;
+                    this.showNewRecord('HIGHEST COMBO', combo);
+                }
+                this.save();
+            },
+
+            recordDeath() {
+                this.records.totalDeaths++;
+                this.save();
+            },
+
+            recordPlanetConquered() {
+                this.records.planetsConquered++;
+                this.save();
+            },
+
+            updateSessionTime() {
+                const sessionLength = Math.floor((Date.now() - this.sessionStart) / 1000);
+                this.records.totalPlayTime += 1; // Add 1 second
+                if (sessionLength > this.records.longestSession) {
+                    this.records.longestSession = sessionLength;
+                }
+                this.save();
+            },
+
+            showNewRecord(type, value) {
+                const recordDiv = document.createElement('div');
+                recordDiv.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    background: linear-gradient(135deg, rgba(255,215,0,0.9), rgba(255,165,0,0.9));
+                    color: #000;
+                    padding: 20px 40px;
+                    border-radius: 10px;
+                    font-size: 24px;
+                    font-weight: bold;
+                    z-index: 10000;
+                    text-align: center;
+                    animation: recordPulse 0.5s ease-out;
+                    box-shadow: 0 0 30px rgba(255,215,0,0.8);
+                `;
+                recordDiv.innerHTML = `
+                    <div style="font-size: 14px; margin-bottom: 5px;">🏆 NEW RECORD!</div>
+                    <div>${type}</div>
+                    <div style="font-size: 36px; color: #8B0000;">${value}</div>
+                `;
+                document.body.appendChild(recordDiv);
+
+                setTimeout(() => {
+                    recordDiv.style.opacity = '0';
+                    recordDiv.style.transition = 'opacity 0.5s';
+                    setTimeout(() => recordDiv.remove(), 500);
+                }, 2000);
+            },
+
+            showStreakAchievement() {
+                const streakDiv = document.createElement('div');
+                streakDiv.style.cssText = `
+                    position: fixed;
+                    top: 30%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background: linear-gradient(135deg, rgba(255,100,0,0.9), rgba(255,50,0,0.9));
+                    color: #fff;
+                    padding: 15px 30px;
+                    border-radius: 10px;
+                    font-size: 20px;
+                    font-weight: bold;
+                    z-index: 10000;
+                    text-align: center;
+                    animation: recordPulse 0.5s ease-out;
+                `;
+                streakDiv.innerHTML = `🔥 ${this.records.currentStreak} DAY STREAK! 🔥`;
+                document.body.appendChild(streakDiv);
+                setTimeout(() => {
+                    streakDiv.style.opacity = '0';
+                    streakDiv.style.transition = 'opacity 0.5s';
+                    setTimeout(() => streakDiv.remove(), 500);
+                }, 2500);
+            },
+
+            getStatsDisplay() {
+                const hours = Math.floor(this.records.totalPlayTime / 3600);
+                const mins = Math.floor((this.records.totalPlayTime % 3600) / 60);
+                return {
+                    'Total Kills': this.records.totalKills.toLocaleString(),
+                    'Best Combo': this.records.highestCombo,
+                    'Best Hit': this.records.bestSingleHit,
+                    'Planets': this.records.planetsConquered,
+                    'Play Time': `${hours}h ${mins}m`,
+                    'Day Streak': `🔥 ${this.records.currentStreak}`,
+                    'Best Streak': this.records.bestStreak,
+                    'Sessions': this.records.sessionsPlayed
+                };
+            }
+        };
+
+        // ============================================
+        // v6.36: DAILY CHALLENGE SYSTEM
+        // Rotating challenges with streak bonuses
+        // Consensus feature from Round 3 strategy analysis
+        // ============================================
+        const dailyChallenges = {
+            storageKey: 'leviathan-daily-v1',
+            challenges: [],
+
+            challengeTemplates: [
+                { id: 'kills', name: 'Slayer', desc: 'Defeat {target} enemies', targets: [25, 50, 100], icon: '⚔️' },
+                { id: 'combo', name: 'Combo Master', desc: 'Reach a {target}x combo', targets: [15, 25, 50], icon: '🔥' },
+                { id: 'damage', name: 'Heavy Hitter', desc: 'Deal {target} total damage', targets: [500, 1000, 2500], icon: '💥' },
+                { id: 'nodeath', name: 'Untouchable', desc: 'Kill {target} enemies without dying', targets: [10, 20, 30], icon: '🛡️' },
+                { id: 'ability', name: 'Ability Expert', desc: 'Use abilities {target} times', targets: [20, 40, 60], icon: '✨' },
+                { id: 'dash', name: 'Speed Demon', desc: 'Dash {target} times', targets: [30, 50, 100], icon: '💨' }
+            ],
+
+            init() {
+                const saved = localStorage.getItem(this.storageKey);
+                const data = saved ? JSON.parse(saved) : { date: null, challenges: [], progress: {} };
+
+                const today = new Date().toDateString();
+                if (data.date !== today) {
+                    // Generate new daily challenges
+                    this.generateDailyChallenges(today);
+                } else {
+                    this.challenges = data.challenges;
+                    this.progress = data.progress;
+                }
+            },
+
+            generateDailyChallenges(date) {
+                // Seed random based on date for consistent daily challenges
+                const seed = date.split('').reduce((a, c) => a + c.charCodeAt(0), 0);
+                const seededRandom = (i) => {
+                    const x = Math.sin(seed + i) * 10000;
+                    return x - Math.floor(x);
+                };
+
+                // Pick 3 unique challenges
+                const shuffled = [...this.challengeTemplates].sort(() => seededRandom(Math.random()) - 0.5);
+                this.challenges = shuffled.slice(0, 3).map((template, i) => {
+                    const difficulty = Math.floor(seededRandom(i) * 3);
+                    return {
+                        ...template,
+                        target: template.targets[difficulty],
+                        difficulty: ['Easy', 'Medium', 'Hard'][difficulty],
+                        completed: false
+                    };
+                });
+
+                this.progress = {
+                    kills: 0,
+                    combo: 0,
+                    damage: 0,
+                    killsWithoutDeath: 0,
+                    abilityUses: 0,
+                    dashes: 0
+                };
+
+                this.save(date);
+                this.showDailyChallenges();
+            },
+
+            save(date) {
+                localStorage.setItem(this.storageKey, JSON.stringify({
+                    date: date || new Date().toDateString(),
+                    challenges: this.challenges,
+                    progress: this.progress
+                }));
+            },
+
+            updateProgress(type, value) {
+                if (!this.progress) return;
+
+                switch(type) {
+                    case 'kill':
+                        this.progress.kills++;
+                        this.progress.killsWithoutDeath++;
+                        break;
+                    case 'combo':
+                        this.progress.combo = Math.max(this.progress.combo, value);
+                        break;
+                    case 'damage':
+                        this.progress.damage += value;
+                        break;
+                    case 'death':
+                        this.progress.killsWithoutDeath = 0;
+                        break;
+                    case 'ability':
+                        this.progress.abilityUses++;
+                        break;
+                    case 'dash':
+                        this.progress.dashes++;
+                        break;
+                }
+
+                this.checkChallengeCompletion();
+                this.save();
+            },
+
+            checkChallengeCompletion() {
+                this.challenges.forEach(challenge => {
+                    if (challenge.completed) return;
+
+                    let current = 0;
+                    switch(challenge.id) {
+                        case 'kills': current = this.progress.kills; break;
+                        case 'combo': current = this.progress.combo; break;
+                        case 'damage': current = this.progress.damage; break;
+                        case 'nodeath': current = this.progress.killsWithoutDeath; break;
+                        case 'ability': current = this.progress.abilityUses; break;
+                        case 'dash': current = this.progress.dashes; break;
+                    }
+
+                    if (current >= challenge.target) {
+                        challenge.completed = true;
+                        this.showChallengeComplete(challenge);
+                    }
+                });
+            },
+
+            showChallengeComplete(challenge) {
+                const div = document.createElement('div');
+                div.style.cssText = `
+                    position: fixed;
+                    top: 20%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background: linear-gradient(135deg, rgba(0,255,100,0.95), rgba(0,200,80,0.95));
+                    color: #000;
+                    padding: 20px 40px;
+                    border-radius: 15px;
+                    font-size: 22px;
+                    font-weight: bold;
+                    z-index: 10000;
+                    text-align: center;
+                    animation: recordPulse 0.5s ease-out;
+                    box-shadow: 0 0 40px rgba(0,255,100,0.6);
+                `;
+                div.innerHTML = `
+                    <div style="font-size: 40px; margin-bottom: 10px;">${challenge.icon}</div>
+                    <div>CHALLENGE COMPLETE!</div>
+                    <div style="font-size: 16px; margin-top: 5px; opacity: 0.8;">${challenge.name}</div>
+                `;
+                document.body.appendChild(div);
+
+                // Play celebration sound
+                AudioSystem.playGentle(880, 0.1, 0.3);
+                setTimeout(() => AudioSystem.playGentle(1100, 0.1, 0.3), 100);
+                setTimeout(() => AudioSystem.playGentle(1320, 0.15, 0.3), 200);
+
+                setTimeout(() => {
+                    div.style.opacity = '0';
+                    div.style.transition = 'opacity 0.5s';
+                    setTimeout(() => div.remove(), 500);
+                }, 3000);
+            },
+
+            showDailyChallenges() {
+                const div = document.createElement('div');
+                div.style.cssText = `
+                    position: fixed;
+                    top: 15%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background: rgba(0,20,40,0.95);
+                    border: 2px solid #0ff;
+                    color: #fff;
+                    padding: 20px 30px;
+                    border-radius: 15px;
+                    font-size: 16px;
+                    z-index: 10000;
+                    text-align: center;
+                    box-shadow: 0 0 30px rgba(0,255,255,0.4);
+                `;
+                div.innerHTML = `
+                    <div style="font-size: 20px; color: #0ff; margin-bottom: 15px;">📋 TODAY'S CHALLENGES</div>
+                    ${this.challenges.map(c => `
+                        <div style="margin: 10px 0; padding: 8px; background: rgba(0,255,255,0.1); border-radius: 8px;">
+                            <span style="font-size: 24px;">${c.icon}</span>
+                            <span style="color: #0ff;">${c.name}</span>
+                            <span style="opacity: 0.7; font-size: 12px;">[${c.difficulty}]</span>
+                            <div style="font-size: 13px; opacity: 0.8;">${c.desc.replace('{target}', c.target)}</div>
+                        </div>
+                    `).join('')}
+                `;
+                document.body.appendChild(div);
+
+                setTimeout(() => {
+                    div.style.opacity = '0';
+                    div.style.transition = 'opacity 0.5s';
+                    setTimeout(() => div.remove(), 500);
+                }, 5000);
+            },
+
+            getChallengeProgress() {
+                return this.challenges.map(c => {
+                    let current = 0;
+                    switch(c.id) {
+                        case 'kills': current = this.progress?.kills || 0; break;
+                        case 'combo': current = this.progress?.combo || 0; break;
+                        case 'damage': current = this.progress?.damage || 0; break;
+                        case 'nodeath': current = this.progress?.killsWithoutDeath || 0; break;
+                        case 'ability': current = this.progress?.abilityUses || 0; break;
+                        case 'dash': current = this.progress?.dashes || 0; break;
+                    }
+                    return { ...c, current, percent: Math.min(100, (current / c.target) * 100) };
+                });
+            }
+        };
+
+        // ============================================
+        // v6.36: KILL REPLAY FLASH SYSTEM
+        // Brief slow-mo replay of significant kills
+        // Consensus feature from Round 3 strategy analysis
+        // ============================================
+        const killReplay = {
+            enabled: true,
+            replayQueue: [],
+            isReplaying: false,
+            significantKillThreshold: 15, // Only replay kills above this damage
+            cooldown: 0,
+            cooldownTime: 8000, // Min time between replays
+
+            recordKill(enemyType, damage, position, killerCombo) {
+                if (!this.enabled || this.isReplaying) return;
+
+                const now = Date.now();
+                if (now < this.cooldown) return;
+
+                // Determine if this kill is replay-worthy
+                const isSignificant = damage >= this.significantKillThreshold ||
+                                      killerCombo >= 20 ||
+                                      enemyType === 'boss' ||
+                                      enemyType === 'elite';
+
+                if (isSignificant) {
+                    this.triggerReplay(enemyType, damage, position, killerCombo);
+                    this.cooldown = now + this.cooldownTime;
+                }
+            },
+
+            triggerReplay(enemyType, damage, position, combo) {
+                this.isReplaying = true;
+
+                // Create replay flash overlay
+                const overlay = document.createElement('div');
+                overlay.id = 'kill-replay-overlay';
+                overlay.style.cssText = `
+                    position: fixed;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    background: radial-gradient(circle, transparent 30%, rgba(255,0,0,0.3) 100%);
+                    z-index: 9999;
+                    pointer-events: none;
+                    animation: replayFlash 0.8s ease-out;
+                `;
+                document.body.appendChild(overlay);
+
+                // Create kill text
+                const killText = document.createElement('div');
+                killText.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    font-size: 48px;
+                    font-weight: bold;
+                    color: #ff4444;
+                    text-shadow: 0 0 20px #ff0000, 0 0 40px #ff0000;
+                    z-index: 10000;
+                    animation: killTextPop 0.8s ease-out;
+                    pointer-events: none;
+                    white-space: nowrap;
+                `;
+
+                const killLabel = combo >= 20 ? `${combo}x COMBO KILL!` :
+                                 enemyType === 'boss' ? 'BOSS SLAIN!' :
+                                 damage >= 25 ? 'DEVASTATING!' :
+                                 'ELIMINATED!';
+                killText.textContent = killLabel;
+                document.body.appendChild(killText);
+
+                // Show damage number
+                const damageNum = document.createElement('div');
+                damageNum.style.cssText = `
+                    position: fixed;
+                    top: 58%;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    font-size: 32px;
+                    color: #ffaa00;
+                    text-shadow: 0 0 10px #ff8800;
+                    z-index: 10000;
+                    animation: killTextPop 0.8s ease-out 0.1s both;
+                    pointer-events: none;
+                `;
+                damageNum.textContent = `-${damage} DMG`;
+                document.body.appendChild(damageNum);
+
+                // Slow-mo effect (if animation frame available)
+                const originalTimeScale = window.gameTimeScale || 1;
+                window.gameTimeScale = 0.3;
+
+                // Play impact sound
+                AudioSystem.playGentle(150, 0.3, 0.5);
+                setTimeout(() => AudioSystem.playGentle(80, 0.4, 0.6), 100);
+
+                // Cleanup
+                setTimeout(() => {
+                    window.gameTimeScale = originalTimeScale;
+                    overlay.remove();
+                    killText.remove();
+                    damageNum.remove();
+                    this.isReplaying = false;
+                }, 800);
+            }
+        };
+
+        // Add CSS for replay animations
+        const replayStyles = document.createElement('style');
+        replayStyles.textContent = `
+            @keyframes replayFlash {
+                0% { opacity: 1; transform: scale(1); }
+                50% { opacity: 0.8; }
+                100% { opacity: 0; transform: scale(1.1); }
+            }
+            @keyframes killTextPop {
+                0% { transform: translate(-50%, -50%) scale(0.5); opacity: 0; }
+                30% { transform: translate(-50%, -50%) scale(1.2); opacity: 1; }
+                100% { transform: translate(-50%, -50%) scale(1); opacity: 0; }
+            }
+            @keyframes recordPulse {
+                0% { transform: translate(-50%, -50%) scale(0.8); }
+                50% { transform: translate(-50%, -50%) scale(1.05); }
+                100% { transform: translate(-50%, -50%) scale(1); }
+            }
+        `;
+        document.head.appendChild(replayStyles);
 
         // v5.15: Robot Animation Trigger System
         // Triggers special animations on the explorer robot
@@ -18092,6 +18917,10 @@
             return true;
         }
 
+        // v6.42: Debounce for inventory full message to prevent spam
+        let _lastInventoryFullMsg = 0;
+        const INVENTORY_FULL_MSG_COOLDOWN = 3000; // 3 seconds between messages
+
         // Helper: Add item to inventory (v6.13: with auto-drop for low priority)
         function addToInventory(itemName, amount) {
             if (!gameData.inventory) gameData.inventory = [];
@@ -18110,8 +18939,11 @@
                     const didDrop = autoDropLowestPriorityItem(itemName);
                     if (!didDrop) {
                         // Couldn't drop anything (new item is too low priority)
-                        if (worldState.player) {
-                            spawnFloater(worldState.player.position, `📦 Inventory full! ${itemName} skipped`, '#888888');
+                        // v6.42: Debounce to prevent spam
+                        const now = performance.now();
+                        if (worldState.player && now - _lastInventoryFullMsg > INVENTORY_FULL_MSG_COOLDOWN) {
+                            _lastInventoryFullMsg = now;
+                            spawnFloater(worldState.player.position, `📦 Inventory full!`, '#ff8888');
                         }
                         return false;
                     }
@@ -29702,6 +30534,10 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             // v6.29: Initialize physics tutorial panel
             initPhysicsTutorial();
 
+            // v6.36: Initialize Round 3 consensus systems
+            personalRecords.init();
+            dailyChallenges.init();
+
             // Autosave
             setInterval(() => {
                 if (mode === 'world') {
@@ -29710,6 +30546,10 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     updateDailyChallengeProgress();
                     // v5.3: Check portal timeout
                     checkPortalTimeout();
+                }
+                // v6.36: Update session time for personal records (works in all modes)
+                if (typeof personalRecords !== 'undefined' && personalRecords.records) {
+                    personalRecords.updateSessionTime();
                 }
             }, CONFIG.AUTOSAVE_INTERVAL);
 
@@ -35949,6 +36789,9 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                 updateAutoRotation(time);
             }
 
+            // v6.36: Update screen shake effect every frame
+            impactShake.update();
+
             renderer.render(scene, camera);
         }
 
@@ -36435,6 +37278,11 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             // v6.9: Update style meter decay (Agent consensus - Combat Depth)
             if (typeof decayStyleMeter === 'function') {
                 decayStyleMeter(dt);
+            }
+
+            // v6.42: Update Chrono-Echo ghost animations
+            if (typeof chronoEchoSystem !== 'undefined') {
+                chronoEchoSystem.update(dt);
             }
 
             // Mob AI with aggro (using CONFIG constants)
@@ -37097,12 +37945,14 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     comboCrescendo.updateCombo(comboHit);
                 }
 
-                // v6.35: Chrono-Echo Combat - record attack for echo playback
-                if (typeof chronoEcho !== 'undefined') {
-                    chronoEcho.recordAction('attack', {
-                        targetPos: target.position.clone(),
-                        damage: damage
-                    });
+                // v6.42: Chrono-Echo Combat - record attack for echo playback
+                if (typeof chronoEchoSystem !== 'undefined' && worldState.player) {
+                    chronoEchoSystem.recordAction('attack',
+                        worldState.player.position,
+                        worldState.player.rotation.y,
+                        target.position,
+                        damage
+                    );
                 }
             }
 
@@ -37191,6 +38041,11 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
 
             data.hp -= damage;
             gameData.statistics.totalDamageDealt += damage;
+
+            // v6.36: Screen shake on dealing damage (Round 3 consensus)
+            if (isCombatHit) {
+                impactShake.triggerDamageDealt(damage);
+            }
 
             // v5.1: Apply lifesteal from equipment
             const equipStats = getEquipmentStats();
@@ -37348,6 +38203,32 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     // Dramatic kill satisfaction - silence, bass thump, screen compression
                     if (typeof synapticBassDrop !== 'undefined') {
                         synapticBassDrop.trigger(target.position, isBoss);
+                    }
+
+                    // v6.36: Kill screen shake (Round 3 consensus)
+                    impactShake.triggerKill();
+                    if (isBoss) impactShake.triggerBossHit();
+
+                    // v6.36: Personal records & daily challenges (Round 3 consensus)
+                    if (typeof personalRecords !== 'undefined' && personalRecords.records) {
+                        personalRecords.recordKill();
+                        personalRecords.recordDamageDealt(damage);
+                        personalRecords.recordCombo(comboHit || 0);
+                    }
+                    if (typeof dailyChallenges !== 'undefined' && dailyChallenges.progress) {
+                        dailyChallenges.updateProgress('kill');
+                        dailyChallenges.updateProgress('damage', damage);
+                        dailyChallenges.updateProgress('combo', comboHit || 0);
+                    }
+
+                    // v6.36: Kill Replay Flash for significant kills (Round 3 consensus)
+                    if (typeof killReplay !== 'undefined') {
+                        killReplay.recordKill(
+                            isBoss ? 'boss' : (data.isElite ? 'elite' : 'mob'),
+                            damage,
+                            target.position.clone(),
+                            comboHit || 0
+                        );
                     }
 
                     if (isBoss) {
@@ -37545,6 +38426,14 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             screenShake(amount * 0.1);
             flashDamageOverlay();
 
+            // v6.36: Screen shake when taking damage
+            impactShake.triggerDamageReceived(actualDamage);
+
+            // v6.36: Update daily challenges for death tracking
+            if (typeof dailyChallenges !== 'undefined' && dailyChallenges.progress) {
+                dailyChallenges.updateProgress('death');
+            }
+
             // v6.7: Show directional damage indicator if attacker position known
             if (attackerPos && typeof flashDirectionalDamage === 'function') {
                 flashDirectionalDamage(attackerPos);
@@ -37554,6 +38443,10 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
             triggerRobotAnimation('damage');
 
             if (gameData.player.hp <= 0) {
+                // v6.36: Record death in personal records
+                if (typeof personalRecords !== 'undefined' && personalRecords.records) {
+                    personalRecords.recordDeath();
+                }
                 playerDeath();
             }
         }
@@ -38301,6 +39194,11 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     useAbility('berserk');
                     e.preventDefault();
                 }
+                // v6.42: Chrono-Echo ability
+                if (e.key === 'b' || e.key === 'B') {
+                    useAbility('chronoEcho');
+                    e.preventDefault();
+                }
             }
         }
 
@@ -38331,6 +39229,12 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
 
         function returnToGalaxy() {
             saveGameData();
+
+            // v6.42: Clear Chrono-Echo ghosts when leaving planet
+            if (typeof chronoEchoSystem !== 'undefined') {
+                chronoEchoSystem.clearGhosts();
+                chronoEchoSystem.clearHistory();
+            }
 
             // v6.32: Hyperspace jump when leaving planet (8-agent consensus)
             triggerHyperspaceJump(1500, () => {
@@ -38370,7 +39274,12 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                 return true;
             }
 
-            spawnFloater(worldState.player.position, "Inventory full!", '#f44');
+            // v6.42: Debounce to prevent spam
+            const now = performance.now();
+            if (worldState.player && now - _lastInventoryFullMsg > INVENTORY_FULL_MSG_COOLDOWN) {
+                _lastInventoryFullMsg = now;
+                spawnFloater(worldState.player.position, "Inventory full!", '#f44');
+            }
             return false;
         }
 
@@ -38727,7 +39636,7 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
         let _abilityUICache = null;
         function _cacheAbilityUIElements() {
             _abilityUICache = {};
-            const keys = ['q', 'e', 'r', 't', 'f', 'z', 'x', 'c'];
+            const keys = ['q', 'e', 'r', 't', 'f', 'z', 'x', 'c', 'b']; // v6.42: Added 'b' for Chrono-Echo
             keys.forEach(key => {
                 _abilityUICache[key] = {
                     slot: document.getElementById(`ability-${key}`),
@@ -38754,7 +39663,9 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                 { key: 'f', id: 'dash' },
                 { key: 'z', id: 'shieldWall' },
                 { key: 'x', id: 'execute' },
-                { key: 'c', id: 'berserk' }
+                { key: 'c', id: 'berserk' },
+                // v6.42: Chrono-Echo
+                { key: 'b', id: 'chronoEcho' }
             ];
 
             abilities.forEach(({ key, id }) => {
@@ -38815,6 +39726,12 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     slotEl.classList.remove('active-buff');
                     slotEl.style.borderColor = '';
                     slotEl.style.boxShadow = '';
+                }
+                // v6.42: Chrono-Echo active state (ghosts are active)
+                if (id === 'chronoEcho' && isChronoEchoActive()) {
+                    slotEl.classList.add('active-buff');
+                } else if (id === 'chronoEcho') {
+                    slotEl.classList.remove('active-buff');
                 }
             });
 
