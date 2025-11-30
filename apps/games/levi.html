@@ -23998,6 +23998,13 @@
                 }
             }
 
+            // v6.66: Base building commands (RCT-style)
+            if (typeof parseBaseBuildCommand === 'function') {
+                if (parseBaseBuildCommand(message)) {
+                    return true;
+                }
+            }
+
             return false; // Not a task command
         }
 
@@ -29428,6 +29435,18 @@ Output JSON: {"action": "scan|claim|navigate|build|upgrade", "targetBeacon": "co
                     break;
                 case 'fisher':
                     runFisherTask(agent);
+                    break;
+                case 'builder':
+                    // v6.66: RCT-style autonomous building
+                    if (typeof runBuilderTask === 'function') {
+                        runBuilderTask(agent);
+                    }
+                    break;
+                case 'terraformer':
+                    // v6.66: RCT-style terrain modification
+                    if (typeof runTerraformerTask === 'function') {
+                        runTerraformerTask(agent);
+                    }
                     break;
                 default:
                     runGathererTask(agent); // Default behavior
@@ -38074,6 +38093,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 cleanupCreepSystem();
             }
 
+            // v6.66: Clean up base building system when leaving world
+            if (typeof cleanupBaseBuildingSystem === 'function') {
+                cleanupBaseBuildingSystem();
+            }
+
             // v4.3: Stop ambient audio when leaving planet
             AudioSystem.stopAmbient();
 
@@ -41831,6 +41855,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.13: Initialize wave momentum system (DOTA-style creep pushing)
             if (typeof initWaveSystem === 'function') {
                 initWaveSystem();
+            }
+
+            // v6.66: Initialize RCT-style base building system
+            if (typeof initBaseBuildingSystem === 'function') {
+                initBaseBuildingSystem();
             }
 
             // v4.4: Start environmental particles
@@ -45658,6 +45687,961 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             creepWaveState.initialized = false;
         }
 
+        // ============================================
+        // v6.66: ROLLERCOASTER TYCOON STYLE BASE BUILDING
+        // Agents autonomously construct bases piece by piece
+        // Like building roller coasters - segment by segment
+        // ============================================
+
+        const BASE_BUILDING_CONFIG = {
+            enabled: true,
+            buildSpeed: 500,           // ms per segment
+            maxConstructionSites: 5,   // Max concurrent builds
+            segmentSize: 2,            // Size of each building segment
+            constructionParticles: true,
+            soundEffects: true
+        };
+
+        // Building blueprints - like roller coaster track pieces
+        const BUILDING_BLUEPRINTS = {
+            // WALLS - Linear segments that connect
+            wall: {
+                name: 'Wall',
+                icon: '🧱',
+                category: 'defense',
+                segments: [
+                    { type: 'foundation', offset: {x:0, y:0, z:0}, size: {x:2, y:0.3, z:0.5}, color: 0x555555 },
+                    { type: 'pillar_left', offset: {x:-0.8, y:0.7, z:0}, size: {x:0.3, y:1.4, z:0.4}, color: 0x666666 },
+                    { type: 'pillar_right', offset: {x:0.8, y:0.7, z:0}, size: {x:0.3, y:1.4, z:0.4}, color: 0x666666 },
+                    { type: 'top_beam', offset: {x:0, y:1.5, z:0}, size: {x:2, y:0.3, z:0.4}, color: 0x777777 },
+                    { type: 'fill', offset: {x:0, y:0.7, z:0}, size: {x:1.3, y:1.1, z:0.3}, color: 0x8b7355 }
+                ],
+                buildTime: 2500,
+                cost: { wood: 3, stone: 2 },
+                hp: 100,
+                connectable: true
+            },
+
+            // TOWER - Vertical multi-level structure
+            tower: {
+                name: 'Watch Tower',
+                icon: '🗼',
+                category: 'defense',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0, z:0}, size: {x:3, y:0.5, z:3}, color: 0x555555 },
+                    { type: 'floor1', offset: {x:0, y:1.25, z:0}, size: {x:2.5, y:2, z:2.5}, color: 0x8b7355 },
+                    { type: 'floor2', offset: {x:0, y:3.5, z:0}, size: {x:2.2, y:2, z:2.2}, color: 0x8b6914 },
+                    { type: 'floor3', offset: {x:0, y:5.75, z:0}, size: {x:1.8, y:1.5, z:1.8}, color: 0x654321 },
+                    { type: 'roof', offset: {x:0, y:7, z:0}, size: {x:2.5, y:1, z:2.5}, color: 0x8b0000, shape: 'cone' },
+                    { type: 'flag', offset: {x:0, y:8, z:0}, size: {x:0.1, y:1.5, z:0.1}, color: 0xffffff },
+                    { type: 'banner', offset: {x:0.3, y:8.5, z:0}, size: {x:0.8, y:0.5, z:0.05}, color: 0xff4444 }
+                ],
+                buildTime: 8000,
+                cost: { wood: 10, stone: 15 },
+                hp: 300,
+                provides: { vision: 30 }
+            },
+
+            // PATH - Flat walkway segments
+            path: {
+                name: 'Stone Path',
+                icon: '🛤️',
+                category: 'infrastructure',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.05, z:0}, size: {x:2, y:0.1, z:2}, color: 0x888888 },
+                    { type: 'stone1', offset: {x:-0.5, y:0.12, z:-0.5}, size: {x:0.4, y:0.05, z:0.4}, color: 0x666666 },
+                    { type: 'stone2', offset: {x:0.4, y:0.12, z:0.3}, size: {x:0.5, y:0.05, z:0.5}, color: 0x777777 },
+                    { type: 'stone3', offset: {x:-0.3, y:0.12, z:0.6}, size: {x:0.35, y:0.05, z:0.35}, color: 0x6a6a6a }
+                ],
+                buildTime: 800,
+                cost: { stone: 1 },
+                hp: 50,
+                connectable: true,
+                speedBoost: 1.3
+            },
+
+            // GATE - Entrance with doors
+            gate: {
+                name: 'Fortress Gate',
+                icon: '🚪',
+                category: 'defense',
+                segments: [
+                    { type: 'left_pillar', offset: {x:-2, y:1.5, z:0}, size: {x:1, y:3, z:1}, color: 0x555555 },
+                    { type: 'right_pillar', offset: {x:2, y:1.5, z:0}, size: {x:1, y:3, z:1}, color: 0x555555 },
+                    { type: 'arch', offset: {x:0, y:3.5, z:0}, size: {x:5, y:1, z:1}, color: 0x666666 },
+                    { type: 'left_door', offset: {x:-1, y:1.25, z:0}, size: {x:1.5, y:2.5, z:0.2}, color: 0x8b4513 },
+                    { type: 'right_door', offset: {x:1, y:1.25, z:0}, size: {x:1.5, y:2.5, z:0.2}, color: 0x8b4513 },
+                    { type: 'portcullis', offset: {x:0, y:2, z:0.3}, size: {x:3, y:2.5, z:0.1}, color: 0x333333 }
+                ],
+                buildTime: 5000,
+                cost: { wood: 8, stone: 12, iron: 3 },
+                hp: 250,
+                openable: true
+            },
+
+            // BARRACKS - Troop housing
+            barracks: {
+                name: 'Barracks',
+                icon: '🏠',
+                category: 'military',
+                segments: [
+                    { type: 'foundation', offset: {x:0, y:0.15, z:0}, size: {x:6, y:0.3, z:4}, color: 0x555555 },
+                    { type: 'walls_back', offset: {x:0, y:1.5, z:-1.8}, size: {x:6, y:2.4, z:0.4}, color: 0x8b7355 },
+                    { type: 'walls_left', offset: {x:-2.8, y:1.5, z:0}, size: {x:0.4, y:2.4, z:4}, color: 0x8b7355 },
+                    { type: 'walls_right', offset: {x:2.8, y:1.5, z:0}, size: {x:0.4, y:2.4, z:4}, color: 0x8b7355 },
+                    { type: 'walls_front_l', offset: {x:-1.8, y:1.5, z:1.8}, size: {x:2, y:2.4, z:0.4}, color: 0x8b7355 },
+                    { type: 'walls_front_r', offset: {x:1.8, y:1.5, z:1.8}, size: {x:2, y:2.4, z:0.4}, color: 0x8b7355 },
+                    { type: 'door_frame', offset: {x:0, y:1.2, z:1.8}, size: {x:1.5, y:2, z:0.4}, color: 0x654321 },
+                    { type: 'roof_base', offset: {x:0, y:2.9, z:0}, size: {x:6.5, y:0.3, z:4.5}, color: 0x444444 },
+                    { type: 'roof', offset: {x:0, y:3.8, z:0}, size: {x:6, y:1.5, z:4}, color: 0x8b0000, shape: 'roof' }
+                ],
+                buildTime: 12000,
+                cost: { wood: 20, stone: 10 },
+                hp: 400,
+                provides: { housing: 10 }
+            },
+
+            // TURRET - Auto-attack defense
+            turret: {
+                name: 'Arrow Turret',
+                icon: '🏹',
+                category: 'defense',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.25, z:0}, size: {x:2, y:0.5, z:2}, color: 0x555555 },
+                    { type: 'pedestal', offset: {x:0, y:1, z:0}, size: {x:1.2, y:1, z:1.2}, color: 0x666666 },
+                    { type: 'platform', offset: {x:0, y:1.75, z:0}, size: {x:1.8, y:0.3, z:1.8}, color: 0x777777 },
+                    { type: 'housing', offset: {x:0, y:2.4, z:0}, size: {x:1, y:1, z:1}, color: 0x8b4513 },
+                    { type: 'barrel', offset: {x:0, y:2.4, z:0.8}, size: {x:0.2, y:0.2, z:1}, color: 0x333333 }
+                ],
+                buildTime: 6000,
+                cost: { wood: 5, stone: 8, iron: 5 },
+                hp: 150,
+                provides: { attack: { damage: 10, range: 20, cooldown: 2000 } }
+            },
+
+            // RESOURCE DEPOT - Storage
+            depot: {
+                name: 'Resource Depot',
+                icon: '📦',
+                category: 'economy',
+                segments: [
+                    { type: 'floor', offset: {x:0, y:0.1, z:0}, size: {x:5, y:0.2, z:4}, color: 0x8b7355 },
+                    { type: 'back_wall', offset: {x:0, y:1.5, z:-1.8}, size: {x:5, y:3, z:0.3}, color: 0x654321 },
+                    { type: 'left_wall', offset: {x:-2.4, y:1.5, z:0}, size: {x:0.3, y:3, z:4}, color: 0x654321 },
+                    { type: 'right_wall', offset: {x:2.4, y:1.5, z:0}, size: {x:0.3, y:3, z:4}, color: 0x654321 },
+                    { type: 'roof_support', offset: {x:0, y:3.2, z:0}, size: {x:5.2, y:0.4, z:4.2}, color: 0x444444 },
+                    { type: 'crate1', offset: {x:-1, y:0.6, z:-0.5}, size: {x:1, y:1, z:1}, color: 0xcd853f },
+                    { type: 'crate2', offset: {x:1, y:0.6, z:0.5}, size: {x:0.8, y:0.8, z:0.8}, color: 0xdeb887 },
+                    { type: 'barrel', offset: {x:0, y:0.5, z:0}, size: {x:0.6, y:1, z:0.6}, color: 0x8b4513, shape: 'cylinder' }
+                ],
+                buildTime: 7000,
+                cost: { wood: 15, stone: 5 },
+                hp: 200,
+                provides: { storage: 100 }
+            }
+        };
+
+        // Base building state
+        let baseBuildingState = {
+            enabled: false,
+            constructionSites: [],    // Active construction sites
+            completedBuildings: [],   // Finished structures
+            buildQueue: [],           // Queued builds waiting for agents
+            ghostPreviews: [],        // Preview meshes for placement
+            totalBuilt: 0,
+            initialized: false
+        };
+
+        // Initialize base building system
+        function initBaseBuildingSystem() {
+            if (!BASE_BUILDING_CONFIG.enabled) return;
+
+            baseBuildingState = {
+                enabled: true,
+                constructionSites: [],
+                completedBuildings: [],
+                buildQueue: [],
+                ghostPreviews: [],
+                totalBuilt: 0,
+                initialized: true
+            };
+
+            console.log('v6.66: Base Building System initialized');
+        }
+
+        // Queue a building for construction at position
+        function queueBuildingConstruction(blueprintKey, position, rotation = 0) {
+            const blueprint = BUILDING_BLUEPRINTS[blueprintKey];
+            if (!blueprint) {
+                showNotification(`Unknown building type: ${blueprintKey}`, 'error');
+                return null;
+            }
+
+            // Check if position is valid (not too close to other buildings)
+            const minDistance = 3;
+            for (const building of baseBuildingState.completedBuildings) {
+                if (building.position.distanceTo(position) < minDistance) {
+                    showNotification('Too close to existing building!', 'error');
+                    return null;
+                }
+            }
+            for (const site of baseBuildingState.constructionSites) {
+                if (site.position.distanceTo(position) < minDistance) {
+                    showNotification('Too close to construction site!', 'error');
+                    return null;
+                }
+            }
+
+            const buildOrder = {
+                id: `build_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                blueprintKey: blueprintKey,
+                blueprint: blueprint,
+                position: position.clone(),
+                rotation: rotation,
+                status: 'queued',  // queued, assigned, building, complete
+                assignedAgent: null,
+                currentSegment: 0,
+                totalSegments: blueprint.segments.length,
+                meshes: [],
+                scaffolding: null,
+                startTime: null,
+                queueTime: Date.now()
+            };
+
+            baseBuildingState.buildQueue.push(buildOrder);
+
+            // Create ghost preview
+            createBuildingGhost(buildOrder);
+
+            showNotification(`${blueprint.icon} ${blueprint.name} queued for construction`, 'info');
+            addCopilotMessage(`🔨 New construction order: ${blueprint.name}. Builder agents will begin work automatically.`, 'ai');
+
+            return buildOrder;
+        }
+
+        // Create ghost preview of planned building
+        function createBuildingGhost(buildOrder) {
+            if (!scene) return;
+
+            const ghostGroup = new THREE.Group();
+            const blueprint = buildOrder.blueprint;
+
+            blueprint.segments.forEach(segment => {
+                let geo;
+                if (segment.shape === 'cone') {
+                    geo = new THREE.ConeGeometry(segment.size.x / 2, segment.size.y, 8);
+                } else if (segment.shape === 'cylinder') {
+                    geo = new THREE.CylinderGeometry(segment.size.x / 2, segment.size.x / 2, segment.size.y, 8);
+                } else if (segment.shape === 'roof') {
+                    // Simplified roof - prism-like
+                    geo = new THREE.BoxGeometry(segment.size.x, segment.size.y, segment.size.z);
+                } else {
+                    geo = new THREE.BoxGeometry(segment.size.x, segment.size.y, segment.size.z);
+                }
+
+                const mat = new THREE.MeshBasicMaterial({
+                    color: 0x00ff00,
+                    transparent: true,
+                    opacity: 0.25,
+                    wireframe: true
+                });
+
+                const mesh = new THREE.Mesh(geo, mat);
+                mesh.position.set(segment.offset.x, segment.offset.y, segment.offset.z);
+                ghostGroup.add(mesh);
+            });
+
+            ghostGroup.position.copy(buildOrder.position);
+            ghostGroup.rotation.y = buildOrder.rotation;
+
+            // Add to terrain height
+            const groundY = typeof getTerrainHeight === 'function'
+                ? getTerrainHeight(buildOrder.position.x, buildOrder.position.z)
+                : 0;
+            ghostGroup.position.y = groundY;
+
+            scene.add(ghostGroup);
+            baseBuildingState.ghostPreviews.push({
+                buildId: buildOrder.id,
+                mesh: ghostGroup
+            });
+        }
+
+        // Agent claims a build order and starts construction
+        function agentClaimBuildOrder(agent) {
+            // Find oldest unclaimed build order
+            const availableOrder = baseBuildingState.buildQueue.find(
+                order => order.status === 'queued'
+            );
+
+            if (!availableOrder) return null;
+
+            availableOrder.status = 'assigned';
+            availableOrder.assignedAgent = agent.id;
+
+            // Move to construction sites
+            baseBuildingState.buildQueue = baseBuildingState.buildQueue.filter(
+                o => o.id !== availableOrder.id
+            );
+            baseBuildingState.constructionSites.push(availableOrder);
+
+            // Create scaffolding at site
+            createScaffolding(availableOrder);
+
+            // Remove ghost preview
+            const ghostIdx = baseBuildingState.ghostPreviews.findIndex(
+                g => g.buildId === availableOrder.id
+            );
+            if (ghostIdx !== -1) {
+                const ghost = baseBuildingState.ghostPreviews[ghostIdx];
+                scene.remove(ghost.mesh);
+                baseBuildingState.ghostPreviews.splice(ghostIdx, 1);
+            }
+
+            return availableOrder;
+        }
+
+        // Create scaffolding around construction site
+        function createScaffolding(buildOrder) {
+            if (!scene) return;
+
+            const scaffoldGroup = new THREE.Group();
+            const blueprint = buildOrder.blueprint;
+
+            // Calculate building bounds
+            let maxHeight = 0;
+            let maxWidth = 0;
+            blueprint.segments.forEach(seg => {
+                maxHeight = Math.max(maxHeight, seg.offset.y + seg.size.y);
+                maxWidth = Math.max(maxWidth, Math.abs(seg.offset.x) + seg.size.x / 2);
+            });
+
+            // Create wooden scaffold poles
+            const poleGeo = new THREE.CylinderGeometry(0.05, 0.05, maxHeight + 1, 6);
+            const poleMat = new THREE.MeshStandardMaterial({ color: 0x8b4513 });
+
+            const corners = [
+                [-maxWidth - 0.5, maxWidth + 0.5],
+                [maxWidth + 0.5, maxWidth + 0.5],
+                [-maxWidth - 0.5, -maxWidth - 0.5],
+                [maxWidth + 0.5, -maxWidth - 0.5]
+            ];
+
+            corners.forEach(([x, z]) => {
+                const pole = new THREE.Mesh(poleGeo, poleMat);
+                pole.position.set(x, (maxHeight + 1) / 2, z);
+                scaffoldGroup.add(pole);
+            });
+
+            // Horizontal beams
+            const beamGeo = new THREE.BoxGeometry(maxWidth * 2 + 1, 0.08, 0.08);
+            for (let y = 1; y < maxHeight; y += 1.5) {
+                const beam1 = new THREE.Mesh(beamGeo, poleMat);
+                beam1.position.set(0, y, maxWidth + 0.5);
+                scaffoldGroup.add(beam1);
+
+                const beam2 = new THREE.Mesh(beamGeo, poleMat);
+                beam2.position.set(0, y, -maxWidth - 0.5);
+                scaffoldGroup.add(beam2);
+            }
+
+            scaffoldGroup.position.copy(buildOrder.position);
+            const groundY = typeof getTerrainHeight === 'function'
+                ? getTerrainHeight(buildOrder.position.x, buildOrder.position.z)
+                : 0;
+            scaffoldGroup.position.y = groundY;
+
+            scene.add(scaffoldGroup);
+            buildOrder.scaffolding = scaffoldGroup;
+        }
+
+        // Build next segment (called by agent during construction)
+        function buildNextSegment(buildOrder) {
+            if (!scene || buildOrder.currentSegment >= buildOrder.totalSegments) {
+                return false;
+            }
+
+            const blueprint = buildOrder.blueprint;
+            const segment = blueprint.segments[buildOrder.currentSegment];
+
+            // Create the segment mesh
+            let geo;
+            if (segment.shape === 'cone') {
+                geo = new THREE.ConeGeometry(segment.size.x / 2, segment.size.y, 8);
+            } else if (segment.shape === 'cylinder') {
+                geo = new THREE.CylinderGeometry(segment.size.x / 2, segment.size.x / 2, segment.size.y, 8);
+            } else {
+                geo = new THREE.BoxGeometry(segment.size.x, segment.size.y, segment.size.z);
+            }
+
+            const mat = new THREE.MeshStandardMaterial({
+                color: segment.color,
+                roughness: 0.7,
+                metalness: 0.1
+            });
+
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+
+            // Position relative to building origin
+            const groundY = typeof getTerrainHeight === 'function'
+                ? getTerrainHeight(buildOrder.position.x, buildOrder.position.z)
+                : 0;
+
+            mesh.position.set(
+                buildOrder.position.x + segment.offset.x,
+                groundY + segment.offset.y,
+                buildOrder.position.z + segment.offset.z
+            );
+
+            // Animate segment appearing (RCT-style snap into place)
+            mesh.scale.set(0.1, 0.1, 0.1);
+            const targetScale = { x: 1, y: 1, z: 1 };
+
+            let animProgress = 0;
+            const animateSegment = () => {
+                animProgress += 0.1;
+                const t = Math.min(1, animProgress);
+                const eased = 1 - Math.pow(1 - t, 3); // Ease out cubic
+
+                mesh.scale.set(
+                    0.1 + eased * 0.9,
+                    0.1 + eased * 0.9,
+                    0.1 + eased * 0.9
+                );
+
+                if (t < 1) {
+                    requestAnimationFrame(animateSegment);
+                } else {
+                    // Spawn construction particles
+                    if (BASE_BUILDING_CONFIG.constructionParticles) {
+                        spawnConstructionParticles(mesh.position);
+                    }
+                }
+            };
+            animateSegment();
+
+            scene.add(mesh);
+            buildOrder.meshes.push(mesh);
+            buildOrder.currentSegment++;
+
+            // Play build sound
+            if (BASE_BUILDING_CONFIG.soundEffects && typeof AudioSystem !== 'undefined') {
+                AudioSystem.collect();
+            }
+
+            // Check if complete
+            if (buildOrder.currentSegment >= buildOrder.totalSegments) {
+                completeBuilding(buildOrder);
+                return true;
+            }
+
+            return false;
+        }
+
+        // Spawn particles when segment is placed
+        function spawnConstructionParticles(position) {
+            if (!scene) return;
+
+            for (let i = 0; i < 10; i++) {
+                const geo = new THREE.BoxGeometry(0.1, 0.1, 0.1);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: Math.random() > 0.5 ? 0xffaa00 : 0xffdd44,
+                    transparent: true,
+                    opacity: 1
+                });
+                const particle = new THREE.Mesh(geo, mat);
+                particle.position.copy(position);
+                particle.position.x += (Math.random() - 0.5) * 2;
+                particle.position.z += (Math.random() - 0.5) * 2;
+
+                const velocity = new THREE.Vector3(
+                    (Math.random() - 0.5) * 0.1,
+                    Math.random() * 0.15,
+                    (Math.random() - 0.5) * 0.1
+                );
+
+                scene.add(particle);
+
+                let frame = 0;
+                const animate = () => {
+                    frame++;
+                    particle.position.add(velocity);
+                    velocity.y -= 0.005;
+                    particle.rotation.x += 0.1;
+                    particle.rotation.y += 0.15;
+                    mat.opacity = 1 - (frame / 30);
+
+                    if (frame < 30) {
+                        requestAnimationFrame(animate);
+                    } else {
+                        scene.remove(particle);
+                        geo.dispose();
+                        mat.dispose();
+                    }
+                };
+                animate();
+            }
+        }
+
+        // Complete a building
+        function completeBuilding(buildOrder) {
+            buildOrder.status = 'complete';
+
+            // Remove scaffolding with animation
+            if (buildOrder.scaffolding) {
+                const scaff = buildOrder.scaffolding;
+                let fadeProgress = 0;
+                const fadeScaffolding = () => {
+                    fadeProgress += 0.05;
+                    scaff.children.forEach(child => {
+                        if (child.material) {
+                            child.material.transparent = true;
+                            child.material.opacity = 1 - fadeProgress;
+                        }
+                    });
+
+                    if (fadeProgress < 1) {
+                        requestAnimationFrame(fadeScaffolding);
+                    } else {
+                        scene.remove(scaff);
+                    }
+                };
+                fadeScaffolding();
+            }
+
+            // Create completed building object
+            const completedBuilding = {
+                id: buildOrder.id,
+                blueprintKey: buildOrder.blueprintKey,
+                blueprint: buildOrder.blueprint,
+                position: buildOrder.position.clone(),
+                rotation: buildOrder.rotation,
+                meshes: buildOrder.meshes,
+                hp: buildOrder.blueprint.hp,
+                maxHp: buildOrder.blueprint.hp,
+                provides: buildOrder.blueprint.provides || {},
+                builtBy: buildOrder.assignedAgent,
+                completedTime: Date.now()
+            };
+
+            // Move to completed buildings
+            baseBuildingState.constructionSites = baseBuildingState.constructionSites.filter(
+                s => s.id !== buildOrder.id
+            );
+            baseBuildingState.completedBuildings.push(completedBuilding);
+            baseBuildingState.totalBuilt++;
+
+            // Celebrate!
+            showNotification(`${buildOrder.blueprint.icon} ${buildOrder.blueprint.name} completed!`, 'success');
+
+            // Apply building bonuses
+            applyBuildingBonuses(completedBuilding);
+
+            // Give XP to builder agent
+            const builderAgent = agentFleet.find(a => a.id === buildOrder.assignedAgent);
+            if (builderAgent) {
+                const xpReward = buildOrder.blueprint.segments.length * 10;
+                builderAgent.agentXP += xpReward;
+                builderAgent.totalEarnings.xp += xpReward;
+                addCopilotMessage(`${builderAgent.typeConfig.icon} ${builderAgent.name} completed ${buildOrder.blueprint.name}! +${xpReward} XP`, 'ai');
+            }
+
+            return completedBuilding;
+        }
+
+        // Apply bonuses from completed buildings
+        function applyBuildingBonuses(building) {
+            const provides = building.provides;
+
+            // Vision bonus (for towers)
+            if (provides.vision) {
+                // Could extend minimap range or add fog of war reveal
+            }
+
+            // Housing bonus (for barracks)
+            if (provides.housing) {
+                // Could increase max agent capacity
+            }
+
+            // Storage bonus (for depots)
+            if (provides.storage) {
+                // Could increase inventory capacity
+            }
+
+            // Attack bonus (for turrets) - auto-attack nearby enemies
+            if (provides.attack) {
+                building.attackCooldown = 0;
+                building.canAttack = true;
+            }
+        }
+
+        // Update turret attacks
+        function updateBuildingAttacks(time) {
+            baseBuildingState.completedBuildings.forEach(building => {
+                if (!building.canAttack || !building.provides?.attack) return;
+
+                const attack = building.provides.attack;
+                if (time < building.attackCooldown) return;
+
+                // Find nearest enemy
+                let nearestMob = null;
+                let nearestDist = attack.range;
+
+                if (worldState.mobs) {
+                    worldState.mobs.forEach(mob => {
+                        if (!mob.position) return;
+                        const dist = mob.position.distanceTo(building.position);
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestMob = mob;
+                        }
+                    });
+                }
+
+                // Also target enemy creeps
+                if (creepWaveState.creeps) {
+                    creepWaveState.creeps.forEach(creep => {
+                        if (creep.userData.team === 'B') { // Only attack enemy team
+                            const dist = creep.position.distanceTo(building.position);
+                            if (dist < nearestDist) {
+                                nearestDist = dist;
+                                nearestMob = creep;
+                            }
+                        }
+                    });
+                }
+
+                if (nearestMob) {
+                    // Fire!
+                    building.attackCooldown = time + attack.cooldown;
+
+                    // Create projectile
+                    spawnTurretProjectile(building, nearestMob, attack.damage);
+                }
+            });
+        }
+
+        // Spawn turret projectile
+        function spawnTurretProjectile(building, target, damage) {
+            if (!scene) return;
+
+            const geo = new THREE.SphereGeometry(0.15, 8, 8);
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0xffaa00,
+                emissive: 0xffaa00
+            });
+            const projectile = new THREE.Mesh(geo, mat);
+
+            const startPos = building.position.clone();
+            startPos.y += 2.5;
+            projectile.position.copy(startPos);
+
+            scene.add(projectile);
+
+            const targetPos = target.position.clone();
+            targetPos.y += 0.5;
+
+            let progress = 0;
+            const animateProjectile = () => {
+                progress += 0.1;
+
+                projectile.position.lerpVectors(startPos, targetPos, progress);
+
+                // Arc
+                const arcHeight = Math.sin(progress * Math.PI) * 2;
+                projectile.position.y += arcHeight;
+
+                if (progress >= 1) {
+                    // Hit!
+                    scene.remove(projectile);
+                    geo.dispose();
+                    mat.dispose();
+
+                    // Apply damage
+                    if (target.userData) {
+                        target.userData.hp -= damage;
+                    } else if (target.hp !== undefined) {
+                        target.hp -= damage;
+                    }
+
+                    spawnFloater(targetPos, `-${damage}`, '#ffaa00');
+                } else {
+                    requestAnimationFrame(animateProjectile);
+                }
+            };
+            animateProjectile();
+        }
+
+        // Builder agent task - RCT style construction
+        function runBuilderTask(agent) {
+            const task = agent.taskState;
+            const agentPos = agent.mesh.position;
+
+            // Check if we have an active build
+            if (!task.activeBuild) {
+                // Look for unclaimed build orders
+                const buildOrder = agentClaimBuildOrder(agent);
+                if (buildOrder) {
+                    task.activeBuild = buildOrder;
+                    task.state = 'moving';
+                    task.targetPosition = buildOrder.position.clone();
+                    logAgentTask(agent, `Claimed construction: ${buildOrder.blueprint.name}`);
+                    agent.statusMessage = `🏗️ Heading to build ${buildOrder.blueprint.name}`;
+                    updateAgentCardUI(agent);
+                } else {
+                    // No builds available - wander or idle
+                    if (task.state !== 'idle') {
+                        task.state = 'idle';
+                        agent.statusMessage = '💤 Waiting for build orders...';
+                        updateAgentCardUI(agent);
+                    }
+                    // Random wander
+                    if (!task.targetPosition || Math.random() < 0.02) {
+                        task.targetPosition = new THREE.Vector3(
+                            agentPos.x + (Math.random() - 0.5) * 20,
+                            0,
+                            agentPos.z + (Math.random() - 0.5) * 20
+                        );
+                        task.state = 'moving';
+                    }
+                }
+                return;
+            }
+
+            // We have an active build
+            const buildOrder = task.activeBuild;
+            const distToBuild = agentPos.distanceTo(buildOrder.position);
+
+            if (distToBuild > 3) {
+                // Move to construction site
+                task.state = 'moving';
+                task.targetPosition = buildOrder.position.clone();
+                return;
+            }
+
+            // At construction site - BUILD!
+            task.state = 'working';
+
+            // Check if build is done
+            if (buildOrder.status === 'complete') {
+                task.activeBuild = null;
+                task.state = 'idle';
+                agent.statusMessage = '✅ Construction complete!';
+                updateAgentCardUI(agent);
+                return;
+            }
+
+            // Build next segment (rate limited)
+            if (!task.lastBuildTime || Date.now() - task.lastBuildTime > BASE_BUILDING_CONFIG.buildSpeed) {
+                task.lastBuildTime = Date.now();
+
+                const isComplete = buildNextSegment(buildOrder);
+
+                // Update status
+                const progress = Math.floor((buildOrder.currentSegment / buildOrder.totalSegments) * 100);
+                agent.statusMessage = `🔨 Building ${buildOrder.blueprint.name} (${progress}%)`;
+                logAgentTask(agent, `Built segment ${buildOrder.currentSegment}/${buildOrder.totalSegments}`);
+                updateAgentCardUI(agent);
+
+                if (isComplete) {
+                    task.activeBuild = null;
+                }
+            }
+        }
+
+        // Terraformer agent task - prepares sites for building
+        function runTerraformerTask(agent) {
+            const task = agent.taskState;
+            const agentPos = agent.mesh.position;
+
+            // Look for build sites that need preparation
+            const nearbyBuildSite = baseBuildingState.buildQueue.find(order => {
+                if (order.status !== 'queued') return false;
+                const dist = agentPos.distanceTo(order.position);
+                return dist < 50; // Within 50 units
+            });
+
+            if (nearbyBuildSite) {
+                // Move toward build site and prepare it
+                const distToSite = agentPos.distanceTo(nearbyBuildSite.position);
+
+                if (distToSite > 5) {
+                    task.state = 'moving';
+                    task.targetPosition = nearbyBuildSite.position.clone();
+                    agent.statusMessage = `🚜 Heading to prepare construction site`;
+                } else {
+                    // At site - flatten terrain (visual effect)
+                    task.state = 'working';
+                    agent.statusMessage = `🚜 Preparing site for ${nearbyBuildSite.blueprint.name}`;
+
+                    // Spawn terrain flattening particles
+                    if (Math.random() < 0.1) {
+                        spawnConstructionParticles(agentPos);
+                    }
+                }
+            } else {
+                // No build sites - default gatherer behavior
+                runGathererTask(agent);
+            }
+
+            updateAgentCardUI(agent);
+        }
+
+        // Command to trigger base building via chat
+        function parseBaseBuildCommand(message) {
+            const lowerMsg = message.toLowerCase();
+
+            // Check for build commands
+            const buildMatch = lowerMsg.match(/build\s+(a\s+)?(wall|tower|path|gate|barracks|turret|depot)/i);
+            if (buildMatch) {
+                const buildingType = buildMatch[2].toLowerCase();
+                if (BUILDING_BLUEPRINTS[buildingType]) {
+                    // Build at player position
+                    const buildPos = worldState.player
+                        ? worldState.player.position.clone()
+                        : new THREE.Vector3(0, 0, 0);
+
+                    // Offset slightly in front of player
+                    buildPos.x += 5;
+                    buildPos.z += 5;
+
+                    queueBuildingConstruction(buildingType, buildPos);
+                    return true;
+                }
+            }
+
+            // Build base command - queue multiple buildings
+            if (lowerMsg.includes('build base') || lowerMsg.includes('start base') || lowerMsg.includes('construct base')) {
+                startBaseConstruction();
+                return true;
+            }
+
+            // List buildings command
+            if (lowerMsg.includes('list buildings') || lowerMsg.includes('what can you build')) {
+                const buildingList = Object.entries(BUILDING_BLUEPRINTS).map(([key, bp]) => {
+                    return `${bp.icon} ${bp.name} (${key})`;
+                }).join('\n');
+                addCopilotMessage(`Available buildings:\n${buildingList}\n\nSay "build [type]" to queue construction!`, 'ai');
+                return true;
+            }
+
+            return false;
+        }
+
+        // Start automated base construction (queues multiple buildings)
+        function startBaseConstruction() {
+            const centerPos = worldState.player
+                ? worldState.player.position.clone()
+                : new THREE.Vector3(0, 0, 0);
+
+            // Queue a starter base layout
+            const baseLayout = [
+                { type: 'depot', offset: { x: 0, z: 0 } },
+                { type: 'wall', offset: { x: -5, z: -3 } },
+                { type: 'wall', offset: { x: -5, z: 0 } },
+                { type: 'wall', offset: { x: -5, z: 3 } },
+                { type: 'gate', offset: { x: 0, z: 6 } },
+                { type: 'wall', offset: { x: 5, z: -3 } },
+                { type: 'wall', offset: { x: 5, z: 0 } },
+                { type: 'wall', offset: { x: 5, z: 3 } },
+                { type: 'tower', offset: { x: -8, z: -6 } },
+                { type: 'tower', offset: { x: 8, z: -6 } },
+                { type: 'turret', offset: { x: -8, z: 6 } },
+                { type: 'turret', offset: { x: 8, z: 6 } },
+                { type: 'barracks', offset: { x: 0, z: -8 } }
+            ];
+
+            baseLayout.forEach((item, index) => {
+                const pos = centerPos.clone();
+                pos.x += item.offset.x;
+                pos.z += item.offset.z;
+
+                // Stagger queue to create cascade effect
+                setTimeout(() => {
+                    queueBuildingConstruction(item.type, pos);
+                }, index * 200);
+            });
+
+            showNotification('🏰 Base construction initiated!', 'legendary');
+            addCopilotMessage(`🏰 MASSIVE BASE CONSTRUCTION STARTED!\n${baseLayout.length} buildings queued.\nBuilder agents will construct them piece by piece, RollerCoaster Tycoon style!`, 'ai');
+
+            // Auto-spawn builder agents if we don't have enough
+            const builderCount = agentFleet.filter(a => a.type === 'builder').length;
+            const terraformerCount = agentFleet.filter(a => a.type === 'terraformer').length;
+
+            if (builderCount < 2) {
+                for (let i = builderCount; i < 2; i++) {
+                    spawnAgent('builder');
+                }
+            }
+            if (terraformerCount < 1) {
+                spawnAgent('terraformer');
+            }
+        }
+
+        // Update base building system (called each frame)
+        function updateBaseBuildingSystem(time) {
+            if (!baseBuildingState.enabled) return;
+
+            // Update turret attacks
+            updateBuildingAttacks(time);
+
+            // Check for path speed boosts
+            if (worldState.player) {
+                const playerPos = worldState.player.position;
+                for (const building of baseBuildingState.completedBuildings) {
+                    if (building.blueprint.speedBoost) {
+                        const dist = playerPos.distanceTo(building.position);
+                        if (dist < 2) {
+                            // Apply speed boost (handled elsewhere in movement code)
+                            worldState.onPath = true;
+                            worldState.pathSpeedBoost = building.blueprint.speedBoost;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Cleanup base building system
+        function cleanupBaseBuildingSystem() {
+            // Remove all building meshes
+            baseBuildingState.completedBuildings.forEach(building => {
+                building.meshes.forEach(mesh => {
+                    if (mesh.parent) mesh.parent.remove(mesh);
+                    if (mesh.geometry) mesh.geometry.dispose();
+                    if (mesh.material) mesh.material.dispose();
+                });
+            });
+
+            // Remove construction sites
+            baseBuildingState.constructionSites.forEach(site => {
+                site.meshes.forEach(mesh => {
+                    if (mesh.parent) mesh.parent.remove(mesh);
+                });
+                if (site.scaffolding) {
+                    scene.remove(site.scaffolding);
+                }
+            });
+
+            // Remove ghost previews
+            baseBuildingState.ghostPreviews.forEach(ghost => {
+                if (ghost.mesh.parent) ghost.mesh.parent.remove(ghost.mesh);
+            });
+
+            baseBuildingState = {
+                enabled: false,
+                constructionSites: [],
+                completedBuildings: [],
+                buildQueue: [],
+                ghostPreviews: [],
+                totalBuilt: 0,
+                initialized: false
+            };
+        }
+
         // v4.2: Create Point of Interest
         function createPOI(rng, biome, poiType, poiData) {
             const group = new THREE.Group();
@@ -46528,6 +47512,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.65: Update DOTA-style creep waves
             if (typeof updateCreepWaves === 'function') {
                 updateCreepWaves(dt, time);
+            }
+
+            // v6.66: Update RCT-style base building system
+            if (typeof updateBaseBuildingSystem === 'function') {
+                updateBaseBuildingSystem(time);
             }
 
             // Mob AI with aggro (using CONFIG constants)
