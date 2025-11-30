@@ -9382,7 +9382,7 @@
         //          - Pause/Resume and Exit buttons
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '6.66'; // v6.66: DOTA-Style Creep Lanes - Three lanes with visual paths, spawning creep waves that battle at choke points
+        const VERSION = '6.68'; // v6.68: Bridge Walking Fix - Player properly walks on bridges over water/lava without sinking
 
         // ============================================
         // THREE.js Extensions: FontLoader & TextGeometry
@@ -17872,6 +17872,17 @@
                 fireRate: 800,  // ms between shots
                 autoDefend: true
             },
+            // v6.68: Healing system for player and friendly creeps
+            healing: {
+                enabled: true,
+                range: 25,              // Healing range
+                playerHealRate: 2,      // HP per second for player
+                creepHealRate: 5,       // HP per second for creeps
+                healInterval: 500,      // ms between heal ticks
+                lastHealTime: 0,
+                healBeam: null,
+                totalHealed: 0          // Tracking stat
+            },
             propellers: [],
             thrustLight: null,
             damaged: false,
@@ -18315,6 +18326,80 @@
             // Update laser beam visual
             updateLaserBeam(dt, time);
 
+            // v6.68: Ship healing system - heal player and friendly creeps
+            if (SHIP_STATE.healing.enabled && time - SHIP_STATE.healing.lastHealTime > SHIP_STATE.healing.healInterval) {
+                SHIP_STATE.healing.lastHealTime = time;
+                const healRange = SHIP_STATE.healing.range;
+                let healedSomething = false;
+
+                // Heal player if nearby and damaged
+                if (worldState.player && gameData.player.hp < gameData.player.maxHp) {
+                    const playerDist = SHIP_STATE.mesh.position.distanceTo(worldState.player.position);
+                    if (playerDist < healRange) {
+                        const healAmount = Math.ceil(SHIP_STATE.healing.playerHealRate * (SHIP_STATE.healing.healInterval / 1000));
+                        const actualHeal = Math.min(healAmount, gameData.player.maxHp - gameData.player.hp);
+                        gameData.player.hp += actualHeal;
+                        SHIP_STATE.healing.totalHealed += actualHeal;
+                        updateHealthUI();
+
+                        // Visual feedback - green healing particles
+                        if (actualHeal > 0) {
+                            spawnFloater(worldState.player.position, `+${actualHeal}`, '#44ff88');
+                            if (particles) particles.emit(worldState.player.position, 5, 0x44ff88, { spread: 1.5, lifetime: 400, size: 0.15 });
+                            healedSomething = true;
+
+                            // Draw heal beam to player
+                            spawnHealBeam(SHIP_STATE.mesh.position, worldState.player.position);
+                        }
+                    }
+                }
+
+                // Heal friendly creeps (team A) if nearby and damaged
+                if (creepWaveState.creeps) {
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep || !creep.userData || creep.userData.team !== 'A') return;
+                        if (creep.userData.hp >= creep.userData.maxHp) return;
+
+                        const creepDist = SHIP_STATE.mesh.position.distanceTo(creep.position);
+                        if (creepDist < healRange) {
+                            const healAmount = Math.ceil(SHIP_STATE.healing.creepHealRate * (SHIP_STATE.healing.healInterval / 1000));
+                            const actualHeal = Math.min(healAmount, creep.userData.maxHp - creep.userData.hp);
+                            creep.userData.hp += actualHeal;
+                            SHIP_STATE.healing.totalHealed += actualHeal;
+
+                            // Update creep HP bar
+                            if (creep.userData.hpBar) {
+                                const hpPercent = creep.userData.hp / creep.userData.maxHp;
+                                creep.userData.hpBar.scale.x = Math.max(0.01, hpPercent);
+                                creep.userData.hpBar.material.color.setHex(hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffff00 : 0xff0000);
+                            }
+
+                            // Visual feedback for creep healing (less frequent to avoid spam)
+                            if (actualHeal > 0 && Math.random() < 0.3) {
+                                spawnFloater(creep.position, `+${actualHeal}`, '#44ff88');
+                                if (particles) particles.emit(creep.position, 3, 0x44ff88, { spread: 1, lifetime: 300, size: 0.1 });
+                                spawnHealBeam(SHIP_STATE.mesh.position, creep.position);
+                            }
+                            healedSomething = true;
+                        }
+                    });
+                }
+
+                // Healing aura pulse effect when actively healing
+                if (healedSomething && SHIP_STATE.landingPad) {
+                    const shield = SHIP_STATE.landingPad.userData.shield;
+                    if (shield) {
+                        shield.material.color.setHex(0x44ff88);  // Green healing color
+                        shield.material.opacity = 0.4;
+                        setTimeout(() => {
+                            if (shield.material) {
+                                shield.material.color.setHex(0x00ffff);  // Back to cyan
+                            }
+                        }, 200);
+                    }
+                }
+            }
+
             // Mobs attacking ship
             worldState.mobs.forEach(mob => {
                 if (!mob.parent || mob.userData.hp <= 0) return;
@@ -18454,6 +18539,50 @@
             } else {
                 beam.visible = false;
             }
+        }
+
+        // v6.68: Spawn a temporary heal beam visual effect
+        function spawnHealBeam(startPos, endPos) {
+            if (!scene) return;
+
+            const start = startPos.clone();
+            start.y += 3;  // From ship turret
+            const end = endPos.clone();
+            end.y += 1;
+
+            const dir = new THREE.Vector3().subVectors(end, start);
+            const length = dir.length();
+
+            // Create heal beam geometry
+            const beamGeo = new THREE.CylinderGeometry(0.08, 0.08, 1, 6);
+            const beamMat = new THREE.MeshBasicMaterial({
+                color: 0x44ff88,
+                transparent: true,
+                opacity: 0.7
+            });
+            const healBeam = new THREE.Mesh(beamGeo, beamMat);
+
+            // Position and orient beam
+            healBeam.scale.set(1, length, 1);
+            healBeam.position.copy(start).add(dir.clone().multiplyScalar(0.5));
+            healBeam.lookAt(end);
+            healBeam.rotateX(Math.PI / 2);
+
+            scene.add(healBeam);
+
+            // Fade out and remove
+            let opacity = 0.7;
+            const fadeInterval = setInterval(() => {
+                opacity -= 0.15;
+                if (opacity <= 0) {
+                    clearInterval(fadeInterval);
+                    scene.remove(healBeam);
+                    beamGeo.dispose();
+                    beamMat.dispose();
+                } else {
+                    healBeam.material.opacity = opacity;
+                }
+            }, 30);
         }
 
         // Damage the ship
@@ -20379,12 +20508,10 @@
         // Initialize Genesis 3D rendering
         function initGenesisRendering() {
             // Create instanced mesh for entities
+            // v6.65: Use MeshBasicMaterial to avoid "too many uniforms" shader error
             const entityGeometry = new THREE.SphereGeometry(0.5, 8, 8);
-            const entityMaterial = new THREE.MeshStandardMaterial({
-                color: 0xffffff,
-                emissive: 0x333333,
-                metalness: 0.3,
-                roughness: 0.7
+            const entityMaterial = new THREE.MeshBasicMaterial({
+                color: 0xffffff
             });
 
             genesisState.entityMeshes = new THREE.InstancedMesh(
@@ -20401,10 +20528,10 @@
             scene.add(genesisState.entityMeshes);
 
             // Create resource markers
+            // v6.65: Use MeshBasicMaterial to avoid shader uniform limits
             const resourceGeometry = new THREE.ConeGeometry(0.3, 0.8, 4);
-            const resourceMaterial = new THREE.MeshStandardMaterial({
-                color: 0x44ff44,
-                emissive: 0x114411
+            const resourceMaterial = new THREE.MeshBasicMaterial({
+                color: 0x44ff44
             });
 
             genesisState.resourceMeshes = new THREE.InstancedMesh(
@@ -30991,7 +31118,7 @@ Think Raymond Chandler meets Cowboy Bebop.`,
                 setTimeout(() => generateChronicleEntry(), 2000);
             }
 
-            saveGame();
+            saveGameData();
         }
 
         // Generate chronicle entry from buffered events
@@ -31150,7 +31277,7 @@ Write a dramatic, engaging chronicle entry that weaves these events into a compe
                 gameData.chronicle.entries = gameData.chronicle.entries.slice(0, 50);
             }
 
-            saveGame();
+            saveGameData();
             updateChronicleUI();
         }
 
@@ -31192,7 +31319,7 @@ Write a dramatic, engaging chronicle entry that weaves these events into a compe
             const styleEl = document.getElementById('chronicle-style');
             if (styleEl && gameData.chronicle) {
                 gameData.chronicle.settings.narrativeStyle = styleEl.value;
-                saveGame();
+                saveGameData();
                 showNotification(`Chronicle style set to: ${CHRONICLE_STYLES[styleEl.value]?.name || styleEl.value}`, 'info');
             }
         }
@@ -41302,9 +41429,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.62: HIGH-RESOLUTION TERRAIN using InstancedMesh for performance
             // With 300x300 = 90,000 tiles, individual meshes would be too slow
             // InstancedMesh renders all tiles in ~2 draw calls (ground + water)
+            // v6.65: Use MeshBasicMaterial to avoid "too many uniforms" shader error with many lights
             const groundGeo = new THREE.BoxGeometry(CONFIG.TILE_SIZE, CONFIG.TILE_SIZE, CONFIG.TILE_SIZE);
-            const groundMat = new THREE.MeshLambertMaterial({ color: biome.ground });
-            const waterMat = new THREE.MeshLambertMaterial({ color: biome.water, transparent: true, opacity: 0.8 });
+            const groundMat = new THREE.MeshBasicMaterial({ color: biome.ground });
+            const waterMat = new THREE.MeshBasicMaterial({ color: biome.water, transparent: true, opacity: 0.8 });
 
             const worldGroup = new THREE.Group();
 
@@ -45287,8 +45415,65 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 const bridgeRailColor = baseColor.clone().multiplyScalar(1.2);
 
                 let blockIndex = 0;
-                let inBridgeSection = false;
-                let bridgeSectionStart = null;
+                let wasOverWater = false;  // Track previous block state for ramp detection
+                let lastGroundY = 0;       // Track ground height before bridge
+
+                // Helper function to create bridge ramps
+                function createBridgeRamp(x, z, angle, isUpRamp, groundY) {
+                    const rampLength = config.spacing * 1.5;
+                    const rampHeight = BRIDGE_HEIGHT - groundY + WATER_LEVEL;
+                    const rampSteps = 4;
+
+                    for (let step = 0; step < rampSteps; step++) {
+                        const t = step / rampSteps;
+                        const stepHeight = groundY + rampHeight * (isUpRamp ? t : (1 - t));
+
+                        // Position along the ramp
+                        const stepOffset = (isUpRamp ? -1 : 1) * (rampLength * (1 - t));
+                        const stepX = x + Math.sin(angle) * stepOffset;
+                        const stepZ = z + Math.cos(angle) * stepOffset;
+
+                        // Ramp segment
+                        const rampGeo = new THREE.BoxGeometry(
+                            config.blockSize.x * 1.3,
+                            config.blockSize.y * 0.6,
+                            rampLength / rampSteps
+                        );
+                        const rampMat = new THREE.MeshStandardMaterial({
+                            color: bridgeDeckColor,
+                            emissive: baseColor,
+                            emissiveIntensity: 0.15,
+                            roughness: 0.5,
+                            metalness: 0.6
+                        });
+                        const rampBlock = new THREE.Mesh(rampGeo, rampMat);
+                        rampBlock.position.set(stepX, stepHeight + 0.2, stepZ);
+                        rampBlock.rotation.y = angle;
+                        // Tilt the ramp
+                        const tiltAngle = Math.atan2(rampHeight / rampSteps, rampLength / rampSteps);
+                        rampBlock.rotation.x = isUpRamp ? -tiltAngle * 0.3 : tiltAngle * 0.3;
+                        rampBlock.receiveShadow = true;
+                        laneGroup.add(rampBlock);
+
+                        // Ramp railings
+                        if (step < rampSteps - 1) {
+                            [-1, 1].forEach(side => {
+                                const railGeo = new THREE.BoxGeometry(0.15, 0.8, 0.15);
+                                const railMat = new THREE.MeshStandardMaterial({
+                                    color: bridgeRailColor,
+                                    emissive: baseColor,
+                                    emissiveIntensity: 0.3
+                                });
+                                const rail = new THREE.Mesh(railGeo, railMat);
+                                const railOffset = (config.blockSize.z * 0.6) * side;
+                                const perpX = Math.cos(angle) * railOffset;
+                                const perpZ = -Math.sin(angle) * railOffset;
+                                rail.position.set(stepX + perpX, stepHeight + 0.6, stepZ + perpZ);
+                                laneGroup.add(rail);
+                            });
+                        }
+                    }
+                }
 
                 // Interpolate between waypoints and place blocks
                 for (let i = 0; i < waypoints.length - 1; i++) {
@@ -45314,13 +45499,28 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                         // Calculate Y position - elevated for bridges
                         let y;
+                        const groundY = typeof getTerrainHeight === 'function'
+                            ? getTerrainHeight(x, z)
+                            : 0;
+
                         if (overWater) {
                             y = WATER_LEVEL + BRIDGE_HEIGHT;
+
+                            // v6.67: Detect transition to bridge - create UP ramp
+                            if (!wasOverWater && blockIndex > 0) {
+                                createBridgeRamp(x, z, angle, true, lastGroundY);
+                            }
                         } else {
-                            y = typeof getTerrainHeight === 'function'
-                                ? getTerrainHeight(x, z) + config.blockSize.y / 2 + 0.05
-                                : config.blockSize.y / 2 + 0.05;
+                            y = groundY + config.blockSize.y / 2 + 0.05;
+                            lastGroundY = groundY;
+
+                            // v6.67: Detect transition from bridge - create DOWN ramp
+                            if (wasOverWater) {
+                                createBridgeRamp(x, z, angle, false, groundY);
+                            }
                         }
+
+                        wasOverWater = overWater;
 
                         // Calculate color variation based on pattern
                         let colorMult = 1.0;
@@ -45902,9 +46102,16 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             hpBg.position.z = -0.01;
             creep.add(hpBg);
 
+            // v6.68: Creep names for targeting display
+            const creepNames = team === 'A'
+                ? ['Battle Drone', 'Scout Bot', 'Combat Unit', 'Siege Walker']
+                : ['Fauna Swarm', 'Hive Warrior', 'Acid Spitter', 'Brood Hunter'];
+            const creepName = creepNames[Math.floor(Math.random() * creepNames.length)];
+
             // Store creep data
             creep.userData = {
                 type: 'creep',
+                name: creepName,  // v6.68: Added name for tooltip display
                 team: team,
                 laneKey: laneKey,
                 hp: CREEP_WAVE_CONFIG.creepHp,
@@ -45953,7 +46160,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 // Find enemy target
                 findCreepTarget(creep);
 
-                if (creep.userData.target && creep.userData.target.userData.hp > 0) {
+                // v6.68: Check if target is valid - handle player target differently
+                const hasValidTarget = creep.userData.target && (
+                    (creep.userData.targetIsPlayer && gameData.player.hp > 0) ||
+                    (!creep.userData.targetIsPlayer && creep.userData.target.userData?.hp > 0)
+                );
+
+                if (hasValidTarget) {
                     // Has a valid target - fight or move toward it
                     const dist = creep.position.distanceTo(creep.userData.target.position);
 
@@ -45970,6 +46183,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     // No target - follow lane waypoints
                     creep.userData.state = 'moving';
                     creep.userData.target = null;
+                    creep.userData.targetIsPlayer = false;
                     followLaneWaypoint(creep, dt);
                 }
 
@@ -45999,6 +46213,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         function findCreepTarget(creep) {
             let nearestEnemy = null;
             let nearestDist = 20; // Max aggro range
+            let targetIsPlayer = false;
 
             creepWaveState.creeps.forEach(other => {
                 if (!other || other === creep) return;
@@ -46012,7 +46227,20 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
             });
 
+            // v6.68: Hostile fauna creeps (team B) also target the player robot
+            // Player is considered part of Robot Forces (team A)
+            if (creep.userData.team === 'B' && worldState.player && gameData.player.hp > 0) {
+                const playerDist = creep.position.distanceTo(worldState.player.position);
+                // Prioritize player slightly - use 1.2x distance comparison so player is targeted more aggressively
+                if (playerDist < nearestDist * 1.2 && playerDist < 15) {
+                    nearestEnemy = worldState.player;
+                    nearestDist = playerDist;
+                    targetIsPlayer = true;
+                }
+            }
+
             creep.userData.target = nearestEnemy;
+            creep.userData.targetIsPlayer = targetIsPlayer;
         }
 
         // Attack the target creep
@@ -46020,6 +46248,21 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             if (time < creep.userData.nextAttack) return;
 
             const target = creep.userData.target;
+
+            // v6.68: Handle player target separately
+            if (creep.userData.targetIsPlayer && worldState.player) {
+                if (gameData.player.hp <= 0) return;
+
+                // Deal damage to player
+                const creepDamage = creep.userData.damage || 3;
+                damagePlayer(creepDamage, creep.position);
+                creep.userData.nextAttack = time + CREEP_WAVE_CONFIG.creepAttackCooldown;
+
+                // Visual feedback
+                spawnFloater(worldState.player.position, `-${creepDamage}`, '#ff4444');
+                return;
+            }
+
             if (!target || target.userData.hp <= 0) return;
 
             // Deal damage
@@ -46038,17 +46281,73 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }, 100);
         }
 
+        // v6.67: Get correct Y position for creeps (respects bridges)
+        // Creeps walk on bridges over water, not through the water
+        const CREEP_BRIDGE_HEIGHT = 3.5;  // Bridge deck height (matches lane visuals)
+        const CREEP_WATER_LEVEL = 0.5;
+
+        function getCreepTerrainHeight(x, z) {
+            // Check if over water (need a bridge)
+            if (worldState.terrain) {
+                const gx = Math.round(x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
+                const gz = Math.round(z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
+                if (gx >= 0 && gx < CONFIG.WORLD_SIZE && gz >= 0 && gz < CONFIG.WORLD_SIZE) {
+                    const terrainY = worldState.terrain[gx]?.[gz];
+                    if (terrainY !== undefined && terrainY < -50) {
+                        // Over water - use bridge height
+                        return CREEP_WATER_LEVEL + CREEP_BRIDGE_HEIGHT;
+                    }
+                }
+            }
+
+            // On land - use regular terrain height
+            if (typeof getTerrainHeight === 'function') {
+                return getTerrainHeight(x, z) + 0.5;
+            }
+            return 0.5;
+        }
+
+        // Check if creep is on a ramp (transitioning to/from bridge)
+        function isOnBridgeRamp(x, z, prevX, prevZ) {
+            const currentOverWater = getCreepTerrainHeight(x, z) > 2;
+            const prevOverWater = getCreepTerrainHeight(prevX, prevZ) > 2;
+            return currentOverWater !== prevOverWater;
+        }
+
         // Move creep toward a position
         function moveCreepToward(creep, targetPos, dt) {
             const direction = new THREE.Vector3()
                 .subVectors(targetPos, creep.position)
                 .normalize();
 
+            // Store previous position for ramp detection
+            const prevX = creep.position.x;
+            const prevZ = creep.position.z;
+
             creep.position.x += direction.x * creep.userData.speed * dt;
             creep.position.z += direction.z * creep.userData.speed * dt;
 
+            // v6.67: Update Y position based on terrain/bridge
+            const targetY = getCreepTerrainHeight(creep.position.x, creep.position.z);
+
+            // Smooth Y transition (for ramps)
+            const yDiff = targetY - creep.position.y;
+            if (Math.abs(yDiff) > 0.1) {
+                // Gradually adjust height (ramp effect)
+                creep.position.y += yDiff * 0.15;
+            } else {
+                creep.position.y = targetY;
+            }
+
             // Face movement direction
             creep.rotation.y = Math.atan2(direction.x, direction.z);
+
+            // Tilt slightly when going up/down ramps
+            if (Math.abs(yDiff) > 0.3) {
+                creep.rotation.x = yDiff > 0 ? -0.15 : 0.15;
+            } else {
+                creep.rotation.x *= 0.9; // Gradually return to level
+            }
         }
 
         // Follow lane waypoints
@@ -46063,7 +46362,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }
 
             const targetWp = waypoints[wpIndex];
-            const targetPos = new THREE.Vector3(targetWp.x, 0, targetWp.z);
+            // v6.67: Target Y is now properly calculated (bridge or ground)
+            const targetY = getCreepTerrainHeight(targetWp.x, targetWp.z);
+            const targetPos = new THREE.Vector3(targetWp.x, targetY, targetWp.z);
+
             const dist = new THREE.Vector2(
                 creep.position.x - targetWp.x,
                 creep.position.z - targetWp.z
@@ -47232,6 +47534,17 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 active: true
             };
 
+            // v6.68: Add userData to mesh for targeting/clicking
+            const towerName = team === 'robot' ? 'Robot Defense Tower' : 'Hostile Fauna Nest';
+            towerGroup.userData = {
+                type: team === 'robot' ? 'friendlyTower' : 'hostileTower',
+                name: towerName,
+                team: team,
+                hp: tower.hp,
+                maxHp: tower.maxHp,
+                towerRef: tower  // Reference back to tower data
+            };
+
             // Store in lane support state
             if (!laneSupportState.laneTowers) {
                 laneSupportState.laneTowers = [];
@@ -47255,6 +47568,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 let target = null;
                 let minDist = tower.attackRange;
                 const targetTeam = tower.team === 'robot' ? 'B' : 'A';
+                let targetIsPlayer = false;
 
                 creepWaveState.creeps.forEach(creep => {
                     if (!creep.userData || creep.userData.team !== targetTeam) return;
@@ -47265,13 +47579,33 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     }
                 });
 
+                // v6.68: Hostile fauna towers (team !== 'robot') also target the player
+                // Player is considered team 'A' (Robot Forces)
+                if (tower.team !== 'robot' && worldState.player) {
+                    const playerDist = tower.position.distanceTo(worldState.player.position);
+                    if (playerDist < minDist) {
+                        minDist = playerDist;
+                        target = worldState.player;
+                        targetIsPlayer = true;
+                    }
+                }
+
                 if (target) {
-                    // Attack!
-                    target.userData.hp -= tower.attackDamage;
                     tower.lastAttackTime = time;
 
-                    // Visual projectile
-                    spawnTowerProjectile(tower, target);
+                    if (targetIsPlayer) {
+                        // Attack the player!
+                        const towerDamage = tower.attackDamage || 5;
+                        damagePlayer(towerDamage, tower.position);
+                        spawnFloater(worldState.player.position, `-${towerDamage}`, '#ff4400');
+                        // Visual projectile to player
+                        spawnTowerProjectile(tower, worldState.player);
+                    } else {
+                        // Attack creep as normal
+                        target.userData.hp -= tower.attackDamage;
+                        // Visual projectile
+                        spawnTowerProjectile(tower, target);
+                    }
                 }
 
                 // Animate beacon pulse
@@ -47335,6 +47669,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             checkFortificationOpportunity(time);
             updateFortificationBuilding(time);
             updateFortifications(time);
+            updateLaneTowers(time);
         }
 
         // Cleanup lane support system
@@ -47361,6 +47696,19 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
             });
 
+            // Remove lane towers
+            if (laneSupportState.laneTowers) {
+                laneSupportState.laneTowers.forEach(tower => {
+                    if (tower.mesh && tower.mesh.parent) {
+                        tower.mesh.parent.remove(tower.mesh);
+                        tower.mesh.traverse(child => {
+                            if (child.geometry) child.geometry.dispose();
+                            if (child.material) child.material.dispose();
+                        });
+                    }
+                });
+            }
+
             laneSupportState.enabled = false;
             laneSupportState.initialized = false;
             laneSupportState.fortifications = [];
@@ -47368,6 +47716,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             laneSupportState.assignedAgents = {};
             laneSupportState.laneControl = {};
             laneSupportState.controlPoints = { top: 0, mid: 0, bot: 0 };
+            laneSupportState.laneTowers = [];
         }
 
         // ============================================
@@ -49628,12 +49977,27 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             return 0;
         }
 
+        // v6.68: Bridge constants for player ground snapping
+        const PLAYER_BRIDGE_HEIGHT = 3.5;  // Bridge deck height (matches lane visuals)
+        const PLAYER_WATER_LEVEL = 0.5;
+
         function snapToGround(obj) {
             const gx = Math.round(obj.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE/2;
             const gz = Math.round(obj.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE/2;
 
             if(gx >=0 && gx < CONFIG.WORLD_SIZE && gz >= 0 && gz < CONFIG.WORLD_SIZE) {
                 const y = worldState.terrain[gx]?.[gz];
+
+                // v6.68: Handle water tiles - player walks on bridge
+                if (y !== undefined && y < -50) {
+                    // Over water/lava - check if on lane bridge
+                    const bridgeY = PLAYER_WATER_LEVEL + PLAYER_BRIDGE_HEIGHT;
+                    const targetY = bridgeY + (obj === worldState.player ? 1.2 : 0.8);
+                    const lerpRate = obj === worldState.player ? 0.2 : 0.4;
+                    obj.position.y = THREE.MathUtils.lerp(obj.position.y, targetY, lerpRate);
+                    return; // Exit early - we're on a bridge
+                }
+
                 if(y !== undefined && y > -50) {
                     const targetY = y + (obj === worldState.player ? 1.2 : 0.8);
                     const diff = Math.abs(obj.position.y - targetY);
@@ -49649,6 +50013,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // v6.42: Check if position is on lava (water tiles in Volcanic biome) - 8-agent consensus
+        // v6.68: Updated to account for bridges over lava - no damage when elevated
         function isOnLava(pos) {
             // Early exit: Only Volcanic biome has lava (water in other biomes is just water)
             if (!activeCiv || activeCiv.biome !== 'Volcanic') return false;
@@ -49659,6 +50024,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             // Bounds check
             if (gx < 0 || gx >= CONFIG.WORLD_SIZE || gz < 0 || gz >= CONFIG.WORLD_SIZE) return false;
+
+            // v6.68: If player is elevated (on a bridge), not in lava
+            const bridgeMinHeight = PLAYER_WATER_LEVEL + PLAYER_BRIDGE_HEIGHT - 0.5;
+            if (pos.y > bridgeMinHeight) return false;
 
             // -99 indicates water/lava tile
             return worldState.terrain[gx] && worldState.terrain[gx][gz] === -99;
@@ -49909,6 +50278,105 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 } else {
                     spawnFloater(target.position, "Already discovered", '#888888');
                 }
+                return;
+            }
+
+            // v6.68: Handle hostile creep attacks
+            if (data.type === 'creep' && data.team === 'B') {
+                const damage = getPlayerDamage();
+                data.hp -= damage;
+
+                // Visual feedback
+                spawnFloater(target.position, `-${damage}`, '#ff4444');
+                AudioSystem.hit(0);
+                if (particles) particles.emit(target.position, 8, 0xff4444, { spread: 2, lifetime: 600 });
+
+                // Update HP bar
+                if (data.hpBar) {
+                    const hpPercent = data.hp / data.maxHp;
+                    data.hpBar.scale.x = Math.max(0.01, hpPercent);
+                    data.hpBar.material.color.setHex(hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffff00 : 0xff0000);
+                }
+
+                // Scale feedback
+                target.scale.setScalar(0.85);
+                setTimeout(() => { if(target.parent) target.scale.setScalar(1); }, 100);
+
+                // Creep death
+                if (data.hp <= 0) {
+                    const idx = creepWaveState.creeps.indexOf(target);
+                    if (idx > -1) {
+                        // Award XP and gold
+                        addXp('combat', 30);
+                        gameData.gold = (gameData.gold || 0) + 5;
+                        spawnFloater(target.position, '+30 XP', '#ffff00');
+
+                        // Death particles
+                        if (particles) particles.emit(target.position, 20, 0xff4444, { spread: 4, lifetime: 800 });
+                        AudioSystem.combatEvent('kill');
+
+                        // Remove creep
+                        scene.remove(target);
+                        creepWaveState.creeps.splice(idx, 1);
+                    }
+                }
+
+                worldState.interactTarget = null;
+                return;
+            }
+
+            // v6.68: Handle hostile tower attacks
+            if (data.type === 'hostileTower') {
+                const damage = getPlayerDamage();
+                const towerRef = data.towerRef;
+
+                if (towerRef) {
+                    towerRef.hp -= damage;
+                    data.hp = towerRef.hp;  // Sync userData
+
+                    // Visual feedback
+                    spawnFloater(target.position, `-${damage}`, '#ff4444');
+                    AudioSystem.hit(0);
+                    if (particles) particles.emit(target.position, 10, 0xff4444, { spread: 3, lifetime: 600 });
+
+                    // Flash the tower
+                    target.traverse(child => {
+                        if (child.material && child.material.emissive) {
+                            const origIntensity = child.material.emissiveIntensity;
+                            child.material.emissiveIntensity = 2;
+                            setTimeout(() => {
+                                if (child.material) child.material.emissiveIntensity = origIntensity;
+                            }, 100);
+                        }
+                    });
+
+                    // Tower destruction
+                    if (towerRef.hp <= 0) {
+                        towerRef.active = false;
+
+                        // Award XP and gold
+                        addXp('combat', 200);
+                        gameData.gold = (gameData.gold || 0) + 50;
+                        spawnFloater(target.position, '+200 XP', '#ffff00');
+                        spawnFloater(target.position.clone().add(new THREE.Vector3(0, 1, 0)), 'TOWER DESTROYED!', '#ff4400');
+
+                        // Explosion effect
+                        if (particles) particles.emit(target.position, 50, 0xff4400, { spread: 8, lifetime: 1500, size: 0.4 });
+                        screenShake(1.5);
+                        AudioSystem.combatEvent('kill');
+
+                        // Remove tower mesh
+                        scene.remove(target);
+
+                        // Remove from array
+                        const towerIdx = laneSupportState.laneTowers.indexOf(towerRef);
+                        if (towerIdx > -1) {
+                            laneSupportState.laneTowers.splice(towerIdx, 1);
+                        }
+                    }
+                }
+
+                worldState.interactTarget = null;
                 return;
             }
 
@@ -50788,9 +51256,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
         // v6.51: Slot-based vertical stacking with duplicate suppression
         // Based on consensus from 8 strategy analyzers - simpler and more reliable than spiral/collision
-        const floaterSlots = [];  // Active vertical slots
-        const MAX_FLOATER_SLOTS = 8;
+        // v6.65: Screen-space aware slot system to prevent overlapping floaters from different sources
+        const floaterSlots = [];  // Active floaters with screen positions
+        const MAX_FLOATER_SLOTS = 12;
         const SLOT_HEIGHT = 38;   // Vertical spacing between floaters
+        const PROXIMITY_THRESHOLD = 120; // Horizontal proximity in pixels to consider "same area"
         const recentMessages = new Map();  // For duplicate suppression
         const DUPLICATE_WINDOW = 250;  // ms - suppress identical messages within this window
 
@@ -50831,35 +51301,44 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const v = pos.clone ? pos.clone() : new THREE.Vector3(pos.x || 0, pos.y || 0, pos.z || 0);
             v.y += 2;
             v.project(camera);
-            let x = (v.x * .5 + .5) * window.innerWidth;
-            let y = (-(v.y * .5) + .5) * window.innerHeight;
+            let baseX = (v.x * .5 + .5) * window.innerWidth;
+            let baseY = (-(v.y * .5) + .5) * window.innerHeight;
 
             // v6.51: Clean expired slots
-            const expiredSlots = floaterSlots.filter(s => now >= s.expiresAt);
-            expiredSlots.forEach(s => {
-                const idx = floaterSlots.indexOf(s);
-                if (idx > -1) floaterSlots.splice(idx, 1);
-            });
-
-            // v6.51: Find available slot (simple vertical stacking)
-            let slotIndex = 0;
-            const usedSlots = floaterSlots.map(s => s.slot).sort((a, b) => a - b);
-            for (let i = 0; i <= MAX_FLOATER_SLOTS; i++) {
-                if (!usedSlots.includes(i)) {
-                    slotIndex = i;
-                    break;
+            for (let i = floaterSlots.length - 1; i >= 0; i--) {
+                if (now >= floaterSlots[i].expiresAt) {
+                    floaterSlots.splice(i, 1);
                 }
             }
 
-            // Apply vertical offset based on slot (stack upward from base position)
-            y -= slotIndex * SLOT_HEIGHT;
+            // v6.65: Screen-space collision detection - check if position overlaps any existing floater
+            // Keep pushing up until we find a clear spot
+            let x = baseX + (Math.random() - 0.5) * 30; // Small horizontal jitter
+            let y = baseY;
 
-            // Add small horizontal jitter to prevent perfect vertical alignment
-            x += (Math.random() - 0.5) * 30;
+            // Check for collisions and move up until clear
+            for (let attempts = 0; attempts < MAX_FLOATER_SLOTS; attempts++) {
+                let hasCollision = false;
+                for (const slot of floaterSlots) {
+                    const dx = Math.abs(slot.screenX - baseX);
+                    const dy = Math.abs(slot.screenY - y);
+                    // Check if within collision box (horizontally close AND vertically overlapping)
+                    if (dx < PROXIMITY_THRESHOLD && dy < SLOT_HEIGHT) {
+                        hasCollision = true;
+                        break;
+                    }
+                }
+                if (!hasCollision) break;
+                y -= SLOT_HEIGHT; // Move up one slot
+            }
 
-            // Reserve the slot
+            // Reserve the slot with screen position for proximity checks
             const lifetime = isCrit ? 1700 : 1400;
-            floaterSlots.push({ slot: slotIndex, expiresAt: now + lifetime });
+            floaterSlots.push({
+                screenX: baseX,
+                screenY: y,
+                expiresAt: now + lifetime
+            });
 
             // Track for duplicate suppression
             recentMessages.set(msgKey, { time: now, count: 1, floater: floater });
@@ -51078,7 +51557,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                 // Save to gameData
                 gameData.legacyConstellations = { stars: this.stars };
-                saveGame();
+                saveGameData();
 
                 // Show notification
                 showNotification(`✨ NEW CONSTELLATION: ${def.name}`, 'legendary');
@@ -51740,7 +52219,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     }
                 }
 
-                const hits = raycaster.intersectObjects([...worldState.interactables, ...worldState.mobs], true);
+                // v6.68: Include hostile creeps and towers in clickable targets
+                const hostileCreeps = (creepWaveState.creeps || []).filter(c => c && c.userData?.team === 'B');
+                const hostileTowers = (laneSupportState.laneTowers || []).filter(t => t && t.team !== 'robot' && t.mesh).map(t => t.mesh);
+                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers];
+
+                const hits = raycaster.intersectObjects(allTargets, true);
                 if(hits.length > 0) {
                     let obj = hits[0].object;
                     while(obj.parent && obj.parent.type !== 'Scene') obj = obj.parent;
@@ -51750,7 +52234,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         tooltip.style.left = e.clientX + 10 + 'px';
                         tooltip.style.top = e.clientY + 10 + 'px';
                         const hpText = obj.userData.hp !== undefined ? `<br>HP: ${obj.userData.hp}/${obj.userData.maxHp}` : '';
-                        tooltip.innerHTML = `<strong>${obj.userData.name}</strong>${hpText}<br><span style="color:#888">Click to Interact</span>`;
+                        // v6.68: Show team info for creeps/towers
+                        const teamText = obj.userData.team === 'B' ? '<br><span style="color:#ff4444">HOSTILE FAUNA</span>' :
+                                        obj.userData.type === 'hostileTower' ? '<br><span style="color:#ff4444">ENEMY TOWER</span>' : '';
+                        tooltip.innerHTML = `<strong>${obj.userData.name}</strong>${hpText}${teamText}<br><span style="color:#888">Click to Attack</span>`;
                         document.body.style.cursor = 'pointer';
                         return;
                     }
@@ -51797,12 +52284,18 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
             }
             else if(mode === 'world') {
-                const hits = raycaster.intersectObjects([...worldState.interactables, ...worldState.mobs], true);
+                // v6.68: Include hostile creeps and towers in clickable targets
+                const hostileCreeps = (creepWaveState.creeps || []).filter(c => c && c.userData?.team === 'B');
+                const hostileTowers = (laneSupportState.laneTowers || []).filter(t => t && t.team !== 'robot' && t.mesh).map(t => t.mesh);
+                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers];
+
+                const hits = raycaster.intersectObjects(allTargets, true);
                 if(hits.length > 0) {
                     let obj = hits[0].object;
                     while(obj.parent && obj.parent.type !== 'Scene') obj = obj.parent;
                     worldState.interactTarget = obj;
-                    spawnFloater(obj.position, "Targeting...", '#0ff');
+                    const targetColor = obj.userData.team === 'B' || obj.userData.type === 'hostileTower' ? '#ff4444' : '#0ff';
+                    spawnFloater(obj.position, "Targeting...", targetColor);
                     return;
                 }
 
