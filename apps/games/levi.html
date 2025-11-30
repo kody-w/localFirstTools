@@ -7214,6 +7214,8 @@
                 <button class="action-btn" onclick="returnToGalaxy()">LEAVE PLANET</button>
                 <!-- v5.5: Autopilot Toggle -->
                 <button id="auto-explore-btn" class="action-btn" onclick="toggleAutoExplore()" style="background: #00ff88; color: #000; margin-top: 5px;">Take Manual Control</button>
+                <!-- v6.68: Lane Push AI Toggle -->
+                <button id="lane-push-btn" class="action-btn" onclick="toggleLanePushAI()" style="background: #4488ff; color: #fff; margin-top: 5px;">🤖 Autonomous++</button>
                 <div id="auto-explore-indicator" style="text-align: center; margin-top: 5px; font-size: 12px; color: #00ff88;">🤖 AUTOPILOT</div>
             </div>
         </div>
@@ -7369,12 +7371,15 @@
                 <h3 style="margin: 0 0 15px 0; font-size: 24px; background: linear-gradient(45deg, #00ffff, #0088ff, #06ffa5); -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;">Share World</h3>
 
                 <!-- Mode Toggle Tabs -->
-                <div id="share-mode-tabs" style="display: flex; gap: 10px; justify-content: center; margin-bottom: 15px;">
-                    <button id="tab-spectate" onclick="setShareMode('spectate')" style="flex: 1; padding: 10px 15px; border: 2px solid rgba(0,255,255,0.5); background: rgba(0,255,255,0.2); color: #0ff; border-radius: 10px; cursor: pointer; font-weight: bold; transition: all 0.3s;">
+                <div id="share-mode-tabs" style="display: flex; gap: 8px; justify-content: center; margin-bottom: 15px;">
+                    <button id="tab-spectate" onclick="setShareMode('spectate')" style="flex: 1; padding: 8px 10px; border: 2px solid rgba(0,255,255,0.5); background: rgba(0,255,255,0.2); color: #0ff; border-radius: 10px; cursor: pointer; font-weight: bold; transition: all 0.3s; font-size: 0.85em;">
                         👁️ Spectate
                     </button>
-                    <button id="tab-multiplayer" onclick="setShareMode('multiplayer')" style="flex: 1; padding: 10px 15px; border: 2px solid rgba(255,100,0,0.3); background: transparent; color: #f80; border-radius: 10px; cursor: pointer; font-weight: bold; transition: all 0.3s;">
-                        🎮 Join Game
+                    <button id="tab-multiplayer" onclick="setShareMode('multiplayer')" style="flex: 1; padding: 8px 10px; border: 2px solid rgba(255,100,0,0.3); background: transparent; color: #f80; border-radius: 10px; cursor: pointer; font-weight: bold; transition: all 0.3s; font-size: 0.85em;">
+                        🎮 Co-op
+                    </button>
+                    <button id="tab-versus" onclick="setShareMode('versus')" style="flex: 1; padding: 8px 10px; border: 2px solid rgba(255,0,100,0.3); background: transparent; color: #f08; border-radius: 10px; cursor: pointer; font-weight: bold; transition: all 0.3s; font-size: 0.85em;">
+                        ⚔️ Versus
                     </button>
                 </div>
 
@@ -20508,10 +20513,12 @@
         // Initialize Genesis 3D rendering
         function initGenesisRendering() {
             // Create instanced mesh for entities
-            // v6.65: Use MeshBasicMaterial to avoid "too many uniforms" shader error
             const entityGeometry = new THREE.SphereGeometry(0.5, 8, 8);
-            const entityMaterial = new THREE.MeshBasicMaterial({
-                color: 0xffffff
+            const entityMaterial = new THREE.MeshStandardMaterial({
+                color: 0xffffff,
+                emissive: 0x333333,
+                metalness: 0.3,
+                roughness: 0.7
             });
 
             genesisState.entityMeshes = new THREE.InstancedMesh(
@@ -20528,10 +20535,10 @@
             scene.add(genesisState.entityMeshes);
 
             // Create resource markers
-            // v6.65: Use MeshBasicMaterial to avoid shader uniform limits
             const resourceGeometry = new THREE.ConeGeometry(0.3, 0.8, 4);
-            const resourceMaterial = new THREE.MeshBasicMaterial({
-                color: 0x44ff44
+            const resourceMaterial = new THREE.MeshStandardMaterial({
+                color: 0x44ff44,
+                emissive: 0x114411
             });
 
             genesisState.resourceMeshes = new THREE.InstancedMesh(
@@ -21043,6 +21050,522 @@
 
             return true;
         }
+
+        // ============================================
+        // v6.68: AUTONOMOUS LANE PUSH AI SYSTEM
+        // Actively pushes lanes, uses abilities, takes towers
+        // ============================================
+        const LANE_PUSH_AI = {
+            enabled: false,
+            state: 'idle',  // idle, pushing, fighting, retreating, sieging
+            currentLane: null,  // 'top', 'mid', 'bot'
+            targetTower: null,
+            lastSiegedTier: null,  // Track which tower tier for announcements (T1, T2, T3)
+            lastDecisionTime: 0,
+            decisionInterval: 500,  // Decide every 500ms
+            lastAbilityTime: 0,
+            abilityInterval: 300,  // Check abilities every 300ms
+            retreatThreshold: 0.25,  // Retreat at 25% HP
+            aggressiveThreshold: 0.6,  // Be aggressive above 60% HP
+            waveFollowDistance: 8,  // Stay this close to friendly wave
+            towerSiegeRange: 15,  // Attack tower from this range
+            stats: {
+                creepsKilled: 0,
+                towersDestroyed: 0,
+                abilitiesUsed: 0,
+                pushTime: 0
+            }
+        };
+
+        function toggleLanePushAI() {
+            LANE_PUSH_AI.enabled = !LANE_PUSH_AI.enabled;
+            if (LANE_PUSH_AI.enabled) {
+                LANE_PUSH_AI.state = 'idle';
+                LANE_PUSH_AI.currentLane = null;
+                autoExplore.enabled = false;  // Disable regular autopilot
+                updateAutoExploreUI();
+                showNotification('🤖 AUTONOMOUS++ ENGAGED - Strategic lane domination!', 'success');
+                addCopilotMessage('🤖 AUTONOMOUS++ activated! I will strategically push lanes, use abilities to clear waves, and siege towers in order (T1→T2→T3). Watch the AI dominate!', 'ai');
+            } else {
+                LANE_PUSH_AI.state = 'idle';
+                showNotification('🤖 AUTONOMOUS++ DISENGAGED', 'info');
+            }
+            updateLanePushUI();
+        }
+
+        function updateLanePushUI() {
+            const btn = document.getElementById('lane-push-btn');
+            const indicator = document.getElementById('auto-explore-indicator');
+            if (btn) {
+                btn.textContent = LANE_PUSH_AI.enabled ? '🛑 AUTONOMOUS++ OFF' : '🤖 Autonomous++';
+                btn.style.background = LANE_PUSH_AI.enabled ? '#ff4444' : '#4488ff';
+            }
+            if (indicator && LANE_PUSH_AI.enabled) {
+                const laneName = LANE_PUSH_AI.currentLane?.toUpperCase() || 'LANE';
+                const state = LANE_PUSH_AI.state;
+                let statusText = `🤖 A++ ${laneName}`;
+
+                // Show strategic state info
+                if (state === 'sieging' && LANE_PUSH_AI.lastSiegedTier) {
+                    statusText = `⚔️ SIEGE ${laneName} ${LANE_PUSH_AI.lastSiegedTier}`;
+                    indicator.style.color = '#ff4400';
+                } else if (state === 'fighting') {
+                    statusText = `⚔️ FIGHTING ${laneName}`;
+                    indicator.style.color = '#ff8800';
+                } else if (state === 'retreating') {
+                    statusText = `🏃 RETREATING`;
+                    indicator.style.color = '#ff0000';
+                } else {
+                    statusText = `🎯 PUSHING ${laneName}`;
+                    indicator.style.color = '#00ff88';
+                }
+
+                indicator.textContent = statusText;
+            }
+        }
+
+        // Main AI update function
+        function runLanePushAI(dt) {
+            if (!LANE_PUSH_AI.enabled || mode !== 'world' || !worldState.player) return false;
+
+            const player = worldState.player;
+            const now = performance.now();
+            const playerHpPercent = gameData.player.hp / gameData.player.maxHp;
+
+            // Track push time
+            LANE_PUSH_AI.stats.pushTime += dt;
+
+            // === ABILITY AI: Use abilities to clear waves ===
+            if (now - LANE_PUSH_AI.lastAbilityTime > LANE_PUSH_AI.abilityInterval) {
+                LANE_PUSH_AI.lastAbilityTime = now;
+                runAbilityAI(player, playerHpPercent);
+            }
+
+            // === DECISION AI: Runs less frequently ===
+            if (now - LANE_PUSH_AI.lastDecisionTime < LANE_PUSH_AI.decisionInterval) {
+                return true;
+            }
+            LANE_PUSH_AI.lastDecisionTime = now;
+
+            // === RETREAT CHECK ===
+            if (playerHpPercent < LANE_PUSH_AI.retreatThreshold) {
+                LANE_PUSH_AI.state = 'retreating';
+                retreatToShip(player);
+                return true;
+            }
+
+            // === CHOOSE LANE if none selected ===
+            if (!LANE_PUSH_AI.currentLane) {
+                LANE_PUSH_AI.currentLane = chooseBestLane();
+                LANE_PUSH_AI.state = 'pushing';
+                updateLanePushUI();
+            }
+
+            // === GET LANE DATA ===
+            const laneData = getLanePushData(LANE_PUSH_AI.currentLane);
+
+            // === STATE MACHINE ===
+            switch (LANE_PUSH_AI.state) {
+                case 'pushing':
+                    executePushState(player, laneData, playerHpPercent);
+                    break;
+                case 'fighting':
+                    executeFightState(player, laneData);
+                    break;
+                case 'sieging':
+                    executeSiegeState(player, laneData);
+                    break;
+                case 'retreating':
+                    if (playerHpPercent > LANE_PUSH_AI.aggressiveThreshold) {
+                        LANE_PUSH_AI.state = 'pushing';
+                    } else {
+                        retreatToShip(player);
+                    }
+                    break;
+            }
+
+            return true;
+        }
+
+        // Choose the best lane to push
+        function chooseBestLane() {
+            const lanes = ['top', 'mid', 'bot'];
+            let bestLane = 'mid';
+            let bestScore = -Infinity;
+
+            lanes.forEach(laneKey => {
+                const data = getLanePushData(laneKey);
+                // Score based on: friendly creep advantage, fewer enemy towers, closer to enemy base
+                let score = 0;
+                score += (data.friendlyCreeps - data.enemyCreeps) * 10;
+                score -= data.enemyTowers * 50;
+                score += data.friendlyTowers * 30;
+                score += (50 - data.distanceToEnemyBase) * 2;
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestLane = laneKey;
+                }
+            });
+
+            return bestLane;
+        }
+
+        // Get lane-specific data for AI decisions
+        // v6.68: Strategic tower targeting - must destroy T1 before T2, T2 before T3
+        function getLanePushData(laneKey) {
+            const data = {
+                friendlyCreeps: 0,
+                enemyCreeps: 0,
+                friendlyTowers: 0,
+                enemyTowers: 0,
+                nearestEnemyCreep: null,
+                nearestEnemyTower: null,      // The FRONTMOST tower we should attack
+                nextEnemyTower: null,         // The tower after the frontmost
+                nearestFriendlyCreep: null,
+                frontlinePosition: null,
+                distanceToEnemyBase: 100,
+                // v6.68: Tower tier tracking
+                enemyTowerTiers: [],          // All enemy towers sorted by tier
+                currentTowerTier: 0,          // Which tier we're attacking (1, 2, or 3)
+                towersDestroyed: 0            // How many enemy towers destroyed in this lane
+            };
+
+            if (!creepWaveState.creeps) return data;
+
+            // Count creeps in this lane
+            creepWaveState.creeps.forEach(creep => {
+                if (!creep || !creep.userData || creep.userData.laneKey !== laneKey) return;
+                if (creep.userData.team === 'A') {
+                    data.friendlyCreeps++;
+                    if (!data.nearestFriendlyCreep ||
+                        (worldState.player && creep.position.distanceTo(worldState.player.position) <
+                         data.nearestFriendlyCreep.position.distanceTo(worldState.player.position))) {
+                        data.nearestFriendlyCreep = creep;
+                    }
+                } else {
+                    data.enemyCreeps++;
+                    if (!data.nearestEnemyCreep ||
+                        (worldState.player && creep.position.distanceTo(worldState.player.position) <
+                         data.nearestEnemyCreep.position.distanceTo(worldState.player.position))) {
+                        data.nearestEnemyCreep = creep;
+                    }
+                }
+            });
+
+            // v6.68: Strategic tower analysis - find towers in correct attack order
+            // For hostile towers: segment 3 = T1 (frontline), segment 4 = T2, segment 5 = T3 (base)
+            // We MUST destroy T1 before we can attack T2, etc.
+            if (laneSupportState.laneTowers) {
+                const enemyTowersInLane = [];
+                const friendlyTowersInLane = [];
+
+                laneSupportState.laneTowers.forEach(tower => {
+                    if (!tower || !tower.active || tower.laneKey !== laneKey) return;
+                    if (tower.team === 'robot') {
+                        data.friendlyTowers++;
+                        friendlyTowersInLane.push(tower);
+                    } else {
+                        data.enemyTowers++;
+                        enemyTowersInLane.push(tower);
+                    }
+                });
+
+                // Sort enemy towers by segment (lowest segment = frontmost = attack first)
+                // Hostile towers are at segments 3, 4, 5 - so segment 3 is T1
+                enemyTowersInLane.sort((a, b) => a.segment - b.segment);
+                data.enemyTowerTiers = enemyTowersInLane;
+
+                // The frontmost tower is the one we should attack (lowest segment)
+                if (enemyTowersInLane.length > 0) {
+                    data.nearestEnemyTower = enemyTowersInLane[0];  // T1 or next available
+                    data.currentTowerTier = 4 - enemyTowersInLane[0].segment;  // segment 3=T1, 4=T2, 5=T3
+
+                    if (enemyTowersInLane.length > 1) {
+                        data.nextEnemyTower = enemyTowersInLane[1];  // Preview next target
+                    }
+                }
+
+                // Track how many towers we've destroyed (3 - remaining)
+                data.towersDestroyed = 3 - enemyTowersInLane.length;
+            }
+
+            // Calculate frontline (average position of friendly creeps)
+            if (data.nearestFriendlyCreep) {
+                data.frontlinePosition = data.nearestFriendlyCreep.position.clone();
+            }
+
+            // Calculate distance to enemy base based on remaining towers
+            if (data.nearestEnemyTower) {
+                data.distanceToEnemyBase = data.nearestEnemyTower.segment * 15;  // Rough estimate
+            } else {
+                data.distanceToEnemyBase = 10;  // No towers left, close to base!
+            }
+
+            return data;
+        }
+
+        // Execute PUSH state - follow friendly wave
+        function executePushState(player, laneData, playerHpPercent) {
+            // If enemies nearby, switch to fighting
+            if (laneData.nearestEnemyCreep) {
+                const distToEnemy = player.position.distanceTo(laneData.nearestEnemyCreep.position);
+                if (distToEnemy < 12) {
+                    LANE_PUSH_AI.state = 'fighting';
+                    return;
+                }
+            }
+
+            // If no enemy towers left and we have advantage, we could siege base
+            if (laneData.enemyTowers === 0 && laneData.friendlyCreeps > 0) {
+                // Push toward enemy base area
+                const enemyBasePos = new THREE.Vector3(0, 0, 45);  // Enemy base is at positive Z
+                worldState.target = enemyBasePos;
+                return;
+            }
+
+            // If enemy tower in range and we have creeps for cover, siege it
+            // Strategic: Always target the frontmost tower (T1 → T2 → T3)
+            if (laneData.nearestEnemyTower && laneData.friendlyCreeps >= 2) {
+                const distToTower = player.position.distanceTo(laneData.nearestEnemyTower.position);
+                if (distToTower < 25) {
+                    LANE_PUSH_AI.targetTower = laneData.nearestEnemyTower;
+                    LANE_PUSH_AI.lastSiegedTier = `T${laneData.currentTowerTier || 1}`;
+                    LANE_PUSH_AI.state = 'sieging';
+                    const tierName = LANE_PUSH_AI.lastSiegedTier;
+                    const laneName = LANE_PUSH_AI.currentLane?.toUpperCase() || 'LANE';
+                    showNotification(`⚔️ SIEGING ${laneName} ${tierName} TOWER`, 'warning');
+                    return;
+                }
+            }
+
+            // Follow friendly creeps / frontline
+            if (laneData.frontlinePosition) {
+                const distToFront = player.position.distanceTo(laneData.frontlinePosition);
+                if (distToFront > LANE_PUSH_AI.waveFollowDistance) {
+                    worldState.target = laneData.frontlinePosition.clone();
+                } else {
+                    // Stay with wave, move forward slightly
+                    const pushDir = new THREE.Vector3(0, 0, 1);  // Push toward enemy base
+                    worldState.target = player.position.clone().add(pushDir.multiplyScalar(5));
+                }
+            } else {
+                // No creeps, move to lane
+                const lanePositions = {
+                    top: new THREE.Vector3(-30, 0, 0),
+                    mid: new THREE.Vector3(0, 0, 0),
+                    bot: new THREE.Vector3(30, 0, 0)
+                };
+                worldState.target = lanePositions[LANE_PUSH_AI.currentLane];
+            }
+        }
+
+        // Execute FIGHT state - attack enemy creeps
+        function executeFightState(player, laneData) {
+            if (!laneData.nearestEnemyCreep) {
+                LANE_PUSH_AI.state = 'pushing';
+                return;
+            }
+
+            const enemy = laneData.nearestEnemyCreep;
+            const distToEnemy = player.position.distanceTo(enemy.position);
+
+            if (distToEnemy > CONFIG.INTERACTION_RANGE) {
+                // Move toward enemy
+                worldState.target = enemy.position.clone();
+                worldState.interactTarget = enemy;
+            } else {
+                // Attack!
+                worldState.target = null;
+                const now = performance.now();
+                if (now - worldState.lastActionTime > CONFIG.INTERACTION_COOLDOWN) {
+                    performAction(enemy);
+                    worldState.lastActionTime = now;
+                    LANE_PUSH_AI.stats.creepsKilled++;
+                }
+            }
+
+            // Check if enemy wave cleared
+            if (laneData.enemyCreeps === 0) {
+                LANE_PUSH_AI.state = 'pushing';
+            }
+        }
+
+        // Execute SIEGE state - attack enemy tower (strategic: T1 → T2 → T3)
+        function executeSiegeState(player, laneData) {
+            const tower = LANE_PUSH_AI.targetTower;
+            if (!tower || !tower.active) {
+                // Tower destroyed! Announce it
+                const tierName = LANE_PUSH_AI.lastSiegedTier || 'T1';
+                const laneName = LANE_PUSH_AI.currentLane?.toUpperCase() || 'LANE';
+                showNotification(`🏰 ${laneName} ${tierName} TOWER DESTROYED!`, 'success');
+                addCopilotMessage(`🤖 AUTONOMOUS++: Enemy ${tierName} tower in ${laneName} lane destroyed! ${laneData.enemyTowers > 0 ? 'Moving to next tower.' : 'All towers down - pushing to base!'}`, 'ai');
+
+                LANE_PUSH_AI.targetTower = null;
+                LANE_PUSH_AI.state = 'pushing';
+                LANE_PUSH_AI.stats.towersDestroyed++;
+                return;
+            }
+
+            // Track which tier we're sieging for announcements
+            LANE_PUSH_AI.lastSiegedTier = `T${laneData.currentTowerTier || 1}`;
+
+            const distToTower = player.position.distanceTo(tower.position);
+
+            // Keep distance from tower (let creeps tank)
+            const idealRange = LANE_PUSH_AI.towerSiegeRange;
+            if (distToTower > idealRange + 2) {
+                // Move closer
+                const dir = tower.position.clone().sub(player.position).normalize();
+                worldState.target = player.position.clone().add(dir.multiplyScalar(5));
+            } else if (distToTower < idealRange - 2) {
+                // Move back a bit
+                const dir = player.position.clone().sub(tower.position).normalize();
+                worldState.target = player.position.clone().add(dir.multiplyScalar(3));
+            } else {
+                // In range - attack tower
+                worldState.target = null;
+                worldState.interactTarget = tower.mesh;
+                const now = performance.now();
+                if (now - worldState.lastActionTime > CONFIG.INTERACTION_COOLDOWN) {
+                    performAction(tower.mesh);
+                    worldState.lastActionTime = now;
+                }
+            }
+
+            // If no friendly creeps, retreat (tower will kill us)
+            if (laneData.friendlyCreeps === 0) {
+                LANE_PUSH_AI.state = 'retreating';
+            }
+        }
+
+        // Retreat to ship for healing
+        function retreatToShip(player) {
+            if (!SHIP_STATE.mesh) return;
+            const shipPos = SHIP_STATE.mesh.position;
+            const distToShip = player.position.distanceTo(shipPos);
+
+            if (distToShip > SHIP_STATE.healing.range - 5) {
+                worldState.target = shipPos.clone();
+            } else {
+                // At ship, just wait for healing
+                worldState.target = null;
+            }
+        }
+
+        // AI for using abilities efficiently
+        function runAbilityAI(player, playerHpPercent) {
+            const now = performance.now();
+
+            // Count nearby enemies (creeps + mobs)
+            let nearbyEnemies = 0;
+            let nearestEnemy = null;
+            let nearestDist = Infinity;
+
+            // Check hostile creeps
+            if (creepWaveState.creeps) {
+                creepWaveState.creeps.forEach(creep => {
+                    if (!creep || !creep.userData || creep.userData.team !== 'B') return;
+                    const dist = player.position.distanceTo(creep.position);
+                    if (dist < 10) {
+                        nearbyEnemies++;
+                        if (dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestEnemy = creep;
+                        }
+                    }
+                });
+            }
+
+            // Check mobs
+            worldState.mobs.forEach(mob => {
+                if (!mob.parent || mob.userData.hp <= 0) return;
+                const dist = player.position.distanceTo(mob.position);
+                if (dist < 10) {
+                    nearbyEnemies++;
+                    if (dist < nearestDist) {
+                        nearestDist = dist;
+                        nearestEnemy = mob;
+                    }
+                }
+            });
+
+            // === ABILITY PRIORITY LOGIC ===
+
+            // 1. HEAL if low HP
+            if (playerHpPercent < 0.5 && isAbilityUnlocked('heal') && isAbilityReady('heal')) {
+                useAbility('heal');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 2. SHIELD WALL if taking damage and low HP
+            if (playerHpPercent < 0.4 && nearbyEnemies > 0 && isAbilityUnlocked('shieldWall') && isAbilityReady('shieldWall')) {
+                useAbility('shieldWall');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 3. BERSERK (ultimate) for big wave or tower siege
+            if (nearbyEnemies >= 4 && isAbilityUnlocked('berserk') && isAbilityReady('berserk')) {
+                useAbility('berserk');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 4. WHIRLWIND for wave clear (3+ enemies)
+            if (nearbyEnemies >= 3 && isAbilityUnlocked('whirlwind') && isAbilityReady('whirlwind')) {
+                useAbility('whirlwind');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 5. WAR CRY for damage boost when fighting
+            if (nearbyEnemies >= 2 && isAbilityUnlocked('warcry') && isAbilityReady('warcry')) {
+                useAbility('warcry');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 6. EXECUTE on low HP targets
+            if (nearestEnemy && nearestEnemy.userData.hp / nearestEnemy.userData.maxHp < 0.3) {
+                if (isAbilityUnlocked('execute') && isAbilityReady('execute')) {
+                    useAbility('execute');
+                    LANE_PUSH_AI.stats.abilitiesUsed++;
+                    return;
+                }
+            }
+
+            // 7. POWER STRIKE for single target burst
+            if (nearestEnemy && nearestDist < 5 && isAbilityUnlocked('powerStrike') && isAbilityReady('powerStrike')) {
+                useAbility('powerStrike');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 8. DASH through enemy wave for damage + reposition
+            if (nearbyEnemies >= 2 && isAbilityUnlocked('dash') && isAbilityReady('dash')) {
+                // Face toward enemies first
+                if (nearestEnemy) {
+                    const dir = nearestEnemy.position.clone().sub(player.position).normalize();
+                    player.rotation.y = Math.atan2(dir.x, dir.z);
+                }
+                useAbility('dash');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+
+            // 9. CHRONO-ECHO for sustained damage in big fights
+            if (nearbyEnemies >= 3 && isAbilityUnlocked('chronoEcho') && isAbilityReady('chronoEcho')) {
+                useAbility('chronoEcho');
+                LANE_PUSH_AI.stats.abilitiesUsed++;
+                return;
+            }
+        }
+
+        // ============================================
+        // END LANE PUSH AI SYSTEM
+        // ============================================
 
         // WASD Keyboard controls
         const keys = { w: false, a: false, s: false, d: false };
@@ -41429,10 +41952,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.62: HIGH-RESOLUTION TERRAIN using InstancedMesh for performance
             // With 300x300 = 90,000 tiles, individual meshes would be too slow
             // InstancedMesh renders all tiles in ~2 draw calls (ground + water)
-            // v6.65: Use MeshBasicMaterial to avoid "too many uniforms" shader error with many lights
             const groundGeo = new THREE.BoxGeometry(CONFIG.TILE_SIZE, CONFIG.TILE_SIZE, CONFIG.TILE_SIZE);
-            const groundMat = new THREE.MeshBasicMaterial({ color: biome.ground });
-            const waterMat = new THREE.MeshBasicMaterial({ color: biome.water, transparent: true, opacity: 0.8 });
+            const groundMat = new THREE.MeshLambertMaterial({ color: biome.ground });
+            const waterMat = new THREE.MeshLambertMaterial({ color: biome.water, transparent: true, opacity: 0.8 });
 
             const worldGroup = new THREE.Group();
 
@@ -41882,6 +42404,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             scene.add(worldState.player);
 
+            // v6.68: Create Dota 2-style HP and Mana bars above player
+            createPlayerHealthBars(worldState.player);
+
             // Mobs
             const mobCount = 5 + Math.floor(rng.next() * 5);
             for(let i=0; i<mobCount; i++) {
@@ -42261,12 +42786,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 group.add(leaf);
             });
 
-            // Add glow effect for Alien biome
-            if (grammar.glowing) {
-                const glowLight = new THREE.PointLight(grammar.leafColor, 0.5, 4);
-                glowLight.position.set(0, baseLength * 2, 0);
-                group.add(glowLight);
-            }
+            // v6.65: Removed per-tree PointLights - they caused "too many uniforms" shader errors
+            // The MeshBasicMaterial with bright colors already provides the glowing visual effect
 
             // Scale the whole tree
             const scale = 0.8 + rng.next() * 0.6;
@@ -46398,6 +46919,351 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }
         }
 
+        // ============================================
+        // v6.68: DOTA 2-STYLE 3D PLAYER HP/MANA BARS
+        // Floating 3D bars with text above the robot
+        // ============================================
+        function createPlayerHealthBars(playerMesh) {
+            const barsGroup = new THREE.Group();
+            barsGroup.position.y = 2.8;
+            barsGroup.userData.isBillboard = true;
+
+            const barWidth = 2.2;
+            const hpBarHeight = 0.25;
+            const manaBarHeight = 0.15;
+            const barSpacing = 0.06;
+            const barDepth = 0.08;
+
+            // === OUTER FRAME (3D box - dark metallic) ===
+            const frameGeo = new THREE.BoxGeometry(barWidth + 0.15, hpBarHeight + manaBarHeight + barSpacing + 0.12, barDepth + 0.04);
+            const frameMat = new THREE.MeshStandardMaterial({
+                color: 0x1a1a2e,
+                metalness: 0.8,
+                roughness: 0.3,
+                emissive: 0x0a0a15,
+                emissiveIntensity: 0.2
+            });
+            const frame = new THREE.Mesh(frameGeo, frameMat);
+            frame.position.z = -barDepth / 2;
+            barsGroup.add(frame);
+
+            // === HP BAR BACKGROUND (3D dark red box) ===
+            const hpBgGeo = new THREE.BoxGeometry(barWidth, hpBarHeight, barDepth);
+            const hpBgMat = new THREE.MeshStandardMaterial({
+                color: 0x2a0a0a,
+                metalness: 0.4,
+                roughness: 0.6
+            });
+            const hpBg = new THREE.Mesh(hpBgGeo, hpBgMat);
+            hpBg.position.y = manaBarHeight / 2 + barSpacing / 2;
+            barsGroup.add(hpBg);
+
+            // === HP BAR FILL (3D green - Dota style with glow) ===
+            const hpFillGeo = new THREE.BoxGeometry(barWidth - 0.02, hpBarHeight - 0.02, barDepth + 0.01);
+            const hpFillMat = new THREE.MeshStandardMaterial({
+                color: 0x3cb043,
+                emissive: 0x1a5a1a,
+                emissiveIntensity: 0.5,
+                metalness: 0.3,
+                roughness: 0.4
+            });
+            const hpFill = new THREE.Mesh(hpFillGeo, hpFillMat);
+            hpFill.position.y = manaBarHeight / 2 + barSpacing / 2;
+            hpFill.position.z = 0.02;
+            barsGroup.add(hpFill);
+
+            // === MANA/ENERGY BAR BACKGROUND (3D dark blue) ===
+            const manaBgGeo = new THREE.BoxGeometry(barWidth, manaBarHeight, barDepth);
+            const manaBgMat = new THREE.MeshStandardMaterial({
+                color: 0x0a0a2a,
+                metalness: 0.4,
+                roughness: 0.6
+            });
+            const manaBg = new THREE.Mesh(manaBgGeo, manaBgMat);
+            manaBg.position.y = -hpBarHeight / 2 - barSpacing / 2;
+            barsGroup.add(manaBg);
+
+            // === MANA BAR FILL (3D blue with glow) ===
+            const manaFillGeo = new THREE.BoxGeometry(barWidth - 0.02, manaBarHeight - 0.02, barDepth + 0.01);
+            const manaFillMat = new THREE.MeshStandardMaterial({
+                color: 0x2878bd,
+                emissive: 0x1a4a7a,
+                emissiveIntensity: 0.5,
+                metalness: 0.3,
+                roughness: 0.4
+            });
+            const manaFill = new THREE.Mesh(manaFillGeo, manaFillMat);
+            manaFill.position.y = -hpBarHeight / 2 - barSpacing / 2;
+            manaFill.position.z = 0.02;
+            barsGroup.add(manaFill);
+
+            // === HP SEGMENT DIVIDERS (3D notches) ===
+            for (let i = 1; i < 4; i++) {
+                const segX = -barWidth / 2 + (barWidth / 4) * i;
+                const segGeo = new THREE.BoxGeometry(0.03, hpBarHeight + 0.02, barDepth + 0.03);
+                const segMat = new THREE.MeshStandardMaterial({
+                    color: 0x000000,
+                    metalness: 0.9,
+                    roughness: 0.2
+                });
+                const seg = new THREE.Mesh(segGeo, segMat);
+                seg.position.set(segX, manaBarHeight / 2 + barSpacing / 2, 0.03);
+                barsGroup.add(seg);
+            }
+
+            // === LEVEL BADGE (3D cylinder) ===
+            const levelBadgeGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.1, 16);
+            const levelBadgeMat = new THREE.MeshStandardMaterial({
+                color: 0xffd700,
+                emissive: 0x886600,
+                emissiveIntensity: 0.4,
+                metalness: 0.8,
+                roughness: 0.2
+            });
+            const levelBadge = new THREE.Mesh(levelBadgeGeo, levelBadgeMat);
+            levelBadge.rotation.x = Math.PI / 2;
+            levelBadge.position.set(-barWidth / 2 - 0.3, 0, 0.05);
+            barsGroup.add(levelBadge);
+
+            // === 3D TEXT: HP VALUE ===
+            const hpTextGroup = new THREE.Group();
+            hpTextGroup.position.set(0, manaBarHeight / 2 + barSpacing / 2 + 0.35, 0.1);
+            barsGroup.add(hpTextGroup);
+
+            // === 3D TEXT: MANA VALUE ===
+            const manaTextGroup = new THREE.Group();
+            manaTextGroup.position.set(0, -hpBarHeight / 2 - barSpacing / 2 - 0.25, 0.1);
+            barsGroup.add(manaTextGroup);
+
+            // === 3D TEXT: PLAYER NAME (styled like LEVIATHAN title) ===
+            const nameTextGroup = new THREE.Group();
+            nameTextGroup.position.set(0, hpBarHeight + manaBarHeight + 0.5, 0.1);
+            barsGroup.add(nameTextGroup);
+
+            // Store references
+            playerMesh.userData.dotaBars = {
+                group: barsGroup,
+                hpFill: hpFill,
+                hpFillMat: hpFillMat,
+                manaFill: manaFill,
+                levelBadge: levelBadge,
+                levelBadgeMat: levelBadgeMat,
+                hpTextGroup: hpTextGroup,
+                manaTextGroup: manaTextGroup,
+                nameTextGroup: nameTextGroup,
+                barWidth: barWidth,
+                lastHp: gameData.player.hp,
+                lastHpText: '',
+                lastManaText: '',
+                nameCreated: false
+            };
+
+            playerMesh.add(barsGroup);
+
+            // Create 3D text after font loads
+            setTimeout(() => createPlayerBar3DText(playerMesh), 100);
+        }
+
+        // Create 3D text for player bars (uses loaded font)
+        function createPlayerBar3DText(playerMesh) {
+            if (!playerMesh.userData.dotaBars) return;
+            if (!window.copilot3DFont) {
+                setTimeout(() => createPlayerBar3DText(playerMesh), 200);
+                return;
+            }
+
+            const bars = playerMesh.userData.dotaBars;
+            const font = window.copilot3DFont;
+
+            // Create player name text (LEVIATHAN style)
+            try {
+                const nameGeo = new THREE.TextGeometry('EXPLORER', {
+                    font: font,
+                    size: 0.18,
+                    height: 0.04,
+                    curveSegments: 8,
+                    bevelEnabled: true,
+                    bevelThickness: 0.01,
+                    bevelSize: 0.008,
+                    bevelSegments: 3
+                });
+                nameGeo.computeBoundingBox();
+                nameGeo.center();
+
+                const nameMat = new THREE.MeshStandardMaterial({
+                    color: 0x66ccff,
+                    emissive: 0x224466,
+                    emissiveIntensity: 0.6,
+                    metalness: 0.7,
+                    roughness: 0.3
+                });
+                const nameMesh = new THREE.Mesh(nameGeo, nameMat);
+                bars.nameTextGroup.add(nameMesh);
+                bars.nameCreated = true;
+            } catch (e) {
+                console.warn('Failed to create player name 3D text:', e);
+            }
+        }
+
+        // Update HP text mesh
+        function updatePlayerHpText(bars, hpText) {
+            if (!window.copilot3DFont || bars.lastHpText === hpText) return;
+            bars.lastHpText = hpText;
+
+            // Clear old text
+            while (bars.hpTextGroup.children.length > 0) {
+                const child = bars.hpTextGroup.children[0];
+                bars.hpTextGroup.remove(child);
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            }
+
+            try {
+                const textGeo = new THREE.TextGeometry(hpText, {
+                    font: window.copilot3DFont,
+                    size: 0.12,
+                    height: 0.02,
+                    curveSegments: 6,
+                    bevelEnabled: false
+                });
+                textGeo.computeBoundingBox();
+                textGeo.center();
+
+                const textMat = new THREE.MeshStandardMaterial({
+                    color: 0x44ff44,
+                    emissive: 0x22aa22,
+                    emissiveIntensity: 0.8,
+                    metalness: 0.5,
+                    roughness: 0.3
+                });
+                const textMesh = new THREE.Mesh(textGeo, textMat);
+                bars.hpTextGroup.add(textMesh);
+            } catch (e) { /* ignore */ }
+        }
+
+        // Update Mana text mesh
+        function updatePlayerManaText(bars, manaText) {
+            if (!window.copilot3DFont || bars.lastManaText === manaText) return;
+            bars.lastManaText = manaText;
+
+            // Clear old text
+            while (bars.manaTextGroup.children.length > 0) {
+                const child = bars.manaTextGroup.children[0];
+                bars.manaTextGroup.remove(child);
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            }
+
+            try {
+                const textGeo = new THREE.TextGeometry(manaText, {
+                    font: window.copilot3DFont,
+                    size: 0.09,
+                    height: 0.015,
+                    curveSegments: 6,
+                    bevelEnabled: false
+                });
+                textGeo.computeBoundingBox();
+                textGeo.center();
+
+                const textMat = new THREE.MeshStandardMaterial({
+                    color: 0x4488ff,
+                    emissive: 0x2266aa,
+                    emissiveIntensity: 0.8,
+                    metalness: 0.5,
+                    roughness: 0.3
+                });
+                const textMesh = new THREE.Mesh(textGeo, textMat);
+                bars.manaTextGroup.add(textMesh);
+            } catch (e) { /* ignore */ }
+        }
+
+        // Update player HP/Mana bars each frame
+        function updatePlayerDotaBars(dt, time) {
+            if (!worldState.player || !worldState.player.userData.dotaBars) return;
+            if (!gameData || !gameData.player) return;
+
+            const bars = worldState.player.userData.dotaBars;
+            if (!bars.hpFill || !bars.manaFill || !bars.hpFillMat) return;
+
+            const barWidth = bars.barWidth;
+
+            // === HP BAR UPDATE ===
+            const hp = Math.floor(gameData.player.hp);
+            const maxHp = Math.floor(gameData.player.maxHp);
+            const hpPercent = Math.max(0, Math.min(1, hp / maxHp));
+
+            bars.hpFill.scale.x = Math.max(0.001, hpPercent);
+            bars.hpFill.position.x = -(1 - hpPercent) * barWidth / 2;
+
+            // HP color and glow based on health
+            if (hpPercent > 0.6) {
+                bars.hpFillMat.color.setHex(0x3cb043);
+                bars.hpFillMat.emissive.setHex(0x1a5a1a);
+            } else if (hpPercent > 0.3) {
+                bars.hpFillMat.color.setHex(0xdaa520);
+                bars.hpFillMat.emissive.setHex(0x6a4a10);
+            } else {
+                bars.hpFillMat.color.setHex(0xc41e3a);
+                bars.hpFillMat.emissive.setHex(0x5a0a1a);
+                // Pulse when low HP
+                bars.hpFillMat.emissiveIntensity = 0.5 + Math.sin(time * 0.008) * 0.3;
+            }
+
+            // Update 3D HP text
+            const hpText = `${hp} / ${maxHp}`;
+            updatePlayerHpText(bars, hpText);
+
+            // === MANA/ENERGY BAR UPDATE ===
+            const energy = Math.floor(robotEnergy?.current ?? 100);
+            const maxEnergy = Math.floor(robotEnergy?.max ?? 100);
+            const energyPercent = Math.max(0, Math.min(1, energy / maxEnergy));
+
+            bars.manaFill.scale.x = Math.max(0.001, energyPercent);
+            bars.manaFill.position.x = -(1 - energyPercent) * barWidth / 2;
+
+            // Update 3D mana text
+            const manaText = `${energy} / ${maxEnergy}`;
+            updatePlayerManaText(bars, manaText);
+
+            // === BILLBOARD: Make bars always face camera ===
+            if (camera && bars.group) {
+                // Get the world position of the bars group
+                const barWorldPos = new THREE.Vector3();
+                bars.group.getWorldPosition(barWorldPos);
+
+                // Make the group look at camera (full 3D billboard)
+                bars.group.lookAt(camera.position);
+
+                // Keep bars upright - only allow Y rotation, reset X and Z tilt
+                // This prevents the bars from tilting when camera looks from above/below
+                const euler = new THREE.Euler().setFromQuaternion(bars.group.quaternion);
+                bars.group.rotation.set(0, euler.y, 0);
+            }
+
+            // === LEVEL BADGE UPDATE ===
+            const combatLevel = gameData.skills.combat.level || 1;
+            if (combatLevel >= 20) {
+                bars.levelBadgeMat.color.setHex(0xff4400);
+                bars.levelBadgeMat.emissive.setHex(0x661100);
+            } else if (combatLevel >= 10) {
+                bars.levelBadgeMat.color.setHex(0xffd700);
+                bars.levelBadgeMat.emissive.setHex(0x664400);
+            } else if (combatLevel >= 5) {
+                bars.levelBadgeMat.color.setHex(0xc0c0c0);
+                bars.levelBadgeMat.emissive.setHex(0x444444);
+            } else {
+                bars.levelBadgeMat.color.setHex(0xcd7f32);
+                bars.levelBadgeMat.emissive.setHex(0x442200);
+            }
+
+            // Rotate level badge for shine effect
+            bars.levelBadge.rotation.z += dt * 0.001;
+        }
+
+        // ============================================
+        // END DOTA 2-STYLE PLAYER BARS
+        // ============================================
+
         // Handle creep death
         function handleCreepDeath(creep, index) {
             // Check if player is nearby for rewards
@@ -49122,6 +49988,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 runAutoExplore(dt);
             }
 
+            // v6.68: Run Lane Push AI if enabled
+            if (LANE_PUSH_AI.enabled && !isViewerIndependentMode) {
+                runLanePushAI(dt);
+                updateLanePushUI();  // Update status indicator in real-time
+            }
+
             // v6.16: Auto-craft and auto-equip (cream rises to top)
             runAutoCraftEquip(time);
 
@@ -49554,6 +50426,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.67: Update lane support & fortification system
             if (typeof updateLaneSupportSystem === 'function') {
                 updateLaneSupportSystem(time);
+            }
+
+            // v6.68: Update Dota 2-style player HP/Mana bars
+            if (typeof updatePlayerDotaBars === 'function') {
+                updatePlayerDotaBars(dt, time);
             }
 
             // Mob AI with aggro (using CONFIG constants)
@@ -52502,6 +53379,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v5.5: M to toggle autopilot exploration
             if ((e.key === 'm' || e.key === 'M') && mode === 'world') {
                 toggleAutoExplore();
+            }
+            // v6.68: L to toggle Lane Push AI
+            if ((e.key === 'l' || e.key === 'L') && mode === 'world') {
+                toggleLanePushAI();
+                e.preventDefault();
             }
             // v4.5: Space or Shift to dodge (space only if chat not open)
             // v5.12: Space also breaks hypnosis
