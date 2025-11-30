@@ -12225,10 +12225,10 @@
         const CONFIG = {
             GALAXY_SIZE: 3000,
             NUM_CIVS: 60,
-            // v6.64: BALANCED HIGH-RES TERRAIN - smooth but visible
-            // Original: 100 tiles at size 2 = 200 world units
-            // New: 200 tiles at size 1.0 = 200 world units (2x smoother, still visible)
-            // 40,000 tiles - smooth terrain with visible block structure
+            // v6.64: BALANCED HIGH-RES TERRAIN - 2x resolution, visible blocks but smoother
+            // Original: 100 tiles at size 2 = 200 world units (blocky)
+            // New: 200 tiles at size 1 = 200 world units (smooth but visible)
+            // 40,000 tiles - 4x smoother than original while terrain remains visible
             WORLD_SIZE: 200,
             TILE_SIZE: 1.0,
             TERRAIN_SCALE: 2, // Scale factor for noise sampling (maintains same terrain pattern)
@@ -19203,6 +19203,13 @@
         };
 
         function startLandingGame(civ) {
+            // v6.64: Final safety check - don't land on destroyed planets
+            if (!civ || civ.orbital?.destroyed) {
+                showNotification(`${civ?.name || 'Target planet'} no longer exists! Landing aborted.`, 'error');
+                AudioSystem.error();
+                return;
+            }
+
             // Cleanup any existing landing game
             if (landingGame.animFrame) {
                 cancelAnimationFrame(landingGame.animFrame);
@@ -29897,7 +29904,7 @@ Think Raymond Chandler meets Cowboy Bebop.`,
                 setTimeout(() => generateChronicleEntry(), 2000);
             }
 
-            saveGameData();
+            saveGame();
         }
 
         // Generate chronicle entry from buffered events
@@ -30056,7 +30063,7 @@ Write a dramatic, engaging chronicle entry that weaves these events into a compe
                 gameData.chronicle.entries = gameData.chronicle.entries.slice(0, 50);
             }
 
-            saveGameData();
+            saveGame();
             updateChronicleUI();
         }
 
@@ -30098,7 +30105,7 @@ Write a dramatic, engaging chronicle entry that weaves these events into a compe
             const styleEl = document.getElementById('chronicle-style');
             if (styleEl && gameData.chronicle) {
                 gameData.chronicle.settings.narrativeStyle = styleEl.value;
-                saveGameData();
+                saveGame();
                 showNotification(`Chronicle style set to: ${CHRONICLE_STYLES[styleEl.value]?.name || styleEl.value}`, 'info');
             }
         }
@@ -39837,6 +39844,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         function startPlanetApproach(civ) {
             if (!civ) return;
 
+            // v6.64: Check if planet has been destroyed (collision/black hole)
+            if (civ.orbital?.destroyed) {
+                showNotification(`${civ.name} has been destroyed! Cannot land.`, 'error');
+                AudioSystem.error();
+                return;
+            }
+
             // v6.32: Trigger hyperspace jump first (8-agent consensus)
             triggerHyperspaceJump(1800, () => {
                 // At midpoint of jump, start the approach sequence
@@ -39846,6 +39860,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
         // v6.32: Internal function that handles the actual approach (separated for hyperspace integration)
         function _beginPlanetApproach(civ) {
+            // v6.64: Check if planet was destroyed during hyperspace jump
+            if (!civ || civ.orbital?.destroyed) {
+                showNotification(`${civ?.name || 'Target planet'} has been destroyed! Aborting approach.`, 'error');
+                AudioSystem.error();
+                return;
+            }
+
             // Store target
             planetApproachState.active = true;
             planetApproachState.targetCiv = civ;
@@ -39900,6 +39921,14 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             const civ = planetApproachState.targetCiv;
             if (!civ) {
+                endPlanetApproach();
+                return;
+            }
+
+            // v6.64: Real-time check if planet was destroyed while approaching/orbiting
+            if (civ.orbital?.destroyed) {
+                showNotification(`${civ.name} has been destroyed! Aborting approach.`, 'error');
+                AudioSystem.error();
                 endPlanetApproach();
                 return;
             }
@@ -39979,6 +40008,15 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             if (!planetApproachState.active) return;
 
             const civ = planetApproachState.targetCiv;
+
+            // v6.64: Check if planet was destroyed while orbiting
+            if (!civ || civ.orbital?.destroyed) {
+                showNotification(`${civ?.name || 'Target planet'} has been destroyed! Cannot land.`, 'error');
+                AudioSystem.error();
+                endPlanetApproach();
+                return;
+            }
+
             endPlanetApproach();
 
             // Start the actual landing sequence
@@ -39991,6 +40029,15 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             if (!planetApproachState.active) return;
 
             const civ = planetApproachState.targetCiv;
+
+            // v6.64: Check if planet was destroyed while orbiting
+            if (!civ || civ.orbital?.destroyed) {
+                showNotification(`${civ?.name || 'Target planet'} has been destroyed! Cannot land.`, 'error');
+                AudioSystem.error();
+                endPlanetApproach();
+                return;
+            }
+
             endPlanetApproach();
 
             // Skip directly to landing
@@ -43788,7 +43835,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             const rx = (rng.next() - 0.5) * 60;
             const rz = (rng.next() - 0.5) * 60;
-            mob.position.set(rx, 10, rz);
+            // v6.64: Spawn mobs at terrain height, not y=10 (fixes floating mobs)
+            // Use terrain height if available, fallback to 0.8 if not (snapToGround will correct)
+            let terrainY = getTerrainHeight(rx, rz);
+            if (terrainY <= 0) terrainY = 0; // Ensure reasonable starting height
+            mob.position.set(rx, terrainY + 0.8, rz);
             mob.castShadow = true;
 
             // v4.7: Add glowing aura ring for elite enemies
@@ -43983,11 +44034,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const boss = new THREE.Mesh(bossGeo, bossMat);
 
             // Position boss away from spawn
-            boss.position.set(
-                (Math.random() - 0.5) * 40,
-                15,
-                (Math.random() - 0.5) * 40
-            );
+            // v6.64: Spawn at terrain height, not fixed y=15
+            const bossX = (Math.random() - 0.5) * 40;
+            const bossZ = (Math.random() - 0.5) * 40;
+            let bossTerrainY = getTerrainHeight(bossX, bossZ);
+            if (bossTerrainY <= 0) bossTerrainY = 0;
+            boss.position.set(bossX, bossTerrainY + 1.5, bossZ);
             boss.castShadow = true;
 
             // Boss health bar (larger)
@@ -44855,6 +44907,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
                 snapToGround(mob);
 
+                // v6.64: Add subtle rotation to mobs (makes them feel more alive)
+                mob.rotation.y += dt * 0.5;
+
                 // v4.5: Attack telegraph system with windup
                 const attackRange = mob.userData.attackRange || CONFIG.MOB_ATTACK_RANGE;
                 const attackWindup = mob.userData.attackWindup || 600;
@@ -45203,7 +45258,14 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 const y = worldState.terrain[gx]?.[gz];
                 if(y !== undefined && y > -50) {
                     const targetY = y + (obj === worldState.player ? 1.2 : 0.8);
-                    obj.position.y = THREE.MathUtils.lerp(obj.position.y, targetY, 0.15);
+                    const diff = Math.abs(obj.position.y - targetY);
+                    // v6.64: Instant snap if way off (>3 units), otherwise smooth lerp
+                    if (obj !== worldState.player && diff > 3) {
+                        obj.position.y = targetY; // Instant correction for floating mobs
+                    } else {
+                        const lerpRate = obj === worldState.player ? 0.15 : 0.4;
+                        obj.position.y = THREE.MathUtils.lerp(obj.position.y, targetY, lerpRate);
+                    }
                 }
             }
         }
@@ -46631,7 +46693,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                 // Save to gameData
                 gameData.legacyConstellations = { stars: this.stars };
-                saveGameData();
+                saveGame();
 
                 // Show notification
                 showNotification(`✨ NEW CONSTELLATION: ${def.name}`, 'legendary');
@@ -47116,7 +47178,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                 if (evolved) {
                     gameData.quantumWreckage = this.wreckage;
-                    saveGameData();
+                    saveGame();
                 }
             },
 
@@ -47170,7 +47232,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 this.wreckage = this.wreckage.filter(w => w.id !== wreckageId);
 
                 gameData.quantumWreckage = this.wreckage;
-                saveGameData();
+                saveGame();
 
                 // Track statistic
                 gameData.statistics.wreckageHarvested = (gameData.statistics.wreckageHarvested || 0) + 1;
