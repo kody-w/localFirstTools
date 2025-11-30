@@ -24005,6 +24005,13 @@
                 }
             }
 
+            // v6.67: Lane support & fortification commands
+            if (typeof parseLaneSupportCommand === 'function') {
+                if (parseLaneSupportCommand(message)) {
+                    return true;
+                }
+            }
+
             return false; // Not a task command
         }
 
@@ -41862,6 +41869,17 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 initBaseBuildingSystem();
             }
 
+            // v6.67: Initialize lane support & fortification system
+            if (typeof initLaneSupportSystem === 'function') {
+                initLaneSupportSystem();
+                // Spawn initial lane towers after a short delay
+                setTimeout(() => {
+                    if (typeof spawnInitialLaneTowers === 'function') {
+                        spawnInitialLaneTowers();
+                    }
+                }, 2000);
+            }
+
             // v4.4: Start environmental particles
             if (envParticles) envParticles.startBiome(civ.biome);
 
@@ -45097,46 +45115,63 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             goldPerCreep: 5          // Gold reward
         };
 
-        // Lane definitions - waypoints from spawn to spawn
-        // Team A (Radiant-style) spawns at negative end, Team B (Dire-style) at positive end
+        // v6.67: Lane definitions with universe-appropriate names
+        // Supply corridors connecting frontier outposts across the planet
+        // Choke points named after geographic features - historic battlegrounds
         const LANE_DEFINITIONS = {
             top: {
-                name: 'Top Lane',
-                color: 0x4488ff,     // Blue
+                name: 'Boreal Reach',
+                subtitle: 'Northern Frontier Corridor',
+                lore: 'Ancient cryo-tech relay stations mark this frozen passage. The Battle of Frostfall claimed 200 drones in a single night.',
+                color: 0x4488ff,     // Ice Blue - cold northern route
                 teamASpawn: { x: -75, z: -60 },
                 teamBSpawn: { x: 75, z: -60 },
+                teamABase: 'Outpost Hyperion',
+                teamBBase: 'Fort Glacius',
                 waypoints: [
                     { x: -75, z: -60 },
                     { x: -50, z: -55 },
                     { x: -25, z: -50 },
-                    { x: 0, z: -50 },     // CHOKE POINT (center of lane)
+                    { x: 0, z: -50 },     // CHOKE POINT
                     { x: 25, z: -50 },
                     { x: 50, z: -55 },
                     { x: 75, z: -60 }
                 ],
-                chokePointIndex: 3   // Index of battle zone
+                chokePointIndex: 3,
+                chokePointName: 'Frostfall Crossing',
+                chokePointLore: 'Where the northern winds freeze lubricant solid. Many machines have fallen here.'
             },
             mid: {
-                name: 'Mid Lane',
-                color: 0xffaa00,     // Orange/Gold
+                name: 'Nexus Spine',
+                subtitle: 'Central Command Axis',
+                lore: 'The primary arterial route. Control the Spine, control the planet. The Siege of Ember Gate lasted 47 cycles.',
+                color: 0xffaa00,     // Command Gold - main strategic route
                 teamASpawn: { x: -70, z: -70 },
                 teamBSpawn: { x: 70, z: 70 },
+                teamABase: 'Citadel Prime',
+                teamBBase: 'Fortress Omega',
                 waypoints: [
                     { x: -70, z: -70 },
                     { x: -45, z: -45 },
                     { x: -20, z: -20 },
-                    { x: 0, z: 0 },       // CHOKE POINT (dead center)
+                    { x: 0, z: 0 },       // CHOKE POINT
                     { x: 20, z: 20 },
                     { x: 45, z: 45 },
                     { x: 70, z: 70 }
                 ],
-                chokePointIndex: 3
+                chokePointIndex: 3,
+                chokePointName: 'Ember Gate',
+                chokePointLore: 'The geographic dead center. Thermal vents create perpetual haze. Winner takes all.'
             },
             bot: {
-                name: 'Bot Lane',
-                color: 0x44ff88,     // Green
+                name: 'Verdant Trail',
+                subtitle: 'Southern Terraform Corridor',
+                lore: 'Terraformed valleys rich with xenoflora. The Thornhollow Massacre marked the bloodiest day in colony history.',
+                color: 0x44ff88,     // Life Green - terraformed southern route
                 teamASpawn: { x: -75, z: 60 },
                 teamBSpawn: { x: 75, z: 60 },
+                teamABase: 'Station Evergreen',
+                teamBBase: 'Biodome Sentinel',
                 waypoints: [
                     { x: -75, z: 60 },
                     { x: -50, z: 55 },
@@ -45146,7 +45181,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     { x: 50, z: 55 },
                     { x: 75, z: 60 }
                 ],
-                chokePointIndex: 3
+                chokePointIndex: 3,
+                chokePointName: 'Thornhollow Vale',
+                chokePointLore: 'Dense xenoflora conceals ambush positions. The thorns drink oil as readily as blood.'
             }
         };
 
@@ -45182,7 +45219,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             console.log('v6.65: Creep Wave System initialized');
         }
 
-        // Create visual lane paths using THREE.Line
+        // v6.67: Create visual lane paths using colored BLOCKS instead of lines
+        // DOTA 2 style colored path blocks for each lane
         function createLaneVisuals() {
             if (!scene) return;
 
@@ -45194,76 +45232,544 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             });
             creepWaveState.laneVisuals = [];
 
+            // Block configuration per lane
+            const LANE_BLOCK_CONFIG = {
+                top: {
+                    blockSize: { x: 2.5, y: 0.3, z: 3.5 },      // Wide blocks for top lane
+                    spacing: 4,                                   // Distance between blocks
+                    pattern: 'alternating',                       // Alternating brightness pattern
+                    edgeBlocks: true,                             // Add edge blocks for borders
+                    glowIntensity: 0.6
+                },
+                mid: {
+                    blockSize: { x: 2.0, y: 0.4, z: 2.0 },       // Square blocks for mid
+                    spacing: 3.5,
+                    pattern: 'gradient',                          // Gradient toward center
+                    edgeBlocks: true,
+                    glowIntensity: 0.8
+                },
+                bot: {
+                    blockSize: { x: 2.5, y: 0.3, z: 3.5 },       // Wide blocks for bot lane
+                    spacing: 4,
+                    pattern: 'pulsing',                           // Special pulsing pattern
+                    edgeBlocks: true,
+                    glowIntensity: 0.6
+                }
+            };
+
             Object.entries(LANE_DEFINITIONS).forEach(([laneKey, lane]) => {
-                // Create lane path line (ground level)
-                const points = lane.waypoints.map(wp => {
-                    const y = typeof getTerrainHeight === 'function'
-                        ? getTerrainHeight(wp.x, wp.z) + 0.3
-                        : 0.3;
-                    return new THREE.Vector3(wp.x, y, wp.z);
-                });
+                const config = LANE_BLOCK_CONFIG[laneKey];
+                const waypoints = lane.waypoints;
+                const baseColor = new THREE.Color(lane.color);
 
-                // Main lane line
-                const lineGeometry = new THREE.BufferGeometry().setFromPoints(points);
-                const lineMaterial = new THREE.LineBasicMaterial({
-                    color: lane.color,
-                    linewidth: 3,
-                    transparent: true,
-                    opacity: 0.7
-                });
-                const laneLine = new THREE.Line(lineGeometry, lineMaterial);
-                laneLine.userData.laneKey = laneKey;
-                scene.add(laneLine);
-                creepWaveState.laneVisuals.push(laneLine);
+                // Create a lane group for organization
+                const laneGroup = new THREE.Group();
+                laneGroup.userData.laneKey = laneKey;
+                laneGroup.userData.laneName = lane.name;
 
-                // Create glowing lane "road" using multiple thin lines for width effect
-                for (let offset = -1.5; offset <= 1.5; offset += 0.5) {
-                    const offsetPoints = lane.waypoints.map(wp => {
-                        const y = typeof getTerrainHeight === 'function'
-                            ? getTerrainHeight(wp.x, wp.z) + 0.15
-                            : 0.15;
-                        // Offset perpendicular to lane direction
-                        const perpOffset = laneKey === 'mid' ? offset * 0.7 : 0;
-                        const zOffset = laneKey === 'mid' ? offset * 0.7 : offset;
-                        return new THREE.Vector3(wp.x + perpOffset, y, wp.z + zOffset);
-                    });
-
-                    const offsetGeom = new THREE.BufferGeometry().setFromPoints(offsetPoints);
-                    const offsetMat = new THREE.LineBasicMaterial({
-                        color: lane.color,
-                        transparent: true,
-                        opacity: 0.2 + (0.3 - Math.abs(offset) * 0.1)
-                    });
-                    const offsetLine = new THREE.Line(offsetGeom, offsetMat);
-                    scene.add(offsetLine);
-                    creepWaveState.laneVisuals.push(offsetLine);
+                // v6.67: Helper to check if position is over water
+                const WATER_LEVEL = 0.5;  // Water surface height
+                const BRIDGE_HEIGHT = 3.0; // Bridge deck height above water
+                function isOverWater(wx, wz) {
+                    if (!worldState.terrain) return false;
+                    const gx = Math.round(wx / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
+                    const gz = Math.round(wz / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
+                    if (gx >= 0 && gx < CONFIG.WORLD_SIZE && gz >= 0 && gz < CONFIG.WORLD_SIZE) {
+                        const terrainY = worldState.terrain[gx]?.[gz];
+                        return terrainY !== undefined && terrainY < -50; // Water tiles are -99
+                    }
+                    return false;
                 }
 
-                // Lane name label at midpoint (using sprite)
+                // Bridge materials (industrial/metallic look)
+                const bridgeDeckColor = new THREE.Color(0x445566);
+                const bridgeSupportColor = new THREE.Color(0x334455);
+                const bridgeRailColor = baseColor.clone().multiplyScalar(1.2);
+
+                let blockIndex = 0;
+                let inBridgeSection = false;
+                let bridgeSectionStart = null;
+
+                // Interpolate between waypoints and place blocks
+                for (let i = 0; i < waypoints.length - 1; i++) {
+                    const wpStart = waypoints[i];
+                    const wpEnd = waypoints[i + 1];
+
+                    // Calculate direction and distance
+                    const dx = wpEnd.x - wpStart.x;
+                    const dz = wpEnd.z - wpStart.z;
+                    const segmentDist = Math.sqrt(dx * dx + dz * dz);
+                    const numBlocks = Math.floor(segmentDist / config.spacing);
+
+                    // Calculate angle for block rotation (perpendicular to path)
+                    const angle = Math.atan2(dx, dz);
+
+                    for (let b = 0; b < numBlocks; b++) {
+                        const t = b / numBlocks;
+                        const x = wpStart.x + dx * t;
+                        const z = wpStart.z + dz * t;
+
+                        // v6.67: Check if this block is over water
+                        const overWater = isOverWater(x, z);
+
+                        // Calculate Y position - elevated for bridges
+                        let y;
+                        if (overWater) {
+                            y = WATER_LEVEL + BRIDGE_HEIGHT;
+                        } else {
+                            y = typeof getTerrainHeight === 'function'
+                                ? getTerrainHeight(x, z) + config.blockSize.y / 2 + 0.05
+                                : config.blockSize.y / 2 + 0.05;
+                        }
+
+                        // Calculate color variation based on pattern
+                        let colorMult = 1.0;
+                        let opacity = 0.7;
+
+                        if (config.pattern === 'alternating') {
+                            colorMult = blockIndex % 2 === 0 ? 1.0 : 0.7;
+                            opacity = blockIndex % 2 === 0 ? 0.8 : 0.6;
+                        } else if (config.pattern === 'gradient') {
+                            // Brighter toward choke point (center)
+                            const distToChoke = Math.abs(i - lane.chokePointIndex);
+                            colorMult = 1.0 - distToChoke * 0.1;
+                            opacity = 0.6 + (1 - distToChoke * 0.15) * 0.3;
+                        } else if (config.pattern === 'pulsing') {
+                            // Store phase for animation
+                            colorMult = 0.8 + Math.sin(blockIndex * 0.5) * 0.2;
+                            opacity = 0.65 + Math.sin(blockIndex * 0.5) * 0.15;
+                        }
+
+                        if (overWater) {
+                            // ========== BRIDGE SECTION ==========
+                            // Create bridge deck (wider, metallic)
+                            const deckGeo = new THREE.BoxGeometry(
+                                config.blockSize.x * 1.3,
+                                config.blockSize.y * 0.8,
+                                config.blockSize.z * 1.4
+                            );
+                            const deckMat = new THREE.MeshStandardMaterial({
+                                color: bridgeDeckColor,
+                                emissive: baseColor,
+                                emissiveIntensity: 0.2,
+                                transparent: true,
+                                opacity: 0.95,
+                                roughness: 0.4,
+                                metalness: 0.7
+                            });
+                            const deck = new THREE.Mesh(deckGeo, deckMat);
+                            deck.position.set(x, y, z);
+                            deck.rotation.y = angle;
+                            deck.userData.isBridge = true;
+                            deck.userData.blockIndex = blockIndex;
+                            deck.receiveShadow = true;
+                            deck.castShadow = true;
+                            laneGroup.add(deck);
+
+                            // Lane color strip on bridge deck (center line)
+                            const stripGeo = new THREE.BoxGeometry(
+                                config.blockSize.x * 1.2,
+                                config.blockSize.y * 0.2,
+                                config.blockSize.z * 0.5
+                            );
+                            const stripColor = baseColor.clone().multiplyScalar(colorMult);
+                            const stripMat = new THREE.MeshStandardMaterial({
+                                color: stripColor,
+                                emissive: stripColor,
+                                emissiveIntensity: config.glowIntensity * 0.8,
+                                transparent: true,
+                                opacity: 0.9
+                            });
+                            const strip = new THREE.Mesh(stripGeo, stripMat);
+                            strip.position.set(x, y + config.blockSize.y * 0.5, z);
+                            strip.rotation.y = angle;
+                            strip.userData.laneKey = laneKey;
+                            strip.userData.baseEmissive = config.glowIntensity * 0.8;
+                            laneGroup.add(strip);
+
+                            // Support pillars (every 2 blocks)
+                            if (blockIndex % 2 === 0) {
+                                const pillarHeight = BRIDGE_HEIGHT + 1.5;
+                                const pillarGeo = new THREE.CylinderGeometry(0.35, 0.5, pillarHeight, 8);
+                                const pillarMat = new THREE.MeshStandardMaterial({
+                                    color: bridgeSupportColor,
+                                    emissive: 0x112233,
+                                    emissiveIntensity: 0.1,
+                                    roughness: 0.5,
+                                    metalness: 0.8
+                                });
+
+                                [-1, 1].forEach(side => {
+                                    const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+                                    const pillarOffset = (config.blockSize.z / 2) + 0.3;
+                                    const perpX = Math.cos(angle) * pillarOffset * side;
+                                    const perpZ = -Math.sin(angle) * pillarOffset * side;
+                                    pillar.position.set(
+                                        x + perpX,
+                                        WATER_LEVEL - pillarHeight / 2 + BRIDGE_HEIGHT - 0.5,
+                                        z + perpZ
+                                    );
+                                    pillar.castShadow = true;
+                                    laneGroup.add(pillar);
+
+                                    // Pillar base (underwater foundation)
+                                    const baseGeo = new THREE.CylinderGeometry(0.6, 0.8, 0.5, 8);
+                                    const baseMesh = new THREE.Mesh(baseGeo, pillarMat);
+                                    baseMesh.position.set(
+                                        x + perpX,
+                                        WATER_LEVEL - pillarHeight + 0.25,
+                                        z + perpZ
+                                    );
+                                    laneGroup.add(baseMesh);
+                                });
+
+                                // Cross beam under deck
+                                const beamGeo = new THREE.BoxGeometry(0.3, 0.4, config.blockSize.z * 1.6);
+                                const beam = new THREE.Mesh(beamGeo, pillarMat);
+                                beam.position.set(x, y - config.blockSize.y * 0.6, z);
+                                beam.rotation.y = angle;
+                                laneGroup.add(beam);
+                            }
+
+                            // Railings (both sides)
+                            const railHeight = 1.2;
+                            const railGeo = new THREE.BoxGeometry(config.blockSize.x * 0.15, railHeight, config.blockSize.z * 0.15);
+                            const railMat = new THREE.MeshStandardMaterial({
+                                color: bridgeRailColor,
+                                emissive: baseColor,
+                                emissiveIntensity: 0.5,
+                                transparent: true,
+                                opacity: 0.9,
+                                metalness: 0.6,
+                                roughness: 0.3
+                            });
+
+                            [-1, 1].forEach(side => {
+                                // Vertical rail posts
+                                const post = new THREE.Mesh(railGeo, railMat);
+                                const railOffset = (config.blockSize.z * 0.65);
+                                const perpX = Math.cos(angle) * railOffset * side;
+                                const perpZ = -Math.sin(angle) * railOffset * side;
+                                post.position.set(x + perpX, y + railHeight / 2 + config.blockSize.y * 0.4, z + perpZ);
+                                post.userData.isBridgeRail = true;
+                                laneGroup.add(post);
+
+                                // Horizontal rail bar
+                                const barGeo = new THREE.BoxGeometry(config.blockSize.x * 1.1, 0.12, 0.12);
+                                const bar = new THREE.Mesh(barGeo, railMat);
+                                bar.position.set(x + perpX, y + railHeight + config.blockSize.y * 0.3, z + perpZ);
+                                bar.rotation.y = angle;
+                                laneGroup.add(bar);
+                            });
+
+                            // Bridge warning lights (every 4 blocks)
+                            if (blockIndex % 4 === 0) {
+                                const lightGeo = new THREE.SphereGeometry(0.2, 8, 8);
+                                const lightMat = new THREE.MeshStandardMaterial({
+                                    color: 0xffaa00,
+                                    emissive: 0xffaa00,
+                                    emissiveIntensity: 1.5,
+                                    transparent: true,
+                                    opacity: 0.9
+                                });
+
+                                [-1, 1].forEach(side => {
+                                    const light = new THREE.Mesh(lightGeo, lightMat.clone());
+                                    const lightOffset = (config.blockSize.z * 0.65);
+                                    const perpX = Math.cos(angle) * lightOffset * side;
+                                    const perpZ = -Math.sin(angle) * lightOffset * side;
+                                    light.position.set(x + perpX, y + railHeight + config.blockSize.y * 0.6, z + perpZ);
+                                    light.userData.isBridgeLight = true;
+                                    light.userData.pulsePhase = Math.random() * Math.PI * 2;
+                                    laneGroup.add(light);
+                                });
+                            }
+
+                        } else {
+                            // ========== REGULAR GROUND PATH ==========
+                            // Create main path block
+                            const blockGeo = new THREE.BoxGeometry(
+                                config.blockSize.x,
+                                config.blockSize.y,
+                                config.blockSize.z
+                            );
+
+                            const blockColor = baseColor.clone().multiplyScalar(colorMult);
+                            const blockMat = new THREE.MeshStandardMaterial({
+                                color: blockColor,
+                                emissive: blockColor,
+                                emissiveIntensity: config.glowIntensity * colorMult,
+                                transparent: true,
+                                opacity: opacity,
+                                roughness: 0.3,
+                                metalness: 0.2
+                            });
+
+                            const block = new THREE.Mesh(blockGeo, blockMat);
+                            block.position.set(x, y, z);
+                            block.rotation.y = angle;
+                            block.userData.blockIndex = blockIndex;
+                            block.userData.laneKey = laneKey;
+                            block.userData.baseOpacity = opacity;
+                            block.userData.baseEmissive = config.glowIntensity * colorMult;
+                            block.receiveShadow = true;
+                            laneGroup.add(block);
+
+                            // Add edge blocks for lane borders
+                            if (config.edgeBlocks) {
+                                const edgeWidth = 0.4;
+                                const edgeHeight = config.blockSize.y * 1.5;
+                                const edgeOffset = (config.blockSize.z / 2) + edgeWidth / 2;
+
+                                [-1, 1].forEach(side => {
+                                    const edgeGeo = new THREE.BoxGeometry(config.blockSize.x * 0.9, edgeHeight, edgeWidth);
+                                    const edgeColor = baseColor.clone().multiplyScalar(1.3);
+                                    const edgeMat = new THREE.MeshStandardMaterial({
+                                        color: edgeColor,
+                                        emissive: edgeColor,
+                                        emissiveIntensity: config.glowIntensity * 1.2,
+                                        transparent: true,
+                                        opacity: 0.9,
+                                        roughness: 0.2,
+                                        metalness: 0.4
+                                    });
+
+                                    const edge = new THREE.Mesh(edgeGeo, edgeMat);
+                                    // Position edge perpendicular to path direction
+                                    const perpX = Math.cos(angle) * edgeOffset * side;
+                                    const perpZ = -Math.sin(angle) * edgeOffset * side;
+                                    edge.position.set(x + perpX, y + edgeHeight/4, z + perpZ);
+                                    edge.rotation.y = angle;
+                                    edge.receiveShadow = true;
+                                    laneGroup.add(edge);
+                                });
+                            }
+
+                            // Add decorative corner markers every 5 blocks
+                            if (blockIndex % 5 === 0) {
+                                const markerGeo = new THREE.CylinderGeometry(0.3, 0.5, 1.2, 6);
+                                const markerMat = new THREE.MeshStandardMaterial({
+                                    color: 0xffffff,
+                                    emissive: baseColor,
+                                    emissiveIntensity: 1.0,
+                                    transparent: true,
+                                    opacity: 0.85,
+                                    metalness: 0.6,
+                                    roughness: 0.2
+                                });
+
+                                [-1, 1].forEach(side => {
+                                    const marker = new THREE.Mesh(markerGeo, markerMat.clone());
+                                    const markerOffset = (config.blockSize.z / 2) + 1.0;
+                                    const perpX = Math.cos(angle) * markerOffset * side;
+                                    const perpZ = -Math.sin(angle) * markerOffset * side;
+                                    marker.position.set(x + perpX, y + 0.4, z + perpZ);
+                                    marker.userData.isLaneMarker = true;
+                                    marker.userData.pulsePhase = Math.random() * Math.PI * 2;
+                                    laneGroup.add(marker);
+                                });
+                            }
+                        }
+
+                        blockIndex++;
+                    }
+                }
+
+                // Add spawn point markers (fortress platforms with base names)
+                const baseNames = [lane.teamABase, lane.teamBBase];
+                const teamLabels = ['ROBOT FORCES', 'HOSTILE FAUNA'];
+                [lane.teamASpawn, lane.teamBSpawn].forEach((spawn, teamIdx) => {
+                    const spawnY = typeof getTerrainHeight === 'function'
+                        ? getTerrainHeight(spawn.x, spawn.z) + 0.5
+                        : 0.5;
+
+                    // Team-colored fortress platform
+                    const teamColor = teamIdx === 0 ? 0x00ccff : 0xff4444; // Cyan for Robots, Red for Hostiles
+                    const platformGeo = new THREE.BoxGeometry(6, 0.8, 6);
+                    const platformMat = new THREE.MeshStandardMaterial({
+                        color: teamColor,
+                        emissive: teamColor,
+                        emissiveIntensity: 0.8,
+                        transparent: true,
+                        opacity: 0.75,
+                        metalness: 0.3,
+                        roughness: 0.4
+                    });
+                    const platform = new THREE.Mesh(platformGeo, platformMat);
+                    platform.position.set(spawn.x, spawnY, spawn.z);
+                    platform.userData.isSpawnPoint = true;
+                    platform.userData.team = teamIdx === 0 ? 'robots' : 'hostiles';
+                    laneGroup.add(platform);
+
+                    // Corner pillars for fortress look
+                    const pillarGeo = new THREE.BoxGeometry(0.8, 2.5, 0.8);
+                    const pillarMat = new THREE.MeshStandardMaterial({
+                        color: teamColor,
+                        emissive: teamColor,
+                        emissiveIntensity: 0.5,
+                        metalness: 0.6,
+                        roughness: 0.3
+                    });
+                    [[-2.2, -2.2], [-2.2, 2.2], [2.2, -2.2], [2.2, 2.2]].forEach(([ox, oz]) => {
+                        const pillar = new THREE.Mesh(pillarGeo, pillarMat);
+                        pillar.position.set(spawn.x + ox, spawnY + 1.2, spawn.z + oz);
+                        laneGroup.add(pillar);
+                    });
+
+                    // Vertical spawn beacon (taller for visibility)
+                    const beaconGeo = new THREE.CylinderGeometry(0.4, 0.7, 4, 8);
+                    const beaconMat = new THREE.MeshStandardMaterial({
+                        color: teamColor,
+                        emissive: teamColor,
+                        emissiveIntensity: 1.2,
+                        transparent: true,
+                        opacity: 0.6,
+                        metalness: 0.5,
+                        roughness: 0.3
+                    });
+                    const beacon = new THREE.Mesh(beaconGeo, beaconMat);
+                    beacon.position.set(spawn.x, spawnY + 2.5, spawn.z);
+                    beacon.userData.isSpawnBeacon = true;
+                    beacon.userData.pulsePhase = Math.random() * Math.PI * 2;
+                    laneGroup.add(beacon);
+
+                    // Base name floating label
+                    const baseCanvas = document.createElement('canvas');
+                    baseCanvas.width = 256;
+                    baseCanvas.height = 80;
+                    const baseCtx = baseCanvas.getContext('2d');
+
+                    // Background
+                    baseCtx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                    baseCtx.fillRect(0, 0, 256, 80);
+
+                    // Team indicator
+                    baseCtx.fillStyle = teamIdx === 0 ? '#00ccff' : '#ff4444';
+                    baseCtx.font = 'bold 14px Arial';
+                    baseCtx.textAlign = 'center';
+                    baseCtx.fillText(teamLabels[teamIdx], 128, 20);
+
+                    // Base name
+                    baseCtx.fillStyle = '#ffffff';
+                    baseCtx.font = 'bold 22px Arial';
+                    baseCtx.fillText(baseNames[teamIdx], 128, 50);
+
+                    // Faction icon
+                    baseCtx.font = '18px Arial';
+                    baseCtx.fillText(teamIdx === 0 ? '🤖' : '👾', 128, 72);
+
+                    const baseTexture = new THREE.CanvasTexture(baseCanvas);
+                    const baseSpriteMat = new THREE.SpriteMaterial({
+                        map: baseTexture,
+                        transparent: true,
+                        opacity: 0.95
+                    });
+                    const baseSprite = new THREE.Sprite(baseSpriteMat);
+                    baseSprite.position.set(spawn.x, spawnY + 6, spawn.z);
+                    baseSprite.scale.set(12, 4, 1);
+                    scene.add(baseSprite);
+                    creepWaveState.laneVisuals.push(baseSprite);
+                });
+
+                scene.add(laneGroup);
+                creepWaveState.laneVisuals.push(laneGroup);
+
+                // Lane name label at choke point (contested zone)
                 const canvas = document.createElement('canvas');
-                canvas.width = 256;
-                canvas.height = 64;
+                canvas.width = 320;
+                canvas.height = 100;
                 const ctx = canvas.getContext('2d');
+
+                // Add background panel
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
+                ctx.fillRect(0, 0, 320, 100);
+
+                // Border in lane color
+                ctx.strokeStyle = `#${lane.color.toString(16).padStart(6, '0')}`;
+                ctx.lineWidth = 3;
+                ctx.strokeRect(2, 2, 316, 96);
+
+                // Lane name (main title)
                 ctx.fillStyle = `#${lane.color.toString(16).padStart(6, '0')}`;
-                ctx.font = 'bold 32px Arial';
+                ctx.font = 'bold 28px Arial';
                 ctx.textAlign = 'center';
-                ctx.fillText(lane.name.toUpperCase(), 128, 42);
+                ctx.fillText(lane.name.toUpperCase(), 160, 32);
+
+                // Choke point name
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 20px Arial';
+                ctx.fillText(`⚔️ ${lane.chokePointName} ⚔️`, 160, 58);
+
+                // Contested zone indicator
+                ctx.fillStyle = '#ffcc00';
+                ctx.font = '14px Arial';
+                ctx.fillText('— CONTESTED ZONE —', 160, 82);
 
                 const texture = new THREE.CanvasTexture(canvas);
                 const spriteMat = new THREE.SpriteMaterial({
                     map: texture,
                     transparent: true,
-                    opacity: 0.8
+                    opacity: 0.95
                 });
                 const sprite = new THREE.Sprite(spriteMat);
                 const midWp = lane.waypoints[lane.chokePointIndex];
                 const midY = typeof getTerrainHeight === 'function'
-                    ? getTerrainHeight(midWp.x, midWp.z) + 5
-                    : 5;
+                    ? getTerrainHeight(midWp.x, midWp.z) + 10
+                    : 10;
                 sprite.position.set(midWp.x, midY, midWp.z);
-                sprite.scale.set(15, 4, 1);
+                sprite.scale.set(20, 7, 1);
                 scene.add(sprite);
                 creepWaveState.laneVisuals.push(sprite);
+            });
+
+            console.log('v6.67: Lane block visuals created');
+        }
+
+        // v6.67: Animate lane blocks (pulsing, glowing effects)
+        function animateLaneBlocks(time) {
+            if (!creepWaveState.laneVisuals || creepWaveState.laneVisuals.length === 0) return;
+
+            creepWaveState.laneVisuals.forEach(visual => {
+                if (!visual.isGroup) return;
+
+                visual.children.forEach(child => {
+                    // Animate lane markers (pulsing)
+                    if (child.userData.isLaneMarker) {
+                        const phase = child.userData.pulsePhase || 0;
+                        const pulse = 0.8 + Math.sin(time * 0.003 + phase) * 0.4;
+                        child.material.emissiveIntensity = pulse;
+                        child.scale.y = 0.9 + Math.sin(time * 0.002 + phase) * 0.1;
+                    }
+
+                    // Animate spawn beacons (rotating glow)
+                    if (child.userData.isSpawnBeacon) {
+                        const phase = child.userData.pulsePhase || 0;
+                        child.rotation.y = time * 0.001 + phase;
+                        child.material.emissiveIntensity = 0.8 + Math.sin(time * 0.004 + phase) * 0.4;
+                    }
+
+                    // Animate spawn platforms (subtle pulse)
+                    if (child.userData.isSpawnPoint) {
+                        const pulse = 0.7 + Math.sin(time * 0.002) * 0.1;
+                        child.material.emissiveIntensity = pulse;
+                    }
+
+                    // Animate pulsing pattern blocks (bot lane)
+                    if (child.userData.laneKey === 'bot' && child.userData.blockIndex !== undefined) {
+                        const idx = child.userData.blockIndex;
+                        const wave = Math.sin(time * 0.002 - idx * 0.3);
+                        child.material.emissiveIntensity = child.userData.baseEmissive * (0.7 + wave * 0.3);
+                        child.material.opacity = child.userData.baseOpacity * (0.8 + wave * 0.2);
+                    }
+
+                    // v6.67: Animate bridge warning lights (alternating flash)
+                    if (child.userData.isBridgeLight) {
+                        const phase = child.userData.pulsePhase || 0;
+                        const flash = Math.sin(time * 0.005 + phase) > 0 ? 1.5 : 0.3;
+                        child.material.emissiveIntensity = flash;
+                        child.material.opacity = 0.5 + flash * 0.3;
+                    }
+                });
             });
         }
 
@@ -45420,6 +45926,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         // Update all creeps (called each frame)
         function updateCreepWaves(dt, time) {
             if (!creepWaveState.enabled || mode !== 'world') return;
+
+            // v6.67: Animate lane block visuals
+            animateLaneBlocks(time);
 
             // Check if it's time to spawn a new wave
             if (time - creepWaveState.lastWaveTime > CREEP_WAVE_CONFIG.waveInterval) {
@@ -45685,6 +46194,1180 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             creepWaveState.enabled = false;
             creepWaveState.initialized = false;
+
+            // v6.67: Cleanup lane support system
+            if (typeof cleanupLaneSupportSystem === 'function') {
+                cleanupLaneSupportSystem();
+            }
+        }
+
+        // ============================================
+        // v6.67: LANE SUPPORT & FORTIFICATION SYSTEM
+        // Agents can be assigned to support lanes, buff creeps,
+        // and dynamically build fortifications based on lane control
+        // ============================================
+
+        const LANE_SUPPORT_CONFIG = {
+            enabled: true,
+            agentBuffRadius: 12,          // Range for agent to buff creeps
+            buffCheckInterval: 500,        // ms between buff checks
+            fortBuildInterval: 30000,      // ms between fort attempts (30 sec)
+            maxFortsPerLane: 4,            // Max fortifications per lane
+            controlUpdateInterval: 2000,   // ms between control recalculations
+            creepBuffs: {
+                damage: 1.25,              // 25% damage boost
+                speed: 1.15,               // 15% speed boost
+                hp: 1.20,                  // 20% HP boost when spawned near agent
+                healPerSecond: 2           // HP regen when near agent
+            }
+        };
+
+        // Fortification types - progressively stronger
+        const LANE_FORTIFICATIONS = {
+            outpost: {
+                name: 'Forward Outpost',
+                icon: '🏕️',
+                tier: 1,
+                buildTime: 30000,           // 30 seconds
+                hp: 150,
+                visionRadius: 15,
+                creepBuff: { damage: 1.1, speed: 1.05 },
+                size: { x: 3, y: 2, z: 3 },
+                color: 0x8b7355,
+                cost: { controlPoints: 10 }
+            },
+            supplyCache: {
+                name: 'Supply Cache',
+                icon: '📦',
+                tier: 2,
+                buildTime: 60000,           // 1 minute
+                hp: 200,
+                healRadius: 10,
+                healAmount: 5,              // HP per second to nearby creeps
+                creepBuff: { damage: 1.15, hp: 1.1 },
+                size: { x: 4, y: 2.5, z: 4 },
+                color: 0x4a7c59,
+                cost: { controlPoints: 25 }
+            },
+            watchtower: {
+                name: 'Watchtower',
+                icon: '🗼',
+                tier: 2,
+                buildTime: 90000,           // 1.5 minutes
+                hp: 300,
+                attackDamage: 8,
+                attackRange: 18,
+                attackCooldown: 1500,
+                size: { x: 2, y: 6, z: 2 },
+                color: 0x666688,
+                cost: { controlPoints: 35 }
+            },
+            bunker: {
+                name: 'Defensive Bunker',
+                icon: '🏰',
+                tier: 3,
+                buildTime: 120000,          // 2 minutes
+                hp: 500,
+                attackDamage: 15,
+                attackRange: 20,
+                attackCooldown: 2000,
+                creepBuff: { damage: 1.2, speed: 1.1, hp: 1.15 },
+                spawnExtraCreeps: true,
+                size: { x: 5, y: 3, z: 5 },
+                color: 0x555577,
+                cost: { controlPoints: 50 }
+            },
+            stronghold: {
+                name: 'Stronghold',
+                icon: '⛩️',
+                tier: 4,
+                buildTime: 180000,          // 3 minutes
+                hp: 800,
+                attackDamage: 25,
+                attackRange: 25,
+                attackCooldown: 1800,
+                creepBuff: { damage: 1.3, speed: 1.15, hp: 1.25 },
+                spawnExtraCreeps: true,
+                extraCreepsPerWave: 2,
+                auraRadius: 20,
+                size: { x: 7, y: 5, z: 7 },
+                color: 0x334455,
+                cost: { controlPoints: 100 }
+            }
+        };
+
+        // Lane support state
+        let laneSupportState = {
+            enabled: false,
+            initialized: false,
+            laneControl: {},              // Control state per lane segment
+            assignedAgents: {},           // Agents assigned to lanes
+            fortifications: [],           // Built fortifications
+            buildQueue: [],               // Forts being built
+            lastControlUpdate: 0,
+            lastFortCheck: 0,
+            controlPoints: {              // Earned through lane dominance
+                top: 0,
+                mid: 0,
+                bot: 0
+            }
+        };
+
+        // Initialize lane support system
+        function initLaneSupportSystem() {
+            if (!LANE_SUPPORT_CONFIG.enabled) return;
+
+            // Initialize lane control for each lane
+            Object.keys(LANE_DEFINITIONS).forEach(laneKey => {
+                const lane = LANE_DEFINITIONS[laneKey];
+                const segments = lane.waypoints.length - 1;
+
+                laneSupportState.laneControl[laneKey] = {
+                    segments: Array(segments).fill(0),  // -1 to 1 (hostile to friendly)
+                    overallControl: 0,                   // -1 to 1
+                    frontlineIndex: Math.floor(segments / 2), // Where the battle is
+                    momentum: 0,                         // Push momentum
+                    lastBattleTime: 0
+                };
+            });
+
+            laneSupportState.enabled = true;
+            laneSupportState.initialized = true;
+            laneSupportState.fortifications = [];
+            laneSupportState.buildQueue = [];
+            laneSupportState.assignedAgents = { top: [], mid: [], bot: [] };
+
+            console.log('v6.67: Lane Support & Fortification System initialized');
+        }
+
+        // Assign an agent to support a lane
+        function assignAgentToLane(agent, laneKey) {
+            if (!laneSupportState.enabled) return false;
+            if (!LANE_DEFINITIONS[laneKey]) return false;
+
+            // Remove from any existing lane assignment
+            Object.keys(laneSupportState.assignedAgents).forEach(key => {
+                const idx = laneSupportState.assignedAgents[key].indexOf(agent);
+                if (idx !== -1) {
+                    laneSupportState.assignedAgents[key].splice(idx, 1);
+                }
+            });
+
+            // Assign to new lane
+            laneSupportState.assignedAgents[laneKey].push(agent);
+            agent.assignedLane = laneKey;
+            agent.laneRole = 'support';
+
+            const lane = LANE_DEFINITIONS[laneKey];
+            showNotification(`${agent.name} assigned to ${lane.name}`, 'info');
+            addCopilotMessage(`🎖️ Agent ${agent.name} deployed to ${lane.name}. They will buff nearby creeps and build fortifications as we gain control.`, 'ai');
+
+            return true;
+        }
+
+        // Update lane control based on creep positions and battles
+        function updateLaneControl(time) {
+            if (!laneSupportState.enabled) return;
+            if (time - laneSupportState.lastControlUpdate < LANE_SUPPORT_CONFIG.controlUpdateInterval) return;
+            laneSupportState.lastControlUpdate = time;
+
+            Object.keys(LANE_DEFINITIONS).forEach(laneKey => {
+                const lane = LANE_DEFINITIONS[laneKey];
+                const control = laneSupportState.laneControl[laneKey];
+                const waypoints = lane.waypoints;
+
+                // Count creeps in each segment
+                for (let i = 0; i < waypoints.length - 1; i++) {
+                    const segStart = waypoints[i];
+                    const segEnd = waypoints[i + 1];
+                    const segMidX = (segStart.x + segEnd.x) / 2;
+                    const segMidZ = (segStart.z + segEnd.z) / 2;
+
+                    let friendlyCount = 0;
+                    let hostileCount = 0;
+
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData || creep.userData.lane !== laneKey) return;
+                        const dist = Math.sqrt(
+                            Math.pow(creep.position.x - segMidX, 2) +
+                            Math.pow(creep.position.z - segMidZ, 2)
+                        );
+                        if (dist < 15) {
+                            if (creep.userData.team === 'A') friendlyCount++;
+                            else hostileCount++;
+                        }
+                    });
+
+                    // Check for assigned agents in segment
+                    laneSupportState.assignedAgents[laneKey]?.forEach(agent => {
+                        if (!agent.mesh) return;
+                        const dist = Math.sqrt(
+                            Math.pow(agent.mesh.position.x - segMidX, 2) +
+                            Math.pow(agent.mesh.position.z - segMidZ, 2)
+                        );
+                        if (dist < 20) {
+                            friendlyCount += 3; // Agents count as 3 creeps for control
+                        }
+                    });
+
+                    // Update segment control (-1 to 1)
+                    const total = friendlyCount + hostileCount;
+                    if (total > 0) {
+                        const newControl = (friendlyCount - hostileCount) / total;
+                        // Smooth transition
+                        control.segments[i] = control.segments[i] * 0.7 + newControl * 0.3;
+                    } else {
+                        // Decay toward neutral
+                        control.segments[i] *= 0.95;
+                    }
+                }
+
+                // Calculate overall control
+                const avgControl = control.segments.reduce((a, b) => a + b, 0) / control.segments.length;
+                control.overallControl = avgControl;
+
+                // Calculate frontline (where control shifts from positive to negative)
+                let frontline = lane.chokePointIndex;
+                for (let i = 0; i < control.segments.length; i++) {
+                    if (control.segments[i] < 0) {
+                        frontline = i;
+                        break;
+                    }
+                }
+                control.frontlineIndex = frontline;
+
+                // Calculate momentum (rate of change)
+                control.momentum = avgControl - (control.prevControl || 0);
+                control.prevControl = avgControl;
+
+                // Earn control points for lane dominance
+                if (avgControl > 0.3) {
+                    laneSupportState.controlPoints[laneKey] += avgControl * 0.5;
+                }
+            });
+        }
+
+        // Buff creeps near assigned agents
+        function updateAgentCreepBuffs(time) {
+            if (!laneSupportState.enabled) return;
+
+            Object.keys(laneSupportState.assignedAgents).forEach(laneKey => {
+                const agents = laneSupportState.assignedAgents[laneKey];
+                if (!agents || agents.length === 0) return;
+
+                agents.forEach(agent => {
+                    if (!agent.mesh) return;
+                    const agentPos = agent.mesh.position;
+
+                    // Find nearby friendly creeps
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData) return;
+                        if (creep.userData.team !== 'A') return; // Only buff friendly creeps
+                        if (creep.userData.lane !== laneKey) return;
+
+                        const dist = agentPos.distanceTo(creep.position);
+                        if (dist < LANE_SUPPORT_CONFIG.agentBuffRadius) {
+                            // Apply buffs
+                            if (!creep.userData.agentBuffed) {
+                                creep.userData.agentBuffed = true;
+                                creep.userData.originalDamage = creep.userData.damage;
+                                creep.userData.originalSpeed = creep.userData.speed;
+                                creep.userData.damage *= LANE_SUPPORT_CONFIG.creepBuffs.damage;
+                                creep.userData.speed *= LANE_SUPPORT_CONFIG.creepBuffs.speed;
+
+                                // Visual buff indicator
+                                if (!creep.userData.buffAura) {
+                                    const auraGeo = new THREE.RingGeometry(0.8, 1.0, 16);
+                                    const auraMat = new THREE.MeshBasicMaterial({
+                                        color: 0x00ffaa,
+                                        transparent: true,
+                                        opacity: 0.5,
+                                        side: THREE.DoubleSide
+                                    });
+                                    const aura = new THREE.Mesh(auraGeo, auraMat);
+                                    aura.rotation.x = -Math.PI / 2;
+                                    aura.position.y = 0.1;
+                                    creep.add(aura);
+                                    creep.userData.buffAura = aura;
+                                }
+                            }
+
+                            // Heal over time
+                            creep.userData.hp = Math.min(
+                                creep.userData.maxHp,
+                                creep.userData.hp + LANE_SUPPORT_CONFIG.creepBuffs.healPerSecond * 0.016
+                            );
+                        } else if (creep.userData.agentBuffed) {
+                            // Remove buffs when out of range
+                            creep.userData.damage = creep.userData.originalDamage || creep.userData.damage;
+                            creep.userData.speed = creep.userData.originalSpeed || creep.userData.speed;
+                            creep.userData.agentBuffed = false;
+
+                            if (creep.userData.buffAura) {
+                                creep.remove(creep.userData.buffAura);
+                                creep.userData.buffAura.geometry.dispose();
+                                creep.userData.buffAura.material.dispose();
+                                creep.userData.buffAura = null;
+                            }
+                        }
+                    });
+                });
+            });
+        }
+
+        // Check if we can build a fortification and where
+        function checkFortificationOpportunity(time) {
+            if (!laneSupportState.enabled) return;
+            if (time - laneSupportState.lastFortCheck < LANE_SUPPORT_CONFIG.fortBuildInterval) return;
+            laneSupportState.lastFortCheck = time;
+
+            Object.keys(LANE_DEFINITIONS).forEach(laneKey => {
+                const lane = LANE_DEFINITIONS[laneKey];
+                const control = laneSupportState.laneControl[laneKey];
+                const agents = laneSupportState.assignedAgents[laneKey];
+                const points = laneSupportState.controlPoints[laneKey];
+
+                // Need assigned agents and control points
+                if (!agents || agents.length === 0) return;
+                if (points < 10) return;
+
+                // Count existing forts in this lane
+                const existingForts = laneSupportState.fortifications.filter(f => f.laneKey === laneKey).length;
+                const buildingForts = laneSupportState.buildQueue.filter(f => f.laneKey === laneKey).length;
+                if (existingForts + buildingForts >= LANE_SUPPORT_CONFIG.maxFortsPerLane) return;
+
+                // Find best position for new fort
+                const fortPosition = findBestFortPosition(laneKey, control);
+                if (!fortPosition) return;
+
+                // Determine fort type based on available points and existing forts
+                const fortType = selectFortificationType(points, existingForts);
+                if (!fortType) return;
+
+                const fortDef = LANE_FORTIFICATIONS[fortType];
+                if (points < fortDef.cost.controlPoints) return;
+
+                // Start building
+                startFortificationBuild(laneKey, fortType, fortPosition, agents[0]);
+
+                // Deduct control points
+                laneSupportState.controlPoints[laneKey] -= fortDef.cost.controlPoints;
+            });
+        }
+
+        // Find optimal position for fortification
+        function findBestFortPosition(laneKey, control) {
+            const lane = LANE_DEFINITIONS[laneKey];
+            const waypoints = lane.waypoints;
+
+            // Find segments we control that are near the frontline
+            let bestSegment = -1;
+            let bestScore = -Infinity;
+
+            for (let i = 0; i < control.segments.length; i++) {
+                const segControl = control.segments[i];
+
+                // Must control the segment (friendly)
+                if (segControl < 0.2) continue;
+
+                // Score based on:
+                // - Distance from frontline (closer = more strategic but riskier)
+                // - Level of control (higher = safer)
+                // - Distance from spawn (not too close to base)
+                const distFromFront = Math.abs(i - control.frontlineIndex);
+                const distFromSpawn = i; // Segments are 0-indexed from spawn
+
+                // Check for existing forts nearby
+                const segMidX = (waypoints[i].x + waypoints[i + 1].x) / 2;
+                const segMidZ = (waypoints[i].z + waypoints[i + 1].z) / 2;
+                let nearbyFort = false;
+                laneSupportState.fortifications.forEach(fort => {
+                    if (fort.laneKey === laneKey) {
+                        const dist = Math.sqrt(
+                            Math.pow(fort.position.x - segMidX, 2) +
+                            Math.pow(fort.position.z - segMidZ, 2)
+                        );
+                        if (dist < 20) nearbyFort = true;
+                    }
+                });
+                if (nearbyFort) continue;
+
+                // Calculate score
+                let score = 0;
+                score += segControl * 30;                    // Control bonus
+                score -= distFromFront * 5;                  // Closer to front = higher score
+                score += Math.min(distFromSpawn, 3) * 10;    // Not too close to spawn
+                score -= Math.max(0, distFromFront - 2) * 8; // Penalty for being too far from action
+
+                if (score > bestScore) {
+                    bestScore = score;
+                    bestSegment = i;
+                }
+            }
+
+            if (bestSegment === -1) return null;
+
+            // Calculate position along segment
+            const wp1 = waypoints[bestSegment];
+            const wp2 = waypoints[bestSegment + 1];
+            const t = 0.3 + Math.random() * 0.4; // Random position along segment
+
+            const x = wp1.x + (wp2.x - wp1.x) * t;
+            const z = wp1.z + (wp2.z - wp1.z) * t;
+            const y = typeof getTerrainHeight === 'function' ? getTerrainHeight(x, z) : 0;
+
+            return { x, y, z, segment: bestSegment };
+        }
+
+        // Select fortification type based on resources and progression
+        function selectFortificationType(points, existingForts) {
+            // Progressive unlock - need lower tier forts before higher
+            if (existingForts === 0 || points < 25) {
+                return 'outpost';
+            } else if (existingForts === 1 || points < 50) {
+                return Math.random() < 0.5 ? 'supplyCache' : 'watchtower';
+            } else if (existingForts === 2 || points < 100) {
+                return 'bunker';
+            } else {
+                return 'stronghold';
+            }
+        }
+
+        // Start building a fortification
+        function startFortificationBuild(laneKey, fortType, position, agent) {
+            const fortDef = LANE_FORTIFICATIONS[fortType];
+            const lane = LANE_DEFINITIONS[laneKey];
+
+            const buildOrder = {
+                id: `fort_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`,
+                laneKey: laneKey,
+                type: fortType,
+                definition: fortDef,
+                position: new THREE.Vector3(position.x, position.y, position.z),
+                segment: position.segment,
+                startTime: performance.now(),
+                buildTime: fortDef.buildTime,
+                progress: 0,
+                builder: agent,
+                mesh: null,
+                scaffolding: null,
+                progressBar: null
+            };
+
+            // Create scaffolding/preview
+            createFortScaffolding(buildOrder);
+
+            laneSupportState.buildQueue.push(buildOrder);
+
+            showNotification(`${fortDef.icon} Building ${fortDef.name} at ${lane.chokePointName}`, 'info');
+            addCopilotMessage(`🔨 ${agent.name} is constructing a ${fortDef.name} on ${lane.name}. ETA: ${Math.round(fortDef.buildTime / 1000)}s`, 'ai');
+        }
+
+        // Create scaffolding mesh during construction
+        function createFortScaffolding(buildOrder) {
+            if (!scene) return;
+
+            const def = buildOrder.definition;
+            const pos = buildOrder.position;
+
+            // Scaffolding frame
+            const scaffoldGroup = new THREE.Group();
+
+            // Corner posts
+            const postGeo = new THREE.CylinderGeometry(0.15, 0.15, def.size.y + 1, 6);
+            const postMat = new THREE.MeshStandardMaterial({
+                color: 0xaa8844,
+                transparent: true,
+                opacity: 0.7
+            });
+
+            const offsets = [
+                [-def.size.x/2, -def.size.z/2],
+                [def.size.x/2, -def.size.z/2],
+                [-def.size.x/2, def.size.z/2],
+                [def.size.x/2, def.size.z/2]
+            ];
+
+            offsets.forEach(([ox, oz]) => {
+                const post = new THREE.Mesh(postGeo, postMat);
+                post.position.set(ox, def.size.y / 2 + 0.5, oz);
+                scaffoldGroup.add(post);
+            });
+
+            // Cross beams
+            const beamGeo = new THREE.BoxGeometry(def.size.x + 0.3, 0.1, 0.1);
+            const beamMat = new THREE.MeshStandardMaterial({
+                color: 0x996633,
+                transparent: true,
+                opacity: 0.6
+            });
+
+            [0.3, 0.6, 0.9].forEach(h => {
+                const beam1 = new THREE.Mesh(beamGeo, beamMat);
+                beam1.position.set(0, def.size.y * h, -def.size.z/2);
+                scaffoldGroup.add(beam1);
+
+                const beam2 = new THREE.Mesh(beamGeo, beamMat);
+                beam2.position.set(0, def.size.y * h, def.size.z/2);
+                scaffoldGroup.add(beam2);
+            });
+
+            // Progress indicator (vertical bar)
+            const progressGeo = new THREE.BoxGeometry(0.3, 0.1, 0.3);
+            const progressMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+            const progressBar = new THREE.Mesh(progressGeo, progressMat);
+            progressBar.position.set(0, 0.1, 0);
+            scaffoldGroup.add(progressBar);
+            buildOrder.progressBar = progressBar;
+
+            // Ghost of final building
+            const ghostGeo = new THREE.BoxGeometry(def.size.x, def.size.y, def.size.z);
+            const ghostMat = new THREE.MeshBasicMaterial({
+                color: def.color,
+                transparent: true,
+                opacity: 0.2,
+                wireframe: true
+            });
+            const ghost = new THREE.Mesh(ghostGeo, ghostMat);
+            ghost.position.y = def.size.y / 2;
+            scaffoldGroup.add(ghost);
+
+            scaffoldGroup.position.copy(pos);
+            scaffoldGroup.position.y = pos.y + 0.1;
+
+            scene.add(scaffoldGroup);
+            buildOrder.scaffolding = scaffoldGroup;
+        }
+
+        // Update fortification construction progress
+        function updateFortificationBuilding(time) {
+            if (!laneSupportState.enabled) return;
+
+            for (let i = laneSupportState.buildQueue.length - 1; i >= 0; i--) {
+                const build = laneSupportState.buildQueue[i];
+                const elapsed = time - build.startTime;
+                build.progress = Math.min(1, elapsed / build.buildTime);
+
+                // Update progress bar
+                if (build.progressBar) {
+                    build.progressBar.scale.y = build.progress * build.definition.size.y * 2;
+                    build.progressBar.position.y = build.progress * build.definition.size.y / 2;
+                }
+
+                // Check if complete
+                if (build.progress >= 1) {
+                    completeFortification(build);
+                    laneSupportState.buildQueue.splice(i, 1);
+                }
+            }
+        }
+
+        // Complete a fortification build
+        function completeFortification(buildOrder) {
+            const def = buildOrder.definition;
+            const pos = buildOrder.position;
+            const lane = LANE_DEFINITIONS[buildOrder.laneKey];
+
+            // Remove scaffolding
+            if (buildOrder.scaffolding) {
+                scene.remove(buildOrder.scaffolding);
+                buildOrder.scaffolding.traverse(child => {
+                    if (child.geometry) child.geometry.dispose();
+                    if (child.material) child.material.dispose();
+                });
+            }
+
+            // Create final fortification mesh
+            const fortGroup = new THREE.Group();
+
+            // Base platform
+            const baseGeo = new THREE.BoxGeometry(def.size.x + 1, 0.4, def.size.z + 1);
+            const baseMat = new THREE.MeshStandardMaterial({
+                color: 0x444444,
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            const base = new THREE.Mesh(baseGeo, baseMat);
+            base.position.y = 0.2;
+            base.receiveShadow = true;
+            fortGroup.add(base);
+
+            // Main structure
+            const mainGeo = new THREE.BoxGeometry(def.size.x, def.size.y, def.size.z);
+            const mainMat = new THREE.MeshStandardMaterial({
+                color: def.color,
+                roughness: 0.6,
+                metalness: 0.3
+            });
+            const main = new THREE.Mesh(mainGeo, mainMat);
+            main.position.y = def.size.y / 2 + 0.4;
+            main.castShadow = true;
+            main.receiveShadow = true;
+            fortGroup.add(main);
+
+            // Team color accent
+            const accentGeo = new THREE.BoxGeometry(def.size.x + 0.2, 0.3, def.size.z + 0.2);
+            const accentMat = new THREE.MeshStandardMaterial({
+                color: lane.color,
+                emissive: lane.color,
+                emissiveIntensity: 0.5
+            });
+            const accent = new THREE.Mesh(accentGeo, accentMat);
+            accent.position.y = def.size.y + 0.5;
+            fortGroup.add(accent);
+
+            // Flag/beacon on top
+            const flagGeo = new THREE.CylinderGeometry(0.1, 0.1, 2, 8);
+            const flagMat = new THREE.MeshStandardMaterial({ color: 0x888888 });
+            const flagPole = new THREE.Mesh(flagGeo, flagMat);
+            flagPole.position.y = def.size.y + 1.5;
+            fortGroup.add(flagPole);
+
+            const bannerGeo = new THREE.PlaneGeometry(1.2, 0.8);
+            const bannerMat = new THREE.MeshBasicMaterial({
+                color: lane.color,
+                side: THREE.DoubleSide
+            });
+            const banner = new THREE.Mesh(bannerGeo, bannerMat);
+            banner.position.set(0.7, def.size.y + 2, 0);
+            banner.rotation.y = Math.PI / 2;
+            fortGroup.add(banner);
+
+            fortGroup.position.copy(pos);
+            fortGroup.position.y = pos.y;
+
+            scene.add(fortGroup);
+
+            // Create fortification data object
+            const fort = {
+                id: buildOrder.id,
+                laneKey: buildOrder.laneKey,
+                type: buildOrder.type,
+                definition: def,
+                position: pos.clone(),
+                segment: buildOrder.segment,
+                hp: def.hp,
+                maxHp: def.hp,
+                mesh: fortGroup,
+                lastAttackTime: 0,
+                active: true
+            };
+
+            laneSupportState.fortifications.push(fort);
+
+            showNotification(`${def.icon} ${def.name} constructed!`, 'legendary');
+            addCopilotMessage(`🏰 ${def.name} is now operational on ${lane.name}! It will ${def.attackDamage ? 'attack enemies and ' : ''}buff our forces in the area.`, 'ai');
+        }
+
+        // Update fortification attacks and buffs
+        function updateFortifications(time) {
+            if (!laneSupportState.enabled) return;
+
+            laneSupportState.fortifications.forEach(fort => {
+                if (!fort.active) return;
+
+                const def = fort.definition;
+
+                // Attack enemies if this fort has attack capability
+                if (def.attackDamage && time - fort.lastAttackTime > def.attackCooldown) {
+                    let target = null;
+                    let minDist = def.attackRange;
+
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData || creep.userData.team === 'A') return;
+                        const dist = fort.position.distanceTo(creep.position);
+                        if (dist < minDist) {
+                            minDist = dist;
+                            target = creep;
+                        }
+                    });
+
+                    if (target) {
+                        // Attack!
+                        target.userData.hp -= def.attackDamage;
+                        fort.lastAttackTime = time;
+
+                        // Visual: projectile
+                        spawnFortProjectile(fort, target);
+                    }
+                }
+
+                // Heal nearby creeps if this fort has healing
+                if (def.healAmount) {
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData || creep.userData.team !== 'A') return;
+                        const dist = fort.position.distanceTo(creep.position);
+                        if (dist < def.healRadius) {
+                            creep.userData.hp = Math.min(
+                                creep.userData.maxHp,
+                                creep.userData.hp + def.healAmount * 0.016
+                            );
+                        }
+                    });
+                }
+
+                // Apply creep buffs in aura
+                if (def.creepBuff) {
+                    const auraRange = def.auraRadius || 15;
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData || creep.userData.team !== 'A') return;
+                        if (creep.userData.lane !== fort.laneKey) return;
+                        const dist = fort.position.distanceTo(creep.position);
+                        if (dist < auraRange && !creep.userData.fortBuffed) {
+                            creep.userData.fortBuffed = true;
+                            creep.userData.damage *= def.creepBuff.damage || 1;
+                            creep.userData.speed *= def.creepBuff.speed || 1;
+                        }
+                    });
+                }
+            });
+        }
+
+        // Spawn projectile from fort to target
+        function spawnFortProjectile(fort, target) {
+            if (!scene) return;
+
+            const projectile = new THREE.Mesh(
+                new THREE.SphereGeometry(0.3, 8, 8),
+                new THREE.MeshBasicMaterial({
+                    color: 0xff4400,
+                    emissive: 0xff4400,
+                    emissiveIntensity: 1
+                })
+            );
+            projectile.position.copy(fort.position);
+            projectile.position.y += fort.definition.size.y;
+            scene.add(projectile);
+
+            const targetPos = target.position.clone();
+            const duration = 200;
+            const startTime = performance.now();
+            const startPos = projectile.position.clone();
+
+            function animate() {
+                const elapsed = performance.now() - startTime;
+                const t = Math.min(1, elapsed / duration);
+
+                projectile.position.lerpVectors(startPos, targetPos, t);
+                projectile.position.y += Math.sin(t * Math.PI) * 2; // Arc
+
+                if (t < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    scene.remove(projectile);
+                    projectile.geometry.dispose();
+                    projectile.material.dispose();
+                }
+            }
+            animate();
+        }
+
+        // Parse lane support commands
+        function parseLaneSupportCommand(message) {
+            const lowerMsg = message.toLowerCase();
+
+            // Assign agent to lane
+            const supportMatch = lowerMsg.match(/support\s+(boreal|frostfall|north|top|nexus|spine|ember|mid|middle|verdant|thorn|south|bot|bottom)/i);
+            if (supportMatch) {
+                const laneTerm = supportMatch[1].toLowerCase();
+                let laneKey = null;
+
+                if (['boreal', 'frostfall', 'north', 'top'].includes(laneTerm)) laneKey = 'top';
+                else if (['nexus', 'spine', 'ember', 'mid', 'middle'].includes(laneTerm)) laneKey = 'mid';
+                else if (['verdant', 'thorn', 'south', 'bot', 'bottom'].includes(laneTerm)) laneKey = 'bot';
+
+                if (laneKey && agentFleet.length > 0) {
+                    // Find available agent
+                    const availableAgent = agentFleet.find(a => !a.assignedLane);
+                    if (availableAgent) {
+                        assignAgentToLane(availableAgent, laneKey);
+                        return true;
+                    } else {
+                        addCopilotMessage(`All agents are already assigned. Use "recall agents" first or spawn more agents.`, 'ai');
+                        return true;
+                    }
+                }
+            }
+
+            // Recall all agents from lanes
+            if (lowerMsg.includes('recall agents') || lowerMsg.includes('unassign agents')) {
+                Object.keys(laneSupportState.assignedAgents).forEach(key => {
+                    laneSupportState.assignedAgents[key].forEach(agent => {
+                        agent.assignedLane = null;
+                        agent.laneRole = null;
+                    });
+                    laneSupportState.assignedAgents[key] = [];
+                });
+                addCopilotMessage(`All agents recalled from lane assignments.`, 'ai');
+                return true;
+            }
+
+            // Lane status
+            if (lowerMsg.includes('lane status') || lowerMsg.includes('front status') || lowerMsg.includes('war status')) {
+                let status = '📊 **LANE CONTROL STATUS**\n';
+                Object.keys(LANE_DEFINITIONS).forEach(laneKey => {
+                    const lane = LANE_DEFINITIONS[laneKey];
+                    const control = laneSupportState.laneControl[laneKey];
+                    const agents = laneSupportState.assignedAgents[laneKey]?.length || 0;
+                    const forts = laneSupportState.fortifications.filter(f => f.laneKey === laneKey).length;
+                    const points = Math.floor(laneSupportState.controlPoints[laneKey]);
+
+                    const controlPct = Math.round((control?.overallControl || 0) * 100);
+                    const controlBar = controlPct >= 0
+                        ? '🟢'.repeat(Math.min(5, Math.floor(controlPct / 20))) + '⚪'.repeat(5 - Math.min(5, Math.floor(controlPct / 20)))
+                        : '🔴'.repeat(Math.min(5, Math.floor(-controlPct / 20))) + '⚪'.repeat(5 - Math.min(5, Math.floor(-controlPct / 20)));
+
+                    status += `\n**${lane.name}** (${lane.chokePointName})\n`;
+                    status += `Control: ${controlBar} ${controlPct}%\n`;
+                    status += `Agents: ${agents} | Forts: ${forts} | Points: ${points}\n`;
+                });
+                addCopilotMessage(status, 'ai');
+                return true;
+            }
+
+            return false;
+        }
+
+        // v6.67: Spawn initial lane towers - pre-existing defenses from prior expeditions
+        // These represent the ongoing conflict the player is joining
+        function spawnInitialLaneTowers() {
+            if (!scene || !laneSupportState.enabled) return;
+
+            const LANE_TOWER_POSITIONS = {
+                // Each lane has 3 towers per side (6 total per lane)
+                // Robot side (Team A): cyan towers near spawn
+                // Hostile side (Team B): red towers near their spawn
+                top: {
+                    robotTowers: [
+                        { segment: 0, offset: 0.2 },   // Near spawn
+                        { segment: 1, offset: 0.5 },   // Forward position
+                        { segment: 2, offset: 0.3 }    // Approaching frontline
+                    ],
+                    hostileTowers: [
+                        { segment: 5, offset: 0.7 },   // Near their spawn
+                        { segment: 4, offset: 0.5 },   // Forward position
+                        { segment: 3, offset: 0.8 }    // Approaching frontline
+                    ]
+                },
+                mid: {
+                    robotTowers: [
+                        { segment: 0, offset: 0.3 },
+                        { segment: 1, offset: 0.5 },
+                        { segment: 2, offset: 0.6 }
+                    ],
+                    hostileTowers: [
+                        { segment: 5, offset: 0.7 },
+                        { segment: 4, offset: 0.5 },
+                        { segment: 3, offset: 0.4 }
+                    ]
+                },
+                bot: {
+                    robotTowers: [
+                        { segment: 0, offset: 0.2 },
+                        { segment: 1, offset: 0.5 },
+                        { segment: 2, offset: 0.3 }
+                    ],
+                    hostileTowers: [
+                        { segment: 5, offset: 0.7 },
+                        { segment: 4, offset: 0.5 },
+                        { segment: 3, offset: 0.8 }
+                    ]
+                }
+            };
+
+            Object.keys(LANE_DEFINITIONS).forEach(laneKey => {
+                const lane = LANE_DEFINITIONS[laneKey];
+                const waypoints = lane.waypoints;
+                const towerConfig = LANE_TOWER_POSITIONS[laneKey];
+
+                // Spawn Robot (Team A) towers - CYAN
+                towerConfig.robotTowers.forEach((towerPos, idx) => {
+                    const wp1 = waypoints[towerPos.segment];
+                    const wp2 = waypoints[towerPos.segment + 1];
+                    const t = towerPos.offset;
+
+                    const x = wp1.x + (wp2.x - wp1.x) * t;
+                    const z = wp1.z + (wp2.z - wp1.z) * t;
+                    const y = typeof getTerrainHeight === 'function' ? getTerrainHeight(x, z) : 0;
+
+                    // Offset slightly to the side of the lane
+                    const angle = Math.atan2(wp2.x - wp1.x, wp2.z - wp1.z);
+                    const sideOffset = 6;
+                    const offsetX = Math.cos(angle) * sideOffset * (idx % 2 === 0 ? 1 : -1);
+                    const offsetZ = -Math.sin(angle) * sideOffset * (idx % 2 === 0 ? 1 : -1);
+
+                    createLaneTower(
+                        x + offsetX, y, z + offsetZ,
+                        'robot', laneKey, lane.color, towerPos.segment
+                    );
+                });
+
+                // Spawn Hostile (Team B) towers - RED
+                towerConfig.hostileTowers.forEach((towerPos, idx) => {
+                    const wp1 = waypoints[towerPos.segment];
+                    const wp2 = waypoints[towerPos.segment + 1];
+                    const t = towerPos.offset;
+
+                    const x = wp1.x + (wp2.x - wp1.x) * t;
+                    const z = wp1.z + (wp2.z - wp1.z) * t;
+                    const y = typeof getTerrainHeight === 'function' ? getTerrainHeight(x, z) : 0;
+
+                    // Offset slightly to the side of the lane
+                    const angle = Math.atan2(wp2.x - wp1.x, wp2.z - wp1.z);
+                    const sideOffset = 6;
+                    const offsetX = Math.cos(angle) * sideOffset * (idx % 2 === 0 ? 1 : -1);
+                    const offsetZ = -Math.sin(angle) * sideOffset * (idx % 2 === 0 ? 1 : -1);
+
+                    createLaneTower(
+                        x + offsetX, y, z + offsetZ,
+                        'hostile', laneKey, 0xff4444, towerPos.segment
+                    );
+                });
+            });
+
+            console.log('v6.67: Initial lane towers spawned - joining ongoing conflict');
+            addCopilotMessage(`📡 Sensors detect prior expedition fortifications across all lanes. The struggle between Robot Forces and Hostile Fauna has been ongoing. We're joining this conflict where it stands.`, 'ai');
+        }
+
+        // Create a single lane tower
+        function createLaneTower(x, y, z, team, laneKey, color, segment) {
+            const towerGroup = new THREE.Group();
+
+            const teamColor = team === 'robot' ? 0x00ccff : 0xff4444;
+            const isRobot = team === 'robot';
+
+            // Base platform
+            const baseGeo = new THREE.CylinderGeometry(2.5, 3, 0.6, 8);
+            const baseMat = new THREE.MeshStandardMaterial({
+                color: 0x444455,
+                roughness: 0.7,
+                metalness: 0.4
+            });
+            const base = new THREE.Mesh(baseGeo, baseMat);
+            base.position.y = 0.3;
+            base.receiveShadow = true;
+            towerGroup.add(base);
+
+            // Tower body
+            const bodyGeo = new THREE.CylinderGeometry(1.5, 2, 5, 8);
+            const bodyMat = new THREE.MeshStandardMaterial({
+                color: isRobot ? 0x336688 : 0x663333,
+                roughness: 0.5,
+                metalness: 0.5
+            });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 3;
+            body.castShadow = true;
+            towerGroup.add(body);
+
+            // Tower top / turret
+            const topGeo = new THREE.CylinderGeometry(1.8, 1.5, 1.5, 8);
+            const topMat = new THREE.MeshStandardMaterial({
+                color: teamColor,
+                emissive: teamColor,
+                emissiveIntensity: 0.4,
+                roughness: 0.3,
+                metalness: 0.7
+            });
+            const top = new THREE.Mesh(topGeo, topMat);
+            top.position.y = 5.75;
+            top.castShadow = true;
+            towerGroup.add(top);
+
+            // Glowing beacon
+            const beaconGeo = new THREE.SphereGeometry(0.5, 16, 16);
+            const beaconMat = new THREE.MeshStandardMaterial({
+                color: teamColor,
+                emissive: teamColor,
+                emissiveIntensity: 1.2,
+                transparent: true,
+                opacity: 0.9
+            });
+            const beacon = new THREE.Mesh(beaconGeo, beaconMat);
+            beacon.position.y = 7;
+            beacon.userData.pulsePhase = Math.random() * Math.PI * 2;
+            beacon.userData.isTowerBeacon = true;
+            towerGroup.add(beacon);
+
+            // Lane color ring at base
+            const ringGeo = new THREE.TorusGeometry(3, 0.2, 8, 24);
+            const ringMat = new THREE.MeshStandardMaterial({
+                color: color,
+                emissive: color,
+                emissiveIntensity: 0.5
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = Math.PI / 2;
+            ring.position.y = 0.15;
+            towerGroup.add(ring);
+
+            // Team banner
+            const bannerGeo = new THREE.PlaneGeometry(1.5, 1);
+            const bannerMat = new THREE.MeshBasicMaterial({
+                color: teamColor,
+                side: THREE.DoubleSide
+            });
+            const banner = new THREE.Mesh(bannerGeo, bannerMat);
+            banner.position.set(0, 4.5, 1.6);
+            towerGroup.add(banner);
+
+            towerGroup.position.set(x, y, z);
+
+            scene.add(towerGroup);
+
+            // Create tower data object
+            const tower = {
+                id: `tower_${laneKey}_${team}_${segment}_${Math.random().toString(36).substr(2, 5)}`,
+                laneKey: laneKey,
+                team: team,
+                position: new THREE.Vector3(x, y, z),
+                segment: segment,
+                hp: 400,
+                maxHp: 400,
+                attackDamage: team === 'robot' ? 12 : 10,
+                attackRange: 16,
+                attackCooldown: 1200,
+                lastAttackTime: 0,
+                mesh: towerGroup,
+                active: true
+            };
+
+            // Store in lane support state
+            if (!laneSupportState.laneTowers) {
+                laneSupportState.laneTowers = [];
+            }
+            laneSupportState.laneTowers.push(tower);
+
+            return tower;
+        }
+
+        // Update lane towers - attack enemies
+        function updateLaneTowers(time) {
+            if (!laneSupportState.laneTowers) return;
+
+            laneSupportState.laneTowers.forEach(tower => {
+                if (!tower.active) return;
+
+                // Attack interval check
+                if (time - tower.lastAttackTime < tower.attackCooldown) return;
+
+                // Find target - opposite team's creeps
+                let target = null;
+                let minDist = tower.attackRange;
+                const targetTeam = tower.team === 'robot' ? 'B' : 'A';
+
+                creepWaveState.creeps.forEach(creep => {
+                    if (!creep.userData || creep.userData.team !== targetTeam) return;
+                    const dist = tower.position.distanceTo(creep.position);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        target = creep;
+                    }
+                });
+
+                if (target) {
+                    // Attack!
+                    target.userData.hp -= tower.attackDamage;
+                    tower.lastAttackTime = time;
+
+                    // Visual projectile
+                    spawnTowerProjectile(tower, target);
+                }
+
+                // Animate beacon pulse
+                if (tower.mesh) {
+                    tower.mesh.traverse(child => {
+                        if (child.userData.isTowerBeacon) {
+                            const phase = child.userData.pulsePhase || 0;
+                            child.material.emissiveIntensity = 0.8 + Math.sin(time * 0.003 + phase) * 0.4;
+                        }
+                    });
+                }
+            });
+        }
+
+        // Spawn tower projectile
+        function spawnTowerProjectile(tower, target) {
+            if (!scene) return;
+
+            const color = tower.team === 'robot' ? 0x00ffff : 0xff4400;
+            const projectile = new THREE.Mesh(
+                new THREE.SphereGeometry(0.25, 8, 8),
+                new THREE.MeshBasicMaterial({
+                    color: color,
+                    emissive: color,
+                    emissiveIntensity: 1
+                })
+            );
+            projectile.position.copy(tower.position);
+            projectile.position.y += 6;
+            scene.add(projectile);
+
+            const targetPos = target.position.clone();
+            const duration = 150;
+            const startTime = performance.now();
+            const startPos = projectile.position.clone();
+
+            function animate() {
+                const elapsed = performance.now() - startTime;
+                const t = Math.min(1, elapsed / duration);
+
+                projectile.position.lerpVectors(startPos, targetPos, t);
+                projectile.position.y += Math.sin(t * Math.PI) * 1.5;
+
+                if (t < 1) {
+                    requestAnimationFrame(animate);
+                } else {
+                    scene.remove(projectile);
+                    projectile.geometry.dispose();
+                    projectile.material.dispose();
+                }
+            }
+            animate();
+        }
+
+        // Main update function for lane support system
+        function updateLaneSupportSystem(time) {
+            if (!laneSupportState.enabled) return;
+
+            updateLaneControl(time);
+            updateAgentCreepBuffs(time);
+            checkFortificationOpportunity(time);
+            updateFortificationBuilding(time);
+            updateFortifications(time);
+        }
+
+        // Cleanup lane support system
+        function cleanupLaneSupportSystem() {
+            // Remove fortifications
+            laneSupportState.fortifications.forEach(fort => {
+                if (fort.mesh && fort.mesh.parent) {
+                    fort.mesh.parent.remove(fort.mesh);
+                    fort.mesh.traverse(child => {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) child.material.dispose();
+                    });
+                }
+            });
+
+            // Remove build queue items
+            laneSupportState.buildQueue.forEach(build => {
+                if (build.scaffolding && build.scaffolding.parent) {
+                    build.scaffolding.parent.remove(build.scaffolding);
+                    build.scaffolding.traverse(child => {
+                        if (child.geometry) child.geometry.dispose();
+                        if (child.material) child.material.dispose();
+                    });
+                }
+            });
+
+            laneSupportState.enabled = false;
+            laneSupportState.initialized = false;
+            laneSupportState.fortifications = [];
+            laneSupportState.buildQueue = [];
+            laneSupportState.assignedAgents = {};
+            laneSupportState.laneControl = {};
+            laneSupportState.controlPoints = { top: 0, mid: 0, bot: 0 };
         }
 
         // ============================================
@@ -47517,6 +49200,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.66: Update RCT-style base building system
             if (typeof updateBaseBuildingSystem === 'function') {
                 updateBaseBuildingSystem(time);
+            }
+
+            // v6.67: Update lane support & fortification system
+            if (typeof updateLaneSupportSystem === 'function') {
+                updateLaneSupportSystem(time);
             }
 
             // Mob AI with aggro (using CONFIG constants)
@@ -51156,6 +52844,79 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // Draw terrain bounds
             ctx.strokeStyle = '#333';
             ctx.strokeRect(0, 0, size, size);
+
+            // v6.67: Draw lane paths on minimap
+            if (typeof LANE_DEFINITIONS !== 'undefined' && creepWaveState?.enabled) {
+                Object.entries(LANE_DEFINITIONS).forEach(([laneKey, lane]) => {
+                    const colorHex = '#' + lane.color.toString(16).padStart(6, '0');
+
+                    // Draw lane path
+                    ctx.strokeStyle = colorHex;
+                    ctx.lineWidth = 2;
+                    ctx.globalAlpha = 0.7;
+                    ctx.beginPath();
+
+                    lane.waypoints.forEach((wp, idx) => {
+                        const x = (wp.x + halfExtent) * scale;
+                        const y = (wp.z + halfExtent) * scale;
+                        if (idx === 0) {
+                            ctx.moveTo(x, y);
+                        } else {
+                            ctx.lineTo(x, y);
+                        }
+                    });
+                    ctx.stroke();
+
+                    // Draw spawn points (small squares)
+                    ctx.globalAlpha = 0.9;
+                    ctx.fillStyle = '#00ccff'; // Robot spawn - cyan
+                    const spawnAx = (lane.teamASpawn.x + halfExtent) * scale;
+                    const spawnAy = (lane.teamASpawn.z + halfExtent) * scale;
+                    ctx.fillRect(spawnAx - 3, spawnAy - 3, 6, 6);
+
+                    ctx.fillStyle = '#ff4444'; // Hostile spawn - red
+                    const spawnBx = (lane.teamBSpawn.x + halfExtent) * scale;
+                    const spawnBy = (lane.teamBSpawn.z + halfExtent) * scale;
+                    ctx.fillRect(spawnBx - 3, spawnBy - 3, 6, 6);
+
+                    // Draw choke point marker (pulsing circle)
+                    const chokeWp = lane.waypoints[lane.chokePointIndex];
+                    const chokeX = (chokeWp.x + halfExtent) * scale;
+                    const chokeY = (chokeWp.z + halfExtent) * scale;
+
+                    // Outer ring
+                    ctx.strokeStyle = colorHex;
+                    ctx.lineWidth = 1.5;
+                    ctx.beginPath();
+                    ctx.arc(chokeX, chokeY, 5, 0, Math.PI * 2);
+                    ctx.stroke();
+
+                    // Inner dot (contested zone)
+                    const pulse = Math.sin(performance.now() / 300) * 0.3 + 0.7;
+                    ctx.globalAlpha = pulse;
+                    ctx.fillStyle = colorHex;
+                    ctx.beginPath();
+                    ctx.arc(chokeX, chokeY, 3, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.globalAlpha = 1.0;
+                });
+
+                // Draw creeps on minimap
+                if (creepWaveState.creeps) {
+                    creepWaveState.creeps.forEach(creep => {
+                        if (!creep.userData) return;
+                        const cx = (creep.position.x + halfExtent) * scale;
+                        const cy = (creep.position.z + halfExtent) * scale;
+
+                        // Team color
+                        ctx.fillStyle = creep.userData.team === 'A' ? '#00ffaa' : '#ff6666';
+                        ctx.beginPath();
+                        ctx.arc(cx, cy, 1.5, 0, Math.PI * 2);
+                        ctx.fill();
+                    });
+                }
+            }
 
             // Draw interactables (only in explored areas)
             ctx.fillStyle = '#0a0';
