@@ -218,12 +218,13 @@ localFirstTools/
 
 ## Claude Code Custom Agents
 
-The project includes 12 custom Claude Code subagents in `.claude/agents/`:
+The project includes 13 custom Claude Code subagents in `.claude/agents/`:
 
 | Agent | Purpose |
 |-------|---------|
 | `local-first-app-builder` | Creates new self-contained HTML applications with import/export |
 | `quantum-world-generator` | Creates P2P networked 3D universe applications |
+| `cosmos-chronicle-generator` | Generates Rolling Stone-style magazine issues for applications |
 | `local-first-steward` | Maintains and validates the localFirstTools directory |
 | `app-buzzsaw-enhancer` | Analyzes and enhances apps using 8 strategy analyzers |
 | `strategy-analyzer` | Analyzes solutions without making code changes |
@@ -245,6 +246,13 @@ Create a new [category] app that [description]
 For Quantum Worlds, use the `quantum-world-generator` agent:
 ```
 Create a new Quantum World about [concept]
+```
+
+For magazine coverage of applications, use the `cosmos-chronicle-generator` agent:
+```
+Create a COSMOS CHRONICLE for [app path or name]
+Generate magazine coverage for the latest release
+Write a magazine issue about [app name]
 ```
 
 ## GitHub Actions Workflows
