@@ -9424,8 +9424,9 @@
         <div id="minimap-container" class="minimap" style="cursor: pointer;">
             <canvas id="minimap-canvas" class="minimap-canvas"></canvas>
             <!-- v5.19: Show Mode button overlay -->
-            <div style="position: absolute; top: 4px; right: 4px; z-index: 10;">
-                <button onclick="openShowModeModal()" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'">📡</button>
+            <div style="position: absolute; top: 4px; right: 4px; z-index: 10; display: flex; gap: 3px;">
+                <button onclick="WorldStore.open()" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'" title="Public Worlds">🌍</button>
+                <button onclick="openShowModeModal()" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'" title="Show Mode">📡</button>
             </div>
             <!-- P2P Status -->
             <div style="position: absolute; bottom: 2px; left: 0; right: 0; text-align: center; display: flex; justify-content: center; gap: 6px; align-items: center;">
@@ -18169,6 +18170,237 @@
         };
 
         // ============================================
+        // v7.0: LOGIN STREAK CALENDAR SYSTEM
+        // 7-day calendar with escalating rewards
+        // Consensus feature from 8-Strategy Analysis (9/10 impact)
+        // ============================================
+        const LoginStreakCalendar = {
+            STORAGE_KEY: 'leviathan-login-streak-v1',
+            data: {
+                lastLoginDate: null,
+                currentStreak: 0,
+                longestStreak: 0,
+                totalLogins: 0,
+                monthlyProgress: 0,
+                claimedRewards: [],
+                lastStreakBreakDate: null
+            },
+
+            // Escalating rewards for each day of the week
+            DAILY_REWARDS: [
+                { day: 1, xp: 100, essence: 5, icon: '🌟', name: 'Day 1' },
+                { day: 2, xp: 150, essence: 10, icon: '✨', name: 'Day 2' },
+                { day: 3, xp: 200, essence: 15, icon: '💫', name: 'Day 3', bonus: 'Focus Boost' },
+                { day: 4, xp: 300, essence: 25, icon: '🔮', name: 'Day 4' },
+                { day: 5, xp: 400, essence: 35, icon: '💎', name: 'Day 5', bonus: 'Rare Item' },
+                { day: 6, xp: 500, essence: 50, icon: '👑', name: 'Day 6' },
+                { day: 7, xp: 1000, essence: 100, icon: '🏆', name: 'Day 7', bonus: 'Legendary Reward', legendary: true }
+            ],
+
+            init() {
+                const saved = localStorage.getItem(this.STORAGE_KEY);
+                if (saved) {
+                    try {
+                        this.data = { ...this.data, ...JSON.parse(saved) };
+                    } catch (e) {
+                        console.warn('[LOGIN STREAK] Data corrupted, resetting:', e);
+                    }
+                }
+
+                this.checkLogin();
+            },
+
+            checkLogin() {
+                const today = new Date().toDateString();
+                const yesterday = new Date(Date.now() - 86400000).toDateString();
+
+                if (this.data.lastLoginDate === today) {
+                    // Already logged in today
+                    console.log('[LOGIN STREAK] Already logged in today. Streak:', this.data.currentStreak);
+                    return;
+                }
+
+                // Check if streak continues or breaks
+                if (this.data.lastLoginDate === yesterday) {
+                    // Streak continues!
+                    this.data.currentStreak++;
+                    console.log('[LOGIN STREAK] Streak continued!', this.data.currentStreak);
+                } else if (this.data.lastLoginDate) {
+                    // Streak broken
+                    this.data.lastStreakBreakDate = this.data.lastLoginDate;
+                    this.data.currentStreak = 1;
+                    this.data.claimedRewards = [];
+                    console.log('[LOGIN STREAK] Streak broken. Starting fresh.');
+                } else {
+                    // First ever login
+                    this.data.currentStreak = 1;
+                }
+
+                this.data.lastLoginDate = today;
+                this.data.totalLogins++;
+                this.data.monthlyProgress++;
+
+                if (this.data.currentStreak > this.data.longestStreak) {
+                    this.data.longestStreak = this.data.currentStreak;
+                }
+
+                this.save();
+
+                // Show calendar after a brief delay
+                setTimeout(() => this.showCalendarModal(), 2000);
+            },
+
+            save() {
+                localStorage.setItem(this.STORAGE_KEY, JSON.stringify(this.data));
+            },
+
+            claimReward(day) {
+                if (this.data.claimedRewards.includes(day)) {
+                    showNotification('Already claimed!', 'warning');
+                    return;
+                }
+
+                if (day > this.data.currentStreak) {
+                    showNotification('Keep your streak to unlock this reward!', 'warning');
+                    return;
+                }
+
+                const reward = this.DAILY_REWARDS[day - 1];
+                this.data.claimedRewards.push(day);
+                this.save();
+
+                // Grant rewards
+                if (typeof gameData !== 'undefined') {
+                    gameData.totalXP = (gameData.totalXP || 0) + reward.xp;
+                    gameData.focusEssence = (gameData.focusEssence || 0) + reward.essence;
+                    if (typeof saveGameData === 'function') saveGameData();
+                }
+
+                // Celebration
+                this.showRewardClaimed(reward);
+
+                // Update calendar UI
+                const dayEl = document.querySelector(`[data-streak-day="${day}"]`);
+                if (dayEl) {
+                    dayEl.classList.add('claimed');
+                    dayEl.querySelector('.claim-btn')?.remove();
+                }
+            },
+
+            showRewardClaimed(reward) {
+                const overlay = document.createElement('div');
+                overlay.style.cssText = `
+                    position: fixed;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    background: rgba(0,0,0,0.8);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 10001;
+                    animation: fadeIn 0.3s ease-out;
+                `;
+                overlay.innerHTML = `
+                    <div style="background: linear-gradient(135deg, #0a0a2a 0%, #1a1a4a 100%); border: 3px solid ${reward.legendary ? 'gold' : '#0ff'}; border-radius: 20px; padding: 40px; text-align: center; animation: scaleIn 0.4s ease-out;">
+                        <div style="font-size: 80px; margin-bottom: 20px; animation: bounce 0.5s ease-out;">${reward.icon}</div>
+                        <h2 style="color: ${reward.legendary ? 'gold' : '#0ff'}; margin: 0 0 15px 0; font-size: 28px;">REWARD CLAIMED!</h2>
+                        <div style="color: #fff; font-size: 18px; margin-bottom: 20px;">
+                            <div>+${reward.xp} XP</div>
+                            <div>+${reward.essence} Focus Essence</div>
+                            ${reward.bonus ? `<div style="color: gold; margin-top: 10px;">✧ ${reward.bonus} ✧</div>` : ''}
+                        </div>
+                        <button onclick="this.closest('div').parentElement.remove()" style="background: linear-gradient(90deg, #0ff, #00ff88); color: #000; border: none; padding: 15px 40px; font-size: 16px; font-weight: bold; border-radius: 25px; cursor: pointer;">AWESOME!</button>
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+
+                // Celebration audio
+                AudioSystem.playGentle(523.25, 0.15, 0.3);
+                setTimeout(() => AudioSystem.playGentle(659.25, 0.15, 0.3), 100);
+                setTimeout(() => AudioSystem.playGentle(783.99, 0.15, 0.3), 200);
+                if (reward.legendary) {
+                    setTimeout(() => AudioSystem.playGentle(1046.50, 0.25, 0.4), 300);
+                }
+
+                setTimeout(() => overlay.remove(), 5000);
+            },
+
+            showCalendarModal() {
+                const existingModal = document.getElementById('login-streak-modal');
+                if (existingModal) existingModal.remove();
+
+                const modal = document.createElement('div');
+                modal.id = 'login-streak-modal';
+                modal.innerHTML = `
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+                        <div style="background: linear-gradient(135deg, #0a0a2a 0%, #1a1a4a 100%); border: 2px solid #0ff; border-radius: 20px; padding: 30px; max-width: 600px; width: 90%;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                <h2 style="color: #0ff; margin: 0;">🔥 LOGIN STREAK</h2>
+                                <button onclick="document.getElementById('login-streak-modal').remove()" style="background: none; border: none; color: #fff; font-size: 24px; cursor: pointer;">✕</button>
+                            </div>
+
+                            <div style="text-align: center; margin-bottom: 25px;">
+                                <div style="font-size: 48px; color: #ff8800; text-shadow: 0 0 20px #ff8800;">${this.data.currentStreak}</div>
+                                <div style="color: #888; font-size: 14px;">Day Streak</div>
+                                <div style="color: #666; font-size: 12px; margin-top: 5px;">Best: ${this.data.longestStreak} days | Total logins: ${this.data.totalLogins}</div>
+                            </div>
+
+                            <div style="display: grid; grid-template-columns: repeat(7, 1fr); gap: 10px; margin-bottom: 20px;">
+                                ${this.DAILY_REWARDS.map((r, i) => {
+                                    const day = i + 1;
+                                    const unlocked = day <= this.data.currentStreak;
+                                    const claimed = this.data.claimedRewards.includes(day);
+                                    const isToday = day === this.data.currentStreak;
+                                    return `
+                                        <div data-streak-day="${day}" style="
+                                            background: ${claimed ? 'rgba(0,255,100,0.2)' : unlocked ? 'rgba(0,255,255,0.15)' : 'rgba(255,255,255,0.05)'};
+                                            border: 2px solid ${isToday ? '#ff8800' : claimed ? '#0f8' : unlocked ? '#0ff' : '#333'};
+                                            border-radius: 12px;
+                                            padding: 12px 8px;
+                                            text-align: center;
+                                            position: relative;
+                                            ${isToday ? 'animation: pulse 2s infinite;' : ''}
+                                            ${r.legendary ? 'box-shadow: 0 0 15px gold;' : ''}
+                                        ">
+                                            <div style="font-size: 24px; margin-bottom: 5px;">${r.icon}</div>
+                                            <div style="color: ${unlocked ? '#fff' : '#666'}; font-size: 11px; font-weight: bold;">${r.name}</div>
+                                            <div style="color: #0ff; font-size: 10px;">+${r.xp} XP</div>
+                                            <div style="color: #ff8800; font-size: 9px;">+${r.essence} ✧</div>
+                                            ${claimed ? '<div style="color: #0f8; font-size: 10px; margin-top: 5px;">✓ Claimed</div>' :
+                                              unlocked ? `<button onclick="LoginStreakCalendar.claimReward(${day})" class="claim-btn" style="margin-top: 5px; background: #0ff; color: #000; border: none; padding: 4px 8px; border-radius: 10px; font-size: 10px; cursor: pointer; font-weight: bold;">CLAIM</button>` :
+                                              '<div style="color: #666; font-size: 9px; margin-top: 5px;">🔒</div>'}
+                                        </div>
+                                    `;
+                                }).join('')}
+                            </div>
+
+                            ${this.data.currentStreak >= 7 ? `
+                                <div style="background: linear-gradient(90deg, rgba(255,215,0,0.2), rgba(255,165,0,0.2)); border: 1px solid gold; border-radius: 10px; padding: 15px; text-align: center;">
+                                    <div style="color: gold; font-size: 16px; font-weight: bold;">🏆 WEEKLY STREAK COMPLETE! 🏆</div>
+                                    <div style="color: #fff; font-size: 12px; margin-top: 5px;">You're a dedication legend! Keep it going!</div>
+                                </div>
+                            ` : `
+                                <div style="color: #888; font-size: 12px; text-align: center;">
+                                    Come back tomorrow to continue your streak!
+                                </div>
+                            `}
+
+                            <button onclick="document.getElementById('login-streak-modal').remove()" style="width: 100%; margin-top: 20px; background: linear-gradient(90deg, #0ff, #00ff88); color: #000; border: none; padding: 15px; font-size: 16px; font-weight: bold; border-radius: 25px; cursor: pointer;">
+                                CONTINUE PLAYING
+                            </button>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            },
+
+            // Get current streak for HUD display
+            getStreak() {
+                return this.data.currentStreak;
+            }
+        };
+
+        // ============================================
         // v6.36: KILL REPLAY FLASH SYSTEM
         // Brief slow-mo replay of significant kills
         // Consensus feature from Round 3 strategy analysis
@@ -26800,6 +27032,607 @@
             streamPaused: false,    // When true, camera stops syncing
             hostGameMode: null      // Track host's current mode
         };
+
+        // v7.0: Public World Manager - First-Person-Is-Host System
+        const PublicWorldManager = {
+            REGISTRY_URL: 'https://raw.githubusercontent.com/kodywildfeuer/localFirstTools/main/data/public-worlds/registry.json',
+            registry: null,
+            currentWorld: null,
+            isHost: false,
+            hostPeerId: null,
+            participants: [],
+            hostQueue: [],
+            myPeer: null,
+            hostConnection: null,
+            hostPeer: null,
+
+            async loadRegistry() {
+                try {
+                    const response = await fetch(this.REGISTRY_URL + '?t=' + Date.now());
+                    this.registry = await response.json();
+                    console.log(`[PUBLIC WORLDS] Loaded ${this.registry.worlds.length} worlds`);
+                    return this.registry;
+                } catch (error) {
+                    console.error('[PUBLIC WORLDS] Failed to load registry:', error);
+                    return null;
+                }
+            },
+
+            async joinWorld(worldId, hostPeerId = null) {
+                if (!this.registry) await this.loadRegistry();
+                const worldConfig = this.registry?.worlds.find(w => w.id === worldId);
+                if (!worldConfig) {
+                    showNotification('World not found in registry', 'error');
+                    return false;
+                }
+
+                document.getElementById('loading').style.display = 'flex';
+                document.getElementById('loading').innerHTML = `
+                    <div style="text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 20px;">🌍</div>
+                        <div style="font-size: 24px; color: #0ff;">Loading Public World...</div>
+                        <div style="font-size: 18px; color: #fff; margin-top: 10px;">${worldConfig.name}</div>
+                        <div style="font-size: 14px; color: #888; margin-top: 5px;">${worldConfig.description}</div>
+                    </div>
+                `;
+
+                try {
+                    const seedResponse = await fetch(worldConfig.seedUrl + '?t=' + Date.now());
+                    const seedData = await seedResponse.json();
+                    this.currentWorld = worldId;
+
+                    if (hostPeerId) {
+                        console.log(`[PUBLIC WORLDS] Joining existing host: ${hostPeerId}`);
+                        await this.connectToHost(hostPeerId, seedData);
+                    } else {
+                        console.log(`[PUBLIC WORLDS] No host specified - BECOMING HOST`);
+                        await this.becomeHost(worldId, seedData);
+                    }
+                    return true;
+                } catch (error) {
+                    console.error('[PUBLIC WORLDS] Failed to load world:', error);
+                    showNotification('Failed to load world: ' + error.message, 'error');
+                    document.getElementById('loading').style.display = 'none';
+                    return false;
+                }
+            },
+
+            async becomeHost(worldId, seedData) {
+                this.isHost = true;
+                this.currentWorld = worldId;
+
+                this.hostPeer = new Peer(`levi-world-${worldId}-${Date.now()}`);
+
+                this.hostPeer.on('open', (id) => {
+                    this.hostPeerId = id;
+                    console.log(`[HOST] Now hosting world ${worldId} as ${id}`);
+
+                    this.applySeedData(seedData);
+                    this.hostQueue = [id];
+
+                    setTimeout(() => {
+                        this.showHostQRModal(worldId, id);
+                        showNotification(`🌍 HOSTING: ${seedData.config.name}`, 'success');
+                    }, 1000);
+                });
+
+                this.hostPeer.on('connection', (conn) => {
+                    this.handleNewParticipant(conn);
+                });
+
+                this.hostPeer.on('error', (err) => {
+                    console.error('[HOST] Peer error:', err);
+                    showNotification('Host error: ' + err.type, 'error');
+                });
+            },
+
+            async connectToHost(hostPeerId, seedData) {
+                this.isHost = false;
+                this.hostPeerId = hostPeerId;
+
+                this.myPeer = new Peer();
+
+                this.myPeer.on('open', (myId) => {
+                    console.log(`[JOINER] My peer ID: ${myId}`);
+
+                    const conn = this.myPeer.connect(hostPeerId, { reliable: true });
+
+                    conn.on('open', () => {
+                        console.log(`[JOINER] Connected to host!`);
+                        conn.send({ type: 'REQUEST_STATE' });
+                        conn.send({ type: 'JOIN_QUEUE', peerId: myId });
+                        showNotification(`🌍 Joined ${seedData.config.name}!`, 'success');
+                        this.applySeedData(seedData);
+                    });
+
+                    conn.on('data', (data) => {
+                        this.handleHostMessage(data, seedData);
+                    });
+
+                    conn.on('close', () => {
+                        console.log('[JOINER] Host disconnected!');
+                        this.handleHostDisconnect();
+                    });
+
+                    this.hostConnection = conn;
+                });
+
+                this.myPeer.on('error', (err) => {
+                    console.error('[JOINER] Peer error:', err);
+                    showNotification('Connection error: ' + err.type, 'error');
+                    this.becomeHost(this.currentWorld, seedData);
+                });
+            },
+
+            handleHostMessage(data, seedData) {
+                switch (data.type) {
+                    case 'WORLD_STATE':
+                        console.log('[JOINER] Received world state');
+                        this.hostQueue = data.hostQueue || [];
+                        break;
+                    case 'PARTICIPANT_UPDATE':
+                        console.log(`[JOINER] Participants: ${data.count}`);
+                        this.hostQueue = data.hostQueue || [];
+                        break;
+                    case 'NEW_HOST':
+                        console.log(`[JOINER] New host: ${data.hostPeerId}`);
+                        this.hostPeerId = data.hostPeerId;
+                        this.hostQueue = data.hostQueue || [];
+                        break;
+                }
+            },
+
+            handleHostDisconnect() {
+                console.log('[HOST MIGRATION] Host left - checking if we should become host');
+                this.hostQueue.shift();
+
+                if (this.hostQueue.length > 0 && this.hostQueue[0] === this.myPeer?.id) {
+                    console.log('[HOST MIGRATION] We are next in queue - BECOMING HOST');
+                    this.promoteToHost();
+                } else if (this.hostQueue.length > 0) {
+                    console.log(`[HOST MIGRATION] Reconnecting to new host: ${this.hostQueue[0]}`);
+                    showNotification('Host left - reconnecting...', 'warning');
+                } else {
+                    console.log('[HOST MIGRATION] No queue - BECOMING HOST');
+                    this.promoteToHost();
+                }
+            },
+
+            promoteToHost() {
+                this.isHost = true;
+                this.hostPeerId = this.myPeer.id;
+
+                this.myPeer.on('connection', (conn) => {
+                    this.handleNewParticipant(conn);
+                });
+
+                this.showHostQRModal(this.currentWorld, this.myPeer.id);
+                showNotification('👑 You are now the HOST!', 'warning');
+
+                this.broadcastToAll({
+                    type: 'NEW_HOST',
+                    hostPeerId: this.myPeer.id,
+                    hostQueue: this.hostQueue
+                });
+            },
+
+            handleNewParticipant(conn) {
+                console.log(`[HOST] New participant connecting: ${conn.peer}`);
+
+                this.participants.push({
+                    peerId: conn.peer,
+                    connection: conn,
+                    joinedAt: Date.now()
+                });
+                this.hostQueue.push(conn.peer);
+
+                conn.on('open', () => {
+                    conn.send({
+                        type: 'WORLD_STATE',
+                        state: this.getCurrentWorldState(),
+                        hostQueue: this.hostQueue
+                    });
+
+                    this.broadcastToAll({
+                        type: 'PARTICIPANT_UPDATE',
+                        count: this.participants.length + 1,
+                        hostQueue: this.hostQueue
+                    });
+
+                    showNotification(`👤 Player joined! (${this.participants.length + 1} in world)`, 'info');
+                });
+
+                conn.on('data', (data) => {
+                    if (data.type === 'REQUEST_STATE') {
+                        conn.send({
+                            type: 'WORLD_STATE',
+                            state: this.getCurrentWorldState(),
+                            hostQueue: this.hostQueue
+                        });
+                    }
+                });
+
+                conn.on('close', () => {
+                    this.handleParticipantLeave(conn.peer);
+                });
+            },
+
+            handleParticipantLeave(peerId) {
+                this.participants = this.participants.filter(p => p.peerId !== peerId);
+                this.hostQueue = this.hostQueue.filter(id => id !== peerId);
+
+                this.broadcastToAll({
+                    type: 'PARTICIPANT_UPDATE',
+                    count: this.participants.length + 1,
+                    hostQueue: this.hostQueue
+                });
+
+                showNotification(`👤 Player left (${this.participants.length + 1} in world)`, 'info');
+            },
+
+            broadcastToAll(data) {
+                this.participants.forEach(p => {
+                    try {
+                        p.connection.send(data);
+                    } catch (e) {
+                        console.error(`Failed to send to ${p.peerId}:`, e);
+                    }
+                });
+            },
+
+            getCurrentWorldState() {
+                return {
+                    worldId: this.currentWorld,
+                    timestamp: Date.now(),
+                    timeOfDay: typeof timeOfDay !== 'undefined' ? timeOfDay : 0.5
+                };
+            },
+
+            applySeedData(seedData) {
+                console.log('[WORLD] Applying seed data:', seedData.config.name);
+
+                if (typeof applyFullState === 'function') {
+                    applyFullState({
+                        type: 'fullState',
+                        worldSeed: seedData.terrain?.seed || seedData.worldId,
+                        civilization: {
+                            id: Math.floor(Math.random() * 1000),
+                            name: seedData.config.name,
+                            biome: seedData.config.biome || 'default'
+                        },
+                        world: {
+                            timeOfDay: seedData.config.timeOfDay || 0.5,
+                            player: { position: seedData.spawn?.position || { x: 0, y: 10, z: 0 } }
+                        },
+                        structures: seedData.structures || [],
+                        agents: seedData.agents || []
+                    });
+                }
+
+                document.getElementById('loading').style.display = 'none';
+            },
+
+            showHostQRModal(worldId, hostPeerId) {
+                const existingModal = document.getElementById('host-qr-modal');
+                if (existingModal) existingModal.remove();
+
+                const baseUrl = window.location.origin + window.location.pathname;
+                const joinUrl = `${baseUrl}?world=${worldId}&host=${hostPeerId}`;
+
+                const modal = document.createElement('div');
+                modal.id = 'host-qr-modal';
+                modal.innerHTML = `
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); display: flex; align-items: center; justify-content: center; z-index: 10000;">
+                        <div style="background: linear-gradient(135deg, #0a0a2a 0%, #1a1a4a 100%); border: 2px solid #0ff; border-radius: 20px; padding: 30px; text-align: center; max-width: 400px;">
+                            <h2 style="color: #0ff; margin: 0 0 5px 0;">🌍 YOU ARE HOSTING</h2>
+                            <div style="color: #fff; font-size: 18px; margin-bottom: 15px;">${worldId}</div>
+
+                            <div style="display: flex; justify-content: center; gap: 20px; margin: 15px 0;">
+                                <span style="color: #0f0; animation: pulse 1s infinite;">● LIVE</span>
+                                <span style="color: #888;">${this.participants.length + 1} in world</span>
+                            </div>
+
+                            <div style="background: #000; border-radius: 10px; padding: 10px; margin: 15px 0;">
+                                <canvas id="host-qr-canvas"></canvas>
+                            </div>
+
+                            <div style="display: flex; gap: 10px; margin: 15px 0;">
+                                <input type="text" value="${joinUrl}" readonly style="flex: 1; background: rgba(0,0,0,0.5); border: 1px solid #0ff; color: #fff; padding: 10px; border-radius: 5px; font-size: 11px;" onclick="this.select()">
+                                <button onclick="navigator.clipboard.writeText('${joinUrl}'); showNotification('Link copied!', 'success');" style="background: #0ff; color: #000; border: none; padding: 10px 15px; border-radius: 5px; cursor: pointer;">📋</button>
+                            </div>
+
+                            <div style="color: #888; font-size: 12px; margin: 15px 0;">
+                                Scan QR code or share link to invite others.<br>
+                                Your world is LIVE as long as you stay.
+                            </div>
+
+                            <button onclick="document.getElementById('host-qr-modal').remove();" style="background: linear-gradient(90deg, #0ff, #00ff88); color: #000; border: none; padding: 15px 30px; font-size: 16px; font-weight: bold; border-radius: 25px; cursor: pointer; margin-top: 10px;">
+                                Continue Playing
+                            </button>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+
+                setTimeout(() => {
+                    loadQRiousLibrary().then(() => {
+                        const canvas = document.getElementById('host-qr-canvas');
+                        if (canvas) {
+                            new window.QRious({
+                                element: canvas,
+                                value: joinUrl,
+                                size: 200,
+                                backgroundAlpha: 0,
+                                foreground: '#0ff',
+                                level: 'M'
+                            });
+                        }
+                    });
+                }, 100);
+            }
+        };
+
+        // v7.0: World Store - Browse and join public worlds
+        const WorldStore = {
+            async open() {
+                const registry = await PublicWorldManager.loadRegistry();
+                if (!registry) {
+                    showNotification('Failed to load world registry', 'error');
+                    return;
+                }
+
+                const modal = document.createElement('div');
+                modal.id = 'world-store';
+                modal.innerHTML = `
+                    <div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.95); display: flex; align-items: center; justify-content: center; z-index: 10000; overflow-y: auto;">
+                        <div style="background: linear-gradient(135deg, #0a0a2a 0%, #1a1a4a 100%); border: 2px solid #0ff; border-radius: 20px; padding: 30px; max-width: 800px; width: 90%; max-height: 90vh; overflow-y: auto;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                                <h2 style="color: #0ff; margin: 0;">🌌 PUBLIC WORLDS</h2>
+                                <button onclick="WorldStore.close()" style="background: none; border: none; color: #fff; font-size: 24px; cursor: pointer;">✕</button>
+                            </div>
+
+                            <div style="display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap;">
+                                <button class="world-tab active" onclick="WorldStore.showTab('featured')" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 10px 20px; border-radius: 20px; cursor: pointer;">Featured</button>
+                                <button class="world-tab" onclick="WorldStore.showTab('all')" style="background: rgba(255,255,255,0.1); border: 1px solid #666; color: #888; padding: 10px 20px; border-radius: 20px; cursor: pointer;">All Worlds</button>
+                            </div>
+
+                            <div id="world-store-grid" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 20px;">
+                                ${registry.worlds.map(w => this.renderWorldCard(w)).join('')}
+                            </div>
+                        </div>
+                    </div>
+                `;
+
+                document.body.appendChild(modal);
+            },
+
+            renderWorldCard(world) {
+                return `
+                    <div onclick="WorldStore.joinWorld('${world.id}')" style="background: rgba(0,0,0,0.5); border: 1px solid ${world.featured ? '#0ff' : '#333'}; border-radius: 15px; padding: 20px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.borderColor='#0ff'; this.style.transform='translateY(-3px)';" onmouseout="this.style.borderColor='${world.featured ? '#0ff' : '#333'}'; this.style.transform='translateY(0)';">
+                        ${world.featured ? '<span style="background: #0ff; color: #000; padding: 3px 8px; border-radius: 10px; font-size: 10px; font-weight: bold; position: absolute; top: 10px; right: 10px;">★ FEATURED</span>' : ''}
+                        <div style="font-size: 24px; margin-bottom: 10px;">${this.getWorldIcon(world.category)}</div>
+                        <div style="color: #fff; font-size: 18px; font-weight: bold; margin-bottom: 5px;">${world.name}</div>
+                        <div style="color: #888; font-size: 12px; margin-bottom: 10px;">by ${world.author}</div>
+                        <div style="color: #aaa; font-size: 13px; margin-bottom: 15px; line-height: 1.4;">${world.description}</div>
+                        <div style="display: flex; gap: 15px; color: #666; font-size: 11px;">
+                            <span>👥 ${world.totalVisitors || 0}</span>
+                            <span>⚡ ${world.temporalContributions || 0}</span>
+                        </div>
+                        <button style="width: 100%; margin-top: 15px; background: linear-gradient(90deg, #0ff, #00ff88); color: #000; border: none; padding: 12px; border-radius: 20px; font-weight: bold; cursor: pointer;">JOIN WORLD →</button>
+                    </div>
+                `;
+            },
+
+            getWorldIcon(category) {
+                const icons = {
+                    exploration: '🌋',
+                    social: '👥',
+                    creative: '🎨',
+                    challenge: '⚔️',
+                    story: '📖'
+                };
+                return icons[category] || '🌍';
+            },
+
+            async joinWorld(worldId) {
+                this.close();
+                await PublicWorldManager.joinWorld(worldId);
+            },
+
+            close() {
+                document.getElementById('world-store')?.remove();
+            },
+
+            showTab(tab) {
+                // Future: filter worlds by tab
+                console.log('Showing tab:', tab);
+            }
+        };
+
+        // ============================================
+        // v7.0: CONNECTION HEARTBEAT SYSTEM
+        // P2P connection resilience with auto-reconnect
+        // Consensus feature from 8-Strategy Analysis (9/10 impact)
+        // ============================================
+        const ConnectionHeartbeat = {
+            HEARTBEAT_INTERVAL: 2000,     // Send ping every 2 seconds
+            TIMEOUT_THRESHOLD: 6000,      // Consider dead after 6 seconds
+            MAX_RECONNECT_ATTEMPTS: 3,
+            RECONNECT_DELAYS: [1000, 2000, 4000], // Exponential backoff
+
+            connections: new Map(), // peerId -> { lastPing, latency, status, reconnectAttempts }
+            heartbeatTimer: null,
+            isRunning: false,
+
+            start() {
+                if (this.isRunning) return;
+                this.isRunning = true;
+                this.heartbeatTimer = setInterval(() => this.tick(), this.HEARTBEAT_INTERVAL);
+                console.log('[HEARTBEAT] System started');
+            },
+
+            stop() {
+                if (this.heartbeatTimer) {
+                    clearInterval(this.heartbeatTimer);
+                    this.heartbeatTimer = null;
+                }
+                this.isRunning = false;
+                this.connections.clear();
+                console.log('[HEARTBEAT] System stopped');
+            },
+
+            // Register a connection to monitor
+            register(peerId, connection) {
+                this.connections.set(peerId, {
+                    connection,
+                    lastPing: Date.now(),
+                    lastPong: Date.now(),
+                    latency: 0,
+                    status: 'connected',
+                    reconnectAttempts: 0
+                });
+                console.log(`[HEARTBEAT] Registered peer: ${peerId}`);
+            },
+
+            // Unregister a connection
+            unregister(peerId) {
+                this.connections.delete(peerId);
+                console.log(`[HEARTBEAT] Unregistered peer: ${peerId}`);
+            },
+
+            // Main heartbeat tick
+            tick() {
+                const now = Date.now();
+
+                this.connections.forEach((data, peerId) => {
+                    // Check for timeout
+                    if (now - data.lastPong > this.TIMEOUT_THRESHOLD) {
+                        if (data.status === 'connected') {
+                            console.log(`[HEARTBEAT] Connection timeout: ${peerId}`);
+                            data.status = 'disconnected';
+                            this.handleDisconnect(peerId, data);
+                        }
+                        return;
+                    }
+
+                    // Send ping
+                    if (data.connection && data.connection.open) {
+                        try {
+                            data.connection.send({
+                                type: 'HEARTBEAT_PING',
+                                timestamp: now
+                            });
+                            data.lastPing = now;
+                        } catch (e) {
+                            console.warn(`[HEARTBEAT] Failed to ping ${peerId}:`, e);
+                        }
+                    }
+                });
+
+                // Update UI
+                this.updateUI();
+            },
+
+            // Handle received pong
+            receivePong(peerId, timestamp) {
+                const data = this.connections.get(peerId);
+                if (data) {
+                    data.lastPong = Date.now();
+                    data.latency = Date.now() - timestamp;
+                    data.status = 'connected';
+                    data.reconnectAttempts = 0;
+                }
+            },
+
+            // Handle received ping (respond with pong)
+            receivePing(connection, timestamp) {
+                try {
+                    connection.send({
+                        type: 'HEARTBEAT_PONG',
+                        timestamp
+                    });
+                } catch (e) {
+                    console.warn('[HEARTBEAT] Failed to send pong:', e);
+                }
+            },
+
+            // Handle disconnection with reconnect attempts
+            handleDisconnect(peerId, data) {
+                if (data.reconnectAttempts >= this.MAX_RECONNECT_ATTEMPTS) {
+                    console.log(`[HEARTBEAT] Max reconnect attempts reached for ${peerId}`);
+                    showNotification(`Lost connection to ${peerId.substring(0, 8)}...`, 'error');
+                    this.unregister(peerId);
+
+                    // Trigger host migration if needed
+                    if (PublicWorldManager.hostPeerId === peerId) {
+                        PublicWorldManager.handleHostDisconnect();
+                    }
+                    return;
+                }
+
+                const delay = this.RECONNECT_DELAYS[data.reconnectAttempts] || 4000;
+                data.reconnectAttempts++;
+                data.status = 'reconnecting';
+
+                console.log(`[HEARTBEAT] Reconnect attempt ${data.reconnectAttempts} for ${peerId} in ${delay}ms`);
+                showNotification(`Connection unstable... retrying (${data.reconnectAttempts}/${this.MAX_RECONNECT_ATTEMPTS})`, 'warning');
+
+                setTimeout(() => {
+                    this.attemptReconnect(peerId, data);
+                }, delay);
+            },
+
+            attemptReconnect(peerId, data) {
+                // For now, just check if connection came back
+                if (data.connection && data.connection.open) {
+                    data.lastPong = Date.now();
+                    data.status = 'connected';
+                    data.reconnectAttempts = 0;
+                    showNotification('Connection restored!', 'success');
+                } else {
+                    // Still disconnected, try again
+                    this.handleDisconnect(peerId, data);
+                }
+            },
+
+            // Update connection status UI
+            updateUI() {
+                const statusEl = document.getElementById('connection-status');
+                if (!statusEl) return;
+
+                let worstStatus = 'good';
+                let totalLatency = 0;
+                let count = 0;
+
+                this.connections.forEach((data) => {
+                    if (data.status === 'disconnected' || data.status === 'reconnecting') {
+                        worstStatus = 'bad';
+                    } else if (data.latency > 200 && worstStatus !== 'bad') {
+                        worstStatus = 'medium';
+                    }
+                    totalLatency += data.latency;
+                    count++;
+                });
+
+                const avgLatency = count > 0 ? Math.round(totalLatency / count) : 0;
+
+                const colors = { good: '#0f0', medium: '#ff0', bad: '#f00' };
+                statusEl.style.color = colors[worstStatus];
+                statusEl.innerHTML = count > 0 ? `${avgLatency}ms` : '';
+            },
+
+            // Get connection quality for a peer (0-1)
+            getQuality(peerId) {
+                const data = this.connections.get(peerId);
+                if (!data || data.status !== 'connected') return 0;
+                // Quality based on latency: <50ms = 1.0, >500ms = 0.1
+                return Math.max(0.1, 1 - (data.latency / 500));
+            }
+        };
+
+        // Expose globally
+        window.ConnectionHeartbeat = ConnectionHeartbeat;
 
         // v5.5: Autonomous Exploration System
         let autoExplore = {
@@ -47299,6 +48132,69 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             renderer.outputColorSpace = THREE.SRGBColorSpace;
             document.getElementById('container').appendChild(renderer.domElement);
 
+            // v7.0: Bloom Effect System (8-Strategy Consensus - Visual Polish 9/10)
+            // Uses CSS filter for glow effect on canvas - performant and no dependencies
+            const BloomSystem = {
+                enabled: !isMobileDevice, // Disable on mobile for performance
+                intensity: 0,
+                targetIntensity: 0,
+                transitionSpeed: 0.05,
+
+                // Contexts that should have bloom
+                contexts: {
+                    galaxy: { base: 0.3, stars: true },
+                    hyperspace: { base: 0.8 },
+                    combat: { base: 0.15, onHit: 0.4 },
+                    magic: { base: 0.5 }
+                },
+
+                update(context, boost = 0) {
+                    if (!this.enabled) return;
+
+                    const ctx = this.contexts[context] || { base: 0 };
+                    this.targetIntensity = Math.min(1, ctx.base + boost);
+
+                    // Smooth transition
+                    this.intensity += (this.targetIntensity - this.intensity) * this.transitionSpeed;
+
+                    // Apply to canvas
+                    if (renderer && renderer.domElement) {
+                        const blur = this.intensity * 2;
+                        const brightness = 1 + this.intensity * 0.3;
+                        const saturate = 1 + this.intensity * 0.2;
+
+                        if (this.intensity > 0.05) {
+                            renderer.domElement.style.filter = `brightness(${brightness}) saturate(${saturate})`;
+                        } else {
+                            renderer.domElement.style.filter = '';
+                        }
+                    }
+                },
+
+                // Flash effect for impacts/abilities
+                flash(intensity = 0.5, duration = 150) {
+                    if (!this.enabled) return;
+
+                    const originalTarget = this.targetIntensity;
+                    this.targetIntensity = Math.min(1, this.targetIntensity + intensity);
+
+                    setTimeout(() => {
+                        this.targetIntensity = originalTarget;
+                    }, duration);
+                },
+
+                // Toggle for settings
+                toggle(enabled) {
+                    this.enabled = enabled;
+                    if (!enabled && renderer && renderer.domElement) {
+                        renderer.domElement.style.filter = '';
+                    }
+                }
+            };
+
+            // Expose globally for other systems to trigger bloom
+            window.BloomSystem = BloomSystem;
+
             // Initialize floater pool
             for (let i = 0; i < MAX_FLOATERS; i++) {
                 const el = document.createElement('div');
@@ -47487,6 +48383,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.36: Initialize Round 3 consensus systems
             personalRecords.init();
             dailyChallenges.init();
+
+            // v7.0: Initialize Login Streak Calendar (8-Strategy Consensus)
+            LoginStreakCalendar.init();
 
             // Autosave
             setInterval(() => {
@@ -56211,6 +57110,32 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 console.log('Using world seed from URL:', multiplayerState.worldSeed);
             }
 
+            // v7.0: Public World mode - First-Person-Is-Host system
+            const publicWorldId = params.get('world');
+            const publicHostId = params.get('host');
+
+            if (publicWorldId) {
+                console.log('[PUBLIC WORLD] Loading world:', publicWorldId, 'host:', publicHostId || 'auto');
+
+                // Show loading state
+                document.getElementById('loading').style.display = 'flex';
+                document.getElementById('loading').innerHTML = `
+                    <div style="text-align: center;">
+                        <div style="font-size: 48px; margin-bottom: 20px;">🌍</div>
+                        <div style="font-size: 24px; color: #0ff;">Entering Public World...</div>
+                        <div style="font-size: 14px; color: #888; margin-top: 10px;">${publicWorldId}</div>
+                    </div>
+                `;
+
+                showNotification('🌍 PUBLIC WORLD: Connecting...', 'info');
+
+                // Load registry then join world
+                PublicWorldManager.loadRegistry().then(() => {
+                    PublicWorldManager.joinWorld(publicWorldId, publicHostId);
+                });
+                return; // Don't continue to other multiplayer modes
+            }
+
             // v6.85: Ant Farm spectator mode - join as spectator but auto-enable ant farm view
             if (antfarmId) {
                 console.log('ANT FARM MODE: Connecting to host:', antfarmId);
@@ -61409,6 +62334,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             TimeRewind.update(time);
 
             if(mode === 'galaxy') {
+                // v7.0: Bloom effect for galaxy view (8-Strategy Consensus)
+                if (window.BloomSystem) BloomSystem.update('galaxy');
+
                 // v6.27: ORBITAL MECHANICS - each star orbits the central black hole
                 // Replace simple rotation with Keplerian orbits
                 if (galaxyGroup && civilizations.length > 0) {
