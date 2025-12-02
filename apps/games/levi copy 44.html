@@ -23756,10 +23756,6 @@
                     statusText += ` - ${DEFENDER_AI.state.toUpperCase()}`;
                 } else if (AI_BEHAVIOR.current === 'miner' && MINER_AI.state) {
                     statusText += ` - ${MINER_AI.state.toUpperCase()}`;
-                } else if (AI_BEHAVIOR.current === 'terraformer' && TERRAFORMER_AI.state) {
-                    statusText += ` - ${TERRAFORMER_AI.state.toUpperCase()}`;
-                } else if (AI_BEHAVIOR.current === 'builder' && BUILDER_AI.state) {
-                    statusText += ` - ${BUILDER_AI.state.toUpperCase()}`;
                 }
 
                 status.textContent = statusText;
@@ -24014,189 +24010,14 @@
         }
 
         // ============================================
-        // v6.82: TERRAFORMER AI - Smooth terrain like agents
-        // Uses same logic as agent terraformers: scan, smooth, prepare sites
-        // ============================================
-        const TERRAFORMER_AI = {
-            state: 'idle',  // idle, scanning, smoothing, moving
-            targetSite: null,
-            lastDecisionTime: 0,
-            decisionInterval: 300,
-            smoothRadius: 3,  // Larger radius for player (agents use 2)
-            lastNotification: 0,  // v6.82: Throttle notifications
-            notificationCooldown: 3000,  // Only show same notification every 3s
-            stats: { sitesSmoothed: 0, beaconsPlaced: 0 }
-        };
-
-        // Calculate terrain roughness in an area (same algorithm as agents)
-        function calculateTerrainRoughness(cx, cz, radius) {
-            let heights = [];
-            for (let dx = -radius; dx <= radius; dx++) {
-                for (let dz = -radius; dz <= radius; dz++) {
-                    const tx = cx + dx, tz = cz + dz;
-                    if (worldState.terrain[tx] && worldState.terrain[tx][tz] !== undefined && worldState.terrain[tx][tz] > 0) {
-                        heights.push(worldState.terrain[tx][tz]);
-                    }
-                }
-            }
-            if (heights.length < 2) return 0;
-            const avg = heights.reduce((a, b) => a + b, 0) / heights.length;
-            const variance = heights.reduce((sum, h) => sum + Math.pow(h - avg, 2), 0) / heights.length;
-            return Math.sqrt(variance);
-        }
-
-        // Smooth terrain at player position (same algorithm as agents)
-        function smoothTerrainAtPosition(worldX, worldZ) {
-            const tileX = Math.floor((worldX / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-            const tileZ = Math.floor((worldZ / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-            const smoothRadius = TERRAFORMER_AI.smoothRadius;
-
-            let totalHeight = 0, count = 0;
-            let heightMap = [];
-
-            for (let dx = -smoothRadius; dx <= smoothRadius; dx++) {
-                for (let dz = -smoothRadius; dz <= smoothRadius; dz++) {
-                    const tx = tileX + dx, tz = tileZ + dz;
-                    if (worldState.terrain[tx] && worldState.terrain[tx][tz] !== undefined && worldState.terrain[tx][tz] > 0) {
-                        const h = worldState.terrain[tx][tz];
-                        totalHeight += h;
-                        count++;
-                        heightMap.push({ tx, tz, h });
-                    }
-                }
-            }
-
-            if (count > 0) {
-                const avgHeight = totalHeight / count;
-                for (const cell of heightMap) {
-                    // Smooth 80% toward average (same as agents)
-                    worldState.terrain[cell.tx][cell.tz] = cell.h + (avgHeight - cell.h) * 0.8;
-                }
-                return true;
-            }
-            return false;
-        }
-
-        // Find rough terrain to smooth
-        function findRoughTerrainNearby(player, searchRadius) {
-            const playerTileX = Math.floor((player.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-            const playerTileZ = Math.floor((player.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-
-            let bestSite = null;
-            let highestRoughness = 0.3; // Minimum threshold
-
-            // Scan in a spiral pattern from player
-            for (let dist = 5; dist < searchRadius; dist += 5) {
-                for (let angle = 0; angle < Math.PI * 2; angle += Math.PI / 4) {
-                    const checkX = playerTileX + Math.floor(Math.cos(angle) * dist);
-                    const checkZ = playerTileZ + Math.floor(Math.sin(angle) * dist);
-
-                    const roughness = calculateTerrainRoughness(checkX, checkZ, 3);
-                    if (roughness > highestRoughness) {
-                        highestRoughness = roughness;
-                        bestSite = {
-                            tileX: checkX,
-                            tileZ: checkZ,
-                            worldX: (checkX - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
-                            worldZ: (checkZ - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
-                            roughness: roughness
-                        };
-                    }
-                }
-            }
-            return bestSite;
-        }
-
-        function runTerraformerAI(dt) {
-            if (AI_BEHAVIOR.current !== 'terraformer' || mode !== 'world' || !worldState.player) return false;
-
-            const player = worldState.player;
-            const now = performance.now();
-
-            if (now - TERRAFORMER_AI.lastDecisionTime < TERRAFORMER_AI.decisionInterval) return true;
-            TERRAFORMER_AI.lastDecisionTime = now;
-
-            const playerTileX = Math.floor((player.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-            const playerTileZ = Math.floor((player.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
-
-            // Check roughness at current position
-            const currentRoughness = calculateTerrainRoughness(playerTileX, playerTileZ, TERRAFORMER_AI.smoothRadius);
-
-            // Priority 1: Smooth rough terrain at current location
-            if (currentRoughness > 0.2) {
-                TERRAFORMER_AI.state = 'smoothing';
-                if (smoothTerrainAtPosition(player.position.x, player.position.z)) {
-                    TERRAFORMER_AI.stats.sitesSmoothed++;
-                    showNotification(`🚜 Smoothed terrain (roughness: ${currentRoughness.toFixed(2)})`, 'info');
-
-                    // Create visual effect
-                    if (typeof spawnTerraformParticles === 'function') {
-                        spawnTerraformParticles(player.position);
-                    }
-
-                    // Place construction beacon if terrain is now smooth enough
-                    const newRoughness = calculateTerrainRoughness(playerTileX, playerTileZ, TERRAFORMER_AI.smoothRadius);
-                    if (newRoughness < 0.15) {
-                        // Initialize construction sites array if needed
-                        if (!worldState.constructionSites) worldState.constructionSites = [];
-
-                        // Check if a beacon already exists nearby
-                        const nearbyBeacon = worldState.constructionSites.find(site =>
-                            Math.abs(site.position.x - player.position.x) < 10 &&
-                            Math.abs(site.position.z - player.position.z) < 10
-                        );
-
-                        if (!nearbyBeacon) {
-                            worldState.constructionSites.push({
-                                position: player.position.clone(),
-                                createdAt: now,
-                                claimed: false,
-                                buildProgress: 0,
-                                type: 'terraformed'
-                            });
-                            TERRAFORMER_AI.stats.beaconsPlaced++;
-                            showNotification('📍 Construction beacon placed!', 'success');
-                        }
-                    }
-                }
-                return true;
-            }
-
-            // Priority 2: Find rough terrain nearby
-            TERRAFORMER_AI.state = 'scanning';
-            const roughSite = findRoughTerrainNearby(player, 50);
-
-            if (roughSite) {
-                TERRAFORMER_AI.targetSite = roughSite;
-                TERRAFORMER_AI.state = 'moving';
-                worldState.target = new THREE.Vector3(roughSite.worldX, 0, roughSite.worldZ);
-                return true;
-            }
-
-            // Priority 3: Random exploration to find rough terrain
-            TERRAFORMER_AI.state = 'exploring';
-            const wanderAngle = Math.random() * Math.PI * 2;
-            const wanderDist = 20 + Math.random() * 30;
-            worldState.target = new THREE.Vector3(
-                player.position.x + Math.cos(wanderAngle) * wanderDist,
-                0,
-                player.position.z + Math.sin(wanderAngle) * wanderDist
-            );
-
-            return true;
-        }
-
-        // ============================================
-        // v6.82: BUILDER AI - Enhanced to match agent capabilities
-        // Seeks construction beacons, builds with 100% efficiency
+        // v6.68: BUILDER AI - Auto-construct structures
         // ============================================
         const BUILDER_AI = {
-            state: 'idle',  // idle, seeking, building, repairing, gathering
-            currentSite: null,
+            state: 'idle',  // idle, gathering, building, repairing
+            currentProject: null,
             lastDecisionTime: 0,
-            decisionInterval: 400,
-            buildRange: 5,
-            stats: { structuresBuilt: 0, repairsDone: 0, sitesCompleted: 0 }
+            decisionInterval: 500,
+            stats: { structuresBuilt: 0, repairsDone: 0 }
         };
 
         function runBuilderAI(dt) {
@@ -24208,74 +24029,21 @@
             if (now - BUILDER_AI.lastDecisionTime < BUILDER_AI.decisionInterval) return true;
             BUILDER_AI.lastDecisionTime = now;
 
-            // Priority 1: Build at construction beacons (placed by terraformer)
-            if (worldState.constructionSites && worldState.constructionSites.length > 0) {
-                // Find unclaimed or self-claimed sites
-                const availableSites = worldState.constructionSites.filter(site =>
-                    !site.claimed || site.claimed === 'player'
-                );
-
-                if (availableSites.length > 0) {
-                    // Sort by distance
-                    availableSites.sort((a, b) => {
-                        const distA = player.position.distanceTo(a.position);
-                        const distB = player.position.distanceTo(b.position);
-                        return distA - distB;
-                    });
-
-                    const targetSite = availableSites[0];
-                    const distToSite = player.position.distanceTo(targetSite.position);
-
-                    if (distToSite <= BUILDER_AI.buildRange) {
-                        // At site - BUILD!
-                        BUILDER_AI.state = 'building';
-                        targetSite.claimed = 'player';
-
-                        if (!targetSite.buildProgress) targetSite.buildProgress = 0;
-                        targetSite.buildProgress += 15; // Faster building than agents
-
-                        if (targetSite.buildProgress >= 100) {
-                            // Construction complete!
-                            BUILDER_AI.stats.sitesCompleted++;
-                            showNotification('🏗️ Construction complete! 100% efficiency!', 'success');
-
-                            // Create actual structure at site
-                            if (typeof queueConstruction === 'function') {
-                                const structures = ['turret', 'wall', 'barracks'];
-                                const structureType = structures[Math.floor(Math.random() * structures.length)];
-                                queueConstruction(structureType, targetSite.position);
-                                BUILDER_AI.stats.structuresBuilt++;
-                            }
-
-                            // Remove beacon
-                            worldState.constructionSites = worldState.constructionSites.filter(s => s !== targetSite);
-                        } else {
-                            showNotification(`🔧 Building... ${targetSite.buildProgress}%`, 'info');
-                        }
-                        return true;
-                    } else {
-                        // Move to site
-                        BUILDER_AI.state = 'seeking';
-                        BUILDER_AI.currentSite = targetSite;
-                        worldState.target = targetSite.position.clone();
-                        return true;
-                    }
-                }
-            }
-
-            // Priority 2: Check for damaged structures to repair
+            // Priority 1: Check if we can build any structures
             if (typeof baseBuildingState !== 'undefined' && baseBuildingState.buildings) {
+                // Check for structures that need repairing
                 for (const building of baseBuildingState.buildings) {
                     if (building.hp < building.maxHp * 0.5) {
                         BUILDER_AI.state = 'repairing';
+                        // Move to building and repair
                         const dist = player.position.distanceTo(building.mesh.position);
-                        if (dist > BUILDER_AI.buildRange) {
+                        if (dist > 5) {
                             worldState.target = building.mesh.position.clone();
                         } else {
+                            // Try to repair
                             if (typeof repairBuilding === 'function') {
                                 repairBuilding(building);
                                 BUILDER_AI.stats.repairsDone++;
-                                showNotification('🔧 Repairing structure...', 'info');
                             }
                         }
                         return true;
@@ -24283,11 +24051,48 @@
                 }
             }
 
-            // Priority 3: If no beacons exist, gather resources
-            // (Encourages using terraformer first to prepare sites)
+            // Priority 2: Auto-queue construction if we have resources
+            if (typeof baseBuildingState !== 'undefined' && typeof queueConstruction === 'function') {
+                // Check what we can build
+                const buildPriority = ['turret', 'wall', 'barracks', 'resourceNode'];
+
+                for (const buildingType of buildPriority) {
+                    // Check if we have enough resources (simplified check)
+                    const hasResources = getItemCount('Ore') >= 10 && getItemCount('Log') >= 5;
+
+                    if (hasResources && baseBuildingState.buildings.length < 10) {
+                        // Find a good spot to build
+                        const shipPos = SHIP_STATE.mesh ? SHIP_STATE.mesh.position : new THREE.Vector3(0, 0, 0);
+                        const buildAngle = Math.random() * Math.PI * 2;
+                        const buildDist = 15 + Math.random() * 20;
+                        const buildPos = new THREE.Vector3(
+                            shipPos.x + Math.cos(buildAngle) * buildDist,
+                            0,
+                            shipPos.z + Math.sin(buildAngle) * buildDist
+                        );
+
+                        BUILDER_AI.state = 'building';
+
+                        // Move to build site
+                        const distToBuildSite = player.position.distanceTo(buildPos);
+                        if (distToBuildSite > 5) {
+                            worldState.target = buildPos;
+                        } else {
+                            // Try to build
+                            if (typeof queueConstruction === 'function') {
+                                queueConstruction(buildingType, buildPos);
+                                BUILDER_AI.stats.structuresBuilt++;
+                                showNotification(`🔨 Building ${buildingType}!`, 'info');
+                            }
+                        }
+                        return true;
+                    }
+                }
+            }
+
+            // Priority 3: Gather resources for building
             BUILDER_AI.state = 'gathering';
-            showNotification('🔍 No construction sites - gathering resources', 'info');
-            return runMinerAI(dt);
+            return runMinerAI(dt);  // Use miner logic to gather
         }
 
         // ============================================
@@ -24501,8 +24306,6 @@
                     return runMinerAI(dt);
                 case 'defender':
                     return runDefenderAI(dt);
-                case 'terraformer':
-                    return runTerraformerAI(dt);
                 case 'builder':
                     return runBuilderAI(dt);
                 case 'hunter':
