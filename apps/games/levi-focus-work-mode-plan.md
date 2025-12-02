@@ -2112,3 +2112,818 @@ obsidianArchive: {
 **Total Estimated Lines**: ~890
 
 These 10 features transform Focus Work Mode from a productivity timer into a LEGENDARY experience that players will talk about for years.
+
+---
+
+# PHASE 5: PUBLIC WORLD REGISTRY & DYNAMIC HOSTING
+
+## Core Architecture: First-Person-Is-Host Pattern
+
+**The Problem**: How do public worlds work when there's no central server?
+
+**The Solution**:
+1. GitHub hosts the "seed" world configuration (static template)
+2. First person to visit a world becomes the HOST
+3. QR codes SHIFT to point to the current HOST's PeerJS ID
+4. If HOST leaves, the next person in line becomes HOST
+5. World state syncs from HOST to all joiners in real-time
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    PUBLIC WORLD FLOW                         │
+├─────────────────────────────────────────────────────────────┤
+│                                                              │
+│  ┌──────────────┐         ┌──────────────┐                  │
+│  │   GitHub     │         │   Player A   │                  │
+│  │   (Seed)     │ ──────▶ │   (First)    │                  │
+│  │              │         │   = HOST     │                  │
+│  └──────────────┘         └──────┬───────┘                  │
+│                                  │                           │
+│                                  │ Generates QR              │
+│                                  │ with HOST PeerID          │
+│                                  ▼                           │
+│                          ┌──────────────┐                   │
+│                          │   QR Code    │                   │
+│                          │ ?host=abc123 │                   │
+│                          └──────┬───────┘                   │
+│                                 │                            │
+│               ┌─────────────────┼─────────────────┐         │
+│               │                 │                 │         │
+│               ▼                 ▼                 ▼         │
+│        ┌──────────┐      ┌──────────┐      ┌──────────┐    │
+│        │ Player B │      │ Player C │      │ Player D │    │
+│        │ (Joiner) │      │ (Joiner) │      │ (Joiner) │    │
+│        └──────────┘      └──────────┘      └──────────┘    │
+│                                                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 5.1 Public World Registry Schema
+
+**Location**: `data/public-worlds/registry.json` on GitHub
+
+```json
+{
+    "version": "1.0.0",
+    "lastUpdated": "2024-12-02T00:00:00Z",
+    "worlds": [
+        {
+            "id": "volcano-prime",
+            "name": "Volcano Prime",
+            "author": "kodywildfeuer",
+            "description": "A hostile volcanic world with ancient ruins",
+            "thumbnail": "https://raw.githubusercontent.com/.../volcano-thumb.png",
+            "seedUrl": "https://raw.githubusercontent.com/.../volcano-prime.json",
+            "category": "exploration",
+            "tags": ["volcanic", "ruins", "challenging"],
+            "created": "2024-12-01T00:00:00Z",
+            "featured": true,
+            "temporalContributions": 0,
+            "totalVisitors": 0,
+            "currentHosts": []
+        }
+    ],
+    "categories": ["exploration", "social", "creative", "challenge", "story"],
+    "featured": ["volcano-prime", "crystal-caves", "void-station"]
+}
+```
+
+---
+
+## 5.2 World Seed Schema
+
+**Each world has a seed JSON that defines its initial state:**
+
+```json
+{
+    "worldId": "volcano-prime",
+    "version": "1.0.0",
+    "config": {
+        "name": "Volcano Prime",
+        "biome": "volcanic",
+        "gravity": 1.0,
+        "timeOfDay": 0.75,
+        "weatherEnabled": true,
+        "pvpEnabled": false,
+        "maxPlayers": 16
+    },
+    "spawn": {
+        "position": { "x": 0, "y": 10, "z": 0 },
+        "rotation": { "y": 0 }
+    },
+    "terrain": {
+        "seed": "volcano-2024",
+        "heightScale": 50,
+        "features": ["lava-pools", "obsidian-spires", "ash-clouds"]
+    },
+    "structures": [
+        { "type": "ancient-temple", "position": { "x": 100, "y": 0, "z": 200 } },
+        { "type": "portal-gate", "position": { "x": -50, "y": 0, "z": 0 } }
+    ],
+    "agents": [
+        { "type": "guardian", "position": { "x": 100, "y": 0, "z": 200 }, "patrol": true }
+    ],
+    "lore": {
+        "title": "The Burning Archives",
+        "fragments": [
+            "Long ago, this world was a paradise...",
+            "The Architects came, seeking forbidden knowledge...",
+            "Now only ashes remain, and the Guardians watch."
+        ]
+    }
+}
+```
+
+---
+
+## 5.3 Dynamic Host Assignment System
+
+```javascript
+const PublicWorldManager = {
+    REGISTRY_URL: 'https://raw.githubusercontent.com/kodywildfeuer/localFirstTools/main/data/public-worlds/registry.json',
+
+    currentWorld: null,
+    isHost: false,
+    hostPeerId: null,
+    participants: [],
+    hostQueue: [], // Ordered list of participants for host succession
+
+    // Load world registry from GitHub
+    async loadRegistry() {
+        try {
+            const response = await fetch(this.REGISTRY_URL + '?t=' + Date.now());
+            this.registry = await response.json();
+            console.log(`[PUBLIC WORLDS] Loaded ${this.registry.worlds.length} worlds`);
+            return this.registry;
+        } catch (error) {
+            console.error('[PUBLIC WORLDS] Failed to load registry:', error);
+            return null;
+        }
+    },
+
+    // Join a public world
+    async joinWorld(worldId, hostPeerId = null) {
+        const worldConfig = this.registry.worlds.find(w => w.id === worldId);
+        if (!worldConfig) {
+            showNotification('World not found', 'error');
+            return false;
+        }
+
+        // Load seed data from GitHub
+        const seedResponse = await fetch(worldConfig.seedUrl);
+        const seedData = await seedResponse.json();
+
+        if (hostPeerId) {
+            // Someone is already hosting - join them
+            console.log(`[PUBLIC WORLDS] Joining existing host: ${hostPeerId}`);
+            await this.connectToHost(hostPeerId, seedData);
+        } else {
+            // No host specified - check if anyone is hosting
+            const activeHost = await this.discoverActiveHost(worldId);
+
+            if (activeHost) {
+                console.log(`[PUBLIC WORLDS] Found active host: ${activeHost}`);
+                await this.connectToHost(activeHost, seedData);
+            } else {
+                // NO ONE IS HOSTING - WE BECOME THE HOST
+                console.log(`[PUBLIC WORLDS] No host found - BECOMING HOST`);
+                await this.becomeHost(worldId, seedData);
+            }
+        }
+
+        return true;
+    },
+
+    // BECOME THE HOST of a world
+    async becomeHost(worldId, seedData) {
+        this.isHost = true;
+        this.currentWorld = worldId;
+
+        // Initialize PeerJS as host
+        this.hostPeer = new Peer(`levi-world-${worldId}-${Date.now()}`);
+
+        this.hostPeer.on('open', (id) => {
+            this.hostPeerId = id;
+            console.log(`[HOST] Now hosting world ${worldId} as ${id}`);
+
+            // Apply seed data to create world
+            this.applySeedData(seedData);
+
+            // Generate QR code with OUR peer ID
+            this.generateHostQR(worldId, id);
+
+            // Announce host status
+            this.speak(`You are now the HOST of ${seedData.config.name}. Share the QR code to invite others!`);
+
+            showNotification(`🌍 HOSTING: ${seedData.config.name}`, 'success');
+        });
+
+        // Listen for joiners
+        this.hostPeer.on('connection', (conn) => {
+            this.handleNewParticipant(conn);
+        });
+
+        // Add self to host queue (position 0)
+        this.hostQueue = [this.hostPeerId];
+    },
+
+    // Connect to an existing host
+    async connectToHost(hostPeerId, seedData) {
+        this.isHost = false;
+        this.hostPeerId = hostPeerId;
+
+        // Create our peer
+        this.myPeer = new Peer();
+
+        this.myPeer.on('open', (myId) => {
+            console.log(`[JOINER] My peer ID: ${myId}`);
+
+            // Connect to host
+            const conn = this.myPeer.connect(hostPeerId);
+
+            conn.on('open', () => {
+                console.log(`[JOINER] Connected to host!`);
+
+                // Request current world state from host
+                conn.send({ type: 'REQUEST_STATE' });
+
+                // Add ourselves to host queue
+                conn.send({ type: 'JOIN_QUEUE', peerId: myId });
+
+                showNotification(`🌍 Joined ${seedData.config.name}!`, 'success');
+            });
+
+            conn.on('data', (data) => {
+                this.handleHostMessage(data, seedData);
+            });
+
+            conn.on('close', () => {
+                console.log('[JOINER] Host disconnected!');
+                this.handleHostDisconnect();
+            });
+
+            this.hostConnection = conn;
+        });
+    },
+
+    // Handle when host disconnects - HOST MIGRATION
+    handleHostDisconnect() {
+        console.log('[HOST MIGRATION] Host left - checking if we should become host');
+
+        // Remove old host from queue
+        this.hostQueue.shift();
+
+        if (this.hostQueue.length > 0 && this.hostQueue[0] === this.myPeer?.id) {
+            // WE ARE NEXT IN LINE - BECOME HOST
+            console.log('[HOST MIGRATION] We are next in queue - BECOMING HOST');
+            this.promoteToHost();
+        } else if (this.hostQueue.length > 0) {
+            // Someone else is becoming host - reconnect to them
+            console.log(`[HOST MIGRATION] Reconnecting to new host: ${this.hostQueue[0]}`);
+            this.reconnectToNewHost(this.hostQueue[0]);
+        } else {
+            // No one left - we're alone, become host
+            console.log('[HOST MIGRATION] No queue - BECOMING HOST');
+            this.promoteToHost();
+        }
+    },
+
+    // Promote ourselves from joiner to host
+    promoteToHost() {
+        this.isHost = true;
+        this.hostPeerId = this.myPeer.id;
+
+        // Start listening for connections
+        this.myPeer.on('connection', (conn) => {
+            this.handleNewParticipant(conn);
+        });
+
+        // Generate new QR code with our ID
+        this.generateHostQR(this.currentWorld, this.myPeer.id);
+
+        this.speak('The previous host has departed. You are now the HOST of this world.');
+        showNotification('👑 You are now the HOST!', 'warning');
+
+        // Broadcast to all participants that we're the new host
+        this.broadcastToAll({
+            type: 'NEW_HOST',
+            hostPeerId: this.myPeer.id,
+            hostQueue: this.hostQueue
+        });
+    },
+
+    // Generate QR code that points to current host
+    generateHostQR(worldId, hostPeerId) {
+        const baseUrl = window.location.origin + window.location.pathname;
+        const joinUrl = `${baseUrl}?world=${worldId}&host=${hostPeerId}`;
+
+        console.log(`[QR] Generating QR for: ${joinUrl}`);
+
+        // Use existing QR generation infrastructure
+        if (typeof QRious !== 'undefined') {
+            const qr = new QRious({
+                element: document.getElementById('host-qr-canvas') || this.createQRCanvas(),
+                value: joinUrl,
+                size: 200,
+                backgroundAlpha: 0,
+                foreground: '#0ff',
+                level: 'M'
+            });
+        }
+
+        // Show QR modal
+        this.showHostQRModal(joinUrl, worldId);
+    },
+
+    showHostQRModal(joinUrl, worldId) {
+        const modal = document.createElement('div');
+        modal.id = 'host-qr-modal';
+        modal.innerHTML = `
+            <div class="host-qr-overlay">
+                <div class="host-qr-container">
+                    <div class="host-qr-header">
+                        <h2>🌍 YOU ARE HOSTING</h2>
+                        <div class="world-name">${this.currentWorld}</div>
+                    </div>
+
+                    <div class="host-qr-status">
+                        <span class="status-indicator live">● LIVE</span>
+                        <span class="participant-count">${this.participants.length + 1} in world</span>
+                    </div>
+
+                    <div class="host-qr-code">
+                        <canvas id="host-qr-canvas"></canvas>
+                    </div>
+
+                    <div class="host-qr-url">
+                        <input type="text" value="${joinUrl}" readonly onclick="this.select()">
+                        <button onclick="navigator.clipboard.writeText('${joinUrl}')">📋 Copy</button>
+                    </div>
+
+                    <div class="host-qr-info">
+                        Scan QR code or share link to invite others.
+                        <br>Your world is LIVE as long as you stay.
+                    </div>
+
+                    <button class="host-qr-close" onclick="PublicWorldManager.closeHostModal()">
+                        Continue Playing
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        // Generate QR into the canvas
+        setTimeout(() => {
+            new QRious({
+                element: document.getElementById('host-qr-canvas'),
+                value: joinUrl,
+                size: 200,
+                backgroundAlpha: 0,
+                foreground: '#0ff',
+                level: 'M'
+            });
+        }, 100);
+    },
+
+    closeHostModal() {
+        document.getElementById('host-qr-modal')?.remove();
+    },
+
+    // Handle new participant joining
+    handleNewParticipant(conn) {
+        console.log(`[HOST] New participant connecting: ${conn.peer}`);
+
+        this.participants.push({
+            peerId: conn.peer,
+            connection: conn,
+            joinedAt: Date.now()
+        });
+
+        // Add to host queue
+        this.hostQueue.push(conn.peer);
+
+        conn.on('open', () => {
+            // Send current world state
+            conn.send({
+                type: 'WORLD_STATE',
+                state: this.getCurrentWorldState(),
+                hostQueue: this.hostQueue
+            });
+
+            // Broadcast participant count update
+            this.broadcastToAll({
+                type: 'PARTICIPANT_UPDATE',
+                count: this.participants.length + 1,
+                hostQueue: this.hostQueue
+            });
+
+            showNotification(`👤 Player joined! (${this.participants.length + 1} in world)`, 'info');
+        });
+
+        conn.on('data', (data) => {
+            this.handleParticipantMessage(conn.peer, data);
+        });
+
+        conn.on('close', () => {
+            this.handleParticipantLeave(conn.peer);
+        });
+    },
+
+    handleParticipantLeave(peerId) {
+        this.participants = this.participants.filter(p => p.peerId !== peerId);
+        this.hostQueue = this.hostQueue.filter(id => id !== peerId);
+
+        this.broadcastToAll({
+            type: 'PARTICIPANT_UPDATE',
+            count: this.participants.length + 1,
+            hostQueue: this.hostQueue
+        });
+
+        showNotification(`👤 Player left (${this.participants.length + 1} in world)`, 'info');
+    },
+
+    // Broadcast to all participants
+    broadcastToAll(data) {
+        this.participants.forEach(p => {
+            try {
+                p.connection.send(data);
+            } catch (e) {
+                console.error(`Failed to send to ${p.peerId}:`, e);
+            }
+        });
+    },
+
+    // Get current world state for syncing
+    getCurrentWorldState() {
+        return {
+            worldId: this.currentWorld,
+            timestamp: Date.now(),
+            // Include relevant game state
+            timeOfDay: typeof timeOfDay !== 'undefined' ? timeOfDay : 0.5,
+            entities: this.getEntityStates(),
+            structures: this.getStructureStates(),
+            agents: this.getAgentStates()
+        };
+    },
+
+    // Apply seed data to initialize world
+    applySeedData(seedData) {
+        console.log('[WORLD] Applying seed data:', seedData.config.name);
+
+        // Use existing applyFullState function if available
+        if (typeof applyFullState === 'function') {
+            applyFullState({
+                type: 'fullState',
+                worldSeed: seedData.terrain.seed,
+                civilization: {
+                    name: seedData.config.name,
+                    biome: seedData.config.biome
+                },
+                world: {
+                    timeOfDay: seedData.config.timeOfDay,
+                    player: { position: seedData.spawn.position }
+                },
+                structures: seedData.structures,
+                agents: seedData.agents
+            });
+        }
+    }
+};
+
+// URL Parameter Handling
+function checkPublicWorldParams() {
+    const params = new URLSearchParams(window.location.search);
+    const worldId = params.get('world');
+    const hostPeerId = params.get('host');
+
+    if (worldId) {
+        console.log(`[PUBLIC WORLD] Loading world: ${worldId}, host: ${hostPeerId || 'auto'}`);
+
+        // Load registry then join world
+        PublicWorldManager.loadRegistry().then(() => {
+            PublicWorldManager.joinWorld(worldId, hostPeerId);
+        });
+
+        return true;
+    }
+    return false;
+}
+```
+
+---
+
+## 5.4 QR Code Shifting Mechanism
+
+**The Key Innovation**: QR codes are DYNAMIC, not static.
+
+```javascript
+// When you become HOST, your QR code includes YOUR peer ID
+// This means scanning the QR connects directly to YOU
+
+// URL Structure:
+// ?world=volcano-prime                    → Auto-discover or become host
+// ?world=volcano-prime&host=abc123        → Connect to specific host
+
+// QR Code Lifecycle:
+// 1. Player A visits ?world=volcano-prime (no host param)
+// 2. No host found → Player A BECOMES host
+// 3. Player A's QR code shows: ?world=volcano-prime&host=playerA-peer-id
+// 4. Player B scans QR → connects directly to Player A
+// 5. If Player A leaves → Player B becomes host
+// 6. Player B's QR code updates to: ?world=volcano-prime&host=playerB-peer-id
+
+const QRShiftingManager = {
+    updateQRForNewHost(newHostPeerId) {
+        const baseUrl = window.location.origin + window.location.pathname;
+        const newUrl = `${baseUrl}?world=${PublicWorldManager.currentWorld}&host=${newHostPeerId}`;
+
+        // Update any displayed QR codes
+        const qrCanvas = document.getElementById('host-qr-canvas');
+        if (qrCanvas && typeof QRious !== 'undefined') {
+            new QRious({
+                element: qrCanvas,
+                value: newUrl,
+                size: 200,
+                foreground: '#0ff'
+            });
+        }
+
+        // Update URL input
+        const urlInput = document.querySelector('.host-qr-url input');
+        if (urlInput) {
+            urlInput.value = newUrl;
+        }
+
+        console.log(`[QR SHIFT] QR code updated to point to new host: ${newHostPeerId}`);
+    }
+};
+```
+
+---
+
+## 5.5 Temporal Energy Integration with Public Worlds
+
+```javascript
+// Focus Work contributes Temporal Energy to public worlds
+const TemporalWorldContribution = {
+    // When completing a Focus Work session while in a public world
+    contributeToWorld(worldId, temporalEnergy) {
+        const contribution = {
+            worldId,
+            peerId: PublicWorldManager.myPeer?.id || 'local',
+            energy: temporalEnergy,
+            timestamp: Date.now()
+        };
+
+        // If we're the host, apply contribution immediately
+        if (PublicWorldManager.isHost) {
+            this.applyContribution(contribution);
+        } else {
+            // Send to host
+            PublicWorldManager.hostConnection?.send({
+                type: 'TEMPORAL_CONTRIBUTION',
+                contribution
+            });
+        }
+
+        // Track for leaderboards
+        this.logContribution(contribution);
+    },
+
+    applyContribution(contribution) {
+        // Temporal Energy accelerates world evolution
+        // Every 100 units of temporal energy = 1 evolution stage
+
+        this.worldEnergy = (this.worldEnergy || 0) + contribution.energy;
+
+        const evolutionThreshold = 100;
+        if (this.worldEnergy >= evolutionThreshold) {
+            this.evolveWorld();
+            this.worldEnergy -= evolutionThreshold;
+        }
+
+        // Broadcast contribution to all participants
+        if (PublicWorldManager.isHost) {
+            PublicWorldManager.broadcastToAll({
+                type: 'TEMPORAL_CONTRIBUTION_RECEIVED',
+                from: contribution.peerId,
+                energy: contribution.energy,
+                totalWorldEnergy: this.worldEnergy
+            });
+        }
+    },
+
+    evolveWorld() {
+        // The world physically changes based on collective temporal energy
+        const evolutions = [
+            { stage: 1, effect: 'New flora spawns' },
+            { stage: 2, effect: 'Ancient structures begin to rise' },
+            { stage: 3, effect: 'Wildlife returns to the world' },
+            { stage: 4, effect: 'A portal to another world appears' },
+            { stage: 5, effect: 'The Leviathan takes notice...' }
+        ];
+
+        this.currentStage = (this.currentStage || 0) + 1;
+        const evolution = evolutions[Math.min(this.currentStage - 1, evolutions.length - 1)];
+
+        console.log(`[WORLD EVOLUTION] Stage ${this.currentStage}: ${evolution.effect}`);
+
+        PublicWorldManager.speak(`World Evolution Stage ${this.currentStage}! ${evolution.effect}`);
+
+        // Visual celebration
+        showNotification(`🌍 WORLD EVOLVED: ${evolution.effect}`, 'legendary');
+    }
+};
+```
+
+---
+
+## 5.6 CSS Styles for Host UI
+
+```css
+.host-qr-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10000;
+}
+
+.host-qr-container {
+    background: linear-gradient(135deg, #0a0a2a 0%, #1a1a4a 100%);
+    border: 2px solid #0ff;
+    border-radius: 20px;
+    padding: 30px;
+    text-align: center;
+    max-width: 400px;
+}
+
+.host-qr-header h2 {
+    color: #0ff;
+    margin-bottom: 5px;
+}
+
+.host-qr-status {
+    display: flex;
+    justify-content: center;
+    gap: 20px;
+    margin: 15px 0;
+}
+
+.status-indicator.live {
+    color: #0f0;
+    animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+.host-qr-code canvas {
+    background: #000;
+    border-radius: 10px;
+    padding: 10px;
+}
+
+.host-qr-url {
+    display: flex;
+    gap: 10px;
+    margin: 15px 0;
+}
+
+.host-qr-url input {
+    flex: 1;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid #0ff;
+    color: #fff;
+    padding: 10px;
+    border-radius: 5px;
+    font-size: 12px;
+}
+
+.host-qr-url button {
+    background: #0ff;
+    color: #000;
+    border: none;
+    padding: 10px 15px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+
+.host-qr-close {
+    background: linear-gradient(90deg, #0ff, #00ff88);
+    color: #000;
+    border: none;
+    padding: 15px 30px;
+    font-size: 16px;
+    font-weight: bold;
+    border-radius: 25px;
+    cursor: pointer;
+    margin-top: 15px;
+}
+
+.host-qr-info {
+    color: #888;
+    font-size: 12px;
+    margin: 15px 0;
+}
+```
+
+---
+
+## 5.7 World Store / Browser
+
+```javascript
+const WorldStore = {
+    async open() {
+        const registry = await PublicWorldManager.loadRegistry();
+        if (!registry) {
+            showNotification('Failed to load world registry', 'error');
+            return;
+        }
+
+        const modal = document.createElement('div');
+        modal.id = 'world-store';
+        modal.innerHTML = `
+            <div class="world-store-overlay">
+                <div class="world-store-container">
+                    <div class="world-store-header">
+                        <h2>🌌 PUBLIC WORLDS</h2>
+                        <button onclick="WorldStore.close()">✕</button>
+                    </div>
+
+                    <div class="world-store-tabs">
+                        <button class="active" onclick="WorldStore.showTab('featured')">Featured</button>
+                        <button onclick="WorldStore.showTab('popular')">Popular</button>
+                        <button onclick="WorldStore.showTab('new')">New</button>
+                        <button onclick="WorldStore.showTab('all')">All</button>
+                    </div>
+
+                    <div class="world-store-grid">
+                        ${registry.worlds.map(w => this.renderWorldCard(w)).join('')}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+    },
+
+    renderWorldCard(world) {
+        return `
+            <div class="world-card" onclick="WorldStore.joinWorld('${world.id}')">
+                <div class="world-thumb" style="background-image: url('${world.thumbnail || ''}')">
+                    ${world.featured ? '<span class="featured-badge">★ FEATURED</span>' : ''}
+                </div>
+                <div class="world-info">
+                    <div class="world-name">${world.name}</div>
+                    <div class="world-author">by ${world.author}</div>
+                    <div class="world-desc">${world.description}</div>
+                    <div class="world-stats">
+                        <span>👥 ${world.totalVisitors || 0} visitors</span>
+                        <span>⚡ ${world.temporalContributions || 0} temporal energy</span>
+                    </div>
+                </div>
+                <button class="world-join-btn">JOIN →</button>
+            </div>
+        `;
+    },
+
+    async joinWorld(worldId) {
+        this.close();
+        await PublicWorldManager.joinWorld(worldId);
+    },
+
+    close() {
+        document.getElementById('world-store')?.remove();
+    }
+};
+```
+
+---
+
+## Summary: First-Person-Is-Host Architecture
+
+1. **GitHub hosts the seed** - Static world configurations stored in repo
+2. **First visitor becomes HOST** - Automatic host assignment
+3. **QR codes shift to current host** - Dynamic sharing
+4. **Host migration on disconnect** - Seamless handoff
+5. **Temporal Energy contributes** - Focus work evolves worlds
+6. **World Store for discovery** - Browse and join public worlds
+
+**URL Pattern**:
+```
+https://[domain]/apps/games/levi.html?world=[worldId]&host=[peerID]
+```
+
+**Host Queue System**:
+- Position 1 = Current HOST
+- Position 2+ = Next in line for host migration
+- Automatic promotion when host leaves
