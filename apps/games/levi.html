@@ -9584,6 +9584,10 @@
             <div style="font-size: 12px; color: #668899; text-transform: uppercase; letter-spacing: 3px; margin-bottom: 8px;">APPROACHING</div>
             <div id="approach-planet-name" style="font-size: 36px; font-weight: bold; color: #00ffff; text-shadow: 0 0 20px rgba(0,255,255,0.5); letter-spacing: 4px;"></div>
             <div id="approach-planet-biome" style="font-size: 14px; color: #aaccff; margin-top: 8px;"></div>
+            <!-- v7.4: Planet visit history -->
+            <div id="approach-visit-info" style="margin-top: 12px; font-size: 13px; color: #88aacc; display: none;">
+                <span id="approach-visit-status"></span>
+            </div>
             <div style="margin-top: 20px; display: flex; gap: 30px; justify-content: center;">
                 <div style="text-align: center;">
                     <div id="approach-distance" style="font-size: 24px; color: #ffaa00; font-weight: bold;">0</div>
@@ -12658,6 +12662,461 @@
             }
             return { offsetX: glyph.ha * scale, path: path };
         }
+
+        // --- MODEL LOADER SYSTEM (v7.4: External model loading with caching) ---
+        // Loads detailed 3D models from GitHub repo, caches locally for performance
+        // Models are JSON-based hierarchical mesh definitions
+        const ModelLoader = {
+            // Configuration
+            baseUrl: 'https://raw.githubusercontent.com/kody-w/localFirstTools/main/data/models',
+            cacheVersion: '1.0.0',
+            dbName: 'leviathan_model_cache',
+            storeName: 'models',
+
+            // Runtime state
+            cache: new Map(),
+            db: null,
+            initialized: false,
+            loading: new Map(), // Track in-flight loads to prevent duplicates
+
+            // Initialize IndexedDB cache
+            async init() {
+                if (this.initialized) return;
+
+                try {
+                    this.db = await new Promise((resolve, reject) => {
+                        const request = indexedDB.open(this.dbName, 1);
+                        request.onerror = () => reject(request.error);
+                        request.onsuccess = () => resolve(request.result);
+                        request.onupgradeneeded = (e) => {
+                            const db = e.target.result;
+                            if (!db.objectStoreNames.contains(this.storeName)) {
+                                db.createObjectStore(this.storeName, { keyPath: 'id' });
+                            }
+                        };
+                    });
+                    this.initialized = true;
+                    console.log('[ModelLoader] IndexedDB cache initialized');
+                } catch (e) {
+                    console.warn('[ModelLoader] IndexedDB not available, using memory cache only');
+                    this.initialized = true;
+                }
+            },
+
+            // Get model from cache
+            async getFromCache(modelId) {
+                // Check memory cache first
+                if (this.cache.has(modelId)) {
+                    return this.cache.get(modelId);
+                }
+
+                // Check IndexedDB
+                if (this.db) {
+                    try {
+                        const data = await new Promise((resolve, reject) => {
+                            const tx = this.db.transaction(this.storeName, 'readonly');
+                            const store = tx.objectStore(this.storeName);
+                            const request = store.get(modelId);
+                            request.onsuccess = () => resolve(request.result);
+                            request.onerror = () => reject(request.error);
+                        });
+
+                        if (data && data.version === this.cacheVersion) {
+                            this.cache.set(modelId, data.model);
+                            return data.model;
+                        }
+                    } catch (e) {
+                        console.warn('[ModelLoader] Cache read error:', e);
+                    }
+                }
+
+                return null;
+            },
+
+            // Save model to cache
+            async saveToCache(modelId, modelData) {
+                this.cache.set(modelId, modelData);
+
+                if (this.db) {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const tx = this.db.transaction(this.storeName, 'readwrite');
+                            const store = tx.objectStore(this.storeName);
+                            const request = store.put({
+                                id: modelId,
+                                version: this.cacheVersion,
+                                timestamp: Date.now(),
+                                model: modelData
+                            });
+                            request.onsuccess = () => resolve();
+                            request.onerror = () => reject(request.error);
+                        });
+                    } catch (e) {
+                        console.warn('[ModelLoader] Cache write error:', e);
+                    }
+                }
+            },
+
+            // Fetch model from GitHub
+            async fetchModel(modelPath) {
+                const url = `${this.baseUrl}/${modelPath}`;
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    return await response.json();
+                } catch (e) {
+                    console.warn(`[ModelLoader] Failed to fetch ${modelPath}:`, e);
+                    return null;
+                }
+            },
+
+            // Load a model by ID (with caching)
+            async loadModel(modelId, modelPath) {
+                await this.init();
+
+                // Check if already loading
+                if (this.loading.has(modelId)) {
+                    return this.loading.get(modelId);
+                }
+
+                // Check cache
+                const cached = await this.getFromCache(modelId);
+                if (cached) {
+                    console.log(`[ModelLoader] Loaded ${modelId} from cache`);
+                    return cached;
+                }
+
+                // Fetch from GitHub
+                const loadPromise = (async () => {
+                    const modelData = await this.fetchModel(modelPath);
+                    if (modelData) {
+                        await this.saveToCache(modelId, modelData);
+                        console.log(`[ModelLoader] Loaded ${modelId} from GitHub`);
+                    }
+                    this.loading.delete(modelId);
+                    return modelData;
+                })();
+
+                this.loading.set(modelId, loadPromise);
+                return loadPromise;
+            },
+
+            // Build Three.js mesh from model definition
+            buildMesh(modelData, options = {}) {
+                if (!modelData || !modelData.parts) {
+                    console.warn('[ModelLoader] Invalid model data');
+                    return null;
+                }
+
+                const group = new THREE.Group();
+                group.userData.modelName = modelData.name;
+                group.userData.animations = modelData.animations || {};
+                group.userData.animatableParts = [];
+
+                // Build each part recursively
+                const buildPart = (partDef, parent) => {
+                    let mesh;
+
+                    // Create geometry based on type
+                    const geo = this.createGeometry(partDef.geometry);
+                    if (!geo) return null;
+
+                    // Create material
+                    const mat = this.createMaterial(partDef.material, options);
+
+                    mesh = new THREE.Mesh(geo, mat);
+                    mesh.userData.partId = partDef.id;
+                    mesh.userData.partName = partDef.name;
+
+                    // Apply position
+                    if (partDef.position) {
+                        mesh.position.set(
+                            partDef.position.x || 0,
+                            partDef.position.y || 0,
+                            partDef.position.z || 0
+                        );
+                    }
+
+                    // Apply rotation (in radians)
+                    if (partDef.rotation) {
+                        mesh.rotation.set(
+                            partDef.rotation.x || 0,
+                            partDef.rotation.y || 0,
+                            partDef.rotation.z || 0
+                        );
+                    }
+
+                    // Apply scale
+                    if (partDef.scale) {
+                        mesh.scale.set(
+                            partDef.scale.x || 1,
+                            partDef.scale.y || 1,
+                            partDef.scale.z || 1
+                        );
+                    }
+
+                    // Store animation data
+                    if (partDef.animate) {
+                        mesh.userData.animate = partDef.animate;
+                        group.userData.animatableParts.push(mesh);
+                    }
+
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+
+                    // Add to parent
+                    parent.add(mesh);
+
+                    // Build children recursively
+                    if (partDef.children) {
+                        partDef.children.forEach(childDef => buildPart(childDef, mesh));
+                    }
+
+                    return mesh;
+                };
+
+                // Build all top-level parts
+                modelData.parts.forEach(partDef => buildPart(partDef, group));
+
+                // Apply overall scale if specified
+                if (options.scale) {
+                    group.scale.setScalar(options.scale);
+                }
+
+                // Apply team color tint if specified
+                if (options.teamColor) {
+                    this.applyTeamColor(group, options.teamColor);
+                }
+
+                return group;
+            },
+
+            // Create geometry from definition
+            createGeometry(geoDef) {
+                if (!geoDef) return new THREE.BoxGeometry(1, 1, 1);
+
+                switch (geoDef.type) {
+                    case 'box':
+                        return new THREE.BoxGeometry(
+                            geoDef.width || 1,
+                            geoDef.height || 1,
+                            geoDef.depth || 1
+                        );
+
+                    case 'sphere':
+                        return new THREE.SphereGeometry(
+                            geoDef.radius || 0.5,
+                            geoDef.widthSegments || 16,
+                            geoDef.heightSegments || 12,
+                            geoDef.phiStart || 0,
+                            geoDef.phiLength || Math.PI * 2,
+                            geoDef.thetaStart || 0,
+                            geoDef.thetaLength || Math.PI
+                        );
+
+                    case 'cylinder':
+                        return new THREE.CylinderGeometry(
+                            geoDef.radiusTop || 0.5,
+                            geoDef.radiusBottom || 0.5,
+                            geoDef.height || 1,
+                            geoDef.radialSegments || 16
+                        );
+
+                    case 'cone':
+                        return new THREE.ConeGeometry(
+                            geoDef.radius || 0.5,
+                            geoDef.height || 1,
+                            geoDef.radialSegments || 16
+                        );
+
+                    case 'torus':
+                        return new THREE.TorusGeometry(
+                            geoDef.radius || 0.5,
+                            geoDef.tube || 0.1,
+                            geoDef.radialSegments || 8,
+                            geoDef.tubularSegments || 24
+                        );
+
+                    case 'plane':
+                        return new THREE.PlaneGeometry(
+                            geoDef.width || 1,
+                            geoDef.height || 1
+                        );
+
+                    default:
+                        console.warn(`[ModelLoader] Unknown geometry type: ${geoDef.type}`);
+                        return new THREE.BoxGeometry(1, 1, 1);
+                }
+            },
+
+            // Create material from definition
+            createMaterial(matDef, options = {}) {
+                if (!matDef) {
+                    return new THREE.MeshStandardMaterial({ color: 0x888888 });
+                }
+
+                const props = {
+                    color: new THREE.Color(matDef.color || '#888888'),
+                    metalness: matDef.metalness !== undefined ? matDef.metalness : 0.5,
+                    roughness: matDef.roughness !== undefined ? matDef.roughness : 0.5
+                };
+
+                // Emissive properties
+                if (matDef.emissive) {
+                    props.emissive = new THREE.Color(matDef.emissive);
+                    props.emissiveIntensity = matDef.emissiveIntensity || 0.5;
+                }
+
+                // Transparency
+                if (matDef.transparent || matDef.opacity !== undefined) {
+                    props.transparent = true;
+                    props.opacity = matDef.opacity !== undefined ? matDef.opacity : 1.0;
+                }
+
+                return new THREE.MeshStandardMaterial(props);
+            },
+
+            // Apply team color tint to model
+            applyTeamColor(group, color) {
+                const tintColor = new THREE.Color(color);
+                group.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        // Blend team color with original
+                        const origColor = child.material.color.clone();
+                        child.material.color.lerp(tintColor, 0.3);
+
+                        // Also tint emissive if present
+                        if (child.material.emissive) {
+                            child.material.emissive.lerp(tintColor, 0.5);
+                        }
+                    }
+                });
+            },
+
+            // Animate model parts (call each frame)
+            animateModel(group, time, deltaTime) {
+                if (!group.userData.animatableParts) return;
+
+                group.userData.animatableParts.forEach(part => {
+                    const anim = part.userData.animate;
+                    if (!anim) return;
+
+                    switch (anim.type) {
+                        case 'rotate':
+                            part.rotation[anim.axis || 'y'] += (anim.speed || 1) * deltaTime;
+                            break;
+
+                        case 'pulse':
+                            if (part.material && part.material[anim.property] !== undefined) {
+                                const t = (Math.sin(time * (anim.speed || 1)) + 1) / 2;
+                                part.material[anim.property] = anim.min + (anim.max - anim.min) * t;
+                            }
+                            break;
+
+                        case 'flicker':
+                            if (part.material && part.material[anim.property] !== undefined) {
+                                const flicker = Math.random() > 0.1 ? 1 : 0.5;
+                                const base = anim.min + (anim.max - anim.min) * 0.5;
+                                part.material[anim.property] = base * flicker;
+                            }
+                            break;
+
+                        case 'sway':
+                            const swayAngle = Math.sin(time * (anim.speed || 1)) * (anim.amplitude || 0.1);
+                            part.rotation[anim.axis || 'z'] = swayAngle;
+                            break;
+
+                        case 'blink':
+                            if (part.material) {
+                                const blinkCycle = time % ((anim.onDuration || 0.1) + (anim.offDuration || 1));
+                                part.material[anim.property || 'emissiveIntensity'] =
+                                    blinkCycle < (anim.onDuration || 0.1) ? anim.onValue : anim.offValue;
+                            }
+                            break;
+
+                        case 'hover':
+                            const hoverOffset = Math.sin(time * (anim.speed || 1) + (anim.offset || 0)) * (anim.amplitude || 0.05);
+                            group.position.y = (group.userData.baseY || group.position.y) + hoverOffset;
+                            break;
+
+                        case 'walk':
+                            const walkAngle = Math.sin(time * (anim.speed || 1) + (anim.phase || 0)) * (anim.amplitude || 0.3);
+                            part.rotation.x = walkAngle;
+                            break;
+                    }
+                });
+            },
+
+            // Create fallback procedural mesh
+            createFallbackMesh(type, team, options = {}) {
+                const teamColor = team === 'A' ? 0x00ff88 : 0xff4444;
+
+                if (type === 'robot-drone') {
+                    // Simple drone fallback
+                    const group = new THREE.Group();
+                    const body = new THREE.Mesh(
+                        new THREE.BoxGeometry(0.8, 0.3, 0.8),
+                        new THREE.MeshStandardMaterial({ color: 0x2a4a5a, metalness: 0.8, roughness: 0.2 })
+                    );
+                    const core = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.12),
+                        new THREE.MeshStandardMaterial({ color: teamColor, emissive: teamColor, emissiveIntensity: 1 })
+                    );
+                    core.position.y = 0.05;
+                    group.add(body);
+                    group.add(core);
+                    return group;
+                } else {
+                    // Simple creature fallback
+                    const group = new THREE.Group();
+                    const body = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.3),
+                        new THREE.MeshStandardMaterial({ color: 0x4a2525, roughness: 0.7 })
+                    );
+                    body.scale.set(1, 0.7, 1.2);
+                    const eyes = new THREE.Mesh(
+                        new THREE.SphereGeometry(0.05),
+                        new THREE.MeshStandardMaterial({ color: 0xff0000, emissive: 0xff0000, emissiveIntensity: 2 })
+                    );
+                    eyes.position.set(0, 0.1, -0.25);
+                    group.add(body);
+                    group.add(eyes);
+                    return group;
+                }
+            },
+
+            // Clear cache (for debugging/updates)
+            async clearCache() {
+                this.cache.clear();
+                if (this.db) {
+                    try {
+                        await new Promise((resolve, reject) => {
+                            const tx = this.db.transaction(this.storeName, 'readwrite');
+                            const store = tx.objectStore(this.storeName);
+                            const request = store.clear();
+                            request.onsuccess = () => resolve();
+                            request.onerror = () => reject(request.error);
+                        });
+                        console.log('[ModelLoader] Cache cleared');
+                    } catch (e) {
+                        console.warn('[ModelLoader] Failed to clear cache:', e);
+                    }
+                }
+            }
+        };
+
+        // Pre-load commonly used models
+        async function preloadModels() {
+            console.log('[ModelLoader] Preloading models...');
+            await ModelLoader.init();
+
+            // Load creep models in background
+            ModelLoader.loadModel('robot-drone', 'creeps/robot-drone.json');
+            ModelLoader.loadModel('hostile-fauna-basic', 'creeps/hostile-fauna-basic.json');
+        }
+
+        // Start preloading
+        preloadModels();
 
         // --- AUDIO SYSTEM (Web Audio API - No external dependencies) ---
         // v6.14: THERAPEUTIC AUDIO REDESIGN
@@ -34094,9 +34553,9 @@
             state: 'idle',  // idle, scanning, smoothing, moving
             targetSite: null,
             lastDecisionTime: 0,
-            decisionInterval: 300,
-            smoothRadius: 3,  // Larger radius for player (agents use 2)
-            lastNotification: 0,  // v6.82: Throttle notifications
+            decisionInterval: 100,  // v9.4: Faster smoothing (was 300)
+            smoothRadius: 5,        // v9.4: Larger radius for more visible effect (was 3)
+            lastNotification: 0,    // v6.82: Throttle notifications
             notificationCooldown: 3000,  // Only show same notification every 3s
             stats: { sitesSmoothed: 0, beaconsPlaced: 0 }
         };
@@ -34119,6 +34578,7 @@
         }
 
         // Smooth terrain at player position (same algorithm as agents)
+        // v9.4: Actually updates the 3D terrain mesh visuals
         function smoothTerrainAtPosition(worldX, worldZ) {
             const tileX = Math.floor((worldX / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
             const tileZ = Math.floor((worldZ / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2);
@@ -34142,9 +34602,15 @@
             if (count > 0) {
                 const avgHeight = totalHeight / count;
                 for (const cell of heightMap) {
-                    // Smooth 80% toward average (same as agents)
-                    worldState.terrain[cell.tx][cell.tz] = cell.h + (avgHeight - cell.h) * 0.8;
+                    // Smooth 95% toward average for more visible effect
+                    worldState.terrain[cell.tx][cell.tz] = cell.h + (avgHeight - cell.h) * 0.95;
                 }
+
+                // v9.4: Update the 3D terrain mesh to show the smoothed terrain
+                if (typeof worldState.updateTerrainMeshes === 'function') {
+                    worldState.updateTerrainMeshes(tileX, tileZ, smoothRadius + 1);
+                }
+
                 return true;
             }
             return false;
@@ -35372,6 +35838,11 @@
         function updateAIBehavior(dt) {
             if (mode !== 'world') return false;
 
+            // v9.4: Run colony planner in background (independent of current AI behavior)
+            if (typeof runColonyPlanner === 'function') {
+                runColonyPlanner();
+            }
+
             switch (AI_BEHAVIOR.current) {
                 case 'manual':
                     return false;
@@ -35963,6 +36434,8 @@
                 lastRotation: null        // Y rotation (facing direction)
             },
             visitedPlanets: [],
+            // v7.4: Track visit counts per planet
+            planetVisitCounts: {},  // { planetId: visitCount }
             // v6.92: Persistent planet destruction/escape tracking
             destroyedPlanets: [],  // IDs of planets destroyed by collision
             escapedPlanets: [],    // IDs of planets that escaped orbit
@@ -41595,7 +42068,12 @@ Output JSON: {"greeting": "your message to the player", "observation": "pattern 
                 if (count > 0) {
                     const avgHeight = totalHeight / count;
                     for (const cell of heightMap) {
-                        worldState.terrain[cell.tx][cell.tz] = cell.h + (avgHeight - cell.h) * 0.8;
+                        worldState.terrain[cell.tx][cell.tz] = cell.h + (avgHeight - cell.h) * 0.95;
+                    }
+
+                    // v9.4: Update the 3D terrain mesh visuals
+                    if (typeof worldState.updateTerrainMeshes === 'function') {
+                        worldState.updateTerrainMeshes(agentX, agentZ, smoothRadius + 1);
                     }
 
                     agent.statusMessage = `🚜 Smoothed terrain at (${agentX}, ${agentZ})`;
@@ -42301,8 +42779,9 @@ Output JSON: {"greeting": "your message to the player", "observation": "pattern 
                             if (variance > 0.3 || roughness > 0.2) {
                                 // ================================
                                 // SMOOTH OPERATION - Gradual averaging
+                                // v9.4: Increased smoothing strength for more visible effect
                                 // ================================
-                                const smoothingStrength = 0.8; // How much to smooth (0-1)
+                                const smoothingStrength = 0.95; // How much to smooth (0-1)
 
                                 for (const cell of heightMap) {
                                     // Smooth towards average with strength factor
@@ -59907,6 +60386,24 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                     document.getElementById('approach-planet-name').textContent = civ.name;
                     document.getElementById('approach-planet-biome').textContent = `${civ.biomeName} World • Population: ${civ.pop}M`;
+
+                    // v7.4: Show visit history
+                    const visitInfo = document.getElementById('approach-visit-info');
+                    const visitStatus = document.getElementById('approach-visit-status');
+                    if (visitInfo && visitStatus) {
+                        const visitCount = gameData.planetVisitCounts?.[civ.id] || 0;
+                        if (visitCount === 0) {
+                            visitStatus.innerHTML = '✨ <span style="color: #ffdd44;">UNCHARTED TERRITORY</span> - First Contact!';
+                            visitStatus.style.color = '#ffdd44';
+                        } else if (visitCount === 1) {
+                            visitStatus.innerHTML = `🔄 <span style="color: #44ddff;">RETURN VISIT</span> - Visited once before`;
+                            visitStatus.style.color = '#44ddff';
+                        } else {
+                            visitStatus.innerHTML = `🏠 <span style="color: #44ff88;">FAMILIAR GROUND</span> - ${visitCount} previous visits`;
+                            visitStatus.style.color = '#44ff88';
+                        }
+                        visitInfo.style.display = 'block';
+                    }
                 }, 800);
             }
 
@@ -60068,6 +60565,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 document.getElementById('approach-land-prompt').style.opacity = '0';
                 document.getElementById('approach-skip').style.opacity = '0';
 
+                // v7.4: Hide visit info
+                const visitInfo = document.getElementById('approach-visit-info');
+                if (visitInfo) visitInfo.style.display = 'none';
+
                 setTimeout(() => {
                     overlay.style.display = 'none';
                 }, 800);
@@ -60155,6 +60656,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     tryDiscoverLore('explore');
                 }
             }
+
+            // v7.4: Track visit count for this planet
+            if (!gameData.planetVisitCounts) gameData.planetVisitCounts = {};
+            gameData.planetVisitCounts[civ.id] = (gameData.planetVisitCounts[civ.id] || 0) + 1;
+            saveGameData();
 
             // v4.9: Track biome in codex
             trackBiomeVisit(civ.biome.toLowerCase());
@@ -66559,10 +67065,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             playerRewardRadius: 15,  // Radius to get XP/gold from creep kills
             xpPerCreep: 15,          // XP reward for nearby kill
             goldPerCreep: 5,         // Gold reward
-            // v9.3: Creep separation/collision avoidance settings
-            separationRadius: 1.8,   // Distance at which creeps start pushing apart
-            separationStrength: 4.0, // How strongly creeps push each other away
-            minSeparation: 0.8       // Minimum distance creeps try to maintain
+            // v9.3: Creep separation/collision avoidance settings (STRONG values)
+            separationRadius: 2.5,   // Distance at which creeps start pushing apart
+            separationStrength: 12.0, // How strongly creeps push each other away (very strong)
+            minSeparation: 1.2,      // Minimum distance creeps try to maintain
+            hardRadius: 0.8          // Creeps cannot get closer than this - hard collision
         };
 
         // v6.67: Lane definitions with universe-appropriate names
@@ -66689,6 +67196,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             waveNumber: 0,
             creeps: [],              // All active creeps
             laneVisuals: [],         // Lane path meshes
+            spawnPlatforms: [],      // v7.4: Destructible spawn platforms
             initialized: false
         };
 
@@ -66702,6 +67210,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 waveNumber: 0,
                 creeps: [],
                 laneVisuals: [],
+                spawnPlatforms: [],  // v7.4: Destructible spawn platforms
                 initialized: true
             };
 
@@ -66775,23 +67284,24 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             creepWaveState.laneVisuals = [];
 
             // Block configuration per lane
+            // v9.4: Made bridges much wider for easier use
             const LANE_BLOCK_CONFIG = {
                 top: {
-                    blockSize: { x: 2.5, y: 0.3, z: 3.5 },      // Wide blocks for top lane
+                    blockSize: { x: 5.0, y: 0.3, z: 5.0 },       // Wide blocks for top lane
                     spacing: 4,                                   // Distance between blocks
                     pattern: 'alternating',                       // Alternating brightness pattern
                     edgeBlocks: true,                             // Add edge blocks for borders
                     glowIntensity: 0.6
                 },
                 mid: {
-                    blockSize: { x: 2.0, y: 0.4, z: 2.0 },       // Square blocks for mid
+                    blockSize: { x: 5.0, y: 0.4, z: 5.0 },       // Wide square blocks for mid
                     spacing: 3.5,
                     pattern: 'gradient',                          // Gradient toward center
                     edgeBlocks: true,
                     glowIntensity: 0.8
                 },
                 bot: {
-                    blockSize: { x: 2.5, y: 0.3, z: 3.5 },       // Wide blocks for bot lane
+                    blockSize: { x: 5.0, y: 0.3, z: 5.0 },       // Wide blocks for bot lane
                     spacing: 4,
                     pattern: 'pulsing',                           // Special pulsing pattern
                     edgeBlocks: true,
@@ -67190,12 +67700,17 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
 
                 // Add spawn point markers (fortress platforms with base names)
+                // v7.4: Make spawn platforms destructible - destroying them stops creep spawns for that team/lane
                 const baseNames = [lane.teamABase, lane.teamBBase];
                 const teamLabels = ['ROBOT FORCES', 'HOSTILE FAUNA'];
                 [lane.teamASpawn, lane.teamBSpawn].forEach((spawn, teamIdx) => {
                     const spawnY = typeof getTerrainHeight === 'function'
                         ? getTerrainHeight(spawn.x, spawn.z) + 0.5
                         : 0.5;
+
+                    // v7.4: Create a group for the entire spawn platform structure
+                    const spawnPlatformGroup = new THREE.Group();
+                    spawnPlatformGroup.position.set(spawn.x, 0, spawn.z);
 
                     // Team-colored fortress platform
                     const teamColor = teamIdx === 0 ? 0x00ccff : 0xff4444; // Cyan for Robots, Red for Hostiles
@@ -67210,10 +67725,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         roughness: 0.4
                     });
                     const platform = new THREE.Mesh(platformGeo, platformMat);
-                    platform.position.set(spawn.x, spawnY, spawn.z);
-                    platform.userData.isSpawnPoint = true;
-                    platform.userData.team = teamIdx === 0 ? 'robots' : 'hostiles';
-                    laneGroup.add(platform);
+                    platform.position.set(0, spawnY, 0);
+                    spawnPlatformGroup.add(platform);
 
                     // Corner pillars for fortress look
                     const pillarGeo = new THREE.BoxGeometry(0.8, 2.5, 0.8);
@@ -67226,8 +67739,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     });
                     [[-2.2, -2.2], [-2.2, 2.2], [2.2, -2.2], [2.2, 2.2]].forEach(([ox, oz]) => {
                         const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-                        pillar.position.set(spawn.x + ox, spawnY + 1.2, spawn.z + oz);
-                        laneGroup.add(pillar);
+                        pillar.position.set(ox, spawnY + 1.2, oz);
+                        spawnPlatformGroup.add(pillar);
                     });
 
                     // Vertical spawn beacon (taller for visibility)
@@ -67242,10 +67755,40 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         roughness: 0.3
                     });
                     const beacon = new THREE.Mesh(beaconGeo, beaconMat);
-                    beacon.position.set(spawn.x, spawnY + 2.5, spawn.z);
+                    beacon.position.set(0, spawnY + 2.5, 0);
                     beacon.userData.isSpawnBeacon = true;
                     beacon.userData.pulsePhase = Math.random() * Math.PI * 2;
-                    laneGroup.add(beacon);
+                    spawnPlatformGroup.add(beacon);
+
+                    // v7.4: Set up spawn platform as destructible target
+                    const spawnPlatformHP = 500; // Tougher than towers
+                    const teamKey = teamIdx === 0 ? 'A' : 'B';
+                    spawnPlatformGroup.userData = {
+                        type: teamIdx === 0 ? 'friendlySpawnPlatform' : 'hostileSpawnPlatform',
+                        name: baseNames[teamIdx],
+                        team: teamKey,
+                        laneKey: laneKey,
+                        hp: spawnPlatformHP,
+                        maxHp: spawnPlatformHP,
+                        isSpawnPlatform: true,
+                        active: true,
+                        spawnPosition: { x: spawn.x, z: spawn.z }
+                    };
+
+                    // Store reference for spawn control
+                    if (!creepWaveState.spawnPlatforms) creepWaveState.spawnPlatforms = [];
+                    creepWaveState.spawnPlatforms.push({
+                        mesh: spawnPlatformGroup,
+                        team: teamKey,
+                        laneKey: laneKey,
+                        hp: spawnPlatformHP,
+                        maxHp: spawnPlatformHP,
+                        active: true,
+                        position: { x: spawn.x, z: spawn.z }
+                    });
+
+                    scene.add(spawnPlatformGroup);
+                    creepWaveState.laneVisuals.push(spawnPlatformGroup);
 
                     // Base name floating label
                     const baseCanvas = document.createElement('canvas');
@@ -67281,6 +67824,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     const baseSprite = new THREE.Sprite(baseSpriteMat);
                     baseSprite.position.set(spawn.x, spawnY + 6, spawn.z);
                     baseSprite.scale.set(12, 4, 1);
+                    // v7.4: Store label reference for removal on destruction
+                    spawnPlatformGroup.userData.labelSprite = baseSprite;
                     scene.add(baseSprite);
                     creepWaveState.laneVisuals.push(baseSprite);
                 });
@@ -67442,18 +67987,30 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             // Spawn for each lane
             Object.entries(LANE_DEFINITIONS).forEach(([laneKey, lane]) => {
-                // Team A creeps (from negative spawn)
-                for (let i = 0; i < CREEP_WAVE_CONFIG.creepsPerWave; i++) {
-                    setTimeout(() => {
-                        spawnCreep('A', laneKey, lane, i);
-                    }, i * 300); // Stagger spawns
+                // v7.4: Check if spawn platforms are still active before spawning
+                const teamASpawnActive = !creepWaveState.spawnPlatforms?.find(p =>
+                    p.team === 'A' && p.laneKey === laneKey && !p.active
+                );
+                const teamBSpawnActive = !creepWaveState.spawnPlatforms?.find(p =>
+                    p.team === 'B' && p.laneKey === laneKey && !p.active
+                );
+
+                // Team A creeps (from negative spawn) - only if spawn platform active
+                if (teamASpawnActive) {
+                    for (let i = 0; i < CREEP_WAVE_CONFIG.creepsPerWave; i++) {
+                        setTimeout(() => {
+                            spawnCreep('A', laneKey, lane, i);
+                        }, i * 300); // Stagger spawns
+                    }
                 }
 
-                // Team B creeps (from positive spawn)
-                for (let i = 0; i < CREEP_WAVE_CONFIG.creepsPerWave; i++) {
-                    setTimeout(() => {
-                        spawnCreep('B', laneKey, lane, i);
-                    }, i * 300);
+                // Team B creeps (from positive spawn) - only if spawn platform active
+                if (teamBSpawnActive) {
+                    for (let i = 0; i < CREEP_WAVE_CONFIG.creepsPerWave; i++) {
+                        setTimeout(() => {
+                            spawnCreep('B', laneKey, lane, i);
+                        }, i * 300);
+                    }
                 }
             });
 
@@ -67466,6 +68023,7 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // Spawn a single creep
+        // v7.4: Updated to use externally loaded models from GitHub
         function spawnCreep(team, laneKey, lane, index) {
             if (!scene) return;
 
@@ -67474,34 +68032,90 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 ? [...lane.waypoints]  // Forward through waypoints
                 : [...lane.waypoints].reverse();  // Reverse for team B
 
-            // Creep appearance
-            const teamColor = team === 'A' ? 0x00ff88 : 0xff4444;  // Green vs Red
-            const creepGeo = new THREE.BoxGeometry(0.8, 1.2, 0.8);
-            const creepMat = new THREE.MeshStandardMaterial({
-                color: teamColor,
-                emissive: teamColor,
-                emissiveIntensity: 0.3,
-                roughness: 0.5
-            });
-            const creep = new THREE.Mesh(creepGeo, creepMat);
+            // v7.4: Create creep mesh using loaded models or fallback
+            const teamColor = team === 'A' ? 0x00ff88 : 0xff4444;
+            const modelId = team === 'A' ? 'robot-drone' : 'hostile-fauna-basic';
+            let creep;
 
-            // Position at spawn with slight offset
+            // Try to use cached model data
+            const modelData = ModelLoader.cache.get(modelId);
+            if (modelData) {
+                creep = ModelLoader.buildMesh(modelData, {
+                    scale: team === 'A' ? 0.8 : 0.7,
+                    teamColor: team === 'A' ? '#00ff88' : '#ff4444'
+                });
+                creep.userData.hasDetailedModel = true;
+            }
+
+            // Fallback to procedural mesh if model not loaded
+            if (!creep) {
+                creep = ModelLoader.createFallbackMesh(modelId, team);
+                creep.userData.hasDetailedModel = false;
+
+                // Async upgrade: replace with real model when loaded
+                ModelLoader.loadModel(modelId, team === 'A' ? 'creeps/robot-drone.json' : 'creeps/hostile-fauna-basic.json')
+                    .then(data => {
+                        if (data && creep.parent && !creep.userData.hasDetailedModel) {
+                            // Model loaded - upgrade this creep
+                            const newMesh = ModelLoader.buildMesh(data, {
+                                scale: team === 'A' ? 0.8 : 0.7,
+                                teamColor: team === 'A' ? '#00ff88' : '#ff4444'
+                            });
+                            if (newMesh) {
+                                // Copy position/rotation
+                                newMesh.position.copy(creep.position);
+                                newMesh.rotation.copy(creep.rotation);
+
+                                // Copy userData
+                                Object.assign(newMesh.userData, creep.userData);
+                                newMesh.userData.hasDetailedModel = true;
+
+                                // Re-add HP bar and banner
+                                const hpBar = creep.userData.hpBar;
+                                if (hpBar && hpBar.parent) {
+                                    hpBar.parent.remove(hpBar);
+                                    newMesh.add(hpBar);
+                                }
+
+                                // Swap in scene
+                                const idx = creepWaveState.creeps.indexOf(creep);
+                                if (idx > -1) {
+                                    scene.remove(creep);
+                                    scene.add(newMesh);
+                                    creepWaveState.creeps[idx] = newMesh;
+                                }
+                            }
+                        }
+                    });
+            }
+
+            // Position at spawn with larger offset to prevent initial bunching
+            // v9.4: Increased offset and use index for better spacing
             const spawnY = typeof getTerrainHeight === 'function'
                 ? getTerrainHeight(spawn.x, spawn.z) + 0.6
                 : 0.6;
-            const offsetX = (Math.random() - 0.5) * 2;
-            const offsetZ = (Math.random() - 0.5) * 2;
-            creep.position.set(spawn.x + offsetX, spawnY, spawn.z + offsetZ);
+            // Spread creeps in a line along the lane direction, plus random offset
+            const laneDir = team === 'A' ? 1 : -1;
+            const baseOffset = index * 1.8; // Space creeps 1.8 units apart along spawn line
+            const randomX = (Math.random() - 0.5) * 3; // +/- 1.5 units lateral
+            const randomZ = (Math.random() - 0.5) * 3; // +/- 1.5 units forward/back
+            creep.position.set(
+                spawn.x + randomX,
+                spawnY,
+                spawn.z + (baseOffset * laneDir * 0.3) + randomZ
+            );
+            creep.userData.baseY = spawnY; // Store for hover animation
             creep.castShadow = true;
 
-            // Team banner on top
-            const bannerGeo = new THREE.PlaneGeometry(0.5, 0.8);
+            // Team banner on top (smaller for detailed models)
+            const bannerSize = creep.userData.hasDetailedModel ? 0.3 : 0.5;
+            const bannerGeo = new THREE.PlaneGeometry(bannerSize, bannerSize * 1.6);
             const bannerMat = new THREE.MeshBasicMaterial({
                 color: team === 'A' ? 0x00ff00 : 0xff0000,
                 side: THREE.DoubleSide
             });
             const banner = new THREE.Mesh(bannerGeo, bannerMat);
-            banner.position.y = 1.0;
+            banner.position.y = team === 'A' ? 1.2 : 0.9; // Adjust based on model type
             banner.rotation.y = Math.PI / 4;
             creep.add(banner);
 
@@ -67509,20 +68123,20 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const hpBarGeo = new THREE.PlaneGeometry(1.2, 0.15);
             const hpBarMat = new THREE.MeshBasicMaterial({ color: 0x00ff00, side: THREE.DoubleSide });
             const hpBar = new THREE.Mesh(hpBarGeo, hpBarMat);
-            hpBar.position.y = 1.5;
+            hpBar.position.y = team === 'A' ? 1.5 : 1.2;
             creep.add(hpBar);
 
             const hpBgGeo = new THREE.PlaneGeometry(1.3, 0.2);
             const hpBgMat = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide });
             const hpBg = new THREE.Mesh(hpBgGeo, hpBgMat);
-            hpBg.position.y = 1.5;
+            hpBg.position.y = team === 'A' ? 1.5 : 1.2;
             hpBg.position.z = -0.01;
             creep.add(hpBg);
 
-            // v6.68: Creep names for targeting display
+            // v7.4: Updated creep names to match new models
             const creepNames = team === 'A'
-                ? ['Battle Drone', 'Scout Bot', 'Combat Unit', 'Siege Walker']
-                : ['Fauna Swarm', 'Hive Warrior', 'Acid Spitter', 'Brood Hunter'];
+                ? ['Combat Drone', 'Recon Unit', 'Assault Bot', 'Tactical Walker', 'Strike Drone']
+                : ['Swarm Crawler', 'Hive Stalker', 'Venom Spitter', 'Brood Hunter', 'Chitin Ripper'];
             const creepName = creepNames[Math.floor(Math.random() * creepNames.length)];
 
             // Store creep data
@@ -67607,6 +68221,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 // HP bar always faces camera
                 if (creep.userData.hpBar) {
                     creep.userData.hpBar.lookAt(camera.position);
+                }
+
+                // v7.4: Animate detailed model parts (hover, legs, etc.)
+                if (creep.userData.hasDetailedModel && creep.userData.animatableParts) {
+                    ModelLoader.animateModel(creep, time * 0.001, dt * 0.001);
                 }
 
                 // Snap to ground
@@ -67703,21 +68322,74 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }, 100);
         }
 
+        // v9.4: Bridge detection for creeps and players
+        const BRIDGE_COLLISION_WIDTH = 6.0;  // Width of bridge collision (wider for easier use)
+
+        // v9.4: Check if position is on a bridge (near a lane path over water)
+        function isOnBridge(x, z) {
+            if (typeof LANE_DEFINITIONS === 'undefined') return false;
+
+            // Check distance to each lane's path segments
+            for (const laneKey of Object.keys(LANE_DEFINITIONS)) {
+                const lane = LANE_DEFINITIONS[laneKey];
+                const waypoints = lane.waypoints;
+
+                // Check each segment of the lane
+                for (let i = 0; i < waypoints.length - 1; i++) {
+                    const p1 = waypoints[i];
+                    const p2 = waypoints[i + 1];
+
+                    // Calculate distance from point to line segment
+                    const dx = p2.x - p1.x;
+                    const dz = p2.z - p1.z;
+                    const segLen = Math.sqrt(dx * dx + dz * dz);
+                    if (segLen < 0.01) continue;
+
+                    // Project point onto line segment
+                    const t = Math.max(0, Math.min(1,
+                        ((x - p1.x) * dx + (z - p1.z) * dz) / (segLen * segLen)
+                    ));
+
+                    // Closest point on segment
+                    const closestX = p1.x + t * dx;
+                    const closestZ = p1.z + t * dz;
+
+                    // Distance to closest point
+                    const distX = x - closestX;
+                    const distZ = z - closestZ;
+                    const dist = Math.sqrt(distX * distX + distZ * distZ);
+
+                    // If within bridge width, position is on bridge
+                    if (dist < BRIDGE_COLLISION_WIDTH) {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
         // v6.67: Get correct Y position for creeps (respects bridges)
-        // Creeps walk on bridges over water, not through the water
+        // v9.4: Only use bridge height if actually ON a bridge path
         const CREEP_BRIDGE_HEIGHT = 3.5;  // Bridge deck height (matches lane visuals)
         const CREEP_WATER_LEVEL = 0.5;
+        const CREEP_SWIM_HEIGHT = 0.8;    // Height when swimming in water/lava
 
         function getCreepTerrainHeight(x, z) {
-            // Check if over water (need a bridge)
+            // Check if over water
             if (worldState.terrain) {
                 const gx = Math.round(x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
                 const gz = Math.round(z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE / 2;
                 if (gx >= 0 && gx < CONFIG.WORLD_SIZE && gz >= 0 && gz < CONFIG.WORLD_SIZE) {
                     const terrainY = worldState.terrain[gx]?.[gz];
                     if (terrainY !== undefined && terrainY < -50) {
-                        // Over water - use bridge height
-                        return CREEP_WATER_LEVEL + CREEP_BRIDGE_HEIGHT;
+                        // Over water - check if on a bridge
+                        if (typeof isOnBridge === 'function' && isOnBridge(x, z)) {
+                            // On bridge - use bridge height
+                            return CREEP_WATER_LEVEL + CREEP_BRIDGE_HEIGHT;
+                        } else {
+                            // Not on bridge - swim at water surface
+                            return CREEP_SWIM_HEIGHT;
+                        }
                     }
                 }
             }
@@ -67737,17 +68409,98 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // Move creep toward a position
+        // v9.4: Integrated avoidance steering - creeps steer around each other while moving
         function moveCreepToward(creep, targetPos, dt) {
-            const direction = new THREE.Vector3()
-                .subVectors(targetPos, creep.position)
-                .normalize();
+            const targetDir = new THREE.Vector3()
+                .subVectors(targetPos, creep.position);
+            const distToTarget = targetDir.length();
+            targetDir.normalize();
 
-            // Store previous position for ramp detection
-            const prevX = creep.position.x;
-            const prevZ = creep.position.z;
+            // Calculate avoidance force from nearby creeps
+            let avoidX = 0;
+            let avoidZ = 0;
+            const avoidRadius = 2.5;  // Distance at which creeps notice each other
+            const hardRadius = 1.0;   // Minimum clearance - strong avoidance
 
-            creep.position.x += direction.x * creep.userData.speed * dt;
-            creep.position.z += direction.z * creep.userData.speed * dt;
+            for (let i = 0; i < creepWaveState.creeps.length; i++) {
+                const other = creepWaveState.creeps[i];
+                if (!other || other === creep || !other.userData || other.userData.hp <= 0) continue;
+
+                const dx = creep.position.x - other.position.x;
+                const dz = creep.position.z - other.position.z;
+                let dist = Math.sqrt(dx * dx + dz * dz);
+
+                // Handle exact overlap - push in random direction
+                if (dist < 0.01) {
+                    const angle = Math.random() * Math.PI * 2;
+                    avoidX += Math.cos(angle) * 3;
+                    avoidZ += Math.sin(angle) * 3;
+                    continue;
+                }
+
+                if (dist < avoidRadius) {
+                    const nx = dx / dist;
+                    const nz = dz / dist;
+
+                    // Calculate avoidance strength - exponentially stronger as closer
+                    let strength;
+                    if (dist < hardRadius) {
+                        // Very close - strong steering
+                        strength = 3.0 * (hardRadius / dist);
+                    } else {
+                        // Normal avoidance
+                        strength = 1.5 * ((avoidRadius - dist) / avoidRadius);
+                    }
+
+                    avoidX += nx * strength;
+                    avoidZ += nz * strength;
+                }
+            }
+
+            // v9.5: Add building avoidance force
+            if (typeof getBuildingAvoidanceForce === 'function') {
+                const buildingAvoid = getBuildingAvoidanceForce(creep.position.x, creep.position.z, 2);
+                avoidX += buildingAvoid.x * 2; // Buildings have higher priority
+                avoidZ += buildingAvoid.z * 2;
+            }
+
+            // Combine target direction with avoidance (avoidance has priority)
+            const avoidLen = Math.sqrt(avoidX * avoidX + avoidZ * avoidZ);
+            let finalX = targetDir.x;
+            let finalZ = targetDir.z;
+
+            if (avoidLen > 0.1) {
+                // Blend target direction with avoidance based on avoidance magnitude
+                const avoidWeight = Math.min(avoidLen * 0.5, 0.9); // Cap at 90% avoidance
+                finalX = targetDir.x * (1 - avoidWeight) + (avoidX / avoidLen) * avoidWeight;
+                finalZ = targetDir.z * (1 - avoidWeight) + (avoidZ / avoidLen) * avoidWeight;
+
+                // Normalize the result
+                const finalLen = Math.sqrt(finalX * finalX + finalZ * finalZ);
+                if (finalLen > 0) {
+                    finalX /= finalLen;
+                    finalZ /= finalLen;
+                }
+            }
+
+            // v9.5: Hard collision check - prevent moving into buildings
+            const newX = creep.position.x + finalX * creep.userData.speed * dt;
+            const newZ = creep.position.z + finalZ * creep.userData.speed * dt;
+
+            if (typeof checkBuildingCollision === 'function') {
+                const collision = checkBuildingCollision(newX, newZ);
+                if (collision) {
+                    // Push out of building instead
+                    const pushOut = getBuildingPushOut(creep.position.x, creep.position.z, collision);
+                    creep.position.x += pushOut.x * 0.5;
+                    creep.position.z += pushOut.z * 0.5;
+                    return; // Skip normal movement this frame
+                }
+            }
+
+            // Move in the calculated direction
+            creep.position.x = newX;
+            creep.position.z = newZ;
 
             // v6.67: Update Y position based on terrain/bridge
             const targetY = getCreepTerrainHeight(creep.position.x, creep.position.z);
@@ -67761,8 +68514,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 creep.position.y = targetY;
             }
 
-            // Face movement direction
-            creep.rotation.y = Math.atan2(direction.x, direction.z);
+            // Face movement direction (use final direction with avoidance)
+            creep.rotation.y = Math.atan2(finalX, finalZ);
 
             // Tilt slightly when going up/down ramps
             if (Math.abs(yDiff) > 0.3) {
@@ -67773,78 +68526,107 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // v9.3: Calculate and apply separation force to prevent creeps from bunching up
+        // ROBUST VERSION: Handles exact overlaps and applies strong collision avoidance
         function applyCreepSeparation(dt) {
             if (!creepWaveState.creeps || creepWaveState.creeps.length < 2) return;
 
             const sepRadius = CREEP_WAVE_CONFIG.separationRadius;
             const sepStrength = CREEP_WAVE_CONFIG.separationStrength;
             const minSep = CREEP_WAVE_CONFIG.minSeparation;
+            const hardRadius = CREEP_WAVE_CONFIG.hardRadius || 0.8;
 
-            // Calculate separation forces for all creeps
-            const separationForces = [];
+            // Run multiple iterations for better convergence when heavily bunched
+            const iterations = 2;
 
-            for (let i = 0; i < creepWaveState.creeps.length; i++) {
-                const creep = creepWaveState.creeps[i];
-                if (!creep || !creep.userData || creep.userData.hp <= 0) {
-                    separationForces.push(null);
-                    continue;
-                }
+            for (let iter = 0; iter < iterations; iter++) {
+                // Calculate separation forces for all creeps
+                const separationForces = [];
 
-                // Accumulate separation force from nearby creeps
-                let forceX = 0;
-                let forceZ = 0;
-                let neighborCount = 0;
+                for (let i = 0; i < creepWaveState.creeps.length; i++) {
+                    const creep = creepWaveState.creeps[i];
+                    if (!creep || !creep.userData || creep.userData.hp <= 0) {
+                        separationForces.push(null);
+                        continue;
+                    }
 
-                for (let j = 0; j < creepWaveState.creeps.length; j++) {
-                    if (i === j) continue;
+                    // Accumulate separation force from nearby creeps
+                    let forceX = 0;
+                    let forceZ = 0;
+                    let neighborCount = 0;
 
-                    const other = creepWaveState.creeps[j];
-                    if (!other || !other.userData || other.userData.hp <= 0) continue;
+                    for (let j = 0; j < creepWaveState.creeps.length; j++) {
+                        if (i === j) continue;
 
-                    // Calculate distance (2D, ignore Y)
-                    const dx = creep.position.x - other.position.x;
-                    const dz = creep.position.z - other.position.z;
-                    const distSq = dx * dx + dz * dz;
-                    const dist = Math.sqrt(distSq);
+                        const other = creepWaveState.creeps[j];
+                        if (!other || !other.userData || other.userData.hp <= 0) continue;
 
-                    // If within separation radius, calculate repulsion force
-                    if (dist < sepRadius && dist > 0.001) {
-                        // Force strength increases as creeps get closer (inverse relationship)
-                        // Stronger push when very close, weaker when further
-                        const overlap = sepRadius - dist;
-                        const strength = (overlap / sepRadius) * sepStrength;
+                        // Calculate distance (2D, ignore Y)
+                        let dx = creep.position.x - other.position.x;
+                        let dz = creep.position.z - other.position.z;
+                        let dist = Math.sqrt(dx * dx + dz * dz);
 
-                        // Extra strong repulsion when below minimum separation
-                        const urgency = dist < minSep ? 3.0 : 1.0;
+                        // CRITICAL: Handle exact overlap - push in random direction
+                        if (dist < 0.01) {
+                            // Creeps are at exact same position - assign random separation direction
+                            const randomAngle = Math.random() * Math.PI * 2 + i * 0.1; // Use index for determinism
+                            dx = Math.cos(randomAngle);
+                            dz = Math.sin(randomAngle);
+                            dist = 0.01; // Pretend very small distance for max force
+                        }
 
-                        // Normalize direction and apply force
-                        const invDist = 1 / dist;
-                        forceX += dx * invDist * strength * urgency;
-                        forceZ += dz * invDist * strength * urgency;
-                        neighborCount++;
+                        // If within separation radius, calculate repulsion force
+                        if (dist < sepRadius) {
+                            // Normalize direction
+                            const invDist = 1 / dist;
+                            const nx = dx * invDist;
+                            const nz = dz * invDist;
+
+                            // Calculate force strength - exponentially stronger as distance decreases
+                            let strength;
+                            if (dist < hardRadius) {
+                                // HARD COLLISION: Very strong instant push
+                                strength = sepStrength * 5.0 * (hardRadius / Math.max(dist, 0.01));
+                            } else if (dist < minSep) {
+                                // Below minimum separation - strong push
+                                strength = sepStrength * 2.0 * ((minSep - dist) / minSep + 1);
+                            } else {
+                                // Normal soft separation
+                                const overlap = sepRadius - dist;
+                                strength = sepStrength * (overlap / sepRadius);
+                            }
+
+                            forceX += nx * strength;
+                            forceZ += nz * strength;
+                            neighborCount++;
+                        }
+                    }
+
+                    // Store the separation force
+                    if (neighborCount > 0) {
+                        separationForces.push({ x: forceX, z: forceZ });
+                    } else {
+                        separationForces.push(null);
                     }
                 }
 
-                // Store the separation force
-                if (neighborCount > 0) {
-                    separationForces.push({ x: forceX, z: forceZ });
-                } else {
-                    separationForces.push(null);
+                // Apply separation forces to all creeps
+                for (let i = 0; i < creepWaveState.creeps.length; i++) {
+                    const creep = creepWaveState.creeps[i];
+                    const force = separationForces[i];
+
+                    if (!creep || !force) continue;
+
+                    // Apply the separation force (scaled by dt for frame-independence)
+                    creep.position.x += force.x * dt;
+                    creep.position.z += force.z * dt;
                 }
             }
 
-            // Apply separation forces to all creeps
+            // Final Y position update after all separation is done
             for (let i = 0; i < creepWaveState.creeps.length; i++) {
                 const creep = creepWaveState.creeps[i];
-                const force = separationForces[i];
+                if (!creep || !creep.userData || creep.userData.hp <= 0) continue;
 
-                if (!creep || !force) continue;
-
-                // Apply the separation force
-                creep.position.x += force.x * dt;
-                creep.position.z += force.z * dt;
-
-                // Update Y position after horizontal movement
                 if (typeof getCreepTerrainHeight === 'function') {
                     const targetY = getCreepTerrainHeight(creep.position.x, creep.position.z);
                     creep.position.y = targetY;
@@ -67855,11 +68637,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // v9.3: Apply separation force to mobs (enemies) to prevent bunching up
-        // Similar logic to creep separation but for the worldState.mobs array
+        // ROBUST VERSION: Same algorithm as creep separation
         const MOB_SEPARATION_CONFIG = {
-            radius: 2.0,      // Distance at which mobs start pushing apart
-            strength: 3.5,    // How strongly mobs push each other away
-            minDist: 1.0      // Minimum distance mobs try to maintain
+            radius: 2.5,      // Distance at which mobs start pushing apart
+            strength: 10.0,   // How strongly mobs push each other away (strong)
+            minDist: 1.2,     // Minimum distance mobs try to maintain
+            hardRadius: 0.8   // Mobs cannot get closer than this
         };
 
         function applyMobSeparation(dt) {
@@ -67868,77 +68651,106 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const sepRadius = MOB_SEPARATION_CONFIG.radius;
             const sepStrength = MOB_SEPARATION_CONFIG.strength;
             const minSep = MOB_SEPARATION_CONFIG.minDist;
+            const hardRadius = MOB_SEPARATION_CONFIG.hardRadius;
 
-            // Calculate separation forces for all mobs
-            const separationForces = [];
+            // Run multiple iterations for better convergence
+            const iterations = 2;
 
-            for (let i = 0; i < worldState.mobs.length; i++) {
-                const mob = worldState.mobs[i];
-                if (!mob || !mob.parent || !mob.userData || mob.userData.hp <= 0) {
-                    separationForces.push(null);
-                    continue;
-                }
+            for (let iter = 0; iter < iterations; iter++) {
+                // Calculate separation forces for all mobs
+                const separationForces = [];
 
-                // Skip mobs that are stunned or have special behavior
-                if (mob.userData.stunned || mob.userData.telegraphing) {
-                    separationForces.push(null);
-                    continue;
-                }
+                for (let i = 0; i < worldState.mobs.length; i++) {
+                    const mob = worldState.mobs[i];
+                    if (!mob || !mob.parent || !mob.userData || mob.userData.hp <= 0) {
+                        separationForces.push(null);
+                        continue;
+                    }
 
-                // Accumulate separation force from nearby mobs
-                let forceX = 0;
-                let forceZ = 0;
-                let neighborCount = 0;
+                    // Skip mobs that are stunned or telegraphing (don't disrupt attack feedback)
+                    if (mob.userData.stunned || mob.userData.telegraphing) {
+                        separationForces.push(null);
+                        continue;
+                    }
 
-                for (let j = 0; j < worldState.mobs.length; j++) {
-                    if (i === j) continue;
+                    // Accumulate separation force from nearby mobs
+                    let forceX = 0;
+                    let forceZ = 0;
+                    let neighborCount = 0;
 
-                    const other = worldState.mobs[j];
-                    if (!other || !other.parent || !other.userData || other.userData.hp <= 0) continue;
+                    for (let j = 0; j < worldState.mobs.length; j++) {
+                        if (i === j) continue;
 
-                    // Calculate distance (2D, ignore Y)
-                    const dx = mob.position.x - other.position.x;
-                    const dz = mob.position.z - other.position.z;
-                    const distSq = dx * dx + dz * dz;
-                    const dist = Math.sqrt(distSq);
+                        const other = worldState.mobs[j];
+                        if (!other || !other.parent || !other.userData || other.userData.hp <= 0) continue;
 
-                    // If within separation radius, calculate repulsion force
-                    if (dist < sepRadius && dist > 0.001) {
-                        // Force strength increases as mobs get closer
-                        const overlap = sepRadius - dist;
-                        const strength = (overlap / sepRadius) * sepStrength;
+                        // Calculate distance (2D, ignore Y)
+                        let dx = mob.position.x - other.position.x;
+                        let dz = mob.position.z - other.position.z;
+                        let dist = Math.sqrt(dx * dx + dz * dz);
 
-                        // Extra strong repulsion when below minimum separation
-                        const urgency = dist < minSep ? 2.5 : 1.0;
+                        // CRITICAL: Handle exact overlap - push in random direction
+                        if (dist < 0.01) {
+                            const randomAngle = Math.random() * Math.PI * 2 + i * 0.1;
+                            dx = Math.cos(randomAngle);
+                            dz = Math.sin(randomAngle);
+                            dist = 0.01;
+                        }
 
-                        // Normalize direction and apply force
-                        const invDist = 1 / dist;
-                        forceX += dx * invDist * strength * urgency;
-                        forceZ += dz * invDist * strength * urgency;
-                        neighborCount++;
+                        // If within separation radius, calculate repulsion force
+                        if (dist < sepRadius) {
+                            // Normalize direction
+                            const invDist = 1 / dist;
+                            const nx = dx * invDist;
+                            const nz = dz * invDist;
+
+                            // Calculate force strength - exponentially stronger as distance decreases
+                            let strength;
+                            if (dist < hardRadius) {
+                                // HARD COLLISION: Very strong instant push
+                                strength = sepStrength * 5.0 * (hardRadius / Math.max(dist, 0.01));
+                            } else if (dist < minSep) {
+                                // Below minimum separation - strong push
+                                strength = sepStrength * 2.0 * ((minSep - dist) / minSep + 1);
+                            } else {
+                                // Normal soft separation
+                                const overlap = sepRadius - dist;
+                                strength = sepStrength * (overlap / sepRadius);
+                            }
+
+                            forceX += nx * strength;
+                            forceZ += nz * strength;
+                            neighborCount++;
+                        }
+                    }
+
+                    // Store the separation force
+                    if (neighborCount > 0) {
+                        separationForces.push({ x: forceX, z: forceZ });
+                    } else {
+                        separationForces.push(null);
                     }
                 }
 
-                // Store the separation force
-                if (neighborCount > 0) {
-                    separationForces.push({ x: forceX, z: forceZ });
-                } else {
-                    separationForces.push(null);
+                // Apply separation forces to all mobs
+                for (let i = 0; i < worldState.mobs.length; i++) {
+                    const mob = worldState.mobs[i];
+                    const force = separationForces[i];
+
+                    if (!mob || !force) continue;
+
+                    // Apply the separation force
+                    mob.position.x += force.x * dt;
+                    mob.position.z += force.z * dt;
                 }
             }
 
-            // Apply separation forces to all mobs
+            // Final Y position update after all separation
             for (let i = 0; i < worldState.mobs.length; i++) {
                 const mob = worldState.mobs[i];
-                const force = separationForces[i];
+                if (!mob || !mob.parent || !mob.userData || mob.userData.hp <= 0) continue;
+                if (mob.userData.stunned || mob.userData.telegraphing) continue;
 
-                if (!mob || !force) continue;
-
-                // Apply the separation force
-                mob.position.x += force.x * dt;
-                mob.position.z += force.z * dt;
-
-                // Update Y position after horizontal movement
                 if (typeof snapToGround === 'function') {
                     snapToGround(mob);
                 } else if (typeof getTerrainHeight === 'function') {
@@ -70360,8 +71172,329 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 cost: { wood: 15, stone: 5 },
                 hp: 200,
                 provides: { storage: 100 }
+            },
+
+            // ========================================
+            // v9.4: COLONY BUILDINGS - For human sustainability
+            // ========================================
+
+            // HABITAT POD - Basic living quarters
+            habitat: {
+                name: 'Habitat Pod',
+                icon: '🏠',
+                category: 'colony',
+                segments: [
+                    { type: 'foundation', offset: {x:0, y:0.15, z:0}, size: {x:4, y:0.3, z:4}, color: 0x444455 },
+                    { type: 'dome_base', offset: {x:0, y:1.5, z:0}, size: {x:3.5, y:2.5, z:3.5}, color: 0x667788, shape: 'dome' },
+                    { type: 'airlock', offset: {x:2, y:0.8, z:0}, size: {x:1, y:1.5, z:1.2}, color: 0x556677 },
+                    { type: 'window1', offset: {x:0, y:1.8, z:1.7}, size: {x:1.2, y:0.8, z:0.1}, color: 0x88ccff },
+                    { type: 'window2', offset: {x:1.2, y:1.8, z:1.2}, size: {x:0.8, y:0.8, z:0.1}, color: 0x88ccff },
+                    { type: 'vent', offset: {x:-1.5, y:2.5, z:0}, size: {x:0.5, y:0.3, z:0.5}, color: 0x333344 }
+                ],
+                buildTime: 10000,
+                cost: { stone: 15, iron: 5 },
+                hp: 250,
+                provides: { housing: 4, lifesupport: 4 },
+                colony: true
+            },
+
+            // SOLAR ARRAY - Power generation
+            solar: {
+                name: 'Solar Array',
+                icon: '☀️',
+                category: 'colony',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.1, z:0}, size: {x:1.5, y:0.2, z:1.5}, color: 0x444444 },
+                    { type: 'pole', offset: {x:0, y:1.5, z:0}, size: {x:0.3, y:2.5, z:0.3}, color: 0x666666 },
+                    { type: 'mount', offset: {x:0, y:3, z:0}, size: {x:0.5, y:0.3, z:0.5}, color: 0x555555 },
+                    { type: 'panel1', offset: {x:-1.5, y:3.2, z:0}, size: {x:2.5, y:0.1, z:1.5}, color: 0x1a237e },
+                    { type: 'panel2', offset: {x:1.5, y:3.2, z:0}, size: {x:2.5, y:0.1, z:1.5}, color: 0x1a237e },
+                    { type: 'cells1', offset: {x:-1.5, y:3.25, z:0}, size: {x:2.3, y:0.02, z:1.3}, color: 0x303f9f },
+                    { type: 'cells2', offset: {x:1.5, y:3.25, z:0}, size: {x:2.3, y:0.02, z:1.3}, color: 0x303f9f }
+                ],
+                buildTime: 6000,
+                cost: { iron: 10, crystal: 3 },
+                hp: 100,
+                provides: { power: 25 },
+                colony: true
+            },
+
+            // WATER RECLAIMER - Life support
+            waterReclaimer: {
+                name: 'Water Reclaimer',
+                icon: '💧',
+                category: 'colony',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.2, z:0}, size: {x:3, y:0.4, z:2}, color: 0x445566 },
+                    { type: 'tank1', offset: {x:-0.8, y:1.2, z:0}, size: {x:1, y:2, z:1}, color: 0x4488aa, shape: 'cylinder' },
+                    { type: 'tank2', offset: {x:0.8, y:1, z:0}, size: {x:0.8, y:1.6, z:0.8}, color: 0x4488aa, shape: 'cylinder' },
+                    { type: 'pipes', offset: {x:0, y:0.8, z:0.8}, size: {x:2, y:0.2, z:0.2}, color: 0x666677 },
+                    { type: 'pump', offset: {x:0, y:0.6, z:-0.7}, size: {x:0.6, y:0.8, z:0.6}, color: 0x556666 },
+                    { type: 'display', offset: {x:0, y:1.5, z:0.95}, size: {x:0.8, y:0.5, z:0.05}, color: 0x00ffaa }
+                ],
+                buildTime: 8000,
+                cost: { iron: 12, crystal: 2 },
+                hp: 150,
+                provides: { water: 20, lifesupport: 2 },
+                colony: true
+            },
+
+            // SUPPLY CACHE - Resource storage
+            supplyCache: {
+                name: 'Supply Cache',
+                icon: '📦',
+                category: 'colony',
+                segments: [
+                    { type: 'platform', offset: {x:0, y:0.15, z:0}, size: {x:4, y:0.3, z:3}, color: 0x555566 },
+                    { type: 'container1', offset: {x:-1, y:0.9, z:0}, size: {x:1.5, y:1.2, z:2}, color: 0x667744 },
+                    { type: 'container2', offset: {x:1, y:0.7, z:-0.3}, size: {x:1.2, y:1, z:1.5}, color: 0x668855 },
+                    { type: 'crate1', offset: {x:0.8, y:0.4, z:1}, size: {x:0.6, y:0.6, z:0.6}, color: 0xaa8855 },
+                    { type: 'crate2', offset: {x:-0.5, y:1.8, z:0}, size: {x:0.8, y:0.5, z:0.8}, color: 0xbb9966 },
+                    { type: 'tarp', offset: {x:0, y:2, z:0}, size: {x:3.5, y:0.1, z:2.5}, color: 0x556644 }
+                ],
+                buildTime: 5000,
+                cost: { wood: 10, stone: 5 },
+                hp: 180,
+                provides: { storage: 150 },
+                colony: true
+            },
+
+            // COMMS TOWER - Communication relay
+            commsTower: {
+                name: 'Comms Tower',
+                icon: '📡',
+                category: 'colony',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.25, z:0}, size: {x:2, y:0.5, z:2}, color: 0x555555 },
+                    { type: 'tower1', offset: {x:0, y:2, z:0}, size: {x:0.6, y:3, z:0.6}, color: 0x666677 },
+                    { type: 'tower2', offset: {x:0, y:5, z:0}, size: {x:0.4, y:3, z:0.4}, color: 0x777788 },
+                    { type: 'tower3', offset: {x:0, y:7.5, z:0}, size: {x:0.25, y:2, z:0.25}, color: 0x888899 },
+                    { type: 'dish', offset: {x:0, y:6, z:0.8}, size: {x:1.5, y:1.5, z:0.3}, color: 0xccccdd, shape: 'dish' },
+                    { type: 'antenna', offset: {x:0, y:9, z:0}, size: {x:0.1, y:1.5, z:0.1}, color: 0xff4444 },
+                    { type: 'light', offset: {x:0, y:10, z:0}, size: {x:0.2, y:0.2, z:0.2}, color: 0xff0000 }
+                ],
+                buildTime: 9000,
+                cost: { iron: 15, crystal: 5 },
+                hp: 120,
+                provides: { communication: 50, vision: 40 },
+                colony: true
+            },
+
+            // LANDING PAD - For ships/transport
+            landingPad: {
+                name: 'Landing Pad',
+                icon: '🛬',
+                category: 'colony',
+                segments: [
+                    { type: 'base', offset: {x:0, y:0.1, z:0}, size: {x:8, y:0.2, z:8}, color: 0x444444 },
+                    { type: 'markings', offset: {x:0, y:0.15, z:0}, size: {x:6, y:0.05, z:6}, color: 0xffaa00 },
+                    { type: 'center', offset: {x:0, y:0.18, z:0}, size: {x:2, y:0.05, z:2}, color: 0xff4444 },
+                    { type: 'light1', offset: {x:-3.5, y:0.3, z:-3.5}, size: {x:0.3, y:0.4, z:0.3}, color: 0x00ff00 },
+                    { type: 'light2', offset: {x:3.5, y:0.3, z:-3.5}, size: {x:0.3, y:0.4, z:0.3}, color: 0x00ff00 },
+                    { type: 'light3', offset: {x:-3.5, y:0.3, z:3.5}, size: {x:0.3, y:0.4, z:0.3}, color: 0x00ff00 },
+                    { type: 'light4', offset: {x:3.5, y:0.3, z:3.5}, size: {x:0.3, y:0.4, z:0.3}, color: 0x00ff00 },
+                    { type: 'beacon', offset: {x:4.5, y:1.5, z:0}, size: {x:0.5, y:3, z:0.5}, color: 0x666666 }
+                ],
+                buildTime: 12000,
+                cost: { stone: 25, iron: 10 },
+                hp: 300,
+                provides: { landing: 1 },
+                colony: true
             }
         };
+
+        // ========================================
+        // v9.4: AUTONOMOUS COLONY PLANNER
+        // Detects terraformed areas and queues buildings
+        // ========================================
+        const COLONY_PLANNER = {
+            enabled: true,
+            lastPlanTime: 0,
+            planInterval: 5000,        // Check every 5 seconds
+            maxQueuedBuildings: 5,     // Don't queue too many at once
+            buildPriority: [           // Priority order for colony buildings
+                'habitat',             // Housing first
+                'solar',               // Power
+                'waterReclaimer',      // Life support
+                'supplyCache',         // Storage
+                'commsTower',          // Communications
+                'landingPad'           // Transport (rare)
+            ],
+            stats: {
+                sitesUsed: 0,
+                buildingsPlanned: 0
+            }
+        };
+
+        // Check what buildings the colony needs
+        function assessColonyNeeds() {
+            const completed = baseBuildingState.completedBuildings || [];
+            const queued = baseBuildingState.buildQueue || [];
+            const sites = baseBuildingState.constructionSites || [];
+
+            // Count existing and planned buildings by type
+            const counts = {};
+            COLONY_PLANNER.buildPriority.forEach(type => counts[type] = 0);
+
+            completed.forEach(b => {
+                if (counts[b.blueprintKey] !== undefined) counts[b.blueprintKey]++;
+            });
+            queued.forEach(b => {
+                if (counts[b.blueprintKey] !== undefined) counts[b.blueprintKey]++;
+            });
+            sites.forEach(s => {
+                if (counts[s.blueprintKey] !== undefined) counts[s.blueprintKey]++;
+            });
+
+            // Calculate needs based on colony size
+            const totalHabitats = counts.habitat || 0;
+            const colonySize = totalHabitats + 1; // Base colony level
+
+            const needs = [];
+
+            // Always need habitats (up to 5)
+            if (counts.habitat < Math.min(5, colonySize + 1)) {
+                needs.push({ type: 'habitat', priority: 10 - counts.habitat });
+            }
+
+            // Need power (1 solar per 2 habitats)
+            const solarNeeded = Math.ceil((counts.habitat + 1) / 2);
+            if (counts.solar < solarNeeded) {
+                needs.push({ type: 'solar', priority: 8 - counts.solar });
+            }
+
+            // Need water (1 per 3 habitats)
+            const waterNeeded = Math.ceil((counts.habitat + 1) / 3);
+            if (counts.waterReclaimer < waterNeeded) {
+                needs.push({ type: 'waterReclaimer', priority: 7 - counts.waterReclaimer });
+            }
+
+            // Need storage (1 per 2 habitats)
+            const storageNeeded = Math.ceil((counts.habitat + 1) / 2);
+            if (counts.supplyCache < storageNeeded) {
+                needs.push({ type: 'supplyCache', priority: 5 - counts.supplyCache });
+            }
+
+            // Comms tower (just 1-2)
+            if (counts.commsTower < 2 && counts.habitat >= 2) {
+                needs.push({ type: 'commsTower', priority: 3 - counts.commsTower });
+            }
+
+            // Landing pad (just 1)
+            if (counts.landingPad < 1 && counts.habitat >= 3) {
+                needs.push({ type: 'landingPad', priority: 1 });
+            }
+
+            // Sort by priority
+            needs.sort((a, b) => b.priority - a.priority);
+
+            return needs;
+        }
+
+        // Find a suitable terraformed area for building
+        function findBuildableTerraformedArea(buildingType) {
+            if (!worldState.terraformedAreas || worldState.terraformedAreas.length === 0) {
+                return null;
+            }
+
+            const blueprint = BUILDING_BLUEPRINTS[buildingType];
+            if (!blueprint) return null;
+
+            // Calculate required clearance based on building size
+            const minClearance = buildingType === 'landingPad' ? 12 : 6;
+
+            for (const area of worldState.terraformedAreas) {
+                // Skip areas not marked as clear/ready
+                if (area.clear === false) continue;
+
+                // Convert tile coords to world coords
+                const worldX = (area.x - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                const worldZ = (area.z - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                const pos = new THREE.Vector3(worldX, 0, worldZ);
+
+                // Check distance from existing buildings
+                let tooClose = false;
+
+                for (const building of baseBuildingState.completedBuildings) {
+                    if (building.position.distanceTo(pos) < minClearance) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (tooClose) continue;
+
+                for (const site of baseBuildingState.constructionSites) {
+                    if (site.position.distanceTo(pos) < minClearance) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (tooClose) continue;
+
+                for (const queued of baseBuildingState.buildQueue) {
+                    if (queued.position.distanceTo(pos) < minClearance) {
+                        tooClose = true;
+                        break;
+                    }
+                }
+
+                if (tooClose) continue;
+
+                // Found a suitable area!
+                return { area, position: pos };
+            }
+
+            return null;
+        }
+
+        // Run the autonomous colony planner
+        function runColonyPlanner() {
+            if (!COLONY_PLANNER.enabled) return;
+            if (!baseBuildingState.enabled) return;
+
+            const now = Date.now();
+            if (now - COLONY_PLANNER.lastPlanTime < COLONY_PLANNER.planInterval) return;
+            COLONY_PLANNER.lastPlanTime = now;
+
+            // Don't queue too many buildings
+            const queueSize = (baseBuildingState.buildQueue?.length || 0) +
+                             (baseBuildingState.constructionSites?.length || 0);
+            if (queueSize >= COLONY_PLANNER.maxQueuedBuildings) return;
+
+            // Assess what the colony needs
+            const needs = assessColonyNeeds();
+            if (needs.length === 0) return;
+
+            // Try to find a buildable area for highest priority need
+            for (const need of needs) {
+                const site = findBuildableTerraformedArea(need.type);
+
+                if (site) {
+                    // Queue the building!
+                    const buildOrder = queueBuildingConstruction(need.type, site.position);
+
+                    if (buildOrder) {
+                        COLONY_PLANNER.stats.sitesUsed++;
+                        COLONY_PLANNER.stats.buildingsPlanned++;
+
+                        // Mark terraformed area as used
+                        site.area.clear = false;
+                        site.area.buildingPlanned = need.type;
+
+                        const blueprint = BUILDING_BLUEPRINTS[need.type];
+                        showNotification(
+                            `🏗️ Colony Planner: Queued ${blueprint.icon} ${blueprint.name}`,
+                            'info'
+                        );
+
+                        console.log(`v9.4 Colony Planner: Queued ${need.type} at (${site.position.x.toFixed(0)}, ${site.position.z.toFixed(0)})`);
+                        return; // Only queue one per cycle
+                    }
+                }
+            }
+        }
 
         // Base building state
         let baseBuildingState = {
@@ -70373,6 +71506,134 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             totalBuilt: 0,
             initialized: false
         };
+
+        // ========================================
+        // v9.5: BUILDING COLLISION SYSTEM
+        // Prevents players and entities from walking through buildings
+        // ========================================
+
+        // Calculate building collision radius from blueprint segments
+        function getBuildingCollisionRadius(blueprintKey) {
+            const blueprint = BUILDING_BLUEPRINTS[blueprintKey];
+            if (!blueprint || !blueprint.segments) return 2; // Default radius
+
+            let maxRadius = 0;
+            for (const segment of blueprint.segments) {
+                const size = segment.size;
+                const offset = segment.offset;
+                // Calculate furthest extent from center
+                const extentX = Math.abs(offset.x) + size.x / 2;
+                const extentZ = Math.abs(offset.z) + size.z / 2;
+                const extent = Math.max(extentX, extentZ);
+                if (extent > maxRadius) maxRadius = extent;
+            }
+            // Add a small buffer for better collision feel
+            return maxRadius + 0.5;
+        }
+
+        // Check if a position collides with any building
+        // Returns the building if colliding, null otherwise
+        function checkBuildingCollision(x, z, excludeBuilding = null) {
+            if (!baseBuildingState.completedBuildings) return null;
+
+            for (const building of baseBuildingState.completedBuildings) {
+                if (building === excludeBuilding) continue;
+                if (!building.position) continue;
+
+                const radius = getBuildingCollisionRadius(building.blueprintKey);
+                const dx = x - building.position.x;
+                const dz = z - building.position.z;
+                const distSq = dx * dx + dz * dz;
+
+                if (distSq < radius * radius) {
+                    return building;
+                }
+            }
+
+            // Also check construction sites (can't walk through those either)
+            if (baseBuildingState.constructionSites) {
+                for (const site of baseBuildingState.constructionSites) {
+                    if (!site.position) continue;
+                    const radius = getBuildingCollisionRadius(site.blueprintKey) || 3;
+                    const dx = x - site.position.x;
+                    const dz = z - site.position.z;
+                    const distSq = dx * dx + dz * dz;
+
+                    if (distSq < radius * radius) {
+                        return site;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        // Get push-out vector from a building (direction and magnitude to escape)
+        function getBuildingPushOut(x, z, building) {
+            if (!building || !building.position) return { x: 0, z: 0, dist: 0 };
+
+            const radius = getBuildingCollisionRadius(building.blueprintKey);
+            const dx = x - building.position.x;
+            const dz = z - building.position.z;
+            const dist = Math.sqrt(dx * dx + dz * dz);
+
+            if (dist < 0.01) {
+                // Dead center - push in random direction
+                const angle = Math.random() * Math.PI * 2;
+                return {
+                    x: Math.cos(angle) * radius,
+                    z: Math.sin(angle) * radius,
+                    dist: radius
+                };
+            }
+
+            // Normalize and scale to push just outside the radius
+            const pushDist = radius - dist + 0.2; // Extra 0.2 buffer
+            return {
+                x: (dx / dist) * pushDist,
+                z: (dz / dist) * pushDist,
+                dist: pushDist
+            };
+        }
+
+        // Calculate building avoidance force for steering (mobs/creeps)
+        function getBuildingAvoidanceForce(x, z, lookAhead = 3) {
+            if (!baseBuildingState.completedBuildings) return { x: 0, z: 0 };
+
+            let avoidX = 0;
+            let avoidZ = 0;
+
+            const allBuildings = [
+                ...(baseBuildingState.completedBuildings || []),
+                ...(baseBuildingState.constructionSites || [])
+            ];
+
+            for (const building of allBuildings) {
+                if (!building.position) continue;
+
+                const radius = getBuildingCollisionRadius(building.blueprintKey) + lookAhead;
+                const dx = x - building.position.x;
+                const dz = z - building.position.z;
+                const distSq = dx * dx + dz * dz;
+
+                if (distSq < radius * radius) {
+                    const dist = Math.sqrt(distSq);
+                    if (dist < 0.01) {
+                        // At center - random push
+                        const angle = Math.random() * Math.PI * 2;
+                        avoidX += Math.cos(angle) * 5;
+                        avoidZ += Math.sin(angle) * 5;
+                    } else {
+                        // Push away from building center
+                        const strength = (radius - dist) / radius * 3; // Stronger as closer
+                        avoidX += (dx / dist) * strength;
+                        avoidZ += (dz / dist) * strength;
+                    }
+                }
+            }
+
+            return { x: avoidX, z: avoidZ };
+        }
 
         // Initialize base building system
         function initBaseBuildingSystem() {
@@ -72957,12 +74218,87 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
                 // Move mob (using temp vector) - v4.2: Use enemy-specific speed
                 // v4.6: Apply status effect speed modifier
+                // v9.4: Integrated avoidance steering for mobs
                 _tempVec3B.subVectors(mob.userData.targetPos, mob.position);
                 _tempVec3B.y = 0;
                 if(_tempVec3B.length() > 0.1) {
                     _tempVec3B.normalize();
+
+                    // Calculate avoidance force from nearby mobs
+                    let avoidX = 0;
+                    let avoidZ = 0;
+                    const avoidRadius = 2.5;
+                    const hardRadius = 1.0;
+
+                    for (let j = 0; j < worldState.mobs.length; j++) {
+                        const otherMob = worldState.mobs[j];
+                        if (!otherMob || otherMob === mob || !otherMob.parent || !otherMob.userData || otherMob.userData.hp <= 0) continue;
+
+                        const dx2 = mob.position.x - otherMob.position.x;
+                        const dz2 = mob.position.z - otherMob.position.z;
+                        let dist2 = Math.sqrt(dx2 * dx2 + dz2 * dz2);
+
+                        if (dist2 < 0.01) {
+                            const angle = Math.random() * Math.PI * 2;
+                            avoidX += Math.cos(angle) * 2;
+                            avoidZ += Math.sin(angle) * 2;
+                            continue;
+                        }
+
+                        if (dist2 < avoidRadius) {
+                            const nx = dx2 / dist2;
+                            const nz = dz2 / dist2;
+                            let strength = dist2 < hardRadius
+                                ? 2.5 * (hardRadius / dist2)
+                                : 1.2 * ((avoidRadius - dist2) / avoidRadius);
+                            avoidX += nx * strength;
+                            avoidZ += nz * strength;
+                        }
+                    }
+
+                    // v9.5: Add building avoidance force
+                    if (typeof getBuildingAvoidanceForce === 'function') {
+                        const buildingAvoid = getBuildingAvoidanceForce(mob.position.x, mob.position.z, 2);
+                        avoidX += buildingAvoid.x * 2; // Buildings have higher priority
+                        avoidZ += buildingAvoid.z * 2;
+                    }
+
+                    // Blend target direction with avoidance
+                    let finalX = _tempVec3B.x;
+                    let finalZ = _tempVec3B.z;
+                    const avoidLen = Math.sqrt(avoidX * avoidX + avoidZ * avoidZ);
+
+                    if (avoidLen > 0.1) {
+                        const avoidWeight = Math.min(avoidLen * 0.4, 0.8);
+                        finalX = _tempVec3B.x * (1 - avoidWeight) + (avoidX / avoidLen) * avoidWeight;
+                        finalZ = _tempVec3B.z * (1 - avoidWeight) + (avoidZ / avoidLen) * avoidWeight;
+                        const finalLen = Math.sqrt(finalX * finalX + finalZ * finalZ);
+                        if (finalLen > 0) {
+                            finalX /= finalLen;
+                            finalZ /= finalLen;
+                        }
+                    }
+
                     const mobSpeed = (mob.userData.speed || 4) * (mob.userData.speedMultiplier || 1);
-                    mob.position.add(_tempVec3B.multiplyScalar(mobSpeed * dt));
+                    const newMobX = mob.position.x + finalX * mobSpeed * dt;
+                    const newMobZ = mob.position.z + finalZ * mobSpeed * dt;
+
+                    // v9.5: Hard collision check - prevent moving into buildings
+                    if (typeof checkBuildingCollision === 'function') {
+                        const collision = checkBuildingCollision(newMobX, newMobZ);
+                        if (collision) {
+                            // Push out of building instead of moving
+                            const pushOut = getBuildingPushOut(mob.position.x, mob.position.z, collision);
+                            mob.position.x += pushOut.x * 0.3;
+                            mob.position.z += pushOut.z * 0.3;
+                        } else {
+                            mob.position.x = newMobX;
+                            mob.position.z = newMobZ;
+                        }
+                    } else {
+                        mob.position.x = newMobX;
+                        mob.position.z = newMobZ;
+                    }
                 }
                 snapToGround(mob);
 
@@ -73337,6 +74673,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         const SWIM_SINK_DEPTH = 0.8;       // How deep the player sinks when swimming
         const SWIM_BOB_AMPLITUDE = 0.15;   // How much the player bobs up and down
 
+        // Note: isOnBridge() function is defined earlier in file (line ~67752)
+
         function snapToGround(obj) {
             const gx = Math.round(obj.position.x / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE/2;
             const gz = Math.round(obj.position.z / CONFIG.TILE_SIZE) + CONFIG.WORLD_SIZE/2;
@@ -73344,9 +74682,25 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             if(gx >=0 && gx < CONFIG.WORLD_SIZE && gz >= 0 && gz < CONFIG.WORLD_SIZE) {
                 const y = worldState.terrain[gx]?.[gz];
 
-                // v6.81: Handle water/lava tiles - SWIMMING instead of bridges
+                // v6.81: Handle water/lava tiles - SWIMMING or BRIDGES
+                // v9.4: Check if on a bridge first - bridges take priority over swimming
                 if (y !== undefined && y < -50) {
-                    // Player swims in water/lava
+                    // Check if player is on a bridge over the water/lava
+                    const onBridge = isOnBridge(obj.position.x, obj.position.z);
+
+                    if (onBridge) {
+                        // Walk on bridge - not swimming
+                        if (obj === worldState.player && obj.userData.animation) {
+                            obj.userData.animation.isSwimming = false;
+                        }
+                        const bridgeY = PLAYER_WATER_LEVEL + PLAYER_BRIDGE_HEIGHT;
+                        const targetY = bridgeY + (obj === worldState.player ? 1.2 : 0.8);
+                        const lerpRate = obj === worldState.player ? 0.2 : 0.4;
+                        obj.position.y = THREE.MathUtils.lerp(obj.position.y, targetY, lerpRate);
+                        return;
+                    }
+
+                    // Not on bridge - swim in water/lava
                     if (obj === worldState.player && obj.userData.animation) {
                         obj.userData.animation.isSwimming = true;
 
@@ -73359,10 +74713,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         const lerpRate = 0.12;
                         obj.position.y = THREE.MathUtils.lerp(obj.position.y, swimY, lerpRate);
                     } else {
-                        // Non-player objects use bridge height
-                        const bridgeY = PLAYER_WATER_LEVEL + PLAYER_BRIDGE_HEIGHT;
-                        const targetY = bridgeY + 0.8;
-                        obj.position.y = THREE.MathUtils.lerp(obj.position.y, targetY, 0.4);
+                        // v9.4: Non-player objects (mobs) also swim at water level, not float
+                        const swimY = SWIM_WATER_SURFACE + 0.3;  // Mobs swim slightly higher
+                        obj.position.y = THREE.MathUtils.lerp(obj.position.y, swimY, 0.3);
                     }
                     return;
                 }
@@ -73407,16 +74760,49 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // v6.81: Move player - swimming enabled, no terrain blocking
+        // v9.5: Added building collision detection
         function tryMovePlayer(player, moveVector) {
             if (!player || moveVector.length() < 0.001) return true;
 
-            // v6.81: Swimming enabled - always allow movement, snapToGround handles Y position
+            // v9.5: Check for building collision at target position
+            const targetX = player.position.x + moveVector.x;
+            const targetZ = player.position.z + moveVector.z;
+
+            if (typeof checkBuildingCollision === 'function') {
+                const collidingBuilding = checkBuildingCollision(targetX, targetZ);
+                if (collidingBuilding) {
+                    // Blocked by building - try to slide along it
+                    const pushOut = getBuildingPushOut(targetX, targetZ, collidingBuilding);
+
+                    // Try X movement only
+                    const testX = player.position.x + moveVector.x;
+                    if (!checkBuildingCollision(testX, player.position.z)) {
+                        player.position.x = testX;
+                        return true;
+                    }
+
+                    // Try Z movement only
+                    const testZ = player.position.z + moveVector.z;
+                    if (!checkBuildingCollision(player.position.x, testZ)) {
+                        player.position.z = testZ;
+                        return true;
+                    }
+
+                    // Fully blocked - push player out of building
+                    player.position.x += pushOut.x;
+                    player.position.z += pushOut.z;
+                    return false;
+                }
+            }
+
+            // v6.81: Swimming enabled - allow movement, snapToGround handles Y position
             player.position.add(moveVector);
             return true;
         }
 
         // v6.42: Check if position is on lava (water tiles in Volcanic biome) - 8-agent consensus
         // v6.68: Updated to account for bridges over lava - no damage when elevated
+        // v9.4: Also check isOnBridge for extra safety
         function isOnLava(pos) {
             // Early exit: Only Volcanic biome has lava (water in other biomes is just water)
             if (!activeCiv || activeCiv.biome !== 'Volcanic') return false;
@@ -73427,6 +74813,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
 
             // Bounds check
             if (gx < 0 || gx >= CONFIG.WORLD_SIZE || gz < 0 || gz >= CONFIG.WORLD_SIZE) return false;
+
+            // v9.4: If on a bridge, not in lava (check position against lane paths)
+            if (isOnBridge(pos.x, pos.z)) return false;
 
             // v6.68: If player is elevated (on a bridge), not in lava
             const bridgeMinHeight = PLAYER_WATER_LEVEL + PLAYER_BRIDGE_HEIGHT - 0.5;
@@ -73753,13 +75142,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 AudioSystem.hit(0);
                 if (particles) particles.emit(target.position, 10, 0xffaa00, { spread: 2.5, lifetime: 600 });
 
-                // Flash effect
+                // Flash effect (only on MeshStandardMaterial which has emissive)
                 target.traverse(child => {
-                    if (child.isMesh && child.material) {
-                        const origEmissive = child.material.emissive?.clone();
+                    if (child.isMesh && child.material && child.material.isMeshStandardMaterial) {
+                        const origEmissive = child.material.emissive.clone();
                         child.material.emissive = new THREE.Color(0xffffff);
                         setTimeout(() => {
-                            if (child.material && origEmissive) {
+                            if (child.material) {
                                 child.material.emissive = origEmissive;
                             }
                         }, 100);
@@ -73797,9 +75186,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     AudioSystem.hit(0);
                     if (particles) particles.emit(target.position, 10, 0xff4444, { spread: 3, lifetime: 600 });
 
-                    // Flash the tower
+                    // Flash the tower (only on MeshStandardMaterial which has emissive)
                     target.traverse(child => {
-                        if (child.material && child.material.emissive) {
+                        if (child.isMesh && child.material && child.material.isMeshStandardMaterial) {
                             const origIntensity = child.material.emissiveIntensity;
                             child.material.emissiveIntensity = 2;
                             setTimeout(() => {
@@ -73831,6 +75220,69 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         if (towerIdx > -1) {
                             laneSupportState.laneTowers.splice(towerIdx, 1);
                         }
+                    }
+                }
+
+                worldState.interactTarget = null;
+                return;
+            }
+
+            // v7.4: Handle hostile spawn platform attacks
+            if (data.type === 'hostileSpawnPlatform') {
+                const damage = getPlayerDamage();
+
+                // Find the spawn platform data
+                const platformData = creepWaveState.spawnPlatforms?.find(p =>
+                    p.team === data.team && p.laneKey === data.laneKey && p.active
+                );
+
+                if (platformData) {
+                    platformData.hp -= damage;
+                    data.hp = platformData.hp;  // Sync userData
+
+                    // Visual feedback
+                    spawnFloater(target.position, `-${damage}`, '#ff4444');
+                    AudioSystem.hit(0);
+                    if (particles) particles.emit(target.position, 15, 0xff4444, { spread: 4, lifetime: 700 });
+
+                    // Flash the platform (only on MeshStandardMaterial which has emissive)
+                    target.traverse(child => {
+                        if (child.isMesh && child.material && child.material.isMeshStandardMaterial) {
+                            const origIntensity = child.material.emissiveIntensity;
+                            child.material.emissiveIntensity = 3;
+                            setTimeout(() => {
+                                if (child.material) child.material.emissiveIntensity = origIntensity;
+                            }, 100);
+                        }
+                    });
+
+                    // Spawn platform destruction
+                    if (platformData.hp <= 0) {
+                        platformData.active = false;
+                        data.active = false;
+
+                        // Award big XP and gold for destroying spawn
+                        addXp('combat', 500);
+                        gameData.gold = (gameData.gold || 0) + 150;
+                        spawnFloater(target.position, '+500 XP', '#ffff00');
+                        spawnFloater(target.position.clone().add(new THREE.Vector3(0, 1, 0)), 'SPAWN DESTROYED!', '#ff0000');
+                        spawnFloater(target.position.clone().add(new THREE.Vector3(0, 2, 0)), `${data.name} FALLS!`, '#ff8800');
+
+                        // Big explosion effect
+                        if (particles) particles.emit(target.position, 80, 0xff4400, { spread: 12, lifetime: 2000, size: 0.5 });
+                        screenShake(2.5);
+                        AudioSystem.combatEvent('kill');
+
+                        // Remove platform mesh and label
+                        scene.remove(target);
+                        if (data.labelSprite) {
+                            scene.remove(data.labelSprite);
+                        }
+
+                        // Announce the destruction
+                        const laneDef = LANE_DEFINITIONS[data.laneKey];
+                        showNotification(`🏰 ${data.name} DESTROYED! ${laneDef?.name || data.laneKey.toUpperCase()} lane hostile spawns disabled!`, 'success');
+                        addCopilotMessage(`💥 CRITICAL HIT! The ${data.name} spawn platform on ${laneDef?.name || data.laneKey} has been obliterated! No more hostile fauna will spawn from this location.`, 'ai');
                     }
                 }
 
@@ -75923,9 +77375,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }
 
                 // v6.68: Include hostile creeps and towers in clickable targets
+                // v7.4: Include hostile spawn platforms in clickable targets
                 const hostileCreeps = (creepWaveState.creeps || []).filter(c => c && c.userData?.team === 'B');
                 const hostileTowers = (laneSupportState.laneTowers || []).filter(t => t && t.team !== 'robot' && t.mesh).map(t => t.mesh);
-                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers];
+                const hostileSpawnPlatforms = (creepWaveState.spawnPlatforms || []).filter(p => p && p.team === 'B' && p.active && p.mesh).map(p => p.mesh);
+                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers, ...hostileSpawnPlatforms];
 
                 const hits = raycaster.intersectObjects(allTargets, true);
                 if(hits.length > 0) {
@@ -75938,8 +77392,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         tooltip.style.top = e.clientY + 10 + 'px';
                         const hpText = obj.userData.hp !== undefined ? `<br>HP: ${obj.userData.hp}/${obj.userData.maxHp}` : '';
                         // v6.68: Show team info for creeps/towers
+                        // v7.4: Also show spawn platform info
                         const teamText = obj.userData.team === 'B' ? '<br><span style="color:#ff4444">HOSTILE FAUNA</span>' :
-                                        obj.userData.type === 'hostileTower' ? '<br><span style="color:#ff4444">ENEMY TOWER</span>' : '';
+                                        obj.userData.type === 'hostileTower' ? '<br><span style="color:#ff4444">ENEMY TOWER</span>' :
+                                        obj.userData.type === 'hostileSpawnPlatform' ? '<br><span style="color:#ff0000">ENEMY SPAWN POINT</span><br><span style="color:#ff8800">Destroy to stop hostile spawns!</span>' : '';
                         tooltip.innerHTML = `<strong>${obj.userData.name}</strong>${hpText}${teamText}<br><span style="color:#888">Click to Attack</span>`;
                         document.body.style.cursor = 'pointer';
                         return;
@@ -75989,10 +77445,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             else if(mode === 'world') {
                 // v6.68: Include hostile creeps and towers in clickable targets
                 // v9.1: Include neutral camp creatures in clickable targets
+                // v7.4: Include hostile spawn platforms in clickable targets
                 const hostileCreeps = (creepWaveState.creeps || []).filter(c => c && c.userData?.team === 'B');
                 const hostileTowers = (laneSupportState.laneTowers || []).filter(t => t && t.team !== 'robot' && t.mesh).map(t => t.mesh);
                 const neutralCreatures = (typeof neutralCampState !== 'undefined' && neutralCampState.creatures) ? neutralCampState.creatures.filter(c => c && c.userData) : [];
-                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers, ...neutralCreatures];
+                const hostileSpawnPlatforms = (creepWaveState.spawnPlatforms || []).filter(p => p && p.team === 'B' && p.active && p.mesh).map(p => p.mesh);
+                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers, ...neutralCreatures, ...hostileSpawnPlatforms];
 
                 const hits = raycaster.intersectObjects(allTargets, true);
                 if(hits.length > 0) {
