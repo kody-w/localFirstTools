@@ -15088,6 +15088,12 @@
             // v6.43: Update combo UI display
             updateComboUI();
 
+            // v8.0: Apply Combo Cooldown Reduction (8-Agent Consensus Cycle 8)
+            if (typeof applyComboCoolddownReduction === 'function') {
+                const isFinisher = comboState.count >= COMBO_CONFIG.MAX_HITS - 1;
+                applyComboCoolddownReduction(comboState.count, comboState.isPerfect, isFinisher);
+            }
+
             return comboState.count;
         }
 
@@ -15203,6 +15209,10 @@
                 // v6.35: Reset chromatic aura when combo breaks
                 if (typeof comboChromaticSystem !== 'undefined') {
                     comboChromaticSystem.resetAura();
+                }
+                // v8.0: Reset CDR state when combo ends (8-Agent Consensus Cycle 8)
+                if (typeof resetComboCDRState === 'function') {
+                    resetComboCDRState();
                 }
                 comboState.active = false;
                 comboState.count = 0;
@@ -17097,6 +17107,120 @@
             // v6.42: Chrono-Echo state
             chronoEcho: { lastUsed: 0, activeUntil: 0 }
         };
+
+        // ============================================
+        // v8.0: COMBO COOLDOWN ACCELERATION - 8-Agent Consensus (Cycle 8)
+        // Perfect combo chains reduce ability cooldowns
+        // ============================================
+        const COMBO_CDR_CONFIG = {
+            ENABLED: true,
+            BASE_REDUCTION: 50,         // ms per combo hit
+            PERFECT_MULTIPLIER: 2.0,    // 2x reduction for perfect timing
+            MILESTONE_BONUSES: {        // Extra reduction at milestones
+                3: 300,
+                5: 500,
+                10: 1000
+            },
+            FINISHER_BONUS: 1500,       // Big reduction on finisher
+            MAX_REDUCTION_PERCENT: 0.5, // Cap at 50% CDR per combo
+            SHOW_FLOATERS: true         // Show CDR feedback
+        };
+
+        let comboCDRState = {
+            totalReductionThisCombo: 0,
+            lastMilestoneReached: 0
+        };
+
+        function applyComboCoolddownReduction(comboCount, isPerfect, isFinisher) {
+            if (!COMBO_CDR_CONFIG.ENABLED) return;
+
+            const now = performance.now();
+            let reduction = COMBO_CDR_CONFIG.BASE_REDUCTION;
+
+            // Perfect timing doubles reduction
+            if (isPerfect) {
+                reduction *= COMBO_CDR_CONFIG.PERFECT_MULTIPLIER;
+            }
+
+            // Apply milestone bonus
+            for (const [milestone, bonus] of Object.entries(COMBO_CDR_CONFIG.MILESTONE_BONUSES)) {
+                if (comboCount === parseInt(milestone) && comboCDRState.lastMilestoneReached < parseInt(milestone)) {
+                    reduction += bonus;
+                    comboCDRState.lastMilestoneReached = parseInt(milestone);
+                    // Special feedback for milestone
+                    if (worldState.player && COMBO_CDR_CONFIG.SHOW_FLOATERS) {
+                        spawnFloater(worldState.player.position.clone().add(new THREE.Vector3(0, 1.5, 0)),
+                            `⚡ COMBO ${milestone}x CDR!`, '#00ffff');
+                    }
+                }
+            }
+
+            // Finisher bonus
+            if (isFinisher) {
+                reduction += COMBO_CDR_CONFIG.FINISHER_BONUS;
+            }
+
+            // Apply reduction to all abilities
+            let totalApplied = 0;
+            Object.keys(abilityState).forEach(abilityKey => {
+                const ability = ABILITIES[abilityKey];
+                if (!ability) return;
+
+                const elapsed = now - abilityState[abilityKey].lastUsed;
+                const remaining = Math.max(0, ability.cooldown - elapsed);
+
+                if (remaining > 0) {
+                    // Calculate max reduction for this ability
+                    const maxReduction = ability.cooldown * COMBO_CDR_CONFIG.MAX_REDUCTION_PERCENT;
+                    const currentTotalReduction = comboCDRState.totalReductionThisCombo;
+
+                    // Cap based on what we've already reduced this combo
+                    const allowedReduction = Math.min(reduction, maxReduction - currentTotalReduction);
+
+                    if (allowedReduction > 0) {
+                        // Move lastUsed back in time (effectively reducing remaining cooldown)
+                        abilityState[abilityKey].lastUsed -= allowedReduction;
+                        totalApplied += allowedReduction;
+                    }
+                }
+            });
+
+            comboCDRState.totalReductionThisCombo += totalApplied;
+
+            // Visual feedback
+            if (totalApplied > 0 && COMBO_CDR_CONFIG.SHOW_FLOATERS) {
+                // Glow pulse on ability bar
+                const abilityBar = document.getElementById('ability-bar');
+                if (abilityBar) {
+                    abilityBar.style.boxShadow = '0 0 15px #00ffff';
+                    setTimeout(() => {
+                        if (abilityBar) abilityBar.style.boxShadow = '';
+                    }, 150);
+                }
+
+                // Small audio tick
+                try {
+                    const ctx = AudioSystem.ctx || new (window.AudioContext || window.webkitAudioContext)();
+                    if (ctx.state === 'suspended') ctx.resume();
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(1200 + comboCount * 50, ctx.currentTime);
+                    gain.gain.setValueAtTime(0.05, ctx.currentTime);
+                    gain.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.08);
+                    osc.start();
+                    osc.stop(ctx.currentTime + 0.08);
+                } catch (e) {}
+            }
+        }
+
+        // Reset CDR state when combo ends
+        function resetComboCDRState() {
+            comboCDRState.totalReductionThisCombo = 0;
+            comboCDRState.lastMilestoneReached = 0;
+        }
 
         // ============================================
         // v8.0: ABILITY READY AUDIO CUE - 8-Agent Consensus (Cycle 4)
@@ -75070,48 +75194,51 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         // v5.19: Initialize Show Mode button listeners
         initShowModeButtons();
 
-        // v8.0: FLOATING MINIMAP TOOLBAR - Created at end of body for maximum z-index
+        // v8.0: FLOATING MINIMAP TOOLBAR - Compact row above minimap
         (function createMinimapToolbar() {
             var toolbar = document.createElement('div');
             toolbar.id = 'floating-minimap-toolbar';
-            toolbar.style.cssText = 'display:none; position:fixed; bottom:140px; right:10px; z-index:999999; pointer-events:auto; background:rgba(0,20,40,0.95); border:2px solid #0ff; border-radius:10px; padding:8px; display:flex; gap:8px;';
+            toolbar.style.cssText = 'display:none; position:fixed; bottom:318px; right:10px; z-index:999999; pointer-events:auto; background:rgba(0,20,40,0.95); border:2px solid #0ff; border-radius:8px; padding:4px 8px; flex-direction:row; gap:6px; align-items:center;';
+
+            // Label
+            var label = document.createElement('span');
+            label.innerHTML = 'MAP';
+            label.style.cssText = 'color:#0ff; font-size:10px; font-weight:bold; letter-spacing:1px; margin-right:4px;';
+            toolbar.appendChild(label);
 
             var btn3d = document.createElement('button');
             btn3d.innerHTML = '🐜';
             btn3d.title = '3D Ant Farm View';
-            btn3d.style.cssText = 'width:40px; height:40px; background:rgba(0,60,80,0.9); border:2px solid #0ff; border-radius:8px; font-size:18px; cursor:pointer; color:#fff;';
+            btn3d.style.cssText = 'width:28px; height:28px; background:rgba(0,60,80,0.9); border:1px solid #0ff; border-radius:6px; font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center;';
             btn3d.onmousedown = function(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 console.log('🐜 3D clicked');
                 if (window.toggleMinimap3D) window.toggleMinimap3D();
-                else alert('toggleMinimap3D not ready');
                 return false;
             };
 
             var btnWorld = document.createElement('button');
             btnWorld.innerHTML = '🌍';
             btnWorld.title = 'Public Worlds';
-            btnWorld.style.cssText = 'width:40px; height:40px; background:rgba(0,60,80,0.9); border:2px solid #0ff; border-radius:8px; font-size:18px; cursor:pointer; color:#fff;';
+            btnWorld.style.cssText = 'width:28px; height:28px; background:rgba(0,60,80,0.9); border:1px solid #0ff; border-radius:6px; font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center;';
             btnWorld.onmousedown = function(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 console.log('🌍 World clicked');
                 if (window.WorldStore && window.WorldStore.open) window.WorldStore.open();
-                else alert('WorldStore not ready');
                 return false;
             };
 
             var btnShare = document.createElement('button');
             btnShare.innerHTML = '📡';
             btnShare.title = 'Share / QR Code';
-            btnShare.style.cssText = 'width:40px; height:40px; background:rgba(0,60,80,0.9); border:2px solid #0ff; border-radius:8px; font-size:18px; cursor:pointer; color:#fff;';
+            btnShare.style.cssText = 'width:28px; height:28px; background:rgba(0,60,80,0.9); border:1px solid #0ff; border-radius:6px; font-size:14px; cursor:pointer; display:flex; align-items:center; justify-content:center;';
             btnShare.onmousedown = function(e) {
                 e.preventDefault();
                 e.stopPropagation();
                 console.log('📡 Share clicked');
                 if (window.openShowModeModal) window.openShowModeModal();
-                else alert('openShowModeModal not ready');
                 return false;
             };
 
@@ -75120,17 +75247,21 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             toolbar.appendChild(btnShare);
             document.body.appendChild(toolbar);
 
-            // Show toolbar when minimap is visible
+            // Show toolbar when minimap is visible, position above it
             function checkMinimapVisibility() {
                 var minimap = document.getElementById('minimap-wrapper');
                 if (minimap && minimap.style.display !== 'none') {
                     toolbar.style.display = 'flex';
+                    // Position toolbar directly above the minimap
+                    var rect = minimap.getBoundingClientRect();
+                    toolbar.style.bottom = (window.innerHeight - rect.top + 4) + 'px';
+                    toolbar.style.right = (window.innerWidth - rect.right) + 'px';
                 } else {
                     toolbar.style.display = 'none';
                 }
             }
 
-            setInterval(checkMinimapVisibility, 500);
+            setInterval(checkMinimapVisibility, 200);
             console.log('v8.0: Floating minimap toolbar created');
         })();
     </script>
