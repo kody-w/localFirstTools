@@ -32246,7 +32246,20 @@
                 // Clone or create portrait model
                 let portraitModel;
                 if (entity.mesh) {
+                    // Deep clone with materials
                     portraitModel = entity.mesh.clone(true);
+
+                    // Clone materials for each child to ensure they render in separate scene
+                    portraitModel.traverse(child => {
+                        if (child.isMesh && child.material) {
+                            if (Array.isArray(child.material)) {
+                                child.material = child.material.map(m => m.clone());
+                            } else {
+                                child.material = child.material.clone();
+                            }
+                        }
+                    });
+
                     // Reset transforms
                     portraitModel.position.set(0, 0, 0);
                     portraitModel.rotation.set(0, 0, 0);
@@ -32257,14 +32270,20 @@
                     const size = box.getSize(new THREE.Vector3());
                     const center = box.getCenter(new THREE.Vector3());
 
-                    // Scale to fit in frame
+                    // Check for valid bounding box
                     const maxDim = Math.max(size.x, size.y, size.z);
-                    const scale = 1.5 / maxDim;
-                    portraitModel.scale.setScalar(scale);
+                    if (maxDim > 0 && isFinite(maxDim)) {
+                        // Scale to fit in frame
+                        const scale = 1.5 / maxDim;
+                        portraitModel.scale.setScalar(scale);
 
-                    // Center the model
-                    portraitModel.position.sub(center.multiplyScalar(scale));
-                    portraitModel.position.y -= 0.2; // Slight offset down
+                        // Center the model
+                        portraitModel.position.sub(center.multiplyScalar(scale));
+                        portraitModel.position.y -= 0.2; // Slight offset down
+                    } else {
+                        // Fallback scale for empty/invalid bounds
+                        portraitModel.scale.setScalar(0.5);
+                    }
                 } else {
                     // Fallback sphere for entities without mesh
                     const geo = new THREE.SphereGeometry(0.5, 16, 16);
@@ -32518,6 +32537,979 @@
             chargeRate: 5,   // Energy gain per second when on charger
             lowEnergyThreshold: 20,
             isCharging: false
+        };
+
+        // ============================================
+        // v9.8: CINEMATIC LANDING SEQUENCE
+        // Breath of the Wild-style intro cutscene
+        // Spacecraft descent → Landing → Robot emerges → Environment reveal
+        // ============================================
+
+        const LandingSequence = {
+            // State
+            active: false,
+            phase: 'idle', // idle, fadeIn, descent, landing, doorOpen, emerge, cameraReveal, fadeOut, complete
+            time: 0,
+            phaseTime: 0,
+            skipRequested: false,
+
+            // Scene elements
+            spacecraft: null,
+            ramp: null,
+            thrusterParticles: [],
+            dustParticles: [],
+
+            // Camera
+            cinematicCamera: null,
+            originalCameraPos: null,
+            originalCameraTarget: null,
+
+            // Landing position
+            landingPos: new THREE.Vector3(),
+            landingY: 0,
+
+            // Phase durations (seconds)
+            phaseDurations: {
+                fadeIn: 1.5,
+                descent: 4.0,
+                landing: 1.5,
+                doorOpen: 2.0,
+                emerge: 3.5,
+                cameraReveal: 5.0,
+                fadeOut: 1.5
+            },
+
+            // UI Elements
+            overlay: null,
+            skipHint: null,
+            titleCard: null,
+
+            // Create spacecraft with animated ramp
+            createSpacecraft() {
+                const shipGroup = new THREE.Group();
+
+                // Main body - sleek fuselage
+                const bodyGeometry = new THREE.BoxGeometry(4, 1.5, 5);
+                const bodyMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x2a2a3a,
+                    metalness: 0.7,
+                    roughness: 0.3
+                });
+                const body = new THREE.Mesh(bodyGeometry, bodyMaterial);
+                body.castShadow = true;
+                body.receiveShadow = true;
+                shipGroup.add(body);
+
+                // Cockpit dome with glow
+                const cockpitGeometry = new THREE.SphereGeometry(1.2, 16, 16);
+                const cockpitMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x00ffff,
+                    metalness: 0.9,
+                    roughness: 0.1,
+                    emissive: 0x004444,
+                    emissiveIntensity: 0.5
+                });
+                const cockpit = new THREE.Mesh(cockpitGeometry, cockpitMaterial);
+                cockpit.position.set(0, 0.8, 0.5);
+                cockpit.scale.set(1, 0.5, 1.2);
+                shipGroup.add(cockpit);
+                shipGroup.userData.cockpit = cockpit;
+
+                // Wings
+                const wingGeometry = new THREE.BoxGeometry(8, 0.2, 2);
+                const wingMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x3a3a4a,
+                    metalness: 0.6,
+                    roughness: 0.4
+                });
+                const wings = new THREE.Mesh(wingGeometry, wingMaterial);
+                wings.position.set(0, 0.3, -0.5);
+                wings.castShadow = true;
+                shipGroup.add(wings);
+
+                // Wing tip lights
+                const tipGeometry = new THREE.BoxGeometry(0.5, 0.3, 0.5);
+                const tipMaterialL = new THREE.MeshStandardMaterial({
+                    color: 0xff0000,
+                    emissive: 0xff0000,
+                    emissiveIntensity: 1
+                });
+                const tipMaterialR = new THREE.MeshStandardMaterial({
+                    color: 0x00ff00,
+                    emissive: 0x00ff00,
+                    emissiveIntensity: 1
+                });
+                const tipL = new THREE.Mesh(tipGeometry, tipMaterialL);
+                const tipR = new THREE.Mesh(tipGeometry, tipMaterialR);
+                tipL.position.set(-4, 0.3, -0.5);
+                tipR.position.set(4, 0.3, -0.5);
+                shipGroup.add(tipL, tipR);
+                shipGroup.userData.tipL = tipL;
+                shipGroup.userData.tipR = tipR;
+
+                // Tail fin
+                const tailGeometry = new THREE.BoxGeometry(0.3, 2, 1);
+                const tail = new THREE.Mesh(tailGeometry, wingMaterial);
+                tail.position.set(0, 1, -2);
+                tail.castShadow = true;
+                shipGroup.add(tail);
+
+                // Engine pods with animated glow
+                const engineGeometry = new THREE.CylinderGeometry(0.4, 0.5, 2, 8);
+                const engineMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x1a1a2a,
+                    metalness: 0.8,
+                    roughness: 0.2
+                });
+                shipGroup.userData.engineGlows = [];
+                [-2, 2].forEach(x => {
+                    const engine = new THREE.Mesh(engineGeometry, engineMaterial);
+                    engine.rotation.x = Math.PI / 2;
+                    engine.position.set(x, 0, -2);
+                    engine.castShadow = true;
+                    shipGroup.add(engine);
+
+                    // Engine glow (animated)
+                    const glowGeometry = new THREE.CircleGeometry(0.5, 16);
+                    const glowMaterial = new THREE.MeshBasicMaterial({
+                        color: 0x00ff88,
+                        transparent: true,
+                        opacity: 0.9
+                    });
+                    const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+                    glow.rotation.x = -Math.PI / 2;
+                    glow.position.set(x, -0.1, -3);
+                    shipGroup.add(glow);
+                    shipGroup.userData.engineGlows.push(glow);
+                });
+
+                // Landing gear (retractable)
+                const gearGeometry = new THREE.BoxGeometry(0.3, 1.2, 0.3);
+                const gearMaterial = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.5 });
+                shipGroup.userData.landingGear = [];
+                [[-1.5, -0.5, 1], [1.5, -0.5, 1], [0, -0.5, -2]].forEach(pos => {
+                    const gear = new THREE.Mesh(gearGeometry, gearMaterial);
+                    gear.position.set(...pos);
+                    gear.castShadow = true;
+                    gear.userData.restY = pos[1];
+                    gear.userData.deployedY = pos[1] - 0.8;
+                    shipGroup.add(gear);
+                    shipGroup.userData.landingGear.push(gear);
+                });
+
+                // Exit ramp (animates down)
+                const rampGroup = new THREE.Group();
+                rampGroup.position.set(0, -0.75, 2.5);
+                const rampGeometry = new THREE.BoxGeometry(1.5, 0.15, 2.5);
+                const rampMaterial = new THREE.MeshStandardMaterial({
+                    color: 0x3a3a4a,
+                    metalness: 0.5,
+                    roughness: 0.5
+                });
+                const ramp = new THREE.Mesh(rampGeometry, rampMaterial);
+                ramp.position.set(0, 0, 1.25);
+                ramp.castShadow = true;
+                rampGroup.add(ramp);
+
+                // Ramp lights
+                const rampLightGeo = new THREE.BoxGeometry(0.1, 0.05, 2.3);
+                const rampLightMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.8 });
+                [-0.65, 0.65].forEach(x => {
+                    const light = new THREE.Mesh(rampLightGeo, rampLightMat);
+                    light.position.set(x, 0.1, 1.15);
+                    rampGroup.add(light);
+                });
+
+                rampGroup.rotation.x = Math.PI / 2; // Start closed (vertical)
+                shipGroup.add(rampGroup);
+                shipGroup.userData.ramp = rampGroup;
+
+                // Interior light (visible when door opens)
+                const interiorLight = new THREE.PointLight(0x00ffff, 2, 8);
+                interiorLight.position.set(0, 0.5, 1.5);
+                interiorLight.visible = false;
+                shipGroup.add(interiorLight);
+                shipGroup.userData.interiorLight = interiorLight;
+
+                // Spotlight for dramatic landing
+                const spotlight = new THREE.SpotLight(0xffffff, 3, 50, Math.PI / 6, 0.5);
+                spotlight.position.set(0, -1, 0);
+                spotlight.target.position.set(0, -10, 0);
+                shipGroup.add(spotlight);
+                shipGroup.add(spotlight.target);
+                shipGroup.userData.spotlight = spotlight;
+
+                return shipGroup;
+            },
+
+            // Create thruster particle
+            createThrusterParticle(position, velocity) {
+                const geo = new THREE.SphereGeometry(0.15 + Math.random() * 0.1, 8, 8);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color().setHSL(0.35 + Math.random() * 0.1, 1, 0.6),
+                    transparent: true,
+                    opacity: 0.9
+                });
+                const particle = new THREE.Mesh(geo, mat);
+                particle.position.copy(position);
+                particle.userData.velocity = velocity.clone();
+                particle.userData.life = 1.0;
+                particle.userData.decay = 1.5 + Math.random() * 0.5;
+                return particle;
+            },
+
+            // Create dust particle
+            createDustParticle(position) {
+                const geo = new THREE.SphereGeometry(0.3 + Math.random() * 0.4, 8, 8);
+                const mat = new THREE.MeshBasicMaterial({
+                    color: new THREE.Color(0.6, 0.5, 0.4),
+                    transparent: true,
+                    opacity: 0.6
+                });
+                const particle = new THREE.Mesh(geo, mat);
+                particle.position.copy(position);
+                const angle = Math.random() * Math.PI * 2;
+                const speed = 3 + Math.random() * 5;
+                particle.userData.velocity = new THREE.Vector3(
+                    Math.cos(angle) * speed,
+                    1 + Math.random() * 2,
+                    Math.sin(angle) * speed
+                );
+                particle.userData.life = 1.0;
+                particle.userData.decay = 0.4 + Math.random() * 0.3;
+                return particle;
+            },
+
+            // Play synthesized sound
+            playSound(type) {
+                if (!AudioSystem || !AudioSystem.ctx) return;
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+
+                if (type === 'engine') {
+                    // Deep rumbling engine
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    const lfo = ctx.createOscillator();
+                    const lfoGain = ctx.createGain();
+
+                    lfo.frequency.value = 8;
+                    lfoGain.gain.value = 30;
+                    lfo.connect(lfoGain);
+                    lfoGain.connect(osc.frequency);
+
+                    osc.type = 'sawtooth';
+                    osc.frequency.value = 60;
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0.15, now);
+                    gain.gain.linearRampToValueAtTime(0.08, now + 2);
+
+                    lfo.start(now);
+                    osc.start(now);
+                    osc.stop(now + 3);
+                    lfo.stop(now + 3);
+                } else if (type === 'landing') {
+                    // Heavy thud with reverb-like tail
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(80, now);
+                    osc.frequency.exponentialRampToValueAtTime(30, now + 0.3);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0.4, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
+                    osc.start(now);
+                    osc.stop(now + 0.5);
+
+                    // Add impact noise
+                    const noise = ctx.createOscillator();
+                    const noiseGain = ctx.createGain();
+                    noise.type = 'triangle';
+                    noise.frequency.value = 150;
+                    noise.connect(noiseGain);
+                    noiseGain.connect(ctx.destination);
+                    noiseGain.gain.setValueAtTime(0.2, now);
+                    noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+                    noise.start(now);
+                    noise.stop(now + 0.2);
+                } else if (type === 'hydraulic') {
+                    // Hydraulic hiss
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(2000, now);
+                    osc.frequency.linearRampToValueAtTime(500, now + 1.5);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0.05, now);
+                    gain.gain.linearRampToValueAtTime(0.08, now + 0.5);
+                    gain.gain.linearRampToValueAtTime(0.02, now + 1.5);
+                    osc.start(now);
+                    osc.stop(now + 1.5);
+                } else if (type === 'footstep') {
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = 100 + Math.random() * 50;
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0.1, now);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                    osc.start(now);
+                    osc.stop(now + 0.1);
+                } else if (type === 'whoosh') {
+                    // Camera whoosh
+                    const osc = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(200, now);
+                    osc.frequency.exponentialRampToValueAtTime(800, now + 0.3);
+                    osc.frequency.exponentialRampToValueAtTime(100, now + 0.6);
+                    osc.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0.08, now);
+                    gain.gain.linearRampToValueAtTime(0.15, now + 0.2);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+                    osc.start(now);
+                    osc.stop(now + 0.6);
+                } else if (type === 'ambient') {
+                    // Ambient pad for dramatic reveal
+                    const osc1 = ctx.createOscillator();
+                    const osc2 = ctx.createOscillator();
+                    const gain = ctx.createGain();
+                    osc1.type = 'sine';
+                    osc2.type = 'sine';
+                    osc1.frequency.value = 130.81; // C3
+                    osc2.frequency.value = 196.00; // G3
+                    osc1.connect(gain);
+                    osc2.connect(gain);
+                    gain.connect(ctx.destination);
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(0.08, now + 2);
+                    gain.gain.linearRampToValueAtTime(0.05, now + 4);
+                    gain.gain.linearRampToValueAtTime(0, now + 5);
+                    osc1.start(now);
+                    osc2.start(now);
+                    osc1.stop(now + 5);
+                    osc2.stop(now + 5);
+                }
+            },
+
+            // Create UI overlay
+            createUI() {
+                // Black overlay for fades
+                this.overlay = document.createElement('div');
+                this.overlay.id = 'landing-overlay';
+                this.overlay.style.cssText = `
+                    position: fixed;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    background: black;
+                    z-index: 10000;
+                    opacity: 1;
+                    pointer-events: none;
+                    transition: opacity 0.5s ease;
+                `;
+                document.body.appendChild(this.overlay);
+
+                // Skip hint
+                this.skipHint = document.createElement('div');
+                this.skipHint.id = 'landing-skip';
+                this.skipHint.innerHTML = 'Press <span style="color:#00ffff">SPACE</span> or <span style="color:#00ffff">CLICK</span> to skip';
+                this.skipHint.style.cssText = `
+                    position: fixed;
+                    bottom: 30px;
+                    right: 30px;
+                    color: rgba(255,255,255,0.5);
+                    font-family: 'Courier New', monospace;
+                    font-size: 14px;
+                    z-index: 10001;
+                    opacity: 0;
+                    transition: opacity 0.5s ease;
+                `;
+                document.body.appendChild(this.skipHint);
+
+                // Title card
+                this.titleCard = document.createElement('div');
+                this.titleCard.id = 'landing-title';
+                this.titleCard.style.cssText = `
+                    position: fixed;
+                    top: 50%;
+                    left: 50%;
+                    transform: translate(-50%, -50%);
+                    color: white;
+                    font-family: 'Courier New', monospace;
+                    text-align: center;
+                    z-index: 10001;
+                    opacity: 0;
+                    transition: opacity 1s ease;
+                `;
+                document.body.appendChild(this.titleCard);
+            },
+
+            // Remove UI
+            removeUI() {
+                if (this.overlay) this.overlay.remove();
+                if (this.skipHint) this.skipHint.remove();
+                if (this.titleCard) this.titleCard.remove();
+                this.overlay = null;
+                this.skipHint = null;
+                this.titleCard = null;
+            },
+
+            // Initialize landing sequence
+            start(landingPosition, planetName) {
+                if (this.active) return;
+
+                this.active = true;
+                this.phase = 'fadeIn';
+                this.time = 0;
+                this.phaseTime = 0;
+                this.skipRequested = false;
+                this.landingPos.copy(landingPosition);
+                this.landingY = landingPosition.y;
+
+                // Create UI
+                this.createUI();
+
+                // Create spacecraft high above landing zone
+                this.spacecraft = this.createSpacecraft();
+                this.spacecraft.position.set(
+                    landingPosition.x,
+                    landingPosition.y + 80, // Start high
+                    landingPosition.z
+                );
+                this.spacecraft.rotation.y = Math.PI; // Face forward
+                scene.add(this.spacecraft);
+
+                // Hide player initially
+                if (worldState.player) {
+                    worldState.player.visible = false;
+                    worldState.player.position.set(
+                        landingPosition.x,
+                        landingPosition.y + 0.8,
+                        landingPosition.z + 5 // Behind ship ramp
+                    );
+                }
+
+                // Store original camera state
+                this.originalCameraPos = camera.position.clone();
+
+                // Set initial cinematic camera - looking up at descending ship
+                camera.position.set(
+                    landingPosition.x + 15,
+                    landingPosition.y + 5,
+                    landingPosition.z + 20
+                );
+                camera.lookAt(landingPosition.x, landingPosition.y + 40, landingPosition.z);
+
+                // Set title
+                if (this.titleCard) {
+                    this.titleCard.innerHTML = `
+                        <div style="font-size: 48px; letter-spacing: 8px; text-shadow: 0 0 30px rgba(0,255,255,0.5);">
+                            ${planetName || 'UNKNOWN WORLD'}
+                        </div>
+                        <div style="font-size: 16px; margin-top: 20px; color: rgba(255,255,255,0.6);">
+                            First Contact
+                        </div>
+                    `;
+                }
+
+                // Hide game UI during cutscene
+                document.querySelectorAll('#game-ui, #portrait-panel, #minimap-container, #hp-mp-panel').forEach(el => {
+                    if (el) el.style.opacity = '0';
+                });
+
+                // Add skip listeners
+                this.skipHandler = (e) => {
+                    if (e.code === 'Space' || e.type === 'click') {
+                        this.skipRequested = true;
+                    }
+                };
+                window.addEventListener('keydown', this.skipHandler);
+                window.addEventListener('click', this.skipHandler);
+
+                // Start engine sound
+                this.playSound('engine');
+
+                console.log('🚀 Landing Sequence: Started cinematic intro');
+            },
+
+            // Update landing sequence
+            update(deltaTime) {
+                if (!this.active) return;
+
+                this.time += deltaTime;
+                this.phaseTime += deltaTime;
+
+                // Handle skip
+                if (this.skipRequested && this.phase !== 'fadeOut' && this.phase !== 'complete') {
+                    this.phase = 'fadeOut';
+                    this.phaseTime = 0;
+                    if (this.overlay) this.overlay.style.opacity = '1';
+                }
+
+                const dt = Math.min(deltaTime, 0.05); // Cap delta for stability
+
+                // Update particles
+                this.updateParticles(dt);
+
+                // Phase-specific updates
+                switch (this.phase) {
+                    case 'fadeIn':
+                        this.updateFadeIn();
+                        break;
+                    case 'descent':
+                        this.updateDescent(dt);
+                        break;
+                    case 'landing':
+                        this.updateLanding(dt);
+                        break;
+                    case 'doorOpen':
+                        this.updateDoorOpen(dt);
+                        break;
+                    case 'emerge':
+                        this.updateEmerge(dt);
+                        break;
+                    case 'cameraReveal':
+                        this.updateCameraReveal(dt);
+                        break;
+                    case 'fadeOut':
+                        this.updateFadeOut();
+                        break;
+                }
+
+                // Animate spacecraft elements
+                if (this.spacecraft) {
+                    // Pulsing engine glow
+                    const pulse = 0.7 + Math.sin(this.time * 10) * 0.3;
+                    this.spacecraft.userData.engineGlows?.forEach(glow => {
+                        if (glow.material) glow.material.opacity = pulse;
+                    });
+
+                    // Blinking nav lights
+                    const blink = Math.sin(this.time * 3) > 0;
+                    if (this.spacecraft.userData.tipL) {
+                        this.spacecraft.userData.tipL.material.emissiveIntensity = blink ? 1 : 0.3;
+                    }
+                    if (this.spacecraft.userData.tipR) {
+                        this.spacecraft.userData.tipR.material.emissiveIntensity = blink ? 0.3 : 1;
+                    }
+                }
+            },
+
+            // Update particles
+            updateParticles(dt) {
+                // Thruster particles
+                for (let i = this.thrusterParticles.length - 1; i >= 0; i--) {
+                    const p = this.thrusterParticles[i];
+                    p.position.add(p.userData.velocity.clone().multiplyScalar(dt));
+                    p.userData.velocity.y -= 5 * dt; // Gravity
+                    p.userData.life -= p.userData.decay * dt;
+                    p.material.opacity = p.userData.life * 0.9;
+                    p.scale.setScalar(p.userData.life * 1.5);
+
+                    if (p.userData.life <= 0) {
+                        scene.remove(p);
+                        this.thrusterParticles.splice(i, 1);
+                    }
+                }
+
+                // Dust particles
+                for (let i = this.dustParticles.length - 1; i >= 0; i--) {
+                    const p = this.dustParticles[i];
+                    p.position.add(p.userData.velocity.clone().multiplyScalar(dt));
+                    p.userData.velocity.y -= 3 * dt;
+                    p.userData.velocity.multiplyScalar(0.98); // Drag
+                    p.userData.life -= p.userData.decay * dt;
+                    p.material.opacity = p.userData.life * 0.6;
+                    p.scale.setScalar(1 + (1 - p.userData.life) * 2);
+
+                    if (p.userData.life <= 0) {
+                        scene.remove(p);
+                        this.dustParticles.splice(i, 1);
+                    }
+                }
+            },
+
+            updateFadeIn() {
+                const progress = this.phaseTime / this.phaseDurations.fadeIn;
+                if (this.overlay) {
+                    this.overlay.style.opacity = 1 - progress;
+                }
+                if (this.skipHint && progress > 0.5) {
+                    this.skipHint.style.opacity = '1';
+                }
+
+                if (progress >= 1) {
+                    this.phase = 'descent';
+                    this.phaseTime = 0;
+                }
+            },
+
+            updateDescent(dt) {
+                const progress = this.phaseTime / this.phaseDurations.descent;
+                const eased = 1 - Math.pow(1 - progress, 2); // Ease out
+
+                if (this.spacecraft) {
+                    // Descend from high to landing position
+                    const startY = this.landingY + 80;
+                    const endY = this.landingY + 8;
+                    this.spacecraft.position.y = startY + (endY - startY) * eased;
+
+                    // Gentle sway
+                    this.spacecraft.rotation.z = Math.sin(this.time * 2) * 0.03;
+                    this.spacecraft.rotation.x = Math.sin(this.time * 1.5) * 0.02;
+
+                    // Deploy landing gear gradually
+                    const gearProgress = Math.max(0, (progress - 0.5) * 2);
+                    this.spacecraft.userData.landingGear?.forEach(gear => {
+                        gear.position.y = gear.userData.restY + (gear.userData.deployedY - gear.userData.restY) * gearProgress;
+                    });
+
+                    // Spawn thruster particles
+                    if (Math.random() < 0.3) {
+                        [-2, 2].forEach(x => {
+                            const pos = new THREE.Vector3(
+                                this.spacecraft.position.x + x,
+                                this.spacecraft.position.y - 1,
+                                this.spacecraft.position.z - 2
+                            );
+                            const vel = new THREE.Vector3(
+                                (Math.random() - 0.5) * 2,
+                                -8 - Math.random() * 5,
+                                (Math.random() - 0.5) * 2
+                            );
+                            const particle = this.createThrusterParticle(pos, vel);
+                            scene.add(particle);
+                            this.thrusterParticles.push(particle);
+                        });
+                    }
+                }
+
+                // Camera tracks descent
+                const camProgress = eased;
+                camera.position.set(
+                    this.landingPos.x + 15 - camProgress * 5,
+                    this.landingPos.y + 5 + (1 - camProgress) * 10,
+                    this.landingPos.z + 20 - camProgress * 10
+                );
+                camera.lookAt(
+                    this.landingPos.x,
+                    this.landingPos.y + 40 - camProgress * 35,
+                    this.landingPos.z
+                );
+
+                if (progress >= 1) {
+                    this.phase = 'landing';
+                    this.phaseTime = 0;
+                    this.playSound('landing');
+                }
+            },
+
+            updateLanding(dt) {
+                const progress = this.phaseTime / this.phaseDurations.landing;
+
+                if (this.spacecraft) {
+                    // Final descent to ground
+                    const startY = this.landingY + 8;
+                    const endY = this.landingY + 2.5;
+
+                    if (progress < 0.3) {
+                        // Quick drop
+                        const dropProgress = progress / 0.3;
+                        this.spacecraft.position.y = startY + (endY - startY) * dropProgress;
+                    } else {
+                        // Settle with bounce
+                        const settleProgress = (progress - 0.3) / 0.7;
+                        const bounce = Math.sin(settleProgress * Math.PI * 3) * (1 - settleProgress) * 0.3;
+                        this.spacecraft.position.y = endY + bounce;
+                    }
+
+                    // Camera shake on impact
+                    if (progress < 0.3) {
+                        const shake = (1 - progress / 0.3) * 0.3;
+                        camera.position.x += (Math.random() - 0.5) * shake;
+                        camera.position.y += (Math.random() - 0.5) * shake;
+                    }
+
+                    // Spawn dust cloud on impact
+                    if (progress < 0.1) {
+                        for (let i = 0; i < 5; i++) {
+                            const pos = new THREE.Vector3(
+                                this.landingPos.x + (Math.random() - 0.5) * 8,
+                                this.landingY + 0.5,
+                                this.landingPos.z + (Math.random() - 0.5) * 8
+                            );
+                            const particle = this.createDustParticle(pos);
+                            scene.add(particle);
+                            this.dustParticles.push(particle);
+                        }
+                    }
+                }
+
+                // Move camera to side view
+                const camEase = 1 - Math.pow(1 - progress, 2);
+                camera.position.set(
+                    this.landingPos.x + 10,
+                    this.landingPos.y + 3,
+                    this.landingPos.z + 10 - camEase * 5
+                );
+                camera.lookAt(
+                    this.landingPos.x,
+                    this.landingPos.y + 3,
+                    this.landingPos.z
+                );
+
+                if (progress >= 1) {
+                    this.phase = 'doorOpen';
+                    this.phaseTime = 0;
+                    this.playSound('hydraulic');
+                }
+            },
+
+            updateDoorOpen(dt) {
+                const progress = this.phaseTime / this.phaseDurations.doorOpen;
+
+                if (this.spacecraft && this.spacecraft.userData.ramp) {
+                    // Animate ramp opening (rotate from vertical to angled down)
+                    const rampAngle = Math.PI / 2 - progress * (Math.PI / 2 + 0.3);
+                    this.spacecraft.userData.ramp.rotation.x = rampAngle;
+
+                    // Turn on interior light
+                    if (this.spacecraft.userData.interiorLight && progress > 0.2) {
+                        this.spacecraft.userData.interiorLight.visible = true;
+                        this.spacecraft.userData.interiorLight.intensity = Math.min((progress - 0.2) * 3, 2);
+                    }
+                }
+
+                // Camera focuses on ramp
+                camera.position.set(
+                    this.landingPos.x + 6,
+                    this.landingPos.y + 2,
+                    this.landingPos.z + 8
+                );
+                camera.lookAt(
+                    this.landingPos.x,
+                    this.landingPos.y + 2,
+                    this.landingPos.z + 3
+                );
+
+                if (progress >= 1) {
+                    this.phase = 'emerge';
+                    this.phaseTime = 0;
+
+                    // Position player at top of ramp
+                    if (worldState.player) {
+                        worldState.player.position.set(
+                            this.landingPos.x,
+                            this.landingPos.y + 2,
+                            this.landingPos.z + 3
+                        );
+                        worldState.player.rotation.y = Math.PI; // Face outward
+                    }
+                }
+            },
+
+            updateEmerge(dt) {
+                const progress = this.phaseTime / this.phaseDurations.emerge;
+
+                if (worldState.player) {
+                    // Make player visible and walk down ramp
+                    worldState.player.visible = true;
+
+                    const startPos = new THREE.Vector3(
+                        this.landingPos.x,
+                        this.landingPos.y + 2,
+                        this.landingPos.z + 3
+                    );
+                    const endPos = new THREE.Vector3(
+                        this.landingPos.x,
+                        this.landingPos.y + 0.8,
+                        this.landingPos.z + 7
+                    );
+
+                    // Ease out movement
+                    const moveProgress = Math.min(progress * 1.2, 1);
+                    const eased = 1 - Math.pow(1 - moveProgress, 2);
+
+                    worldState.player.position.lerpVectors(startPos, endPos, eased);
+
+                    // Walking animation
+                    if (worldState.player.userData.animation) {
+                        worldState.player.userData.animation.state = 'walking';
+                        worldState.player.userData.animation.walkCycle += dt * 8;
+                    }
+
+                    // Footstep sounds
+                    if (Math.sin(this.phaseTime * 6) > 0.9) {
+                        this.playSound('footstep');
+                    }
+
+                    // Robot looks around
+                    if (worldState.player.userData.bones?.headGroup) {
+                        const lookPhase = this.phaseTime * 0.8;
+                        worldState.player.userData.bones.headGroup.rotation.y = Math.sin(lookPhase) * 0.4;
+                        worldState.player.userData.bones.headGroup.rotation.x = Math.sin(lookPhase * 0.7) * 0.1 - 0.1;
+                    }
+                }
+
+                // Camera follows robot, low angle hero shot
+                const camProgress = Math.min(progress * 1.5, 1);
+                camera.position.set(
+                    this.landingPos.x + 4 - camProgress * 2,
+                    this.landingPos.y + 1,
+                    this.landingPos.z + 10 + camProgress * 2
+                );
+                camera.lookAt(
+                    this.landingPos.x,
+                    this.landingPos.y + 1.5,
+                    this.landingPos.z + 5
+                );
+
+                if (progress >= 1) {
+                    this.phase = 'cameraReveal';
+                    this.phaseTime = 0;
+                    this.playSound('whoosh');
+                    this.playSound('ambient');
+
+                    // Show title card
+                    if (this.titleCard) {
+                        this.titleCard.style.opacity = '1';
+                    }
+
+                    // Stop walking animation
+                    if (worldState.player?.userData.animation) {
+                        worldState.player.userData.animation.state = 'idle';
+                    }
+                }
+            },
+
+            updateCameraReveal(dt) {
+                const progress = this.phaseTime / this.phaseDurations.cameraReveal;
+
+                // Epic pullback and pan
+                const eased = 1 - Math.pow(1 - progress, 3); // Strong ease out
+
+                // Camera arcs around and pulls back
+                const angle = eased * Math.PI * 0.6;
+                const distance = 8 + eased * 25;
+                const height = 2 + eased * 15;
+
+                camera.position.set(
+                    this.landingPos.x + Math.sin(angle) * distance,
+                    this.landingPos.y + height,
+                    this.landingPos.z + Math.cos(angle) * distance
+                );
+
+                // Look at a point between player and horizon
+                const lookHeight = 1 + eased * 5;
+                camera.lookAt(
+                    this.landingPos.x,
+                    this.landingPos.y + lookHeight,
+                    this.landingPos.z
+                );
+
+                // Fade out title card
+                if (this.titleCard && progress > 0.6) {
+                    this.titleCard.style.opacity = String(1 - (progress - 0.6) / 0.4);
+                }
+
+                // Robot turns to face camera
+                if (worldState.player && progress > 0.3) {
+                    const turnProgress = (progress - 0.3) / 0.4;
+                    worldState.player.rotation.y = Math.PI + Math.min(turnProgress, 1) * (-angle);
+                }
+
+                if (progress >= 1) {
+                    this.phase = 'fadeOut';
+                    this.phaseTime = 0;
+                    if (this.overlay) this.overlay.style.opacity = '0.5';
+                }
+            },
+
+            updateFadeOut() {
+                const progress = this.phaseTime / this.phaseDurations.fadeOut;
+
+                // Quick fade
+                if (this.overlay) {
+                    if (progress < 0.3) {
+                        this.overlay.style.opacity = String(0.5 + progress);
+                    } else {
+                        this.overlay.style.opacity = String(1 - (progress - 0.3) / 0.7);
+                    }
+                }
+
+                // Hide skip hint
+                if (this.skipHint) {
+                    this.skipHint.style.opacity = '0';
+                }
+
+                if (progress >= 1) {
+                    this.complete();
+                }
+            },
+
+            // Complete and cleanup
+            complete() {
+                this.phase = 'complete';
+                this.active = false;
+
+                // Remove event listeners
+                if (this.skipHandler) {
+                    window.removeEventListener('keydown', this.skipHandler);
+                    window.removeEventListener('click', this.skipHandler);
+                }
+
+                // Clean up particles
+                this.thrusterParticles.forEach(p => scene.remove(p));
+                this.dustParticles.forEach(p => scene.remove(p));
+                this.thrusterParticles = [];
+                this.dustParticles = [];
+
+                // Remove spacecraft (leave world ship)
+                if (this.spacecraft) {
+                    scene.remove(this.spacecraft);
+                    this.spacecraft = null;
+                }
+
+                // Remove UI
+                this.removeUI();
+
+                // Reset player to idle
+                if (worldState.player) {
+                    worldState.player.visible = true;
+                    if (worldState.player.userData.animation) {
+                        worldState.player.userData.animation.state = 'idle';
+                    }
+                    if (worldState.player.userData.bones?.headGroup) {
+                        worldState.player.userData.bones.headGroup.rotation.set(0, 0, 0);
+                    }
+                }
+
+                // Restore game UI
+                document.querySelectorAll('#game-ui, #portrait-panel, #minimap-container, #hp-mp-panel').forEach(el => {
+                    if (el) el.style.opacity = '1';
+                });
+
+                // Reset camera for gameplay
+                if (typeof updateCameraForGameplay === 'function') {
+                    updateCameraForGameplay();
+                }
+
+                // Initialize RTS selection
+                if (RTSSelection) {
+                    RTSSelection.init();
+                }
+
+                console.log('🚀 Landing Sequence: Complete - Welcome to the world!');
+            },
+
+            // Check if sequence is running
+            isActive() {
+                return this.active;
+            }
         };
 
         // ============================================
