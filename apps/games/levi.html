@@ -23743,13 +23743,21 @@
 
         // Maps enemy names to creature model files
         const CREATURE_MODEL_REGISTRY = {
+            // Regular enemies
             'ShadowWraith': 'shadow-wraith.json',
             'CrystalGolem': 'crystal-golem.json',
             'VoidSpawn': 'void-spider.json',
             'MagmaCore': 'flame-serpent.json',
             'IceWisp': 'storm-elemental.json',
             'Berserker': 'blood-knight.json',
-            'Slime': 'forest-guardian.json'  // Nature-themed for Terra biome
+            'Slime': 'forest-guardian.json',
+            // Neutral creep camp creatures
+            'CaveBat': 'cave-bat.json',
+            'ForestSprite': 'forest-sprite.json',
+            'RockTroll': 'rock-troll.json',
+            'WolfAlpha': 'wolf-alpha.json',
+            'AncientWyrm': 'ancient-wyrm.json',
+            'TitanGolem': 'titan-golem.json'
         };
 
         // Fetch and cache creature model JSON
@@ -63052,6 +63060,502 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             if (isElite) {
                 showNotification(`${eliteData.prefix} ELITE ${eliteData.name} ${enemyName} appeared!`, 'warning');
             }
+        }
+
+        // ============================================
+        // v9.1: NEUTRAL CREEP CAMP SYSTEM
+        // Random jungle camps throughout the map with
+        // detailed 3D creature models and respawn timers
+        // ============================================
+
+        const NEUTRAL_CAMP_CONFIG = {
+            ENABLED: true,
+            RESPAWN_TIME: 60000,           // 60 seconds respawn
+            AGGRO_RANGE: 8,                // Range to aggro player
+            LEASH_RANGE: 20,               // Range before returning to camp
+            RETURN_HEAL_RATE: 0.1,         // HP regen rate when returning
+            CAMP_INDICATOR_HEIGHT: 3,      // Height of camp marker
+            XP_MULTIPLIER: 1.5,            // Bonus XP for neutrals
+            GOLD_MULTIPLIER: 2.0           // Bonus gold for neutrals
+        };
+
+        // Neutral creature types by camp tier
+        const NEUTRAL_CREATURES = {
+            // Small camps - 2-3 weak creatures
+            small: {
+                CaveBat: {
+                    hp: 25, damage: 8, speed: 6, xp: 40, gold: 8,
+                    color: 0x2a1a3a, emissive: 0x110011,
+                    count: 3, scale: 0.35
+                },
+                ForestSprite: {
+                    hp: 20, damage: 6, speed: 8, xp: 35, gold: 6,
+                    color: 0x90ee90, emissive: 0x225522,
+                    count: 2, scale: 0.4
+                }
+            },
+            // Medium camps - 1-2 stronger creatures
+            medium: {
+                RockTroll: {
+                    hp: 120, damage: 25, speed: 3, xp: 120, gold: 25,
+                    color: 0x696969, emissive: 0x222222,
+                    count: 1, scale: 0.6
+                },
+                WolfAlpha: {
+                    hp: 80, damage: 18, speed: 5, xp: 90, gold: 20,
+                    color: 0x2f2f2f, emissive: 0x111111,
+                    count: 2, scale: 0.5
+                }
+            },
+            // Large/Ancient camps - single powerful creature
+            large: {
+                AncientWyrm: {
+                    hp: 300, damage: 40, speed: 4, xp: 300, gold: 80,
+                    color: 0x8b0000, emissive: 0x330000,
+                    count: 1, scale: 0.8
+                },
+                TitanGolem: {
+                    hp: 400, damage: 35, speed: 2, xp: 350, gold: 100,
+                    color: 0x4a4a4a, emissive: 0x001111,
+                    count: 1, scale: 0.7
+                }
+            }
+        };
+
+        // Camp locations throughout the map (positioned between lanes)
+        const NEUTRAL_CAMP_LOCATIONS = [
+            // Northwest jungle (between top and mid lanes)
+            { x: -45, z: -30, tier: 'small', name: 'Whispering Hollow' },
+            { x: -55, z: -15, tier: 'medium', name: 'Stone Circle' },
+            { x: -35, z: -5, tier: 'small', name: 'Moonlit Glade' },
+
+            // Northeast jungle
+            { x: 45, z: -30, tier: 'small', name: 'Frozen Den' },
+            { x: 55, z: -15, tier: 'medium', name: 'Crystal Cavern' },
+            { x: 35, z: -5, tier: 'small', name: 'Shadow Thicket' },
+
+            // Southwest jungle (between mid and bot lanes)
+            { x: -45, z: 30, tier: 'small', name: 'Verdant Nest' },
+            { x: -55, z: 15, tier: 'medium', name: 'Troll Bridge' },
+            { x: -35, z: 5, tier: 'small', name: 'Sprite Garden' },
+
+            // Southeast jungle
+            { x: 45, z: 30, tier: 'small', name: 'Ember Pit' },
+            { x: 55, z: 15, tier: 'medium', name: 'Wolf Den' },
+            { x: 35, z: 5, tier: 'small', name: 'Ancient Grove' },
+
+            // Central ancient camps (high risk, high reward)
+            { x: -25, z: 0, tier: 'large', name: 'Dragon Lair' },
+            { x: 25, z: 0, tier: 'large', name: 'Titan Ruins' }
+        ];
+
+        // State tracking for neutral camps
+        const neutralCampState = {
+            camps: [],           // Active camp data
+            creatures: [],       // Active neutral creatures
+            initialized: false,
+            lastUpdate: 0
+        };
+
+        // Initialize neutral camp system
+        function initNeutralCamps() {
+            if (!NEUTRAL_CAMP_CONFIG.ENABLED || neutralCampState.initialized) return;
+
+            neutralCampState.camps = NEUTRAL_CAMP_LOCATIONS.map((loc, index) => ({
+                id: index,
+                x: loc.x,
+                z: loc.z,
+                tier: loc.tier,
+                name: loc.name,
+                creatures: [],
+                cleared: false,
+                respawnTime: 0,
+                marker: null
+            }));
+
+            // Create visual markers for each camp
+            neutralCampState.camps.forEach(camp => {
+                createCampMarker(camp);
+            });
+
+            // Spawn initial creatures
+            neutralCampState.camps.forEach(camp => {
+                spawnNeutralCamp(camp);
+            });
+
+            neutralCampState.initialized = true;
+            console.log(`[NEUTRAL CAMPS] Initialized ${neutralCampState.camps.length} camps`);
+        }
+
+        // Create visual marker for camp location
+        function createCampMarker(camp) {
+            const markerGroup = new THREE.Group();
+
+            // Glowing ring on ground
+            const ringGeo = new THREE.RingGeometry(1.5, 2.0, 32);
+            const ringColor = camp.tier === 'large' ? 0xff4400 :
+                             camp.tier === 'medium' ? 0xffaa00 : 0x44ff44;
+            const ringMat = new THREE.MeshBasicMaterial({
+                color: ringColor,
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.4
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.y = 0.1;
+            markerGroup.add(ring);
+
+            // Floating icon based on tier
+            const iconSize = camp.tier === 'large' ? 0.5 :
+                            camp.tier === 'medium' ? 0.4 : 0.3;
+            const iconGeo = new THREE.OctahedronGeometry(iconSize, 0);
+            const iconMat = new THREE.MeshStandardMaterial({
+                color: ringColor,
+                emissive: ringColor,
+                emissiveIntensity: 0.5,
+                transparent: true,
+                opacity: 0.8
+            });
+            const icon = new THREE.Mesh(iconGeo, iconMat);
+            icon.position.y = NEUTRAL_CAMP_CONFIG.CAMP_INDICATOR_HEIGHT;
+            markerGroup.add(icon);
+
+            markerGroup.position.set(camp.x, 0, camp.z);
+            markerGroup.userData = { type: 'campMarker', campId: camp.id };
+
+            if (scene) scene.add(markerGroup);
+            camp.marker = markerGroup;
+        }
+
+        // Spawn creatures for a camp
+        function spawnNeutralCamp(camp) {
+            if (camp.creatures.length > 0) return; // Already spawned
+
+            const tierCreatures = NEUTRAL_CREATURES[camp.tier];
+            const creatureTypes = Object.keys(tierCreatures);
+            const selectedType = creatureTypes[Math.floor(Math.random() * creatureTypes.length)];
+            const creatureData = tierCreatures[selectedType];
+
+            for (let i = 0; i < creatureData.count; i++) {
+                const creature = spawnNeutralCreature(camp, selectedType, creatureData, i);
+                if (creature) {
+                    camp.creatures.push(creature);
+                    neutralCampState.creatures.push(creature);
+                }
+            }
+
+            camp.cleared = false;
+
+            // Update marker visibility
+            if (camp.marker) {
+                camp.marker.visible = true;
+                camp.marker.traverse(child => {
+                    if (child.material) child.material.opacity = 0.8;
+                });
+            }
+        }
+
+        // Spawn a single neutral creature
+        function spawnNeutralCreature(camp, creatureType, data, index) {
+            // Use creature model system
+            const mesh = createMobMeshSync(creatureType, {
+                color: data.color,
+                emissive: data.emissive
+            }, false, null);
+
+            if (!mesh) return null;
+
+            // Position around camp center with slight offset
+            const angle = (index / data.count) * Math.PI * 2;
+            const radius = 1.5 + Math.random() * 1.5;
+            const offsetX = Math.cos(angle) * radius;
+            const offsetZ = Math.sin(angle) * radius;
+
+            mesh.position.set(camp.x + offsetX, 1, camp.z + offsetZ);
+            mesh.scale.multiplyScalar(data.scale);
+            mesh.castShadow = true;
+
+            // Health bar
+            const hpBar = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.5, 0.15),
+                new THREE.MeshBasicMaterial({ color: 0xffaa00, side: THREE.DoubleSide })
+            );
+            hpBar.position.y = 2.0;
+            mesh.add(hpBar);
+
+            const hpBg = new THREE.Mesh(
+                new THREE.PlaneGeometry(1.6, 0.2),
+                new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide })
+            );
+            hpBg.position.y = 2.0;
+            hpBg.position.z = -0.01;
+            mesh.add(hpBg);
+
+            mesh.userData = {
+                type: 'neutral',
+                creatureType: creatureType,
+                hp: data.hp,
+                maxHp: data.hp,
+                damage: data.damage,
+                speed: data.speed,
+                xpReward: Math.floor(data.xp * NEUTRAL_CAMP_CONFIG.XP_MULTIPLIER),
+                goldReward: Math.floor(data.gold * NEUTRAL_CAMP_CONFIG.GOLD_MULTIPLIER),
+                campId: camp.id,
+                homePos: new THREE.Vector3(camp.x + offsetX, 1, camp.z + offsetZ),
+                targetPos: new THREE.Vector3(),
+                state: 'idle',  // idle, aggro, returning
+                hpBar: hpBar,
+                nextAttack: 0,
+                attackWindup: 600,
+                attackRange: 2.5
+            };
+
+            if (scene) scene.add(mesh);
+            return mesh;
+        }
+
+        // Update neutral camp system each frame
+        function updateNeutralCamps(time, dt) {
+            if (!NEUTRAL_CAMP_CONFIG.ENABLED || !neutralCampState.initialized) return;
+            if (!worldState?.player) return;
+
+            const playerPos = worldState.player.position;
+
+            // Update each creature
+            for (let i = neutralCampState.creatures.length - 1; i >= 0; i--) {
+                const creature = neutralCampState.creatures[i];
+                if (!creature || !creature.userData) continue;
+
+                const data = creature.userData;
+
+                // Check if dead
+                if (data.hp <= 0) {
+                    handleNeutralDeath(creature, i);
+                    continue;
+                }
+
+                // Update HP bar
+                if (data.hpBar) {
+                    const hpPercent = data.hp / data.maxHp;
+                    data.hpBar.scale.x = Math.max(0.01, hpPercent);
+                    data.hpBar.material.color.setHex(
+                        hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffaa00 : 0xff0000
+                    );
+                }
+
+                const distToPlayer = creature.position.distanceTo(playerPos);
+                const distToHome = creature.position.distanceTo(data.homePos);
+
+                // State machine
+                switch (data.state) {
+                    case 'idle':
+                        // Check for player aggro
+                        if (distToPlayer < NEUTRAL_CAMP_CONFIG.AGGRO_RANGE) {
+                            data.state = 'aggro';
+                            data.targetPos.copy(playerPos);
+                        } else {
+                            // Idle animation - slight bob
+                            creature.position.y = data.homePos.y + Math.sin(time * 0.002) * 0.1;
+                            creature.rotation.y += dt * 0.0005;
+                        }
+                        break;
+
+                    case 'aggro':
+                        // Check leash range
+                        if (distToHome > NEUTRAL_CAMP_CONFIG.LEASH_RANGE) {
+                            data.state = 'returning';
+                            break;
+                        }
+
+                        // Chase and attack player
+                        data.targetPos.copy(playerPos);
+
+                        if (distToPlayer > data.attackRange) {
+                            // Move toward player
+                            const dir = new THREE.Vector3()
+                                .subVectors(playerPos, creature.position)
+                                .normalize();
+                            creature.position.add(dir.multiplyScalar(data.speed * dt * 0.001));
+                            creature.lookAt(playerPos.x, creature.position.y, playerPos.z);
+                        } else if (time > data.nextAttack) {
+                            // Attack player
+                            attackPlayer(creature, data);
+                            data.nextAttack = time + 1000 + data.attackWindup;
+                        }
+
+                        // Re-aggro check
+                        if (distToPlayer > NEUTRAL_CAMP_CONFIG.AGGRO_RANGE * 1.5) {
+                            data.state = 'returning';
+                        }
+                        break;
+
+                    case 'returning':
+                        // Return to home position
+                        if (distToHome > 0.5) {
+                            const dir = new THREE.Vector3()
+                                .subVectors(data.homePos, creature.position)
+                                .normalize();
+                            creature.position.add(dir.multiplyScalar(data.speed * 1.5 * dt * 0.001));
+                            creature.lookAt(data.homePos.x, creature.position.y, data.homePos.z);
+
+                            // Heal while returning
+                            data.hp = Math.min(data.maxHp,
+                                data.hp + data.maxHp * NEUTRAL_CAMP_CONFIG.RETURN_HEAL_RATE * dt * 0.001);
+                        } else {
+                            data.state = 'idle';
+                            creature.position.copy(data.homePos);
+                            data.hp = data.maxHp; // Full heal on return
+                        }
+                        break;
+                }
+            }
+
+            // Check for camp respawns
+            const now = performance.now();
+            neutralCampState.camps.forEach(camp => {
+                if (camp.cleared && now > camp.respawnTime) {
+                    spawnNeutralCamp(camp);
+                    if (typeof showNotification === 'function') {
+                        showNotification(`${camp.name} has respawned!`, 'info');
+                    }
+                }
+            });
+
+            // Animate camp markers
+            neutralCampState.camps.forEach(camp => {
+                if (camp.marker) {
+                    const icon = camp.marker.children[1];
+                    if (icon) {
+                        icon.rotation.y += dt * 0.002;
+                        icon.position.y = NEUTRAL_CAMP_CONFIG.CAMP_INDICATOR_HEIGHT +
+                            Math.sin(time * 0.003) * 0.2;
+                    }
+                    // Dim marker when camp is cleared
+                    if (camp.cleared) {
+                        camp.marker.traverse(child => {
+                            if (child.material && child.material.opacity > 0.15) {
+                                child.material.opacity = 0.15;
+                            }
+                        });
+                    }
+                }
+            });
+        }
+
+        // Handle neutral creature death
+        function handleNeutralDeath(creature, index) {
+            const data = creature.userData;
+            const camp = neutralCampState.camps[data.campId];
+
+            // Award XP and gold
+            if (typeof addXp === 'function') {
+                addXp('combat', data.xpReward);
+            }
+            gameData.gold = (gameData.gold || 0) + data.goldReward;
+
+            // Show rewards
+            if (typeof spawnFloater === 'function') {
+                spawnFloater(creature.position, `+${data.xpReward} XP`, '#ffff00');
+                setTimeout(() => {
+                    spawnFloater(creature.position, `+${data.goldReward} Gold`, '#ffd700');
+                }, 200);
+            }
+
+            // Play death effect
+            if (typeof particles !== 'undefined' && particles.burst) {
+                particles.burst(creature.position.clone(), 0xffaa00, 15);
+            }
+
+            // Remove from scene and arrays
+            if (scene) scene.remove(creature);
+            neutralCampState.creatures.splice(index, 1);
+
+            // Remove from camp creatures
+            if (camp) {
+                const campIndex = camp.creatures.indexOf(creature);
+                if (campIndex > -1) camp.creatures.splice(campIndex, 1);
+
+                // Check if camp is cleared
+                if (camp.creatures.length === 0) {
+                    camp.cleared = true;
+                    camp.respawnTime = performance.now() + NEUTRAL_CAMP_CONFIG.RESPAWN_TIME;
+
+                    if (typeof showNotification === 'function') {
+                        showNotification(`${camp.name} cleared! +${data.goldReward} gold`, 'success');
+                    }
+                }
+            }
+
+            // Update stats
+            gameData.stats = gameData.stats || {};
+            gameData.stats.neutralsKilled = (gameData.stats.neutralsKilled || 0) + 1;
+        }
+
+        // Attack player from neutral creature
+        function attackPlayer(creature, data) {
+            if (!worldState?.player) return;
+
+            // Calculate damage (can be blocked/dodged)
+            const damage = data.damage;
+
+            // Apply damage to player
+            if (typeof takeDamage === 'function') {
+                takeDamage(damage, 'neutral');
+            } else if (worldState.player.userData) {
+                worldState.player.userData.hp = Math.max(0,
+                    (worldState.player.userData.hp || 100) - damage);
+            }
+
+            // Visual feedback
+            if (typeof spawnFloater === 'function') {
+                spawnFloater(worldState.player.position, `-${damage}`, '#ff4444');
+            }
+
+            // Play attack sound
+            if (typeof AudioSystem !== 'undefined' && AudioSystem.play) {
+                AudioSystem.play('hit');
+            }
+        }
+
+        // Damage a neutral creature (called from player attacks)
+        function damageNeutral(creature, damage) {
+            if (!creature?.userData || creature.userData.type !== 'neutral') return false;
+
+            creature.userData.hp -= damage;
+            creature.userData.state = 'aggro'; // Aggro on damage
+
+            // Flash effect
+            creature.traverse(child => {
+                if (child.isMesh && child.material) {
+                    const origColor = child.material.emissive?.clone();
+                    child.material.emissive = new THREE.Color(0xffffff);
+                    setTimeout(() => {
+                        if (child.material && origColor) {
+                            child.material.emissive = origColor;
+                        }
+                    }, 100);
+                }
+            });
+
+            // Damage floater
+            if (typeof spawnFloater === 'function') {
+                spawnFloater(creature.position, `-${Math.floor(damage)}`, '#ffaa00');
+            }
+
+            return true;
+        }
+
+        // Check if position collides with neutral creature
+        function checkNeutralCollision(position, radius = 1.5) {
+            for (const creature of neutralCampState.creatures) {
+                if (!creature?.position) continue;
+                const dist = position.distanceTo(creature.position);
+                if (dist < radius + 1) {
+                    return creature;
+                }
+            }
+            return null;
         }
 
         // ============================================
