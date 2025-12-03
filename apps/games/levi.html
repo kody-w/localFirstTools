@@ -412,6 +412,11 @@
             from { opacity: 0; transform: scale(0.95); }
             to { opacity: 1; transform: scale(1); }
         }
+        /* v12.8: Space Music notification animation */
+        @keyframes spaceMusicFadeIn {
+            from { opacity: 0; transform: translateX(-50%) translateY(-20px); }
+            to { opacity: 1; transform: translateX(-50%) translateY(0); }
+        }
         @keyframes pulse {
             0%, 100% { transform: scale(1); }
             50% { transform: scale(1.05); }
@@ -14270,9 +14275,20 @@
                 this.combatMusic.intensity = 0;
                 this.combatMusic.targetIntensity = 0;
 
+                // v12.10: Notify SpaceMusic of combat state for ambient adaptation
+                if (typeof SpaceMusic !== 'undefined') {
+                    SpaceMusic.setCombatState(true, 0);
+                    SpaceMusic.playTension(); // Subtle tension accent
+                }
+
                 // Update intensity smoothly over time
                 this.combatMusic.updateInterval = setInterval(() => {
                     this.updateCombatMusicIntensity();
+
+                    // v12.10: Keep SpaceMusic updated on combat intensity
+                    if (typeof SpaceMusic !== 'undefined' && SpaceMusic.isPlaying) {
+                        SpaceMusic.tensionLevel = this.combatMusic.intensity / 5;
+                    }
                 }, 100);
             },
 
@@ -14283,6 +14299,12 @@
                 if (this.combatMusic.updateInterval) {
                     clearInterval(this.combatMusic.updateInterval);
                     this.combatMusic.updateInterval = null;
+                }
+
+                // v12.10: Notify SpaceMusic combat ended
+                if (typeof SpaceMusic !== 'undefined') {
+                    SpaceMusic.setCombatState(false, 0);
+                    SpaceMusic.playResolve(); // Peaceful resolution accent
                 }
 
                 // Fade out all combat music nodes
@@ -14513,6 +14535,862 @@
 
         // Initialize nature soundscape integration
         AudioSystem.initNature();
+
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        // v12.10: ADAPTIVE SPACE AMBIENT MUSIC SYSTEM
+        // The core musical identity of LEVIATHAN: OMNIVERSE
+        // Procedural, lo-fi space ambient that adapts to game context
+        // - Mode-aware: Galaxy (cosmic), World (grounded), Tesseract (ethereal)
+        // - Biome-influenced: Subtle tonal shifts based on planet environment
+        // - Combat-aware: Reduces melodic activity during tension, maintains atmosphere
+        // - Moment-reactive: Special accents for discoveries, landings, achievements
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        const SpaceMusic = {
+            ctx: null,
+            isPlaying: false,
+            masterGain: null,
+            volume: 0.15,
+            nodes: [],
+            melodyTimeout: null,
+            chordTimeout: null,
+            arpTimeout: null,
+            shimmerTimeout: null,
+
+            // Current game context for adaptive music
+            currentMode: 'galaxy',      // galaxy, world, tesseract
+            currentBiome: 'Terra',      // Affects tonal color
+            inCombat: false,            // Reduces melodic activity
+            tensionLevel: 0,            // 0-1, affects music intensity
+
+            // Pentatonic scales for different moods (all harmonious)
+            scales: {
+                // Default cosmic scale (A minor pentatonic)
+                cosmic: [220, 261.63, 293.66, 329.63, 392, 440, 523.25, 587.33, 659.25, 783.99],
+                // Warmer scale for Terra/forest biomes (C major pentatonic)
+                warm: [261.63, 293.66, 329.63, 392, 440, 523.25, 587.33, 659.25, 783.99, 880],
+                // Cooler scale for Ice/space (E minor pentatonic)
+                cool: [164.81, 196, 220, 246.94, 293.66, 329.63, 392, 440, 493.88, 587.33],
+                // Mysterious scale for Alien/Volcanic (D minor pentatonic)
+                mysterious: [146.83, 174.61, 196, 220, 261.63, 293.66, 349.23, 392, 440, 523.25],
+                // Ethereal scale for Tesseract (whole tone based)
+                ethereal: [220, 246.94, 277.18, 311.13, 349.23, 392, 440, 493.88, 554.37, 622.25]
+            },
+
+            // Biome to scale mapping
+            biomeScales: {
+                Terra: 'warm',
+                Desert: 'warm',
+                Ice: 'cool',
+                Volcanic: 'mysterious',
+                Alien: 'mysterious',
+                Magma: 'mysterious',
+                Ocean: 'cool',
+                Forest: 'warm',
+                Crystal: 'ethereal'
+            },
+
+            // Mode-specific pad configurations
+            modeConfigs: {
+                galaxy: {
+                    padNotes: [55, 82.41, 110],     // Very low, cosmic
+                    filterBase: 300,
+                    melodyOctave: 1,
+                    melodyDensity: 0.6,
+                    shimmer: true,
+                    cosmicWashVol: 0.04
+                },
+                world: {
+                    padNotes: [110, 165, 220],      // Warmer, more present
+                    filterBase: 500,
+                    melodyOctave: 1,
+                    melodyDensity: 0.8,
+                    shimmer: false,
+                    cosmicWashVol: 0.02
+                },
+                tesseract: {
+                    padNotes: [73.42, 110, 146.83], // Unsettling intervals
+                    filterBase: 600,
+                    melodyOctave: 2,
+                    melodyDensity: 0.4,
+                    shimmer: true,
+                    cosmicWashVol: 0.05
+                }
+            },
+
+            // Chord roots for progression
+            chordRoots: [220, 174.61, 261.63, 196],
+            currentChordIndex: 0,
+
+            init() {
+                if (this.ctx) return;
+                try {
+                    this.ctx = AudioSystem.ctx || new (window.AudioContext || window.webkitAudioContext)();
+                    this.masterGain = this.ctx.createGain();
+                    this.masterGain.gain.value = 0; // Start silent for fade-in
+                    this.masterGain.connect(this.ctx.destination);
+                } catch(e) {
+                    console.warn('SpaceMusic: Could not initialize audio context');
+                }
+            },
+
+            resume() {
+                if (this.ctx && this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+            },
+
+            // Get current scale based on mode and biome
+            getCurrentScale() {
+                if (this.currentMode === 'tesseract') return this.scales.ethereal;
+                if (this.currentMode === 'galaxy') return this.scales.cosmic;
+                const scaleName = this.biomeScales[this.currentBiome] || 'cosmic';
+                return this.scales[scaleName];
+            },
+
+            // Get current mode config
+            getModeConfig() {
+                return this.modeConfigs[this.currentMode] || this.modeConfigs.galaxy;
+            },
+
+            // Update game context (called by game state changes)
+            setMode(newMode) {
+                if (this.currentMode === newMode) return;
+                const oldMode = this.currentMode;
+                this.currentMode = newMode;
+
+                if (this.isPlaying) {
+                    // Crossfade to new mode settings
+                    this.transitionToMode(oldMode, newMode);
+                }
+                console.log(`🎵 Music adapting to ${newMode} mode`);
+            },
+
+            setBiome(biomeName) {
+                if (this.currentBiome === biomeName) return;
+                this.currentBiome = biomeName;
+                console.log(`🎵 Music tinted by ${biomeName} atmosphere`);
+            },
+
+            setCombatState(inCombat, tensionLevel = 0) {
+                this.inCombat = inCombat;
+                this.tensionLevel = Math.max(0, Math.min(1, tensionLevel));
+
+                // Adjust melody density based on combat
+                if (this.isPlaying && this.melodyTimeout) {
+                    // Clear and restart melody with new density
+                    clearTimeout(this.melodyTimeout);
+                    this.startMelody();
+                }
+            },
+
+            // Smooth transition between modes
+            transitionToMode(oldMode, newMode) {
+                const config = this.getModeConfig();
+                const now = this.ctx.currentTime;
+
+                // Adjust cosmic wash volume
+                this.nodes.forEach(node => {
+                    if (node.isCosmicWash && node.gain) {
+                        node.gain.gain.linearRampToValueAtTime(config.cosmicWashVol, now + 2);
+                    }
+                });
+            },
+
+            // Start the ambient space music
+            start() {
+                if (this.isPlaying) return;
+                this.init();
+                if (!this.ctx) return;
+                this.resume();
+                this.isPlaying = true;
+
+                // Start the layers
+                this.startPad();
+                this.startMelody();
+                this.startArpeggio();
+                this.startCosmicWash();
+
+                // v12.10: Start shimmer for galaxy/tesseract modes
+                const config = this.getModeConfig();
+                if (config.shimmer) {
+                    this.startShimmer();
+                }
+
+                // Gentle fade-in
+                const now = this.ctx.currentTime;
+                this.masterGain.gain.setValueAtTime(0, now);
+                this.masterGain.gain.linearRampToValueAtTime(this.volume, now + 4);
+
+                console.log(`🎵 Space ambient music started (${this.currentMode} mode)`);
+            },
+
+            stop() {
+                if (!this.isPlaying) return;
+                this.isPlaying = false;
+
+                // Clear timeouts
+                if (this.melodyTimeout) clearTimeout(this.melodyTimeout);
+                if (this.chordTimeout) clearTimeout(this.chordTimeout);
+                if (this.arpTimeout) clearTimeout(this.arpTimeout);
+                if (this.shimmerTimeout) clearTimeout(this.shimmerTimeout);
+
+                // Fade out and stop all nodes
+                const now = this.ctx.currentTime;
+                this.masterGain.gain.linearRampToValueAtTime(0, now + 2);
+
+                this.nodes.forEach(node => {
+                    try {
+                        setTimeout(() => {
+                            try {
+                                if (node.osc) node.osc.stop();
+                                if (node.noise) node.noise.stop();
+                            } catch(e) {}
+                        }, 2100);
+                    } catch(e) {}
+                });
+
+                setTimeout(() => {
+                    this.nodes = [];
+                }, 2200);
+
+                console.log('🎵 Space ambient music stopped');
+            },
+
+            toggle() {
+                if (this.isPlaying) {
+                    this.stop();
+                } else {
+                    this.start();
+                }
+                return this.isPlaying;
+            },
+
+            setVolume(vol) {
+                this.volume = Math.max(0, Math.min(1, vol));
+                if (this.masterGain) {
+                    this.masterGain.gain.linearRampToValueAtTime(this.volume, this.ctx.currentTime + 0.1);
+                }
+            },
+
+            // Warm pad drone - the foundation
+            startPad() {
+                const now = this.ctx.currentTime;
+
+                // Create a warm, evolving pad with multiple detuned oscillators
+                const padNotes = [110, 165, 220]; // Root, fifth, octave
+                padNotes.forEach((freq, i) => {
+                    const osc1 = this.ctx.createOscillator();
+                    const osc2 = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    const filter = this.ctx.createBiquadFilter();
+
+                    // Slightly detuned for warmth
+                    osc1.type = 'sine';
+                    osc1.frequency.value = freq;
+                    osc2.type = 'triangle';
+                    osc2.frequency.value = freq * 1.002; // Slight detune
+
+                    // LFO for gentle movement
+                    const lfo = this.ctx.createOscillator();
+                    const lfoGain = this.ctx.createGain();
+                    lfo.type = 'sine';
+                    lfo.frequency.value = 0.05 + i * 0.02;
+                    lfoGain.gain.value = freq * 0.01;
+                    lfo.connect(lfoGain);
+                    lfoGain.connect(osc1.frequency);
+                    lfoGain.connect(osc2.frequency);
+
+                    // Warm low-pass filter
+                    filter.type = 'lowpass';
+                    filter.frequency.value = 400 + i * 100;
+                    filter.Q.value = 0.5;
+
+                    // Filter modulation for evolving texture
+                    const filterLfo = this.ctx.createOscillator();
+                    const filterLfoGain = this.ctx.createGain();
+                    filterLfo.type = 'sine';
+                    filterLfo.frequency.value = 0.02;
+                    filterLfoGain.gain.value = 150;
+                    filterLfo.connect(filterLfoGain);
+                    filterLfoGain.connect(filter.frequency);
+
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(0.08 - i * 0.02, now + 4);
+
+                    osc1.connect(filter);
+                    osc2.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(this.masterGain);
+
+                    osc1.start(now);
+                    osc2.start(now);
+                    lfo.start(now);
+                    filterLfo.start(now);
+
+                    this.nodes.push({ osc: osc1, gain }, { osc: osc2 }, { osc: lfo }, { osc: filterLfo });
+                });
+
+                // Schedule chord changes
+                this.scheduleChordChange();
+            },
+
+            scheduleChordChange() {
+                if (!this.isPlaying) return;
+
+                this.chordTimeout = setTimeout(() => {
+                    this.currentChordIndex = (this.currentChordIndex + 1) % this.chordRoots.length;
+                    // Update pad frequencies smoothly (would need to rebuild for true changes)
+                    this.scheduleChordChange();
+                }, 8000 + Math.random() * 4000);
+            },
+
+            // v12.10: Context-aware gentle melody - sparse, contemplative notes
+            startMelody() {
+                if (!this.isPlaying) return;
+
+                const playNote = () => {
+                    if (!this.isPlaying) return;
+
+                    const config = this.getModeConfig();
+                    const scale = this.getCurrentScale();
+
+                    // v12.10: Skip note if in combat (reduce melodic density)
+                    if (this.inCombat && Math.random() > 0.3) {
+                        // Schedule next check sooner during combat
+                        this.melodyTimeout = setTimeout(playNote, 2000 + Math.random() * 2000);
+                        return;
+                    }
+
+                    // v12.10: Check melody density based on mode
+                    if (Math.random() > config.melodyDensity) {
+                        this.melodyTimeout = setTimeout(playNote, 2000 + Math.random() * 3000);
+                        return;
+                    }
+
+                    // Pick a random note from current scale, weighted toward middle range
+                    const noteIndex = Math.floor(Math.pow(Math.random(), 0.7) * scale.length);
+                    const freq = scale[noteIndex] * config.melodyOctave;
+
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    const filter = this.ctx.createBiquadFilter();
+
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+
+                    filter.type = 'lowpass';
+                    filter.frequency.value = config.filterBase + 1500;
+
+                    const now = this.ctx.currentTime;
+                    const duration = 2 + Math.random() * 3;
+
+                    // Soft attack, long decay - quieter during combat
+                    const vol = this.inCombat ? 0.06 : 0.12;
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(vol, now + 0.3);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + duration);
+
+                    osc.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(this.masterGain);
+
+                    osc.start(now);
+                    osc.stop(now + duration + 0.1);
+
+                    // Schedule next note (sparse - every 3-8 seconds, faster during non-combat)
+                    const baseDelay = this.inCombat ? 4000 : 3000;
+                    const variance = this.inCombat ? 4000 : 5000;
+                    this.melodyTimeout = setTimeout(playNote, baseDelay + Math.random() * variance);
+                };
+
+                // Start after a brief delay
+                this.melodyTimeout = setTimeout(playNote, 2000);
+            },
+
+            // Soft arpeggio - occasional rippling notes
+            startArpeggio() {
+                if (!this.isPlaying) return;
+
+                const playArp = () => {
+                    if (!this.isPlaying) return;
+
+                    // Only play arpeggio sometimes
+                    if (Math.random() > 0.4) {
+                        this.arpTimeout = setTimeout(playArp, 4000 + Math.random() * 6000);
+                        return;
+                    }
+
+                    const baseIndex = Math.floor(Math.random() * 4);
+                    const notes = [
+                        this.scale[baseIndex],
+                        this.scale[baseIndex + 2],
+                        this.scale[baseIndex + 4],
+                        this.scale[baseIndex + 2]
+                    ];
+
+                    notes.forEach((freq, i) => {
+                        setTimeout(() => {
+                            if (!this.isPlaying) return;
+
+                            const osc = this.ctx.createOscillator();
+                            const gain = this.ctx.createGain();
+
+                            osc.type = 'sine';
+                            osc.frequency.value = freq * 2; // Octave up
+
+                            const now = this.ctx.currentTime;
+                            gain.gain.setValueAtTime(0, now);
+                            gain.gain.linearRampToValueAtTime(0.06, now + 0.05);
+                            gain.gain.exponentialRampToValueAtTime(0.001, now + 1.5);
+
+                            osc.connect(gain);
+                            gain.connect(this.masterGain);
+
+                            osc.start(now);
+                            osc.stop(now + 1.6);
+                        }, i * 200);
+                    });
+
+                    this.arpTimeout = setTimeout(playArp, 8000 + Math.random() * 8000);
+                };
+
+                setTimeout(playArp, 5000);
+            },
+
+            // Cosmic wash - subtle noise texture
+            startCosmicWash() {
+                const bufferSize = this.ctx.sampleRate * 2;
+                const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+                const data = buffer.getChannelData(0);
+
+                // Pink-ish noise
+                let b0 = 0, b1 = 0, b2 = 0;
+                for (let i = 0; i < bufferSize; i++) {
+                    const white = Math.random() * 2 - 1;
+                    b0 = 0.99765 * b0 + white * 0.0990460;
+                    b1 = 0.96300 * b1 + white * 0.2965164;
+                    b2 = 0.57000 * b2 + white * 1.0526913;
+                    data[i] = (b0 + b1 + b2 + white * 0.1848) * 0.11;
+                }
+
+                const noise = this.ctx.createBufferSource();
+                noise.buffer = buffer;
+                noise.loop = true;
+
+                const filter = this.ctx.createBiquadFilter();
+                filter.type = 'lowpass';
+                filter.frequency.value = 300;
+
+                const gain = this.ctx.createGain();
+                gain.gain.value = 0.03;
+
+                // Gentle modulation
+                const lfo = this.ctx.createOscillator();
+                const lfoGain = this.ctx.createGain();
+                lfo.frequency.value = 0.03;
+                lfoGain.gain.value = 100;
+                lfo.connect(lfoGain);
+                lfoGain.connect(filter.frequency);
+
+                noise.connect(filter);
+                filter.connect(gain);
+                gain.connect(this.masterGain);
+
+                noise.start();
+                lfo.start();
+
+                this.nodes.push({ noise, gain, isCosmicWash: true }, { osc: lfo });
+            },
+
+            // v12.10: Shimmer layer - high frequency sparkles for galaxy/tesseract
+            startShimmer() {
+                if (!this.isPlaying) return;
+
+                const playShimmer = () => {
+                    if (!this.isPlaying) return;
+
+                    const config = this.getModeConfig();
+                    if (!config.shimmer) {
+                        this.shimmerTimeout = setTimeout(playShimmer, 5000);
+                        return;
+                    }
+
+                    // Random high note
+                    const scale = this.getCurrentScale();
+                    const freq = scale[Math.floor(Math.random() * scale.length)] * 4; // Two octaves up
+
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    const filter = this.ctx.createBiquadFilter();
+
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+
+                    filter.type = 'highpass';
+                    filter.frequency.value = 1000;
+
+                    const now = this.ctx.currentTime;
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(0.03, now + 0.05);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 2);
+
+                    osc.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(this.masterGain);
+
+                    osc.start(now);
+                    osc.stop(now + 2.1);
+
+                    // Random interval
+                    this.shimmerTimeout = setTimeout(playShimmer, 1000 + Math.random() * 4000);
+                };
+
+                setTimeout(playShimmer, 3000);
+            },
+
+            // ═══════════════════════════════════════════════════════════════
+            // v12.10: SPECIAL MOMENT MUSICAL ACCENTS
+            // These can be called from anywhere in the game for key moments
+            // ═══════════════════════════════════════════════════════════════
+
+            // Discovery sound - ascending sparkle (finding new things)
+            playDiscovery() {
+                if (!this.ctx || !this.isPlaying) return;
+                const scale = this.getCurrentScale();
+                const now = this.ctx.currentTime;
+
+                [0, 2, 4, 6].forEach((idx, i) => {
+                    setTimeout(() => {
+                        const osc = this.ctx.createOscillator();
+                        const gain = this.ctx.createGain();
+                        osc.type = 'sine';
+                        osc.frequency.value = scale[idx % scale.length] * 2;
+                        gain.gain.setValueAtTime(0, this.ctx.currentTime);
+                        gain.gain.linearRampToValueAtTime(0.15, this.ctx.currentTime + 0.02);
+                        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 0.8);
+                        osc.connect(gain);
+                        gain.connect(this.masterGain);
+                        osc.start();
+                        osc.stop(this.ctx.currentTime + 0.9);
+                    }, i * 100);
+                });
+            },
+
+            // Landing sound - grounding, arrival (entering a planet)
+            playLanding() {
+                if (!this.ctx || !this.isPlaying) return;
+                const now = this.ctx.currentTime;
+
+                // Deep resonant tone
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(110, now);
+                osc.frequency.linearRampToValueAtTime(55, now + 2);
+                gain.gain.setValueAtTime(0, now);
+                gain.gain.linearRampToValueAtTime(0.2, now + 0.5);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + 3);
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                osc.start(now);
+                osc.stop(now + 3.1);
+
+                // Harmonic overtone
+                const osc2 = this.ctx.createOscillator();
+                const gain2 = this.ctx.createGain();
+                osc2.type = 'sine';
+                osc2.frequency.value = 165;
+                gain2.gain.setValueAtTime(0, now);
+                gain2.gain.linearRampToValueAtTime(0.08, now + 0.8);
+                gain2.gain.exponentialRampToValueAtTime(0.001, now + 2.5);
+                osc2.connect(gain2);
+                gain2.connect(this.masterGain);
+                osc2.start(now + 0.3);
+                osc2.stop(now + 2.6);
+            },
+
+            // Departure/launch sound - ascending, hopeful
+            playLaunch() {
+                if (!this.ctx || !this.isPlaying) return;
+                const scale = this.getCurrentScale();
+                const now = this.ctx.currentTime;
+
+                // Rising sweep
+                [0, 2, 4, 7, 9].forEach((idx, i) => {
+                    setTimeout(() => {
+                        const osc = this.ctx.createOscillator();
+                        const gain = this.ctx.createGain();
+                        osc.type = 'sine';
+                        osc.frequency.value = scale[idx % scale.length];
+                        gain.gain.setValueAtTime(0, this.ctx.currentTime);
+                        gain.gain.linearRampToValueAtTime(0.1, this.ctx.currentTime + 0.05);
+                        gain.gain.exponentialRampToValueAtTime(0.001, this.ctx.currentTime + 1.5);
+                        osc.connect(gain);
+                        gain.connect(this.masterGain);
+                        osc.start();
+                        osc.stop(this.ctx.currentTime + 1.6);
+                    }, i * 150);
+                });
+            },
+
+            // Achievement/milestone sound - triumphant chord
+            playAchievement() {
+                if (!this.ctx || !this.isPlaying) return;
+                const now = this.ctx.currentTime;
+
+                // Major chord: root, third, fifth, octave
+                [220, 277.18, 329.63, 440].forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+                    const delay = i * 0.05;
+                    gain.gain.setValueAtTime(0, now + delay);
+                    gain.gain.linearRampToValueAtTime(0.12 - i * 0.02, now + delay + 0.1);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + delay + 2);
+                    osc.connect(gain);
+                    gain.connect(this.masterGain);
+                    osc.start(now + delay);
+                    osc.stop(now + delay + 2.1);
+                });
+            },
+
+            // Tension/danger sound - dissonant undertone
+            playTension() {
+                if (!this.ctx || !this.isPlaying) return;
+                const now = this.ctx.currentTime;
+
+                // Tritone interval - creates unease
+                [110, 155.56].forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sawtooth';
+                    osc.frequency.value = freq;
+                    const filter = this.ctx.createBiquadFilter();
+                    filter.type = 'lowpass';
+                    filter.frequency.value = 400;
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(0.04, now + 0.5);
+                    gain.gain.linearRampToValueAtTime(0.04, now + 2);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 3);
+                    osc.connect(filter);
+                    filter.connect(gain);
+                    gain.connect(this.masterGain);
+                    osc.start(now);
+                    osc.stop(now + 3.1);
+                });
+            },
+
+            // Calm/peaceful resolution
+            playResolve() {
+                if (!this.ctx || !this.isPlaying) return;
+                const now = this.ctx.currentTime;
+
+                // Perfect fifth - resolution
+                [220, 330, 440].forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sine';
+                    osc.frequency.value = freq;
+                    gain.gain.setValueAtTime(0, now);
+                    gain.gain.linearRampToValueAtTime(0.08, now + 0.3);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + 4);
+                    osc.connect(gain);
+                    gain.connect(this.masterGain);
+                    osc.start(now);
+                    osc.stop(now + 4.1);
+                });
+            }
+        };
+
+        // Make SpaceMusic globally accessible
+        window.SpaceMusic = SpaceMusic;
+
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        // v12.11: ADAPTIVE VOLUME MUSIC CONTROLLER
+        // Two-tier volume system: subtle during gameplay, fuller during idle/cinema
+        // - Gameplay Mode: Very low volume (0.06) - adds atmosphere without competing
+        // - Idle/Cinema Mode: Full volume (0.15) - immersive ambient experience
+        // Music starts on first interaction at gameplay level, rises when idle
+        // ═══════════════════════════════════════════════════════════════════════════════════════
+        const SpaceMusicController = {
+            idleTimeout: null,
+            idleThreshold: 15000,       // 15 seconds to transition to idle volume
+            gameplayStartDelay: 3000,   // Start music 3 seconds after first interaction
+            userDisabled: false,
+            hasAutoStarted: false,
+            lastActivity: Date.now(),
+            isIdle: false,
+            hasHadFirstInteraction: false,
+            volumeTransitionInterval: null,
+
+            // Volume tiers
+            volumes: {
+                gameplay: 0.06,    // Very subtle - background atmosphere
+                idle: 0.15,        // Fuller - immersive ambient
+                cinema: 0.18       // Slightly higher for second screen mode
+            },
+
+            // Current target volume
+            targetVolume: 0.06,
+
+            // Show a subtle notification
+            showNotification(msg, duration = 3000) {
+                const notify = document.createElement('div');
+                notify.style.cssText = `
+                    position: fixed;
+                    top: 20px;
+                    left: 50%;
+                    transform: translateX(-50%);
+                    background: linear-gradient(135deg, rgba(0,20,40,0.95) 0%, rgba(0,10,30,0.95) 100%);
+                    color: #0ff;
+                    padding: 12px 24px;
+                    border-radius: 12px;
+                    z-index: 9999;
+                    font-size: 14px;
+                    border: 1px solid rgba(0,255,255,0.4);
+                    pointer-events: none;
+                    box-shadow: 0 4px 20px rgba(0,255,255,0.2), inset 0 1px 0 rgba(255,255,255,0.1);
+                    backdrop-filter: blur(10px);
+                    animation: spaceMusicFadeIn 0.5s ease-out;
+                `;
+                notify.textContent = msg;
+                document.body.appendChild(notify);
+
+                // Fade out before removing
+                setTimeout(() => {
+                    notify.style.transition = 'opacity 0.5s ease-out';
+                    notify.style.opacity = '0';
+                    setTimeout(() => notify.remove(), 500);
+                }, duration - 500);
+            },
+
+            // Reset the idle timer on any activity
+            resetIdleTimer() {
+                this.lastActivity = Date.now();
+
+                // Clear existing timeout
+                if (this.idleTimeout) {
+                    clearTimeout(this.idleTimeout);
+                    this.idleTimeout = null;
+                }
+
+                // Don't set new timer if:
+                // - Music is already playing (let it continue)
+                // - User manually disabled music (respect their choice)
+                if (SpaceMusic.isPlaying || this.userDisabled) {
+                    return;
+                }
+
+                // Set new idle timeout to auto-start music
+                this.idleTimeout = setTimeout(() => {
+                    // Double-check conditions before starting
+                    if (!SpaceMusic.isPlaying && !this.userDisabled) {
+                        SpaceMusic.start();
+                        this.hasAutoStarted = true;
+                        this.showNotification('🎵 Ambient space music activated... (Press M to toggle)', 4000);
+                    }
+                }, this.idleThreshold);
+            },
+
+            // Manual toggle - tracks user preference
+            toggle() {
+                const isPlaying = SpaceMusic.toggle();
+
+                if (isPlaying) {
+                    // User manually enabled - clear disabled flag
+                    this.userDisabled = false;
+                    this.showNotification('🎵 Space Music: ON');
+                } else {
+                    // User manually disabled - set flag to prevent auto-restart
+                    this.userDisabled = true;
+                    this.showNotification('🔇 Space Music: OFF (will not auto-start)');
+
+                    // Clear any pending auto-start timeout
+                    if (this.idleTimeout) {
+                        clearTimeout(this.idleTimeout);
+                        this.idleTimeout = null;
+                    }
+                }
+
+                return isPlaying;
+            },
+
+            // Initialize the controller
+            init() {
+                // Activity events to track (passive for performance)
+                const activityEvents = [
+                    'mousemove',
+                    'mousedown',
+                    'mouseup',
+                    'keydown',
+                    'keyup',
+                    'touchstart',
+                    'touchmove',
+                    'scroll',
+                    'wheel',
+                    'click',
+                    'contextmenu'
+                ];
+
+                // Throttle activity detection to avoid excessive calls
+                let lastReset = 0;
+                const throttleMs = 1000; // Only reset timer once per second max
+
+                const handleActivity = () => {
+                    const now = Date.now();
+                    if (now - lastReset > throttleMs) {
+                        lastReset = now;
+                        this.resetIdleTimer();
+                    }
+                };
+
+                // Attach listeners
+                activityEvents.forEach(event => {
+                    document.addEventListener(event, handleActivity, { passive: true });
+                });
+
+                // Also track visibility changes
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'visible') {
+                        // Tab became visible - reset timer
+                        handleActivity();
+                    }
+                });
+
+                // Start the initial idle timer
+                this.resetIdleTimer();
+
+                console.log('🎵 SpaceMusicController initialized - music will auto-start after 20s of inactivity');
+            }
+        };
+
+        // Initialize the controller
+        SpaceMusicController.init();
+        window.SpaceMusicController = SpaceMusicController;
+
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Don't trigger when typing in inputs
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+
+            // M key - toggle music
+            if (e.key === 'm' || e.key === 'M') {
+                SpaceMusicController.toggle();
+            }
+
+            // [ key - decrease volume
+            if (e.key === '[') {
+                SpaceMusic.setVolume(SpaceMusic.volume - 0.05);
+                SpaceMusicController.showNotification(`🔊 Volume: ${Math.round(SpaceMusic.volume * 100)}%`, 1500);
+            }
+
+            // ] key - increase volume
+            if (e.key === ']') {
+                SpaceMusic.setVolume(SpaceMusic.volume + 0.05);
+                SpaceMusicController.showNotification(`🔊 Volume: ${Math.round(SpaceMusic.volume * 100)}%`, 1500);
+            }
+        });
 
         // ═══════════════════════════════════════════════════════════════════════════════════════
         // v7.22: 8-STRATEGY CONSENSUS ROUND 3 - SOUND SYSTEMS
@@ -39948,6 +40826,11 @@
             showAchievementPopup(ach.icon, ach.name, ach.desc);
             AudioSystem.levelUp();
 
+            // v12.10: Play ambient music achievement accent
+            if (typeof SpaceMusic !== 'undefined' && SpaceMusic.isPlaying) {
+                SpaceMusic.playAchievement();
+            }
+
             if (particles && worldState.player) {
                 particles.emit(worldState.player.position, 25, 0xffd700, { spread: 6, lifetime: 1500 });
             }
@@ -58816,6 +59699,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             lastInputTime: Date.now(),
             wasAutoTriggered: false,
 
+            // v12.9: Second Screen Mode - audio widget interval
+            audioWidgetInterval: null,
+
             // Camera behavior modes for world mode
             cameraModes: ['orbit', 'follow', 'sweep', 'focus', 'zen'],
             currentCameraMode: 'orbit',
@@ -58988,12 +59874,36 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     this.playTransitionSound(true);
                 }
 
+                // v12.9: Start ambient space music for "Second Screen" experience
+                // Music continues even after exiting cinematic mode (per user preference)
+                this.startSecondScreenAudio();
+
                 // v9.8: If in world mode, activate living art features
                 if (mode === 'world') {
                     this.enterWorldMode();
                 }
 
-                console.log('🎬 Cinematic Mode: ON' + (mode === 'world' ? ' (Living Art)' : ''));
+                console.log('🎬 Cinematic Mode: ON' + (mode === 'world' ? ' (Living Art + Second Screen Audio)' : ''));
+            },
+
+            // v12.9: Second Screen Audio Integration
+            // Starts ambient space music when entering cinematic mode
+            // Music persists after exiting - creating a continuous ambient experience
+            startSecondScreenAudio() {
+                if (typeof SpaceMusic !== 'undefined' && !SpaceMusic.isPlaying) {
+                    // Only start if user hasn't explicitly disabled it
+                    if (typeof SpaceMusicController !== 'undefined' && !SpaceMusicController.userDisabled) {
+                        SpaceMusic.start();
+                        SpaceMusicController.hasAutoStarted = true;
+
+                        // Show subtle notification about the second screen experience
+                        if (typeof SpaceMusicController !== 'undefined') {
+                            setTimeout(() => {
+                                SpaceMusicController.showNotification('🎵 Second Screen Mode: Ambient audio activated', 3000);
+                            }, 2500); // Delay so it doesn't overlap with cinematic hint
+                        }
+                    }
+                }
             },
 
             // v9.8: Enhanced enter for world mode with living art features
@@ -59034,7 +59944,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     scene.fog.far = 300;
                 }
 
-                showNotification('🎬 Cinematic Mode - Press ESC or L to exit', 'legendary');
+                // v12.9: Updated messaging for Second Screen Mode
+                showNotification('🎬 Second Screen Mode - Ambient visuals & audio active', 'legendary');
             },
 
             exit() {
@@ -59419,12 +60330,18 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 this.hideLivingArtUI();
                 const overlay = document.createElement('div');
                 overlay.id = 'cinematic-art-overlay';
+
+                // v12.9: Check if music is playing for the indicator
+                const musicPlaying = typeof SpaceMusic !== 'undefined' && SpaceMusic.isPlaying;
+                const musicIndicator = musicPlaying ? '🎵' : '🔇';
+                const musicStatus = musicPlaying ? 'Ambient Audio Active' : 'Press M for music';
+
                 overlay.innerHTML = `
                     <div style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
                         background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
                         padding: 15px 30px; border-radius: 20px;
                         border: 1px solid rgba(255,255,255,0.1); text-align: center; z-index: 1000;">
-                        <div style="font-size: 24px; color: #fff; font-weight: bold; margin-bottom: 5px;">🎬 Cinematic Mode</div>
+                        <div style="font-size: 24px; color: #fff; font-weight: bold; margin-bottom: 5px;">🎬 Second Screen Mode</div>
                         <div id="cinematic-camera-mode" style="font-size: 14px; color: #0ff;">${this.getCameraModeLabel()}</div>
                     </div>
                     <div id="cinematic-wisdom" style="position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
@@ -59433,16 +60350,62 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     <div id="cinematic-stats" style="position: fixed; bottom: 20px; left: 20px;
                         background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
                         padding: 10px 15px; border-radius: 10px; font-size: 12px; color: rgba(255,255,255,0.7); z-index: 1000;"></div>
+
+                    <!-- v12.9: Second Screen Audio Controls -->
+                    <div id="cinematic-audio-widget" style="position: fixed; top: 80px; left: 50%; transform: translateX(-50%);
+                        background: linear-gradient(135deg, rgba(0,30,60,0.7) 0%, rgba(0,20,40,0.7) 100%);
+                        backdrop-filter: blur(10px); padding: 10px 20px; border-radius: 15px;
+                        border: 1px solid rgba(0,255,255,0.2); font-size: 13px; color: rgba(0,255,255,0.9);
+                        display: flex; align-items: center; gap: 12px; z-index: 1000; cursor: pointer;
+                        transition: all 0.3s ease; box-shadow: 0 4px 20px rgba(0,0,0,0.3);"
+                        onclick="if(typeof SpaceMusicController !== 'undefined') SpaceMusicController.toggle(); CinematicMode.updateAudioWidget();"
+                        onmouseenter="this.style.borderColor='rgba(0,255,255,0.5)'; this.style.transform='translateX(-50%) scale(1.02)';"
+                        onmouseleave="this.style.borderColor='rgba(0,255,255,0.2)'; this.style.transform='translateX(-50%) scale(1)';">
+                        <span id="cinematic-audio-icon" style="font-size: 20px;">${musicIndicator}</span>
+                        <span id="cinematic-audio-status">${musicStatus}</span>
+                        <span style="opacity: 0.5; font-size: 11px;">[ M ]</span>
+                    </div>
+
                     <div style="position: fixed; bottom: 20px; right: 20px;
                         background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
                         padding: 10px 15px; border-radius: 10px; font-size: 11px; color: rgba(255,255,255,0.5); z-index: 1000;">
-                        Press <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">ESC</kbd> or <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">L</kbd> to exit
+                        <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">ESC</kbd> / <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">L</kbd> Exit
+                        &nbsp;•&nbsp;
+                        <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">[</kbd> <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">]</kbd> Volume
                     </div>
                 `;
                 document.body.appendChild(overlay);
+
+                // Start periodic updates for the audio widget
+                this.audioWidgetInterval = setInterval(() => this.updateAudioWidget(), 1000);
+            },
+
+            // v12.9: Update the audio widget display
+            updateAudioWidget() {
+                const iconEl = document.getElementById('cinematic-audio-icon');
+                const statusEl = document.getElementById('cinematic-audio-status');
+                if (!iconEl || !statusEl) return;
+
+                const musicPlaying = typeof SpaceMusic !== 'undefined' && SpaceMusic.isPlaying;
+                iconEl.textContent = musicPlaying ? '🎵' : '🔇';
+
+                if (musicPlaying) {
+                    const vol = typeof SpaceMusic !== 'undefined' ? Math.round(SpaceMusic.volume * 100) : 15;
+                    statusEl.textContent = `Ambient Audio • ${vol}%`;
+                    iconEl.style.animation = 'pulse 2s ease-in-out infinite';
+                } else {
+                    statusEl.textContent = 'Press M for music';
+                    iconEl.style.animation = 'none';
+                }
             },
 
             hideLivingArtUI() {
+                // v12.9: Clear audio widget update interval
+                if (this.audioWidgetInterval) {
+                    clearInterval(this.audioWidgetInterval);
+                    this.audioWidgetInterval = null;
+                }
+
                 const overlay = document.getElementById('cinematic-art-overlay');
                 if (overlay) overlay.remove();
             }
@@ -61504,6 +62467,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         function initGalaxy() {
             mode = 'galaxy';
 
+            // v12.10: Update ambient music for galaxy mode (cosmic, expansive)
+            if (typeof SpaceMusic !== 'undefined') {
+                SpaceMusic.setMode('galaxy');
+                SpaceMusic.setCombatState(false); // No combat in galaxy view
+                SpaceMusic.playLaunch(); // Musical accent for departing planet
+            }
+
             // v6.65: Hide companion health in galaxy mode
             const companionHealth = document.getElementById('companion-health-container');
             if (companionHealth) companionHealth.classList.add('hidden');
@@ -63404,6 +64374,12 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             tesseractMode = true;
             mode = 'tesseract';
 
+            // v12.10: Update ambient music for tesseract (ethereal, otherworldly)
+            if (typeof SpaceMusic !== 'undefined') {
+                SpaceMusic.setMode('tesseract');
+                SpaceMusic.playDiscovery(); // Musical accent for dimensional shift
+            }
+
             // Hide galaxy UI
             document.getElementById('galaxy-controls').style.display = 'none';
             const physicsPanel = document.getElementById('physics-tutorial');
@@ -65182,6 +66158,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             activeCiv = civ;
             mode = 'world';
 
+            // v12.10: Update ambient music for world mode with biome tinting
+            if (typeof SpaceMusic !== 'undefined') {
+                SpaceMusic.setMode('world');
+                SpaceMusic.setBiome(civ.biome || 'Terra');
+                SpaceMusic.playLanding(); // Musical accent for arrival
+            }
+
             // v9.8: Capture first visit status BEFORE adding to visitedPlanets
             const isFirstTimeVisit = !gameData.visitedPlanets.includes(civ.id);
 
@@ -65206,6 +66189,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 // v6.9: Try to discover lore on exploration (Agent consensus - Secrets)
                 if (typeof tryDiscoverLore === 'function') {
                     tryDiscoverLore('explore');
+                }
+                // v12.10: Play discovery accent for first planet visit
+                if (typeof SpaceMusic !== 'undefined' && SpaceMusic.isPlaying) {
+                    setTimeout(() => SpaceMusic.playDiscovery(), 500);
                 }
             }
 
