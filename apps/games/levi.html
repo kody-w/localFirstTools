@@ -17653,6 +17653,8 @@
         // Spawn a wave of creeps for both factions
         function spawnWave() {
             if (!waveState.enabled || mode !== 'world') return;
+            // v9.10: Extra guard for customOnly worlds
+            if (window.WORLD_SYSTEMS?.customOnly === true) return;
 
             waveState.waveNumber++;
             const waveNum = waveState.waveNumber;
@@ -55150,6 +55152,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         function canSpawnWorldEvent() {
             if (activeWorldEvent) return false;
             if (mode !== 'world') return false;
+            // v9.10: Skip world events in customOnly worlds
+            if (window.WORLD_SYSTEMS?.customOnly === true) return false;
 
             const timeSinceLastEvent = performance.now() - (gameData.worldEvents?.lastEventTime || 0);
             return timeSinceLastEvent > 180000; // 3 minute cooldown between events
@@ -65865,24 +65869,31 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             initHypnosisEffects();
 
             // v5.13: Create ship and landing zone
-            const landingSpot = new THREE.Vector3(
-                (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
-                10,
-                (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE
-            );
-            // Find ground height at landing spot
-            const lx = Math.floor(CONFIG.WORLD_SIZE / 4);
-            const lz = Math.floor(CONFIG.WORLD_SIZE / 4);
-            if (worldState.terrain[lx] && worldState.terrain[lx][lz] !== undefined) {
-                landingSpot.y = worldState.terrain[lx][lz] > 0 ? worldState.terrain[lx][lz] : 5;
+            // v9.10: Skip ship/landing zone for customOnly worlds or if ship system disabled
+            const shouldCreateShip = window.WORLD_SYSTEMS?.ship !== false && window.WORLD_SYSTEMS?.customOnly !== true;
+            if (shouldCreateShip) {
+                const landingSpot = new THREE.Vector3(
+                    (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE,
+                    10,
+                    (CONFIG.WORLD_SIZE / 4 - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE
+                );
+                // Find ground height at landing spot
+                const lx = Math.floor(CONFIG.WORLD_SIZE / 4);
+                const lz = Math.floor(CONFIG.WORLD_SIZE / 4);
+                if (worldState.terrain[lx] && worldState.terrain[lx][lz] !== undefined) {
+                    landingSpot.y = worldState.terrain[lx][lz] > 0 ? worldState.terrain[lx][lz] : 5;
+                }
+                const landingPad = createLandingZone(landingSpot);
+                scene.add(landingPad);
+                const ship = createWorldShip(landingSpot);
+                scene.add(ship);
+                SHIP_STATE.hp = SHIP_STATE.maxHp;  // Reset ship HP for new world
+                updateShipHPUI();
+                document.getElementById('ship-status').style.display = 'block';
+            } else {
+                console.log('[WORLD] Skipping ship/landing zone - disabled or customOnly world');
+                document.getElementById('ship-status').style.display = 'none';
             }
-            const landingPad = createLandingZone(landingSpot);
-            scene.add(landingPad);
-            const ship = createWorldShip(landingSpot);
-            scene.add(ship);
-            SHIP_STATE.hp = SHIP_STATE.maxHp;  // Reset ship HP for new world
-            updateShipHPUI();
-            document.getElementById('ship-status').style.display = 'block';
 
             // v5.0: Initialize weather system
             initWeatherSystem();
@@ -72626,6 +72637,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         // Spawn a wave of creeps for both teams
         function spawnCreepWave() {
             if (!creepWaveState.enabled || mode !== 'world') return;
+            // v9.10: Extra guard for customOnly worlds
+            if (window.WORLD_SYSTEMS?.customOnly === true) return;
 
             creepWaveState.waveNumber++;
             const waveNum = creepWaveState.waveNumber;
@@ -82263,56 +82276,84 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 this.camera.lookAt(0, 0.5, 0);
 
                 // Clone entity mesh for portrait
-                if (entity.mesh || entity.isMesh || entity.isGroup) {
-                    const meshToClone = entity.mesh || entity;
-                    this.model = meshToClone.clone(true);
+                let cloneSuccess = false;
+                const meshToClone = entity.mesh || entity;
 
-                    // Clone materials
-                    this.model.traverse(child => {
-                        if (child.isMesh && child.material) {
-                            if (Array.isArray(child.material)) {
-                                child.material = child.material.map(m => m.clone());
-                            } else {
-                                child.material = child.material.clone();
+                if (meshToClone && (meshToClone.isMesh || meshToClone.isGroup || meshToClone.isObject3D)) {
+                    try {
+                        this.model = meshToClone.clone(true);
+
+                        // Clone materials to ensure they render in separate scene
+                        this.model.traverse(child => {
+                            if (child.isMesh && child.material) {
+                                if (Array.isArray(child.material)) {
+                                    child.material = child.material.map(m => {
+                                        const cloned = m.clone();
+                                        cloned.needsUpdate = true;
+                                        return cloned;
+                                    });
+                                } else {
+                                    child.material = child.material.clone();
+                                    child.material.needsUpdate = true;
+                                }
                             }
+                            // Ensure geometry is valid
+                            if (child.geometry) {
+                                child.geometry.computeBoundingSphere();
+                            }
+                        });
+
+                        // Reset transforms
+                        this.model.position.set(0, 0, 0);
+                        this.model.rotation.set(0, 0, 0);
+                        this.model.scale.setScalar(1);
+
+                        // Calculate bounding box
+                        const box = new THREE.Box3().setFromObject(this.model);
+                        const size = box.getSize(new THREE.Vector3());
+                        const center = box.getCenter(new THREE.Vector3());
+
+                        const maxDim = Math.max(size.x, size.y, size.z);
+                        if (maxDim > 0.001 && isFinite(maxDim)) {
+                            const scale = 1.5 / maxDim;
+                            this.model.scale.setScalar(scale);
+                            this.model.position.sub(center.multiplyScalar(scale));
+                            this.model.position.y -= 0.2;
+                            cloneSuccess = true;
                         }
-                    });
-
-                    // Reset transforms
-                    this.model.position.set(0, 0, 0);
-                    this.model.rotation.set(0, 0, 0);
-                    this.model.scale.setScalar(1);
-
-                    // Calculate bounding box
-                    const box = new THREE.Box3().setFromObject(this.model);
-                    const size = box.getSize(new THREE.Vector3());
-                    const center = box.getCenter(new THREE.Vector3());
-
-                    const maxDim = Math.max(size.x, size.y, size.z);
-                    if (maxDim > 0 && isFinite(maxDim)) {
-                        const scale = 1.5 / maxDim;
-                        this.model.scale.setScalar(scale);
-                        this.model.position.sub(center.multiplyScalar(scale));
-                        this.model.position.y -= 0.2;
-                    } else {
-                        this.model.scale.setScalar(0.5);
+                    } catch (err) {
+                        console.warn('HoverPortrait clone failed:', err);
                     }
-                } else {
-                    // Fallback sphere
-                    const geo = new THREE.SphereGeometry(0.5, 16, 16);
+                }
+
+                if (!cloneSuccess) {
+                    // Fallback: create a representative sphere/shape
+                    const geo = new THREE.IcosahedronGeometry(0.6, 1);
                     const mat = new THREE.MeshStandardMaterial({
                         color: isHostile ? 0xff4444 : 0x00ffff,
-                        metalness: 0.3,
-                        roughness: 0.7
+                        metalness: 0.5,
+                        roughness: 0.4,
+                        emissive: isHostile ? 0x441111 : 0x114444,
+                        emissiveIntensity: 0.3
                     });
                     this.model = new THREE.Mesh(geo, mat);
                 }
 
+                // Store base scale for animation
+                this.baseScale = this.model.scale.x;
+
                 this.scene.add(this.model);
                 container.appendChild(canvas);
 
-                // Update name and HP
-                const name = entity.userData?.name || entity.name || 'Unknown';
+                // Initial render to ensure something shows
+                this.renderer.render(this.scene, this.camera);
+
+                // Update name and HP - check multiple sources for name
+                const name = entity.userData?.name ||
+                             entity.name ||
+                             entity.userData?.data?.name ||
+                             (entity.userData?.type === 'civ' ? entity.userData.data?.name : null) ||
+                             'Entity';
                 nameEl.textContent = name;
 
                 if (entity.userData?.hp !== undefined) {
@@ -82358,15 +82399,18 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 hoverPortrait.style.top = top + 'px';
             },
 
+            baseScale: 1,
+
             animate() {
                 if (!this.isVisible || !this.renderer || !this.scene || !this.camera || !this.model) return;
 
                 // Gentle rotation
                 this.model.rotation.y += 0.015;
 
-                // Subtle breathing effect
+                // Subtle breathing effect (preserve base scale)
                 const breathe = 1 + Math.sin(Date.now() * 0.003) * 0.02;
-                this.model.scale.y = this.model.scale.x * breathe;
+                const baseS = this.baseScale || this.model.scale.x;
+                this.model.scale.y = baseS * breathe;
 
                 this.renderer.render(this.scene, this.camera);
 
