@@ -8925,6 +8925,20 @@
             border-color: rgba(0, 255, 136, 0.6);
         }
 
+        /* v9.9: Special companion portrait styling */
+        .portrait-card.companion {
+            border-color: rgba(255, 0, 255, 0.7);
+            box-shadow: 0 0 8px rgba(255, 0, 255, 0.3), inset 0 0 10px rgba(0, 255, 255, 0.1);
+        }
+
+        .portrait-card.companion .portrait-3d-canvas {
+            background: radial-gradient(ellipse at center bottom, rgba(100, 0, 150, 0.4) 0%, rgba(0, 0, 0, 0.8) 100%);
+        }
+
+        .portrait-card.companion .portrait-name {
+            color: #ff88ff;
+        }
+
         /* v9.7: 3D Portrait canvas container */
         .portrait-3d-canvas {
             width: 100%;
@@ -8977,6 +8991,49 @@
 
         .portrait-hp-fill.medium {
             background: linear-gradient(90deg, #ffcc00, #ff8800);
+        }
+
+        /* v9.9: Companion-specific portrait stats */
+        .portrait-companion-stats {
+            width: 100%;
+            padding: 2px 4px;
+            margin-top: 2px;
+        }
+
+        .portrait-stat-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 4px;
+            margin-bottom: 2px;
+        }
+
+        .portrait-stat-label {
+            font-size: 7px;
+            color: #888;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .portrait-stat-value {
+            font-size: 7px;
+            color: #0ff;
+            font-weight: bold;
+        }
+
+        .portrait-bond-bar {
+            flex: 1;
+            height: 3px;
+            background: rgba(0, 0, 0, 0.5);
+            border-radius: 2px;
+            overflow: hidden;
+        }
+
+        .portrait-bond-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #ff00ff, #00ffff);
+            transition: width 0.3s ease;
+            box-shadow: 0 0 4px rgba(255, 0, 255, 0.5);
         }
 
         /* Selection count badge */
@@ -11172,7 +11229,7 @@
     </div>
 
     <!-- Copilot 3D Tooltip -->
-    <div id="copilot-3d-tooltip" class="copilot-3d-tooltip">Click to chat</div>
+    <div id="copilot-3d-tooltip" class="copilot-3d-tooltip">Click to select</div>
 
     <!-- Copilot Chat Interface -->
     <div id="copilot-chat-interface" class="copilot-chat-interface">
@@ -31956,14 +32013,17 @@
                     });
                 }
 
-                // NPCs/Companions from copilot
-                if (typeof copilotMesh !== 'undefined' && copilotMesh) {
+                // NPCs/Companions from copilot - v9.9: Use actual companion data
+                if (typeof copilotMesh !== 'undefined' && copilotMesh && gameData.companion && gameData.companion.hp > 0) {
                     entities.push({
                         type: 'companion',
                         mesh: copilotMesh,
-                        name: 'Copilot',
-                        hp: 100,
-                        maxHp: 100,
+                        name: gameData.companion.name || 'Companion',
+                        hp: gameData.companion.hp,
+                        maxHp: gameData.companion.maxHp,
+                        bond: gameData.companion.bond || 0,
+                        generation: gameData.companion.generation || 1,
+                        personality: gameData.companion.personality || [],
                         faction: 'friendly'
                     });
                 }
@@ -32470,11 +32530,39 @@
                 // Create portrait cards with 3D renderers
                 this.selectedUnits.forEach((entity, idx) => {
                     const card = document.createElement('div');
-                    card.className = `portrait-card ${this.getFactionClass(entity.faction)}`;
+                    // v9.9: Add special 'companion' class for companion entities
+                    const typeClass = entity.type === 'companion' ? 'companion' : this.getFactionClass(entity.faction);
+                    card.className = `portrait-card ${typeClass}`;
                     if (idx === 0) card.classList.add('selected');
 
                     const hpPercent = entity.maxHp > 0 ? (entity.hp / entity.maxHp) * 100 : 100;
                     const hpClass = hpPercent > 60 ? 'high' : hpPercent > 30 ? 'medium' : '';
+
+                    // v9.9: Companion-specific extra info
+                    let extraInfo = '';
+                    if (entity.type === 'companion') {
+                        const bondLevel = entity.bond || 0;
+                        const bondPercent = Math.min(100, bondLevel);
+                        const personality = entity.personality && entity.personality.length > 0
+                            ? entity.personality[0]
+                            : 'Loyal';
+                        const generation = entity.generation || 1;
+
+                        extraInfo = `
+                            <div class="portrait-companion-stats">
+                                <div class="portrait-stat-row">
+                                    <span class="portrait-stat-label">Bond</span>
+                                    <div class="portrait-bond-bar">
+                                        <div class="portrait-bond-fill" style="width: ${bondPercent}%"></div>
+                                    </div>
+                                </div>
+                                <div class="portrait-stat-row">
+                                    <span class="portrait-stat-label">${personality}</span>
+                                    <span class="portrait-stat-value">Gen ${generation}</span>
+                                </div>
+                            </div>
+                        `;
+                    }
 
                     // Create card structure (3D canvas will be prepended)
                     card.innerHTML = `
@@ -32483,6 +32571,7 @@
                             <div class="portrait-hp-bar">
                                 <div class="portrait-hp-fill ${hpClass}" style="width: ${hpPercent}%"></div>
                             </div>
+                            ${extraInfo}
                         </div>
                     `;
 
@@ -32523,8 +32612,7 @@
             init() {
                 // Default to player selected
                 this.clearSelection();
-                // Play ready sound
-                setTimeout(() => this.playRobotVoice('ready'), 500);
+                // v9.8: Removed ready beep - was jarring on world load
                 console.log('🎯 RTSSelection: Multi-select system with 3D portraits initialized');
             }
         };
@@ -32780,121 +32868,288 @@
                 return particle;
             },
 
-            // Play synthesized sound
+            // Ambient music state
+            ambientMusic: null,
+
+            // Play gentle ambient music/sounds - no harsh noises
             playSound(type) {
                 if (!AudioSystem || !AudioSystem.ctx) return;
                 const ctx = AudioSystem.ctx;
                 const now = ctx.currentTime;
 
                 if (type === 'engine') {
-                    // Deep rumbling engine
+                    // Start gentle ambient music that plays throughout the sequence
+                    // Beautiful, dreamy pad with slow attack - like waking up to a new world
+                    this.startAmbientMusic();
+                } else if (type === 'landing') {
+                    // Soft, gentle "arrival" chime - like a bell in the distance
+                    this.playChime([523.25, 659.25, 783.99], 0.06, 2.5); // C5, E5, G5 major chord
+                } else if (type === 'hydraulic') {
+                    // Gentle ascending shimmer - sense of opening/possibility
+                    this.playShimmer(400, 800, 1.5, 0.04);
+                } else if (type === 'footstep') {
+                    // Very soft, subtle footstep - barely audible
+                    // Skip most footsteps for a more peaceful experience
+                    if (Math.random() > 0.7) {
+                        const osc = ctx.createOscillator();
+                        const gain = ctx.createGain();
+                        osc.type = 'sine';
+                        osc.frequency.value = 200 + Math.random() * 100;
+                        osc.connect(gain);
+                        gain.connect(ctx.destination);
+                        gain.gain.setValueAtTime(0, now);
+                        gain.gain.linearRampToValueAtTime(0.02, now + 0.02);
+                        gain.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+                        osc.start(now);
+                        osc.stop(now + 0.15);
+                    }
+                } else if (type === 'whoosh') {
+                    // Gentle breeze sound - soft and airy
+                    this.playBreeze(0.8, 0.05);
+                } else if (type === 'ambient') {
+                    // Swell the ambient music for the reveal moment
+                    this.swellAmbientMusic();
+                }
+            },
+
+            // Start beautiful ambient background music with spatial stereo
+            // Optimized for MacBook Pro speakers and spatial audio
+            startAmbientMusic() {
+                if (!AudioSystem || !AudioSystem.ctx) return;
+                if (this.ambientMusic) return; // Already playing
+
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+
+                // Master output with gentle fade in
+                const masterGain = ctx.createGain();
+                masterGain.connect(ctx.destination);
+                masterGain.gain.setValueAtTime(0, now);
+                masterGain.gain.linearRampToValueAtTime(0.08, now + 4); // 4-second fade in
+
+                const oscillators = [];
+                const panners = [];
+
+                // Chord voices with stereo positioning and subtle detuning
+                // Doubled voices panned L/R create width and warmth
+                const voices = [
+                    { freq: 130.81, pan: 0, detune: -3, vol: 0.10 },      // C3 - center (foundation)
+                    { freq: 196.00, pan: -0.4, detune: 2, vol: 0.08 },    // G3 - slight left
+                    { freq: 196.00, pan: 0.4, detune: -2, vol: 0.08 },    // G3 - slight right
+                    { freq: 261.63, pan: -0.6, detune: 4, vol: 0.07 },    // C4 - left
+                    { freq: 261.63, pan: 0.6, detune: -4, vol: 0.07 },    // C4 - right
+                    { freq: 329.63, pan: -0.8, detune: 3, vol: 0.05 },    // E4 - far left
+                    { freq: 329.63, pan: 0.8, detune: -3, vol: 0.05 },    // E4 - far right
+                    { freq: 392.00, pan: -0.3, detune: 5, vol: 0.04 },    // G4 - mid left
+                    { freq: 392.00, pan: 0.3, detune: -5, vol: 0.04 },    // G4 - mid right
+                ];
+
+                voices.forEach((voice) => {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
+                    const panner = ctx.createStereoPanner();
+
+                    osc.type = 'sine';
+                    osc.frequency.value = voice.freq;
+                    osc.detune.value = voice.detune;
+
+                    // Slow wandering vibrato
                     const lfo = ctx.createOscillator();
                     const lfoGain = ctx.createGain();
-
-                    lfo.frequency.value = 8;
-                    lfoGain.gain.value = 30;
+                    lfo.frequency.value = 0.12 + Math.random() * 0.1;
+                    lfoGain.gain.value = voice.freq * 0.003;
                     lfo.connect(lfoGain);
                     lfoGain.connect(osc.frequency);
-
-                    osc.type = 'sawtooth';
-                    osc.frequency.value = 60;
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    gain.gain.setValueAtTime(0.15, now);
-                    gain.gain.linearRampToValueAtTime(0.08, now + 2);
-
                     lfo.start(now);
-                    osc.start(now);
-                    osc.stop(now + 3);
-                    lfo.stop(now + 3);
-                } else if (type === 'landing') {
-                    // Heavy thud with reverb-like tail
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'sine';
-                    osc.frequency.setValueAtTime(80, now);
-                    osc.frequency.exponentialRampToValueAtTime(30, now + 0.3);
-                    osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    gain.gain.setValueAtTime(0.4, now);
-                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.5);
-                    osc.start(now);
-                    osc.stop(now + 0.5);
 
-                    // Add impact noise
-                    const noise = ctx.createOscillator();
-                    const noiseGain = ctx.createGain();
-                    noise.type = 'triangle';
-                    noise.frequency.value = 150;
-                    noise.connect(noiseGain);
-                    noiseGain.connect(ctx.destination);
-                    noiseGain.gain.setValueAtTime(0.2, now);
-                    noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
-                    noise.start(now);
-                    noise.stop(now + 0.2);
-                } else if (type === 'hydraulic') {
-                    // Hydraulic hiss
-                    const osc = ctx.createOscillator();
-                    const gain = ctx.createGain();
-                    osc.type = 'sawtooth';
-                    osc.frequency.setValueAtTime(2000, now);
-                    osc.frequency.linearRampToValueAtTime(500, now + 1.5);
+                    // Subtle pan drift for movement
+                    const panLfo = ctx.createOscillator();
+                    const panLfoGain = ctx.createGain();
+                    panLfo.frequency.value = 0.04 + Math.random() * 0.03;
+                    panLfoGain.gain.value = 0.12;
+                    panLfo.connect(panLfoGain);
+                    panLfoGain.connect(panner.pan);
+                    panLfo.start(now);
+
+                    panner.pan.setValueAtTime(voice.pan, now);
+
                     osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    gain.gain.setValueAtTime(0.05, now);
-                    gain.gain.linearRampToValueAtTime(0.08, now + 0.5);
-                    gain.gain.linearRampToValueAtTime(0.02, now + 1.5);
+                    gain.connect(panner);
+                    panner.connect(masterGain);
+                    gain.gain.setValueAtTime(voice.vol, now);
+
                     osc.start(now);
-                    osc.stop(now + 1.5);
-                } else if (type === 'footstep') {
+                    oscillators.push(osc, lfo, panLfo);
+                    panners.push(panner);
+                });
+
+                // High shimmer - twinkling stars panned wide
+                const shimmerVoices = [
+                    { freq: 1046.50, pan: -0.9, vol: 0.012 },  // C6 far left
+                    { freq: 1174.66, pan: 0.9, vol: 0.010 },   // D6 far right
+                    { freq: 1318.51, pan: -0.5, vol: 0.008 },  // E6 mid left
+                    { freq: 1567.98, pan: 0.5, vol: 0.007 },   // G6 mid right
+                ];
+
+                shimmerVoices.forEach(voice => {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
+                    const panner = ctx.createStereoPanner();
+
                     osc.type = 'sine';
-                    osc.frequency.value = 100 + Math.random() * 50;
+                    osc.frequency.value = voice.freq;
+
+                    // Gentle twinkling
+                    const ampLfo = ctx.createOscillator();
+                    const ampLfoGain = ctx.createGain();
+                    ampLfo.frequency.value = 0.6 + Math.random() * 0.4;
+                    ampLfoGain.gain.value = voice.vol * 0.4;
+                    ampLfo.connect(ampLfoGain);
+                    ampLfoGain.connect(gain.gain);
+                    ampLfo.start(now);
+
+                    // Slow pan wander
+                    const panLfo = ctx.createOscillator();
+                    const panLfoGain = ctx.createGain();
+                    panLfo.frequency.value = 0.025 + Math.random() * 0.02;
+                    panLfoGain.gain.value = 0.25;
+                    panLfo.connect(panLfoGain);
+                    panLfoGain.connect(panner.pan);
+                    panLfo.start(now);
+
+                    panner.pan.setValueAtTime(voice.pan, now);
+
                     osc.connect(gain);
-                    gain.connect(ctx.destination);
-                    gain.gain.setValueAtTime(0.1, now);
-                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.1);
+                    gain.connect(panner);
+                    panner.connect(masterGain);
+                    gain.gain.setValueAtTime(voice.vol, now);
+
                     osc.start(now);
-                    osc.stop(now + 0.1);
-                } else if (type === 'whoosh') {
-                    // Camera whoosh
+                    oscillators.push(osc, ampLfo, panLfo);
+                    panners.push(panner);
+                });
+
+                // Warm sub-bass (center, subtle)
+                const subOsc = ctx.createOscillator();
+                const subGain = ctx.createGain();
+                subOsc.type = 'sine';
+                subOsc.frequency.value = 65.41; // C2
+                subOsc.connect(subGain);
+                subGain.connect(masterGain);
+                subGain.gain.setValueAtTime(0.03, now);
+                subOsc.start(now);
+                oscillators.push(subOsc);
+
+                this.ambientMusic = {
+                    oscillators,
+                    panners,
+                    masterGain,
+                    ctx
+                };
+            },
+
+            // Swell the ambient music for dramatic reveal
+            swellAmbientMusic() {
+                if (!this.ambientMusic) return;
+                const { masterGain, ctx } = this.ambientMusic;
+                const now = ctx.currentTime;
+
+                // Gentle swell up then back down
+                masterGain.gain.linearRampToValueAtTime(0.1, now + 2);
+                masterGain.gain.linearRampToValueAtTime(0.06, now + 5);
+            },
+
+            // Stop ambient music with fade out
+            stopAmbientMusic() {
+                if (!this.ambientMusic) return;
+                const { oscillators, masterGain, ctx } = this.ambientMusic;
+                const now = ctx.currentTime;
+
+                // Gentle fade out
+                masterGain.gain.linearRampToValueAtTime(0, now + 2);
+
+                // Stop all oscillators after fade
+                setTimeout(() => {
+                    oscillators.forEach(osc => {
+                        try { osc.stop(); } catch(e) {}
+                    });
+                }, 2500);
+
+                this.ambientMusic = null;
+            },
+
+            // Play a gentle chime (multiple frequencies)
+            playChime(frequencies, volume, duration) {
+                if (!AudioSystem || !AudioSystem.ctx) return;
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+
+                frequencies.forEach((freq, i) => {
                     const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
+
                     osc.type = 'sine';
-                    osc.frequency.setValueAtTime(200, now);
-                    osc.frequency.exponentialRampToValueAtTime(800, now + 0.3);
-                    osc.frequency.exponentialRampToValueAtTime(100, now + 0.6);
+                    osc.frequency.value = freq;
                     osc.connect(gain);
                     gain.connect(ctx.destination);
-                    gain.gain.setValueAtTime(0.08, now);
-                    gain.gain.linearRampToValueAtTime(0.15, now + 0.2);
-                    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
-                    osc.start(now);
-                    osc.stop(now + 0.6);
-                } else if (type === 'ambient') {
-                    // Ambient pad for dramatic reveal
-                    const osc1 = ctx.createOscillator();
-                    const osc2 = ctx.createOscillator();
+
+                    // Staggered, gentle attack
+                    const delay = i * 0.08;
+                    gain.gain.setValueAtTime(0, now + delay);
+                    gain.gain.linearRampToValueAtTime(volume * (1 - i * 0.15), now + delay + 0.1);
+                    gain.gain.exponentialRampToValueAtTime(0.001, now + delay + duration);
+
+                    osc.start(now + delay);
+                    osc.stop(now + delay + duration);
+                });
+            },
+
+            // Play a gentle ascending shimmer
+            playShimmer(startFreq, endFreq, duration, volume) {
+                if (!AudioSystem || !AudioSystem.ctx) return;
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(startFreq, now);
+                osc.frequency.exponentialRampToValueAtTime(endFreq, now + duration);
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                gain.gain.setValueAtTime(0, now);
+                gain.gain.linearRampToValueAtTime(volume, now + duration * 0.3);
+                gain.gain.linearRampToValueAtTime(0, now + duration);
+
+                osc.start(now);
+                osc.stop(now + duration);
+            },
+
+            // Play a gentle breeze/whoosh sound
+            playBreeze(duration, volume) {
+                if (!AudioSystem || !AudioSystem.ctx) return;
+                const ctx = AudioSystem.ctx;
+                const now = ctx.currentTime;
+
+                // Use multiple sine waves at different frequencies for a soft breeze
+                [300, 450, 600, 800].forEach(freq => {
+                    const osc = ctx.createOscillator();
                     const gain = ctx.createGain();
-                    osc1.type = 'sine';
-                    osc2.type = 'sine';
-                    osc1.frequency.value = 130.81; // C3
-                    osc2.frequency.value = 196.00; // G3
-                    osc1.connect(gain);
-                    osc2.connect(gain);
+
+                    osc.type = 'sine';
+                    osc.frequency.value = freq + Math.random() * 50;
+                    osc.connect(gain);
                     gain.connect(ctx.destination);
+
                     gain.gain.setValueAtTime(0, now);
-                    gain.gain.linearRampToValueAtTime(0.08, now + 2);
-                    gain.gain.linearRampToValueAtTime(0.05, now + 4);
-                    gain.gain.linearRampToValueAtTime(0, now + 5);
-                    osc1.start(now);
-                    osc2.start(now);
-                    osc1.stop(now + 5);
-                    osc2.stop(now + 5);
-                }
+                    gain.gain.linearRampToValueAtTime(volume * 0.3, now + duration * 0.3);
+                    gain.gain.linearRampToValueAtTime(0, now + duration);
+
+                    osc.start(now);
+                    osc.stop(now + duration);
+                });
             },
 
             // Create UI overlay
@@ -33476,6 +33731,9 @@
 
                 // Remove UI
                 this.removeUI();
+
+                // Stop ambient music with gentle fade out
+                this.stopAmbientMusic();
 
                 // Reset player to idle
                 if (worldState.player) {
@@ -49456,6 +49714,18 @@ ${entry.content}
             const particles = new THREE.Points(particleGeometry, particleMaterial);
             companionGroup.add(particles);
 
+            // v9.9: Click collider for easier selection (very low opacity to allow raycast)
+            const clickColliderGeometry = new THREE.SphereGeometry(1.5, 8, 8);
+            const clickColliderMaterial = new THREE.MeshBasicMaterial({
+                color: COPILOT_CONFIG.glowColor,
+                transparent: true,
+                opacity: 0.01, // Nearly invisible but still raycastable
+                depthWrite: false
+            });
+            const clickCollider = new THREE.Mesh(clickColliderGeometry, clickColliderMaterial);
+            clickCollider.name = 'companionClickCollider';
+            companionGroup.add(clickCollider);
+
             // Store references for animation
             companionGroup.userData = {
                 orb: orb,
@@ -49465,6 +49735,7 @@ ${entry.content}
                 particles: particles,
                 beacon: beacon,           // v6.1: Fog-piercing beacon
                 beaconRing: beaconRing,   // v6.1: Pulsing ring
+                clickCollider: clickCollider,  // v9.9: Click detection collider
                 isClickable: true,
                 isCopilot: true
             };
@@ -51471,22 +51742,45 @@ ${entry.content}
             }
         }
 
-        // Check for 3D copilot click
+        // Check for 3D copilot click - v9.9: Now selects companion portrait instead of chat
         function checkCopilotClick(event) {
             if (!copilotMesh || mode !== 'world') return false;
+            if (!gameData.companion || gameData.companion.hp <= 0) return false;
 
             const rect = renderer.domElement.getBoundingClientRect();
-            const mouse = new THREE.Vector2(
+            const mouseVec = new THREE.Vector2(
                 ((event.clientX - rect.left) / rect.width) * 2 - 1,
                 -((event.clientY - rect.top) / rect.height) * 2 + 1
             );
 
-            const raycaster = new THREE.Raycaster();
-            raycaster.setFromCamera(mouse, camera);
+            const copilotRaycaster = new THREE.Raycaster();
+            copilotRaycaster.setFromCamera(mouseVec, camera);
 
-            const intersects = raycaster.intersectObject(copilotMesh, true);
+            // v9.9: Check intersection with companion and all its children
+            const intersects = copilotRaycaster.intersectObject(copilotMesh, true);
+
             if (intersects.length > 0) {
-                toggleCopilotChat();
+                console.log('🐕 Companion clicked! Selecting portrait...');
+
+                // v9.9: Select companion via RTSSelection to show portrait instead of opening chat
+                const companionEntity = {
+                    type: 'companion',
+                    mesh: copilotMesh,
+                    name: gameData.companion.name || 'Companion',
+                    hp: gameData.companion.hp,
+                    maxHp: gameData.companion.maxHp,
+                    bond: gameData.companion.bond || 0,
+                    generation: gameData.companion.generation || 1,
+                    personality: gameData.companion.personality || [],
+                    faction: 'friendly'
+                };
+
+                // Check for shift key to add to selection
+                if (event.shiftKey) {
+                    RTSSelection.addToSelection(companionEntity);
+                } else {
+                    RTSSelection.setSelection([companionEntity]);
+                }
                 return true;
             }
             return false;
@@ -56634,9 +56928,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // ═══════════════════════════════════════════════════════════════
-        // v6.98: CINEMATIC MODE SYSTEM
-        // RDR2-style theatrical view with letterboxing, vignette, and
-        // automatic cursor hiding. Toggle with 'C' key or button.
+        // v9.8: UNIFIED CINEMATIC MODE SYSTEM
+        // Merged Living Art Mode + Cinematic Mode into one unified system.
+        // Features: Letterboxing, vignette, cursor hiding, autonomous camera,
+        // ambient particles, fireflies, wisdom quotes, idle auto-activation.
+        // Toggle with 'L' key in world mode, 'C' in other modes, or button.
         // ═══════════════════════════════════════════════════════════════
 
         const CinematicMode = {
@@ -56644,8 +56940,71 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             cursorTimeout: null,
             cursorHideDelay: 2000, // Hide cursor after 2 seconds of no movement
 
+            // v9.8: Living Art features merged in
+            idleTimeout: null,
+            idleThreshold: 60000, // 60 seconds of no input for auto-trigger
+            lastInputTime: Date.now(),
+            wasAutoTriggered: false,
+
+            // Camera behavior modes for world mode
+            cameraModes: ['orbit', 'follow', 'sweep', 'focus', 'zen'],
+            currentCameraMode: 'orbit',
+            cameraModeIndex: 0,
+            cameraModeTimer: 0,
+            cameraModeDuration: 20000, // 20 seconds per mode
+
+            // Camera state
+            artCamera: {
+                theta: 0,
+                phi: Math.PI / 4,
+                distance: 300,
+                targetX: 0,
+                targetY: 15,
+                targetZ: 0,
+                followTarget: null,
+                sweepProgress: 0
+            },
+
+            // Ambient particles
+            ambientParticles: [],
+            maxAmbientParticles: 200,
+
+            // Fireflies
+            fireflies: [],
+            maxFireflies: 30,
+
+            // Wisdom texts for meditation
+            wisdomTexts: [
+                "In stillness, observe the infinite dance",
+                "Every creature follows its own star",
+                "The cosmos breathes in cycles of creation",
+                "Watch the patterns emerge from chaos",
+                "Life finds a way, always",
+                "The observer becomes the observed",
+                "In this moment, everything is art",
+                "Emergent beauty from simple rules",
+                "The universe plays with itself",
+                "Complexity blooms from simplicity"
+            ],
+            currentWisdom: '',
+            wisdomTimer: 0,
+            wisdomDuration: 15000,
+
+            // Ecosystem stats
+            ecosystemStats: {
+                births: 0,
+                deaths: 0,
+                interactions: 0,
+                cycleTime: 0
+            },
+
+            // Saved state for restoration
+            savedCameraPos: null,
+            savedCameraRot: null,
+            savedFog: null,
+
             init() {
-                // Listen for 'C' key to toggle cinematic mode
+                // Listen for 'C' key to toggle cinematic mode (non-world modes)
                 document.addEventListener('keydown', (e) => {
                     // Don't trigger if typing in an input or if modal is open
                     if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
@@ -56660,11 +57019,27 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         this.toggle();
                     }
 
+                    // v9.8: 'L' key toggles cinematic mode in world mode
+                    if ((e.key === 'l' || e.key === 'L') && mode === 'world') {
+                        e.preventDefault();
+                        this.wasAutoTriggered = false;
+                        this.toggle();
+                        return;
+                    }
+
                     // ESC exits cinematic mode
                     if (e.key === 'Escape' && this.active) {
-                        this.toggle();
+                        this.exit();
                     }
                 });
+
+                // v9.8: Track user input for idle detection
+                ['mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel'].forEach(event => {
+                    document.addEventListener(event, () => this.resetIdleTimer(), { passive: true });
+                });
+
+                // v9.8: Start idle detection for world mode
+                this.startIdleDetection();
 
                 // Track mouse movement for cursor hiding
                 document.addEventListener('mousemove', () => {
@@ -56684,7 +57059,29 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     }
                 });
 
-                console.log('🎬 Cinematic Mode initialized - Press C to toggle');
+                console.log('🎬 v9.8: Unified Cinematic Mode initialized - Press L (world) or C (other) to toggle');
+            },
+
+            // v9.8: Reset idle timer when user interacts
+            resetIdleTimer() {
+                this.lastInputTime = Date.now();
+                // If we're in auto-idle mode and user interacts, exit
+                if (this.active && this.wasAutoTriggered) {
+                    this.exit();
+                }
+            },
+
+            // v9.8: Start idle detection for auto-triggering in world mode
+            startIdleDetection() {
+                setInterval(() => {
+                    if (!this.active && mode === 'world') {
+                        const idleTime = Date.now() - this.lastInputTime;
+                        if (idleTime > this.idleThreshold) {
+                            this.wasAutoTriggered = true;
+                            this.toggle();
+                        }
+                    }
+                }, 5000);
             },
 
             toggle() {
@@ -56721,10 +57118,59 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     this.playTransitionSound(true);
                 }
 
-                console.log('🎬 Cinematic Mode: ON');
+                // v9.8: If in world mode, activate living art features
+                if (mode === 'world') {
+                    this.enterWorldMode();
+                }
+
+                console.log('🎬 Cinematic Mode: ON' + (mode === 'world' ? ' (Living Art)' : ''));
+            },
+
+            // v9.8: Enhanced enter for world mode with living art features
+            enterWorldMode() {
+                this.cameraModeTimer = 0;
+                this.wisdomTimer = 0;
+                this.ecosystemStats = { births: 0, deaths: 0, interactions: 0, cycleTime: 0 };
+
+                // Save current camera state
+                if (typeof camera !== 'undefined') {
+                    this.savedCameraPos = camera.position.clone();
+                    this.savedCameraRot = camera.rotation.clone();
+                }
+                if (typeof scene !== 'undefined' && scene.fog) {
+                    this.savedFog = scene.fog.clone ? scene.fog.clone() : null;
+                }
+
+                // Initialize art camera
+                this.artCamera.theta = Math.random() * Math.PI * 2;
+                this.artCamera.phi = Math.PI / 5 + Math.random() * Math.PI / 4;
+                this.artCamera.distance = 200 + Math.random() * 200;
+
+                // Find initial follow target
+                this.findNewFollowTarget();
+
+                // Create ambient particles and fireflies
+                this.createAmbientParticles();
+                this.createFireflies();
+
+                // Pick initial wisdom
+                this.selectNewWisdom();
+
+                // Show living art overlay UI
+                this.showLivingArtUI();
+
+                // Reduce fog for better visibility
+                if (typeof scene !== 'undefined' && scene.fog) {
+                    scene.fog.far = 300;
+                }
+
+                showNotification('🎬 Cinematic Mode - Press ESC or L to exit', 'legendary');
             },
 
             exit() {
+                this.active = false;
+                this.wasAutoTriggered = false;
+
                 document.body.classList.remove('cinematic-active');
                 document.body.classList.remove('cursor-hidden');
 
@@ -56734,12 +57180,43 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     this.cursorTimeout = null;
                 }
 
+                // v9.8: Clean up living art features if we were in world mode
+                if (this.savedCameraPos) {
+                    this.exitWorldMode();
+                }
+
                 // Play exit sound
                 if (typeof AudioSystem !== 'undefined' && AudioSystem.enabled) {
                     this.playTransitionSound(false);
                 }
 
                 console.log('🎬 Cinematic Mode: OFF');
+            },
+
+            // v9.8: Clean up world mode living art features
+            exitWorldMode() {
+                // Restore camera
+                if (typeof camera !== 'undefined') {
+                    if (this.savedCameraPos) camera.position.copy(this.savedCameraPos);
+                    if (this.savedCameraRot) camera.rotation.copy(this.savedCameraRot);
+                }
+                if (typeof scene !== 'undefined' && this.savedFog) {
+                    scene.fog = this.savedFog;
+                }
+
+                // Clear saved state
+                this.savedCameraPos = null;
+                this.savedCameraRot = null;
+                this.savedFog = null;
+
+                // Remove particles and fireflies
+                this.clearAmbientParticles();
+                this.clearFireflies();
+
+                // Hide UI
+                this.hideLivingArtUI();
+
+                showNotification('Exited Cinematic Mode', 'info');
             },
 
             showCursor() {
@@ -56799,11 +57276,315 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // Check if cinematic mode is active (for other systems to query)
             isActive() {
                 return this.active;
+            },
+
+            // ═══════════════════════════════════════════════════════════════
+            // v9.8: LIVING ART MODE FEATURES (merged from LivingArtMode)
+            // ═══════════════════════════════════════════════════════════════
+
+            // Main update function - called from game loop when active in world mode
+            update(dt) {
+                if (!this.active || mode !== 'world') return;
+
+                this.ecosystemStats.cycleTime += dt;
+
+                // Update camera mode timer
+                this.cameraModeTimer += dt * 1000;
+                if (this.cameraModeTimer > this.cameraModeDuration) {
+                    this.nextCameraMode();
+                }
+
+                // Update wisdom timer
+                this.wisdomTimer += dt * 1000;
+                if (this.wisdomTimer > this.wisdomDuration) {
+                    this.selectNewWisdom();
+                }
+
+                // Update camera based on mode
+                this.updateArtCamera(dt);
+
+                // Update ambient particles and fireflies
+                this.updateAmbientParticles(dt);
+                this.updateFireflies(dt);
+
+                // Update UI stats
+                this.updateStatsDisplay();
+            },
+
+            nextCameraMode() {
+                this.cameraModeTimer = 0;
+                this.cameraModeIndex = (this.cameraModeIndex + 1) % this.cameraModes.length;
+                this.currentCameraMode = this.cameraModes[this.cameraModeIndex];
+
+                if (this.currentCameraMode === 'follow') {
+                    this.findNewFollowTarget();
+                }
+
+                const modeEl = document.getElementById('cinematic-camera-mode');
+                if (modeEl) modeEl.textContent = this.getCameraModeLabel();
+            },
+
+            getCameraModeLabel() {
+                const labels = {
+                    'orbit': '🌍 Orbital View',
+                    'follow': '👁️ Following Entity',
+                    'sweep': '🎬 Cinematic Sweep',
+                    'focus': '🔬 Macro Focus',
+                    'zen': '🧘 Zen Meditation'
+                };
+                return labels[this.currentCameraMode] || 'Unknown';
+            },
+
+            findNewFollowTarget() {
+                const targets = [];
+                if (typeof worldState !== 'undefined' && worldState.mobs) {
+                    worldState.mobs.forEach(mob => {
+                        if (mob.mesh) targets.push({ type: 'mob', obj: mob, priority: 3 });
+                    });
+                }
+                if (typeof agentFleet !== 'undefined' && agentFleet) {
+                    agentFleet.forEach(agent => {
+                        if (agent.mesh) targets.push({ type: 'agent', obj: agent, priority: 5 });
+                    });
+                }
+                if (typeof worldState !== 'undefined' && worldState.player) {
+                    targets.push({ type: 'player', obj: worldState.player, priority: 2 });
+                }
+                if (targets.length > 0) {
+                    const weighted = targets.map(t => ({ ...t, weight: t.priority + Math.random() * 3 }));
+                    weighted.sort((a, b) => b.weight - a.weight);
+                    this.artCamera.followTarget = weighted[0].obj;
+                }
+            },
+
+            updateArtCamera(dt) {
+                if (typeof camera === 'undefined') return;
+                const cam = this.artCamera;
+
+                switch (this.currentCameraMode) {
+                    case 'orbit':
+                        cam.theta += dt * 0.15;
+                        cam.phi = Math.PI / 4 + Math.sin(Date.now() * 0.0003) * 0.1;
+                        cam.distance = 280 + Math.sin(Date.now() * 0.0002) * 80;
+                        break;
+                    case 'follow':
+                        if (cam.followTarget && cam.followTarget.position) {
+                            const targetPos = cam.followTarget.position;
+                            cam.targetX += (targetPos.x - cam.targetX) * dt * 2;
+                            cam.targetY += ((targetPos.y || 0) + 8 - cam.targetY) * dt * 2;
+                            cam.targetZ += (targetPos.z - cam.targetZ) * dt * 2;
+                            cam.theta += dt * 0.3;
+                            cam.distance = 60 + Math.sin(Date.now() * 0.001) * 15;
+                            cam.phi = Math.PI / 4;
+                        } else {
+                            this.findNewFollowTarget();
+                            cam.theta += dt * 0.2;
+                        }
+                        break;
+                    case 'sweep':
+                        cam.sweepProgress += dt * 0.05;
+                        cam.targetX = Math.sin(cam.sweepProgress) * 40;
+                        cam.targetZ = Math.cos(cam.sweepProgress * 0.7) * 40;
+                        cam.theta = cam.sweepProgress * 0.5;
+                        cam.phi = Math.PI / 5 + Math.sin(cam.sweepProgress * 0.3) * 0.15;
+                        cam.distance = 150 + Math.sin(cam.sweepProgress * 0.8) * 50;
+                        cam.targetY = 10 + Math.sin(cam.sweepProgress * 0.4) * 5;
+                        break;
+                    case 'focus':
+                        cam.theta += dt * 0.4;
+                        cam.distance = 40 + Math.sin(Date.now() * 0.0005) * 15;
+                        cam.phi = Math.PI / 3 + Math.sin(Date.now() * 0.0004) * 0.1;
+                        cam.targetX += Math.sin(Date.now() * 0.0002) * dt * 3;
+                        cam.targetZ += Math.cos(Date.now() * 0.00015) * dt * 3;
+                        cam.targetX = Math.max(-40, Math.min(40, cam.targetX));
+                        cam.targetZ = Math.max(-40, Math.min(40, cam.targetZ));
+                        break;
+                    case 'zen':
+                        cam.theta += dt * 0.05;
+                        cam.phi = Math.PI / 3;
+                        cam.distance = 350;
+                        cam.targetX = Math.sin(Date.now() * 0.00005) * 10;
+                        cam.targetZ = Math.cos(Date.now() * 0.00005) * 10;
+                        cam.targetY = 20;
+                        break;
+                }
+
+                const x = cam.targetX + cam.distance * Math.sin(cam.phi) * Math.cos(cam.theta);
+                const y = cam.targetY + cam.distance * Math.cos(cam.phi);
+                const z = cam.targetZ + cam.distance * Math.sin(cam.phi) * Math.sin(cam.theta);
+                camera.position.set(x, y, z);
+                camera.lookAt(cam.targetX, cam.targetY, cam.targetZ);
+            },
+
+            createAmbientParticles() {
+                if (typeof THREE === 'undefined' || typeof scene === 'undefined') return;
+                this.ambientParticles = [];
+                const geometry = new THREE.SphereGeometry(0.3, 8, 8);
+                for (let i = 0; i < this.maxAmbientParticles; i++) {
+                    const hue = Math.random();
+                    const color = new THREE.Color().setHSL(hue, 0.7, 0.6);
+                    const material = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.4 });
+                    const particle = new THREE.Mesh(geometry, material);
+                    particle.position.set((Math.random() - 0.5) * 100, Math.random() * 30 + 5, (Math.random() - 0.5) * 100);
+                    particle.userData = {
+                        velocity: new THREE.Vector3((Math.random() - 0.5) * 2, (Math.random() - 0.5) * 1, (Math.random() - 0.5) * 2),
+                        baseY: particle.position.y,
+                        phase: Math.random() * Math.PI * 2,
+                        hue: hue
+                    };
+                    scene.add(particle);
+                    this.ambientParticles.push(particle);
+                }
+            },
+
+            updateAmbientParticles(dt) {
+                const time = Date.now() * 0.001;
+                this.ambientParticles.forEach(p => {
+                    const data = p.userData;
+                    p.position.x += data.velocity.x * dt;
+                    p.position.z += data.velocity.z * dt;
+                    p.position.y = data.baseY + Math.sin(time + data.phase) * 3;
+                    if (p.position.x > 50) p.position.x = -50;
+                    if (p.position.x < -50) p.position.x = 50;
+                    if (p.position.z > 50) p.position.z = -50;
+                    if (p.position.z < -50) p.position.z = 50;
+                    data.hue += dt * 0.02;
+                    if (data.hue > 1) data.hue -= 1;
+                    p.material.color.setHSL(data.hue, 0.7, 0.6);
+                    p.material.opacity = 0.3 + Math.sin(time * 2 + data.phase) * 0.2;
+                });
+            },
+
+            clearAmbientParticles() {
+                if (typeof scene === 'undefined') return;
+                this.ambientParticles.forEach(p => {
+                    scene.remove(p);
+                    if (p.geometry) p.geometry.dispose();
+                    if (p.material) p.material.dispose();
+                });
+                this.ambientParticles = [];
+            },
+
+            createFireflies() {
+                if (typeof THREE === 'undefined' || typeof scene === 'undefined') return;
+                this.fireflies = [];
+                const geometry = new THREE.SphereGeometry(0.2, 8, 8);
+                for (let i = 0; i < this.maxFireflies; i++) {
+                    const material = new THREE.MeshBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0 });
+                    const firefly = new THREE.Mesh(geometry, material);
+                    firefly.position.set((Math.random() - 0.5) * 80, Math.random() * 10 + 2, (Math.random() - 0.5) * 80);
+                    const light = new THREE.PointLight(0xffffaa, 0, 8);
+                    firefly.add(light);
+                    firefly.userData = {
+                        targetPos: firefly.position.clone(),
+                        blinkPhase: Math.random() * Math.PI * 2,
+                        blinkSpeed: 1 + Math.random() * 2,
+                        moveTimer: Math.random() * 3,
+                        light: light
+                    };
+                    scene.add(firefly);
+                    this.fireflies.push(firefly);
+                }
+            },
+
+            updateFireflies(dt) {
+                const time = Date.now() * 0.001;
+                this.fireflies.forEach(ff => {
+                    const data = ff.userData;
+                    const blink = Math.max(0, Math.sin(time * data.blinkSpeed + data.blinkPhase));
+                    ff.material.opacity = blink * 0.9;
+                    data.light.intensity = blink * 2;
+                    ff.position.lerp(data.targetPos, dt * 2);
+                    data.moveTimer -= dt;
+                    if (data.moveTimer <= 0) {
+                        data.moveTimer = 2 + Math.random() * 4;
+                        data.targetPos.set(
+                            ff.position.x + (Math.random() - 0.5) * 20,
+                            2 + Math.random() * 12,
+                            ff.position.z + (Math.random() - 0.5) * 20
+                        );
+                        data.targetPos.x = Math.max(-40, Math.min(40, data.targetPos.x));
+                        data.targetPos.z = Math.max(-40, Math.min(40, data.targetPos.z));
+                    }
+                });
+            },
+
+            clearFireflies() {
+                if (typeof scene === 'undefined') return;
+                this.fireflies.forEach(ff => {
+                    scene.remove(ff);
+                    if (ff.geometry) ff.geometry.dispose();
+                    if (ff.material) ff.material.dispose();
+                });
+                this.fireflies = [];
+            },
+
+            selectNewWisdom() {
+                this.wisdomTimer = 0;
+                this.currentWisdom = this.wisdomTexts[Math.floor(Math.random() * this.wisdomTexts.length)];
+                const wisdomEl = document.getElementById('cinematic-wisdom');
+                if (wisdomEl) {
+                    wisdomEl.style.opacity = '0';
+                    setTimeout(() => {
+                        wisdomEl.textContent = `"${this.currentWisdom}"`;
+                        wisdomEl.style.opacity = '1';
+                    }, 500);
+                }
+            },
+
+            updateStatsDisplay() {
+                const mobCount = (typeof worldState !== 'undefined' && worldState.mobs) ? worldState.mobs.length : 0;
+                const agentCount = (typeof agentFleet !== 'undefined' && agentFleet) ? agentFleet.length : 0;
+                const statsEl = document.getElementById('cinematic-stats');
+                if (statsEl) {
+                    statsEl.innerHTML = `
+                        <div>🦎 Creatures: ${mobCount}</div>
+                        <div>🤖 Agents: ${agentCount}</div>
+                        <div>⏱️ Runtime: ${Math.floor(this.ecosystemStats.cycleTime / 60)}m ${Math.floor(this.ecosystemStats.cycleTime % 60)}s</div>
+                    `;
+                }
+            },
+
+            showLivingArtUI() {
+                this.hideLivingArtUI();
+                const overlay = document.createElement('div');
+                overlay.id = 'cinematic-art-overlay';
+                overlay.innerHTML = `
+                    <div style="position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+                        background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
+                        padding: 15px 30px; border-radius: 20px;
+                        border: 1px solid rgba(255,255,255,0.1); text-align: center; z-index: 1000;">
+                        <div style="font-size: 24px; color: #fff; font-weight: bold; margin-bottom: 5px;">🎬 Cinematic Mode</div>
+                        <div id="cinematic-camera-mode" style="font-size: 14px; color: #0ff;">${this.getCameraModeLabel()}</div>
+                    </div>
+                    <div id="cinematic-wisdom" style="position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
+                        max-width: 80%; text-align: center; font-size: 20px; font-style: italic; color: rgba(255,255,255,0.8);
+                        text-shadow: 0 0 20px rgba(0,0,0,0.8); transition: opacity 0.5s ease; z-index: 1000;">"${this.currentWisdom}"</div>
+                    <div id="cinematic-stats" style="position: fixed; bottom: 20px; left: 20px;
+                        background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
+                        padding: 10px 15px; border-radius: 10px; font-size: 12px; color: rgba(255,255,255,0.7); z-index: 1000;"></div>
+                    <div style="position: fixed; bottom: 20px; right: 20px;
+                        background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
+                        padding: 10px 15px; border-radius: 10px; font-size: 11px; color: rgba(255,255,255,0.5); z-index: 1000;">
+                        Press <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">ESC</kbd> or <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">L</kbd> to exit
+                    </div>
+                `;
+                document.body.appendChild(overlay);
+            },
+
+            hideLivingArtUI() {
+                const overlay = document.getElementById('cinematic-art-overlay');
+                if (overlay) overlay.remove();
             }
         };
 
         // Global toggle function for the button
         function toggleCinematicMode() {
+            CinematicMode.toggle();
+        }
+
+        // v9.8: Alias for backwards compatibility with Living Art Mode
+        function toggleLivingArtMode() {
             CinematicMode.toggle();
         }
 
@@ -62531,6 +63312,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             activeCiv = civ;
             mode = 'world';
 
+            // v9.8: Capture first visit status BEFORE adding to visitedPlanets
+            const isFirstTimeVisit = !gameData.visitedPlanets.includes(civ.id);
+
             // v6.65: Show companion health in world mode
             const companionHealth = document.getElementById('companion-health-container');
             if (companionHealth) companionHealth.classList.remove('hidden');
@@ -63052,6 +63836,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }
 
             // v6.18: Restore saved position if returning to same planet
+            // v9.8: First visits trigger cinematic landing sequence (uses isFirstTimeVisit captured at start)
+            const landingPosition = new THREE.Vector3(shipSpawnX, shipSpawnY, shipSpawnZ);
+
             if (gameData.player.lastPlanetId === civ.id && gameData.player.lastPosition) {
                 const pos = gameData.player.lastPosition;
                 worldState.player.position.set(pos.x, pos.y, pos.z);
@@ -63059,6 +63846,14 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                     worldState.player.rotation.y = gameData.player.lastRotation;
                 }
                 showNotification('Resumed from last position', 'info');
+            } else if (isFirstTimeVisit && typeof LandingSequence !== 'undefined') {
+                // v9.8: Cinematic landing sequence for first visits
+                worldState.player.position.set(shipSpawnX, shipSpawnY, shipSpawnZ);
+                worldState.player.visible = false; // Hide until emerge phase
+                // Landing sequence will be started after scene is fully set up
+                setTimeout(() => {
+                    LandingSequence.start(landingPosition, civ.name);
+                }, 100);
             } else {
                 // v6.68: Spawn player at ship/fountain location instead of (0,0,0)
                 worldState.player.position.set(shipSpawnX, shipSpawnY, shipSpawnZ);
@@ -63150,7 +63945,10 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             initCreepLaneSystem();
 
             // v9.6: Initialize RTS multi-select system with portrait panel
-            RTSSelection.init();
+            // v9.8: Only initialize if landing sequence is not running (it will init on complete)
+            if (!LandingSequence || !LandingSequence.isActive()) {
+                RTSSelection.init();
+            }
 
             // v5.12: Initialize hypnosis effects
             initHypnosisEffects();
@@ -74910,9 +75708,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.36: Update screen shake effect every frame
             impactShake.update();
 
-            // v7.2: Update Living Art Mode (screensaver/idle mode)
-            if (typeof LivingArtMode !== 'undefined' && LivingArtMode.active) {
-                LivingArtMode.update(dt);
+            // v9.8: Update Cinematic Mode (unified screensaver/idle/living art mode)
+            if (typeof CinematicMode !== 'undefined' && CinematicMode.active) {
+                CinematicMode.update(dt);
             }
 
             // v6.50: Ant Farm 3D view - use perspective orbital camera when active
@@ -76600,13 +77398,18 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             updateCopilotCompanion(dt, time);
 
             // v9.6: Update RTS selection ring positions and refresh portrait panel
-            if (RTSSelection) {
+            if (RTSSelection && (!LandingSequence || !LandingSequence.isActive())) {
                 RTSSelection.updateRingPositions();
                 // Refresh portrait HP bars every ~200ms
                 if (!RTSSelection.lastPortraitUpdate || time - RTSSelection.lastPortraitUpdate > 200) {
                     RTSSelection.updatePortraitPanel();
                     RTSSelection.lastPortraitUpdate = time;
                 }
+            }
+
+            // v9.8: Update cinematic landing sequence
+            if (LandingSequence && LandingSequence.isActive()) {
+                LandingSequence.update(dt);
             }
 
             // v5.12: Update hypnosis effects
@@ -81429,579 +82232,30 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         }
 
         // ============================================
-        // v7.2: LIVING ART MODE - Screensaver/Idle Mode
-        // "Systems that play themselves beautifully"
-        // Mesmerizing autonomous behaviors, procedural animations,
-        // ecosystem simulations - the game as living art
+        // v9.8: LIVING ART MODE COMPATIBILITY SHIM
+        // LivingArtMode is now merged into CinematicMode.
+        // This shim provides backwards compatibility for any
+        // code that still references LivingArtMode directly.
         // ============================================
         const LivingArtMode = {
-            active: false,
-            idleTimeout: null,
-            idleThreshold: 60000, // 60 seconds of no input
-            lastInputTime: Date.now(),
-
-            // Camera behavior modes
-            cameraModes: ['orbit', 'follow', 'sweep', 'focus', 'zen'],
-            currentCameraMode: 'orbit',
-            cameraModeIndex: 0,
-            cameraModeTimer: 0,
-            cameraModeDuration: 20000, // 20 seconds per mode
-
-            // Camera state
-            camera: {
-                theta: 0,
-                phi: Math.PI / 4,
-                distance: 300,
-                targetX: 0,
-                targetY: 15,
-                targetZ: 0,
-                followTarget: null,
-                sweepProgress: 0
-            },
-
-            // Ambient particles for visual flair
-            ambientParticles: [],
-            maxAmbientParticles: 200,
-
-            // Fireflies/light orbs
-            fireflies: [],
-            maxFireflies: 30,
-
-            // Floating text wisdom
-            wisdomTexts: [
-                "In stillness, observe the infinite dance",
-                "Every creature follows its own star",
-                "The cosmos breathes in cycles of creation",
-                "Watch the patterns emerge from chaos",
-                "Life finds a way, always",
-                "The observer becomes the observed",
-                "In this moment, everything is art",
-                "Emergent beauty from simple rules",
-                "The universe plays with itself",
-                "Complexity blooms from simplicity"
-            ],
-            currentWisdom: '',
-            wisdomTimer: 0,
-            wisdomDuration: 15000,
-
-            // Ecosystem stats for display
-            ecosystemStats: {
-                births: 0,
-                deaths: 0,
-                interactions: 0,
-                cycleTime: 0
-            },
-
-            // Initialize Living Art Mode
-            init() {
-                // Track user input to detect idle state
-                ['mousedown', 'mousemove', 'keydown', 'touchstart', 'wheel'].forEach(event => {
-                    document.addEventListener(event, () => this.resetIdleTimer(), { passive: true });
-                });
-
-                // Start idle detection
-                this.startIdleDetection();
-                console.log('v7.2: Living Art Mode initialized');
-            },
-
-            resetIdleTimer() {
-                this.lastInputTime = Date.now();
-                // If we're in auto-idle mode and user interacts, exit
-                if (this.active && this.wasAutoTriggered) {
-                    this.disable();
-                }
-            },
-
-            startIdleDetection() {
-                // Check every 5 seconds if we've been idle
-                setInterval(() => {
-                    if (!this.active && mode === 'world') {
-                        const idleTime = Date.now() - this.lastInputTime;
-                        if (idleTime > this.idleThreshold) {
-                            // Auto-enable after idle threshold
-                            this.wasAutoTriggered = true;
-                            this.enable();
-                        }
-                    }
-                }, 5000);
-            },
-
-            enable() {
-                if (this.active || mode !== 'world') return;
-
-                this.active = true;
-                this.cameraModeTimer = 0;
-                this.wisdomTimer = 0;
-                this.ecosystemStats = { births: 0, deaths: 0, interactions: 0, cycleTime: 0 };
-
-                // Save current state
-                this.savedCameraPos = camera.position.clone();
-                this.savedCameraRot = camera.rotation.clone();
-                this.savedFog = scene.fog ? scene.fog.clone() : null;
-
-                // Initialize camera for art mode
-                this.camera.theta = Math.random() * Math.PI * 2;
-                this.camera.phi = Math.PI / 5 + Math.random() * Math.PI / 4;
-                this.camera.distance = 200 + Math.random() * 200;
-
-                // Find initial follow target
-                this.findNewFollowTarget();
-
-                // Create ambient particles
-                this.createAmbientParticles();
-                this.createFireflies();
-
-                // Pick initial wisdom
-                this.selectNewWisdom();
-
-                // Show overlay UI
-                this.showUI();
-
-                // Slightly reduce fog for better visibility
-                if (scene.fog) {
-                    scene.fog.far = 300;
-                }
-
-                showNotification('🎨 Living Art Mode - Press ESC to exit', 'legendary');
-                AudioSystem.playGentle && AudioSystem.playGentle(440, 0.05, 0.5);
-            },
-
-            disable() {
-                if (!this.active) return;
-
-                this.active = false;
-                this.wasAutoTriggered = false;
-
-                // Restore camera
-                if (this.savedCameraPos) {
-                    camera.position.copy(this.savedCameraPos);
-                }
-                if (this.savedCameraRot) {
-                    camera.rotation.copy(this.savedCameraRot);
-                }
-                if (this.savedFog) {
-                    scene.fog = this.savedFog;
-                }
-
-                // Remove ambient particles
-                this.clearAmbientParticles();
-                this.clearFireflies();
-
-                // Hide UI
-                this.hideUI();
-
-                showNotification('Exited Living Art Mode', 'info');
-            },
-
-            toggle() {
-                if (this.active) {
-                    this.disable();
-                } else {
-                    this.wasAutoTriggered = false;
-                    this.enable();
-                }
-            },
-
-            // Update called every frame
-            update(dt) {
-                if (!this.active) return;
-
-                this.ecosystemStats.cycleTime += dt;
-
-                // Update camera mode timer
-                this.cameraModeTimer += dt * 1000;
-                if (this.cameraModeTimer > this.cameraModeDuration) {
-                    this.nextCameraMode();
-                }
-
-                // Update wisdom timer
-                this.wisdomTimer += dt * 1000;
-                if (this.wisdomTimer > this.wisdomDuration) {
-                    this.selectNewWisdom();
-                }
-
-                // Update camera based on mode
-                this.updateCamera(dt);
-
-                // Update ambient particles
-                this.updateAmbientParticles(dt);
-                this.updateFireflies(dt);
-
-                // Update UI stats
-                this.updateStatsDisplay();
-            },
-
-            nextCameraMode() {
-                this.cameraModeTimer = 0;
-                this.cameraModeIndex = (this.cameraModeIndex + 1) % this.cameraModes.length;
-                this.currentCameraMode = this.cameraModes[this.cameraModeIndex];
-
-                if (this.currentCameraMode === 'follow') {
-                    this.findNewFollowTarget();
-                }
-
-                // Update mode display
-                const modeEl = document.getElementById('living-art-camera-mode');
-                if (modeEl) {
-                    modeEl.textContent = this.getCameraModeLabel();
-                }
-            },
-
-            getCameraModeLabel() {
-                const labels = {
-                    'orbit': '🌍 Orbital View',
-                    'follow': '👁️ Following Entity',
-                    'sweep': '🎬 Cinematic Sweep',
-                    'focus': '🔬 Macro Focus',
-                    'zen': '🧘 Zen Meditation'
-                };
-                return labels[this.currentCameraMode] || 'Unknown';
-            },
-
-            findNewFollowTarget() {
-                // Try to find an interesting entity to follow
-                const targets = [];
-
-                // Add mobs
-                if (worldState.mobs) {
-                    worldState.mobs.forEach(mob => {
-                        if (mob.mesh) targets.push({ type: 'mob', obj: mob, priority: 3 });
-                    });
-                }
-
-                // Add agent fleet members
-                if (agentFleet) {
-                    agentFleet.forEach(agent => {
-                        if (agent.mesh) targets.push({ type: 'agent', obj: agent, priority: 5 });
-                    });
-                }
-
-                // Add player if exists
-                if (worldState.player) {
-                    targets.push({ type: 'player', obj: worldState.player, priority: 2 });
-                }
-
-                if (targets.length > 0) {
-                    // Weight by priority and randomness
-                    const weighted = targets.map(t => ({ ...t, weight: t.priority + Math.random() * 3 }));
-                    weighted.sort((a, b) => b.weight - a.weight);
-                    this.camera.followTarget = weighted[0].obj;
-                }
-            },
-
-            updateCamera(dt) {
-                const cam = this.camera;
-
-                switch (this.currentCameraMode) {
-                    case 'orbit':
-                        // Slow, peaceful orbital rotation
-                        cam.theta += dt * 0.15;
-                        cam.phi = Math.PI / 4 + Math.sin(Date.now() * 0.0003) * 0.1;
-                        cam.distance = 280 + Math.sin(Date.now() * 0.0002) * 80;
-                        break;
-
-                    case 'follow':
-                        if (cam.followTarget && cam.followTarget.position) {
-                            // Smoothly follow target
-                            const targetPos = cam.followTarget.position;
-                            cam.targetX += (targetPos.x - cam.targetX) * dt * 2;
-                            cam.targetY += ((targetPos.y || 0) + 8 - cam.targetY) * dt * 2;
-                            cam.targetZ += (targetPos.z - cam.targetZ) * dt * 2;
-                            cam.theta += dt * 0.3;
-                            cam.distance = 60 + Math.sin(Date.now() * 0.001) * 15;
-                            cam.phi = Math.PI / 4;
-                        } else {
-                            // Fallback to orbit if no target
-                            this.findNewFollowTarget();
-                            cam.theta += dt * 0.2;
-                        }
-                        break;
-
-                    case 'sweep':
-                        // Cinematic sweeping motion across the world
-                        cam.sweepProgress += dt * 0.05;
-                        cam.targetX = Math.sin(cam.sweepProgress) * 40;
-                        cam.targetZ = Math.cos(cam.sweepProgress * 0.7) * 40;
-                        cam.theta = cam.sweepProgress * 0.5;
-                        cam.phi = Math.PI / 5 + Math.sin(cam.sweepProgress * 0.3) * 0.15;
-                        cam.distance = 150 + Math.sin(cam.sweepProgress * 0.8) * 50;
-                        cam.targetY = 10 + Math.sin(cam.sweepProgress * 0.4) * 5;
-                        break;
-
-                    case 'focus':
-                        // Macro-style close-up with slow movement
-                        cam.theta += dt * 0.4;
-                        cam.distance = 40 + Math.sin(Date.now() * 0.0005) * 15;
-                        cam.phi = Math.PI / 3 + Math.sin(Date.now() * 0.0004) * 0.1;
-                        // Slowly drift target
-                        cam.targetX += Math.sin(Date.now() * 0.0002) * dt * 3;
-                        cam.targetZ += Math.cos(Date.now() * 0.00015) * dt * 3;
-                        cam.targetX = Math.max(-40, Math.min(40, cam.targetX));
-                        cam.targetZ = Math.max(-40, Math.min(40, cam.targetZ));
-                        break;
-
-                    case 'zen':
-                        // Very slow, meditative movement
-                        cam.theta += dt * 0.05;
-                        cam.phi = Math.PI / 3;
-                        cam.distance = 350;
-                        cam.targetX = Math.sin(Date.now() * 0.00005) * 10;
-                        cam.targetZ = Math.cos(Date.now() * 0.00005) * 10;
-                        cam.targetY = 20;
-                        break;
-                }
-
-                // Apply camera position
-                const x = cam.targetX + cam.distance * Math.sin(cam.phi) * Math.cos(cam.theta);
-                const y = cam.targetY + cam.distance * Math.cos(cam.phi);
-                const z = cam.targetZ + cam.distance * Math.sin(cam.phi) * Math.sin(cam.theta);
-
-                camera.position.set(x, y, z);
-                camera.lookAt(cam.targetX, cam.targetY, cam.targetZ);
-            },
-
-            createAmbientParticles() {
-                this.ambientParticles = [];
-                const geometry = new THREE.SphereGeometry(0.3, 8, 8);
-
-                for (let i = 0; i < this.maxAmbientParticles; i++) {
-                    const hue = Math.random();
-                    const color = new THREE.Color().setHSL(hue, 0.7, 0.6);
-                    const material = new THREE.MeshBasicMaterial({
-                        color: color,
-                        transparent: true,
-                        opacity: 0.4
-                    });
-
-                    const particle = new THREE.Mesh(geometry, material);
-                    particle.position.set(
-                        (Math.random() - 0.5) * 100,
-                        Math.random() * 30 + 5,
-                        (Math.random() - 0.5) * 100
-                    );
-
-                    particle.userData = {
-                        velocity: new THREE.Vector3(
-                            (Math.random() - 0.5) * 2,
-                            (Math.random() - 0.5) * 1,
-                            (Math.random() - 0.5) * 2
-                        ),
-                        baseY: particle.position.y,
-                        phase: Math.random() * Math.PI * 2,
-                        hue: hue
-                    };
-
-                    scene.add(particle);
-                    this.ambientParticles.push(particle);
-                }
-            },
-
-            updateAmbientParticles(dt) {
-                const time = Date.now() * 0.001;
-
-                this.ambientParticles.forEach(p => {
-                    const data = p.userData;
-
-                    // Floating motion
-                    p.position.x += data.velocity.x * dt;
-                    p.position.z += data.velocity.z * dt;
-                    p.position.y = data.baseY + Math.sin(time + data.phase) * 3;
-
-                    // Wrap around world bounds
-                    if (p.position.x > 50) p.position.x = -50;
-                    if (p.position.x < -50) p.position.x = 50;
-                    if (p.position.z > 50) p.position.z = -50;
-                    if (p.position.z < -50) p.position.z = 50;
-
-                    // Color cycling
-                    data.hue += dt * 0.02;
-                    if (data.hue > 1) data.hue -= 1;
-                    p.material.color.setHSL(data.hue, 0.7, 0.6);
-
-                    // Pulse opacity
-                    p.material.opacity = 0.3 + Math.sin(time * 2 + data.phase) * 0.2;
-                });
-            },
-
-            clearAmbientParticles() {
-                this.ambientParticles.forEach(p => {
-                    scene.remove(p);
-                    p.geometry.dispose();
-                    p.material.dispose();
-                });
-                this.ambientParticles = [];
-            },
-
-            createFireflies() {
-                this.fireflies = [];
-                const geometry = new THREE.SphereGeometry(0.2, 8, 8);
-
-                for (let i = 0; i < this.maxFireflies; i++) {
-                    const material = new THREE.MeshBasicMaterial({
-                        color: 0xffffaa,
-                        transparent: true,
-                        opacity: 0
-                    });
-
-                    const firefly = new THREE.Mesh(geometry, material);
-                    firefly.position.set(
-                        (Math.random() - 0.5) * 80,
-                        Math.random() * 10 + 2,
-                        (Math.random() - 0.5) * 80
-                    );
-
-                    // Add point light for glow effect
-                    const light = new THREE.PointLight(0xffffaa, 0, 8);
-                    firefly.add(light);
-
-                    firefly.userData = {
-                        targetPos: firefly.position.clone(),
-                        blinkPhase: Math.random() * Math.PI * 2,
-                        blinkSpeed: 1 + Math.random() * 2,
-                        moveTimer: Math.random() * 3,
-                        light: light
-                    };
-
-                    scene.add(firefly);
-                    this.fireflies.push(firefly);
-                }
-            },
-
-            updateFireflies(dt) {
-                const time = Date.now() * 0.001;
-
-                this.fireflies.forEach(ff => {
-                    const data = ff.userData;
-
-                    // Blink pattern
-                    const blink = Math.max(0, Math.sin(time * data.blinkSpeed + data.blinkPhase));
-                    ff.material.opacity = blink * 0.9;
-                    data.light.intensity = blink * 2;
-
-                    // Move toward target
-                    ff.position.lerp(data.targetPos, dt * 2);
-
-                    // Pick new target periodically
-                    data.moveTimer -= dt;
-                    if (data.moveTimer <= 0) {
-                        data.moveTimer = 2 + Math.random() * 4;
-                        data.targetPos.set(
-                            ff.position.x + (Math.random() - 0.5) * 20,
-                            2 + Math.random() * 12,
-                            ff.position.z + (Math.random() - 0.5) * 20
-                        );
-                        data.targetPos.x = Math.max(-40, Math.min(40, data.targetPos.x));
-                        data.targetPos.z = Math.max(-40, Math.min(40, data.targetPos.z));
-                    }
-                });
-            },
-
-            clearFireflies() {
-                this.fireflies.forEach(ff => {
-                    scene.remove(ff);
-                    ff.geometry.dispose();
-                    ff.material.dispose();
-                });
-                this.fireflies = [];
-            },
-
-            selectNewWisdom() {
-                this.wisdomTimer = 0;
-                this.currentWisdom = this.wisdomTexts[Math.floor(Math.random() * this.wisdomTexts.length)];
-
-                const wisdomEl = document.getElementById('living-art-wisdom');
-                if (wisdomEl) {
-                    wisdomEl.style.opacity = '0';
-                    setTimeout(() => {
-                        wisdomEl.textContent = `"${this.currentWisdom}"`;
-                        wisdomEl.style.opacity = '1';
-                    }, 500);
-                }
-            },
-
-            updateStatsDisplay() {
-                // Count current ecosystem entities
-                const mobCount = worldState.mobs?.length || 0;
-                const agentCount = agentFleet?.length || 0;
-
-                const statsEl = document.getElementById('living-art-stats');
-                if (statsEl) {
-                    statsEl.innerHTML = `
-                        <div>🦎 Creatures: ${mobCount}</div>
-                        <div>🤖 Agents: ${agentCount}</div>
-                        <div>⏱️ Runtime: ${Math.floor(this.ecosystemStats.cycleTime / 60)}m ${Math.floor(this.ecosystemStats.cycleTime % 60)}s</div>
-                    `;
-                }
-            },
-
-            showUI() {
-                // Remove existing if any
-                this.hideUI();
-
-                const overlay = document.createElement('div');
-                overlay.id = 'living-art-overlay';
-                overlay.innerHTML = `
-                    <div id="living-art-header" style="
-                        position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
-                        background: rgba(0,0,0,0.6); backdrop-filter: blur(10px);
-                        padding: 15px 30px; border-radius: 20px;
-                        border: 1px solid rgba(255,255,255,0.1);
-                        text-align: center; z-index: 1000;
-                    ">
-                        <div style="font-size: 24px; color: #fff; font-weight: bold; margin-bottom: 5px;">
-                            🎨 Living Art Mode
-                        </div>
-                        <div id="living-art-camera-mode" style="font-size: 14px; color: #0ff;">
-                            ${this.getCameraModeLabel()}
-                        </div>
-                    </div>
-
-                    <div id="living-art-wisdom" style="
-                        position: fixed; bottom: 100px; left: 50%; transform: translateX(-50%);
-                        max-width: 80%; text-align: center;
-                        font-size: 20px; font-style: italic; color: rgba(255,255,255,0.8);
-                        text-shadow: 0 0 20px rgba(0,0,0,0.8);
-                        transition: opacity 0.5s ease; z-index: 1000;
-                    ">
-                        "${this.currentWisdom}"
-                    </div>
-
-                    <div id="living-art-stats" style="
-                        position: fixed; bottom: 20px; left: 20px;
-                        background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
-                        padding: 10px 15px; border-radius: 10px;
-                        font-size: 12px; color: rgba(255,255,255,0.7);
-                        z-index: 1000;
-                    "></div>
-
-                    <div style="
-                        position: fixed; bottom: 20px; right: 20px;
-                        background: rgba(0,0,0,0.5); backdrop-filter: blur(5px);
-                        padding: 10px 15px; border-radius: 10px;
-                        font-size: 11px; color: rgba(255,255,255,0.5);
-                        z-index: 1000;
-                    ">
-                        Press <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">ESC</kbd> or <kbd style="background: rgba(255,255,255,0.2); padding: 2px 6px; border-radius: 4px;">L</kbd> to exit
-                    </div>
-                `;
-
-                document.body.appendChild(overlay);
-            },
-
-            hideUI() {
-                const overlay = document.getElementById('living-art-overlay');
-                if (overlay) overlay.remove();
-            }
+            get active() { return typeof CinematicMode !== 'undefined' && CinematicMode.active && mode === 'world'; },
+            init() { console.log('v9.8: LivingArtMode merged into CinematicMode'); },
+            enable() { if (typeof CinematicMode !== 'undefined') CinematicMode.toggle(); },
+            disable() { if (typeof CinematicMode !== 'undefined') CinematicMode.exit(); },
+            toggle() { if (typeof CinematicMode !== 'undefined') CinematicMode.toggle(); },
+            update(dt) { if (typeof CinematicMode !== 'undefined') CinematicMode.update(dt); },
+            // Stub out unused methods for compatibility
+            resetIdleTimer() {},
+            startIdleDetection() {}
         };
 
-        // Initialize Living Art Mode
+        // v9.8: LivingArtMode.init() is now a no-op since CinematicMode handles everything
         LivingArtMode.init();
 
-        // Toggle function for keyboard shortcut
+        // v9.8: toggleLivingArtMode is an alias for CinematicMode.toggle()
         function toggleLivingArtMode() {
-            LivingArtMode.toggle();
+            if (typeof CinematicMode !== 'undefined') CinematicMode.toggle();
         }
-
 
         // Ant farm and Living Art keyboard controls
         document.addEventListener('keydown', (e) => {
