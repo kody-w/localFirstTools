@@ -9767,8 +9767,11 @@
         <!-- Minimap with Show Mode button -->
         <div id="minimap-container" class="minimap" style="cursor: pointer;">
             <canvas id="minimap-canvas" class="minimap-canvas"></canvas>
+            <!-- v8.0: 3D Minimap WebGL canvas (hidden by default) -->
+            <canvas id="minimap-3d-canvas" style="display: none; width: 100%; height: 100%; position: absolute; top: 0; left: 0;"></canvas>
             <!-- v5.19: Show Mode button overlay -->
             <div style="position: absolute; top: 4px; right: 4px; z-index: 10; display: flex; gap: 3px;">
+                <button onclick="toggleMinimap3D()" id="minimap-3d-toggle" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'" title="Toggle 3D View">🐜</button>
                 <button onclick="WorldStore.open()" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'" title="Public Worlds">🌍</button>
                 <button onclick="openShowModeModal()" style="background: rgba(0,255,255,0.2); border: 1px solid #0ff; color: #0ff; padding: 3px 6px; border-radius: 4px; font-size: 8px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='rgba(0,255,255,0.4)'" onmouseout="this.style.background='rgba(0,255,255,0.2)'" title="Show Mode">📡</button>
             </div>
@@ -15549,8 +15552,347 @@
             lastUpdate: 0
         };
 
+        // ============================================
+        // v8.0: STYLE VARIETY MULTIPLIER - 8-Agent Consensus (Cycle 6)
+        // Varied combat actions escalate style gains, repeated actions decay!
+        // ============================================
+        const STYLE_VARIETY_CONFIG = {
+            HISTORY_SIZE: 6,          // Track last 6 actions
+            VARIETY_MULTIPLIERS: {
+                1: 1.0,               // Same action = base
+                2: 1.5,               // 2 unique = 1.5x
+                3: 2.0,               // 3 unique = 2x
+                4: 2.5,               // 4 unique = 2.5x
+                5: 3.0,               // 5+ unique = 3x (cap)
+                6: 3.0
+            },
+            REPEAT_DECAY: 0.75,       // Repeated action = 0.75x
+            REPEAT_MINIMUM: 0.5,      // Decay floor
+            STALE_THRESHOLD: 3,       // After 3 repeats, show "STALE"
+            // Action categories (similar actions count as same)
+            ACTION_CATEGORIES: {
+                hit: 'attack',
+                comboHit: 'attack',
+                kill: 'kill',
+                finisher: 'finisher',
+                dodge: 'dodge',
+                parry: 'parry',
+                ability: 'ability'
+            }
+        };
+
+        let styleVarietyHistory = [];
+        let consecutiveRepeats = 0;
+
+        function getStyleVarietyMultiplier(action) {
+            const category = STYLE_VARIETY_CONFIG.ACTION_CATEGORIES[action] || action;
+
+            // Check if this is a repeat of the last action
+            const lastCategory = styleVarietyHistory.length > 0
+                ? (STYLE_VARIETY_CONFIG.ACTION_CATEGORIES[styleVarietyHistory[styleVarietyHistory.length - 1]] || styleVarietyHistory[styleVarietyHistory.length - 1])
+                : null;
+
+            if (lastCategory === category) {
+                consecutiveRepeats++;
+            } else {
+                consecutiveRepeats = 0;
+            }
+
+            // Add to history
+            styleVarietyHistory.push(action);
+            if (styleVarietyHistory.length > STYLE_VARIETY_CONFIG.HISTORY_SIZE) {
+                styleVarietyHistory.shift();
+            }
+
+            // Count unique categories in history
+            const categories = styleVarietyHistory.map(a => STYLE_VARIETY_CONFIG.ACTION_CATEGORIES[a] || a);
+            const uniqueCategories = new Set(categories).size;
+
+            // Calculate multiplier
+            let multiplier = STYLE_VARIETY_CONFIG.VARIETY_MULTIPLIERS[uniqueCategories] || 1.0;
+
+            // Apply decay for consecutive repeats
+            if (consecutiveRepeats > 0) {
+                const decayFactor = Math.pow(STYLE_VARIETY_CONFIG.REPEAT_DECAY, consecutiveRepeats);
+                multiplier = Math.max(STYLE_VARIETY_CONFIG.REPEAT_MINIMUM, multiplier * decayFactor);
+            }
+
+            // Show visual feedback
+            showStyleVarietyFeedback(uniqueCategories, consecutiveRepeats);
+
+            return multiplier;
+        }
+
+        function showStyleVarietyFeedback(uniqueCount, repeats) {
+            // Only show feedback for significant events
+            if (repeats >= STYLE_VARIETY_CONFIG.STALE_THRESHOLD) {
+                // Show "STALE" indicator
+                if (!document.getElementById('style-variety-stale')) {
+                    const staleDiv = document.createElement('div');
+                    staleDiv.id = 'style-variety-stale';
+                    staleDiv.style.cssText = `
+                        position: fixed;
+                        top: 190px;
+                        right: 80px;
+                        color: #888;
+                        font-size: 12px;
+                        font-weight: bold;
+                        letter-spacing: 2px;
+                        opacity: 0.8;
+                        animation: stalePulse 0.5s ease-out;
+                        z-index: 100;
+                    `;
+                    staleDiv.textContent = 'STALE';
+                    document.body.appendChild(staleDiv);
+                    setTimeout(() => staleDiv.remove(), 1000);
+                }
+            } else if (uniqueCount >= 4) {
+                // Show "VARIED!" indicator for high variety
+                const variedDiv = document.createElement('div');
+                variedDiv.style.cssText = `
+                    position: fixed;
+                    top: 190px;
+                    right: 80px;
+                    color: ${uniqueCount >= 5 ? '#ff00ff' : '#ffdd00'};
+                    font-size: ${uniqueCount >= 5 ? '14px' : '12px'};
+                    font-weight: bold;
+                    letter-spacing: 2px;
+                    text-shadow: 0 0 10px currentColor;
+                    animation: varietyPop 0.4s ease-out forwards;
+                    z-index: 100;
+                `;
+                variedDiv.textContent = uniqueCount >= 5 ? 'STYLISH!' : 'VARIED!';
+                document.body.appendChild(variedDiv);
+                setTimeout(() => variedDiv.remove(), 600);
+            }
+        }
+
+        // Add CSS for variety feedback animations
+        (function addStyleVarietyCSS() {
+            if (document.getElementById('style-variety-css')) return;
+            const style = document.createElement('style');
+            style.id = 'style-variety-css';
+            style.textContent = `
+                @keyframes varietyPop {
+                    0% { transform: scale(0.5); opacity: 0; }
+                    50% { transform: scale(1.2); opacity: 1; }
+                    100% { transform: scale(1); opacity: 0; }
+                }
+                @keyframes stalePulse {
+                    0% { opacity: 0; }
+                    50% { opacity: 0.8; }
+                    100% { opacity: 0.4; }
+                }
+            `;
+            document.head.appendChild(style);
+        })();
+
+        // ============================================
+        // v8.0: KILL-CHAIN AUTO-TARGET LOCK - 8-Agent Consensus Cycle 6
+        // After scoring a kill, automatically snap to nearest enemy
+        // Keeps combat flowing without manual re-targeting
+        // ============================================
+        const AUTO_TARGET_CONFIG = {
+            ENABLED: true,               // Toggle via settings
+            MAX_RANGE: 18,               // Maximum auto-target range (units)
+            PREFER_ELITE_RANGE: 25,      // Extended range for elites/bosses
+            MIN_DELAY: 80,               // Minimum delay before targeting (ms)
+            MAX_DELAY: 150,              // Maximum delay before targeting (ms)
+            VISUAL_DURATION: 400,        // Lock-on indicator duration (ms)
+            AUDIO_ENABLED: true,         // Play lock-on sound
+            PRIORITIZE_DAMAGED: true,    // Prefer already-damaged enemies
+            PRIORITIZE_ELITE: true       // Prefer elites within range
+        };
+
+        let autoTargetState = {
+            lastLockTime: 0,
+            lockIndicator: null,
+            lockTimeout: null
+        };
+
+        // Find the best target after a kill
+        function findNextTarget(killedPosition) {
+            if (!AUTO_TARGET_CONFIG.ENABLED) return null;
+            if (!worldState?.mobs?.length) return null;
+
+            const player = worldState.player;
+            if (!player) return null;
+
+            let bestTarget = null;
+            let bestScore = Infinity;
+
+            worldState.mobs.forEach(mob => {
+                if (!mob?.userData?.hp || mob.userData.hp <= 0) return;
+
+                const dist = mob.position.distanceTo(player.position);
+                const isElite = mob.userData.isElite || mob.userData.type === 'boss';
+                const maxRange = isElite ? AUTO_TARGET_CONFIG.PREFER_ELITE_RANGE : AUTO_TARGET_CONFIG.MAX_RANGE;
+
+                if (dist > maxRange) return;
+
+                // Calculate targeting score (lower = better)
+                let score = dist;
+
+                // Prefer damaged enemies
+                if (AUTO_TARGET_CONFIG.PRIORITIZE_DAMAGED && mob.userData.hp < mob.userData.maxHp) {
+                    score -= 5;
+                    // Extra priority for low-HP enemies (finishable)
+                    if (mob.userData.hp < mob.userData.maxHp * 0.25) {
+                        score -= 3;
+                    }
+                }
+
+                // Prefer elites
+                if (AUTO_TARGET_CONFIG.PRIORITIZE_ELITE && isElite) {
+                    score -= 4;
+                }
+
+                // Prefer enemies in front of player (based on facing direction)
+                const toMob = mob.position.clone().sub(player.position).normalize();
+                const playerForward = new THREE.Vector3(0, 0, -1).applyQuaternion(player.quaternion);
+                const dotProduct = toMob.dot(playerForward);
+                if (dotProduct > 0.5) score -= 3; // In front
+                else if (dotProduct < -0.5) score += 2; // Behind
+
+                if (score < bestScore) {
+                    bestScore = score;
+                    bestTarget = mob;
+                }
+            });
+
+            return bestTarget;
+        }
+
+        // Visual lock-on indicator
+        function showLockOnIndicator(target) {
+            if (!target) return;
+
+            // Clear existing indicator
+            clearLockOnIndicator();
+
+            // Create lock-on ring effect
+            const ringGeometry = new THREE.RingGeometry(0.8, 1.0, 16);
+            const ringMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ffff,
+                transparent: true,
+                opacity: 0.8,
+                side: THREE.DoubleSide
+            });
+            const ring = new THREE.Mesh(ringGeometry, ringMaterial);
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.copy(target.position);
+            ring.position.y = 0.1;
+            scene.add(ring);
+
+            autoTargetState.lockIndicator = ring;
+
+            // Animate the ring
+            let startTime = performance.now();
+            const animateRing = () => {
+                if (!autoTargetState.lockIndicator) return;
+
+                const elapsed = performance.now() - startTime;
+                const progress = elapsed / AUTO_TARGET_CONFIG.VISUAL_DURATION;
+
+                if (progress >= 1) {
+                    clearLockOnIndicator();
+                    return;
+                }
+
+                // Pulse and fade
+                const scale = 1 + progress * 0.5;
+                ring.scale.set(scale, scale, 1);
+                ring.material.opacity = 0.8 * (1 - progress);
+                ring.position.copy(target.position);
+                ring.position.y = 0.1;
+
+                requestAnimationFrame(animateRing);
+            };
+            requestAnimationFrame(animateRing);
+        }
+
+        function clearLockOnIndicator() {
+            if (autoTargetState.lockIndicator) {
+                scene.remove(autoTargetState.lockIndicator);
+                autoTargetState.lockIndicator.geometry?.dispose();
+                autoTargetState.lockIndicator.material?.dispose();
+                autoTargetState.lockIndicator = null;
+            }
+            if (autoTargetState.lockTimeout) {
+                clearTimeout(autoTargetState.lockTimeout);
+                autoTargetState.lockTimeout = null;
+            }
+        }
+
+        // Lock-on audio cue
+        function playLockOnSound(isElite = false) {
+            if (!AUTO_TARGET_CONFIG.AUDIO_ENABLED) return;
+
+            try {
+                const ctx = AudioSystem.ctx || new (window.AudioContext || window.webkitAudioContext)();
+                if (ctx.state === 'suspended') ctx.resume();
+
+                const now = ctx.currentTime;
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                // Quick ascending "lock-on" chirp
+                osc.type = 'sine';
+                const baseFreq = isElite ? 880 : 660;
+                osc.frequency.setValueAtTime(baseFreq * 0.8, now);
+                osc.frequency.exponentialRampToValueAtTime(baseFreq * 1.2, now + 0.08);
+                osc.frequency.exponentialRampToValueAtTime(baseFreq, now + 0.12);
+
+                gain.gain.setValueAtTime(0.12, now);
+                gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+
+                osc.start(now);
+                osc.stop(now + 0.15);
+            } catch (e) {
+                // Audio not available
+            }
+        }
+
+        // Main auto-target function called after kills
+        function triggerKillChainAutoTarget(killedPosition, killedType = 'normal') {
+            if (!AUTO_TARGET_CONFIG.ENABLED) return;
+
+            // Add slight delay for cinematic feel
+            const delay = AUTO_TARGET_CONFIG.MIN_DELAY +
+                Math.random() * (AUTO_TARGET_CONFIG.MAX_DELAY - AUTO_TARGET_CONFIG.MIN_DELAY);
+
+            autoTargetState.lockTimeout = setTimeout(() => {
+                const nextTarget = findNextTarget(killedPosition);
+
+                if (nextTarget) {
+                    // Set as new target
+                    worldState.target = nextTarget;
+                    autoTargetState.lastLockTime = performance.now();
+
+                    // Visual and audio feedback
+                    const isElite = nextTarget.userData?.isElite || nextTarget.userData?.type === 'boss';
+                    showLockOnIndicator(nextTarget);
+                    playLockOnSound(isElite);
+
+                    // Floater feedback
+                    const targetName = nextTarget.userData?.name || 'Enemy';
+                    spawnFloater(nextTarget.position.clone().add(new THREE.Vector3(0, 2, 0)),
+                        `🎯 ${targetName}`, isElite ? '#ff44ff' : '#00ffff');
+                }
+            }, delay);
+        }
+
         function updateStyleMeter(action, multiplier = 1) {
             let pointChange = (STYLE_METER_CONFIG.ACTIONS[action] || 0) * multiplier;
+
+            // v8.0: Apply Style Variety Multiplier (8-Agent Consensus Cycle 6)
+            if (typeof getStyleVarietyMultiplier === 'function' && action !== 'damageTaken') {
+                const varietyMult = getStyleVarietyMultiplier(action);
+                pointChange = Math.floor(pointChange * varietyMult);
+            }
 
             // v8.0: Apply Adrenaline Surge style gain boost (8-Agent Consensus Cycle 4)
             if (typeof getAdrenalineStyleMultiplier === 'function') {
@@ -59809,6 +60151,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
         // v7.22: Expose to window for inline onclick handler
         window.openShowModeModal = openShowModeModal;
 
+        // v8.0: Expose setShareMode for tab buttons
+        window.setShareMode = setShareMode;
+
         // Toggle between spectate and multiplayer share modes
         function setShareMode(shareMode) {
             currentShareMode = shareMode;
@@ -69584,6 +69929,13 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         }
                     }
 
+                    // v8.0: KILL-CHAIN AUTO-TARGET - snap to next enemy! (8-Agent Consensus Cycle 6)
+                    // Keeps combat flowing without manual re-targeting
+                    if (typeof triggerKillChainAutoTarget === 'function') {
+                        const killType = isBoss ? 'boss' : (data.isElite ? 'elite' : 'normal');
+                        triggerKillChainAutoTarget(target.position.clone(), killType);
+                    }
+
                     scene.remove(target);
                     worldState.mobs = worldState.mobs.filter(x => x !== target);
                 }
@@ -72208,6 +72560,118 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const tz = Math.floor(worldZ / 10);
             const key = `${tx},${tz}`;
             return gameData.exploredTiles[planetId]?.[key] === 1;
+        }
+
+        // v8.0: 3D MINIMAP ANT FARM VIEW
+        // Real-time 3D top-down view of the world in the minimap
+        const minimap3D = {
+            enabled: false,
+            renderer: null,
+            camera: null,
+            animationId: null,
+            lastUpdate: 0,
+            updateInterval: 50 // Update at ~20fps for performance
+        };
+
+        function initMinimap3D() {
+            if (minimap3D.renderer) return; // Already initialized
+
+            const canvas = document.getElementById('minimap-3d-canvas');
+            if (!canvas || typeof THREE === 'undefined') return;
+
+            // Create a small WebGL renderer
+            minimap3D.renderer = new THREE.WebGLRenderer({
+                canvas: canvas,
+                antialias: false, // Performance
+                alpha: true
+            });
+            minimap3D.renderer.setSize(130, 130);
+            minimap3D.renderer.setPixelRatio(1); // Lower for performance
+
+            // Create orthographic camera for top-down view
+            const worldExtent = CONFIG.WORLD_SIZE * CONFIG.TILE_SIZE;
+            const aspect = 1;
+            minimap3D.camera = new THREE.OrthographicCamera(
+                -worldExtent / 2, worldExtent / 2,
+                worldExtent / 2, -worldExtent / 2,
+                1, 2000
+            );
+            minimap3D.camera.position.set(0, 500, 0);
+            minimap3D.camera.lookAt(0, 0, 0);
+            minimap3D.camera.up.set(0, 0, -1); // Make north point up
+
+            console.log('v8.0: 3D Minimap initialized');
+        }
+
+        function toggleMinimap3D() {
+            minimap3D.enabled = !minimap3D.enabled;
+
+            const canvas2D = document.getElementById('minimap-canvas');
+            const canvas3D = document.getElementById('minimap-3d-canvas');
+            const toggleBtn = document.getElementById('minimap-3d-toggle');
+
+            if (minimap3D.enabled) {
+                // Switch to 3D view
+                if (!minimap3D.renderer) {
+                    initMinimap3D();
+                }
+
+                if (canvas2D) canvas2D.style.display = 'none';
+                if (canvas3D) canvas3D.style.display = 'block';
+                if (toggleBtn) {
+                    toggleBtn.style.background = 'rgba(0,255,136,0.4)';
+                    toggleBtn.style.borderColor = '#0f8';
+                }
+
+                // Start rendering loop
+                renderMinimap3D();
+                showNotification('🐜 3D Ant Farm View - Real-time world visualization', 'info');
+            } else {
+                // Switch back to 2D view
+                if (canvas2D) canvas2D.style.display = 'block';
+                if (canvas3D) canvas3D.style.display = 'none';
+                if (toggleBtn) {
+                    toggleBtn.style.background = 'rgba(0,255,255,0.2)';
+                    toggleBtn.style.borderColor = '#0ff';
+                }
+
+                // Stop 3D rendering loop
+                if (minimap3D.animationId) {
+                    cancelAnimationFrame(minimap3D.animationId);
+                    minimap3D.animationId = null;
+                }
+            }
+        }
+        window.toggleMinimap3D = toggleMinimap3D;
+
+        function renderMinimap3D() {
+            if (!minimap3D.enabled || !minimap3D.renderer || !scene) {
+                return;
+            }
+
+            const now = performance.now();
+
+            // Throttle updates for performance
+            if (now - minimap3D.lastUpdate >= minimap3D.updateInterval) {
+                minimap3D.lastUpdate = now;
+
+                // Center camera on player position
+                if (worldState.player) {
+                    const px = worldState.player.position.x;
+                    const pz = worldState.player.position.z;
+
+                    // Optionally follow player or show whole world
+                    // For full world view, keep camera at center
+                    // minimap3D.camera.position.set(px, 500, pz);
+                    // minimap3D.camera.lookAt(px, 0, pz);
+                }
+
+                // Render the main scene from above
+                minimap3D.renderer.render(scene, minimap3D.camera);
+            }
+
+            // Continue loop
+            minimap3D.animationId = requestAnimationFrame(renderMinimap3D);
         }
 
         function updateMinimap() {
