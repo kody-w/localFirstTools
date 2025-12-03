@@ -23729,6 +23729,212 @@
             staggerTracking.delete(mobId);
         }
 
+        // ============================================
+        // v9.0: CREATURE MODEL LOADER SYSTEM
+        // Loads detailed 3D creature models from JSON
+        // ============================================
+        const CREATURE_MODEL_CONFIG = {
+            ENABLED: true,
+            BASE_URL: 'https://raw.githubusercontent.com/kody-w/localFirstTools/main/data/games/creatures/',
+            CACHE: new Map(),
+            LOADING: new Map(),
+            FALLBACK_TO_SPHERE: true
+        };
+
+        // Maps enemy names to creature model files
+        const CREATURE_MODEL_REGISTRY = {
+            'ShadowWraith': 'shadow-wraith.json',
+            'CrystalGolem': 'crystal-golem.json',
+            'VoidSpawn': 'void-spider.json',
+            'MagmaCore': 'flame-serpent.json',
+            'IceWisp': 'storm-elemental.json',
+            'Berserker': 'blood-knight.json',
+            'Slime': 'forest-guardian.json'  // Nature-themed for Terra biome
+        };
+
+        // Fetch and cache creature model JSON
+        async function loadCreatureModel(modelFile) {
+            if (CREATURE_MODEL_CONFIG.CACHE.has(modelFile)) {
+                return CREATURE_MODEL_CONFIG.CACHE.get(modelFile);
+            }
+            if (CREATURE_MODEL_CONFIG.LOADING.has(modelFile)) {
+                return CREATURE_MODEL_CONFIG.LOADING.get(modelFile);
+            }
+
+            const loadPromise = fetch(CREATURE_MODEL_CONFIG.BASE_URL + modelFile)
+                .then(r => {
+                    if (!r.ok) throw new Error('Model fetch failed');
+                    return r.json();
+                })
+                .then(data => {
+                    CREATURE_MODEL_CONFIG.CACHE.set(modelFile, data);
+                    CREATURE_MODEL_CONFIG.LOADING.delete(modelFile);
+                    return data;
+                })
+                .catch(err => {
+                    console.warn(`Failed to load creature model ${modelFile}:`, err);
+                    CREATURE_MODEL_CONFIG.LOADING.delete(modelFile);
+                    return null;
+                });
+
+            CREATURE_MODEL_CONFIG.LOADING.set(modelFile, loadPromise);
+            return loadPromise;
+        }
+
+        // Pre-load all creature models at game start
+        function preloadCreatureModels() {
+            Object.values(CREATURE_MODEL_REGISTRY).forEach(modelFile => {
+                loadCreatureModel(modelFile);
+            });
+        }
+
+        // Create 3D mesh from creature JSON bodyParts
+        function createCreatureMeshFromJSON(creatureData, scale = 0.5) {
+            const group = new THREE.Group();
+
+            if (!creatureData || !creatureData.bodyParts) return null;
+
+            creatureData.bodyParts.forEach(part => {
+                let geometry;
+                const size = (part.size || 0.5) * scale;
+
+                switch (part.shape) {
+                    case 'sphere':
+                        geometry = new THREE.SphereGeometry(size, 16, 16);
+                        break;
+                    case 'box':
+                        const w = (part.width || size) * scale;
+                        const h = (part.height || size) * scale;
+                        const d = (part.depth || size) * scale;
+                        geometry = new THREE.BoxGeometry(w, h, d);
+                        break;
+                    case 'cylinder':
+                        const rTop = (part.radiusTop || size * 0.5) * scale;
+                        const rBot = (part.radiusBottom || size * 0.5) * scale;
+                        const height = (part.height || size) * scale;
+                        geometry = new THREE.CylinderGeometry(rTop, rBot, height, 16);
+                        break;
+                    case 'cone':
+                        const cHeight = (part.height || size) * scale;
+                        geometry = new THREE.ConeGeometry(size, cHeight, 16);
+                        break;
+                    case 'torus':
+                        const tubeR = (part.tubeRadius || size * 0.2) * scale;
+                        geometry = new THREE.TorusGeometry(size, tubeR, 12, 24);
+                        break;
+                    default:
+                        geometry = new THREE.SphereGeometry(size, 16, 16);
+                }
+
+                const color = new THREE.Color(part.color || '#ffffff');
+                const material = new THREE.MeshStandardMaterial({
+                    color: color,
+                    roughness: 1.0 - (part.shininess || 50) / 100,
+                    metalness: (part.shininess || 50) / 200,
+                    transparent: part.opacity < 1,
+                    opacity: part.opacity || 1,
+                    emissive: part.glowing ? color : new THREE.Color(0x000000),
+                    emissiveIntensity: part.glowing ? 0.5 : 0
+                });
+
+                const mesh = new THREE.Mesh(geometry, material);
+
+                // Apply position (scaled)
+                if (part.position) {
+                    mesh.position.set(
+                        part.position[0] * scale,
+                        part.position[1] * scale,
+                        part.position[2] * scale
+                    );
+                }
+
+                // Apply rotation
+                if (part.rotation) {
+                    mesh.rotation.set(part.rotation[0], part.rotation[1], part.rotation[2]);
+                }
+
+                // Apply scale
+                if (part.scale) {
+                    mesh.scale.set(part.scale[0], part.scale[1], part.scale[2]);
+                }
+
+                mesh.castShadow = true;
+                mesh.receiveShadow = true;
+                group.add(mesh);
+            });
+
+            return group;
+        }
+
+        // Create mob mesh - uses creature model if available, falls back to sphere
+        async function createMobMeshAsync(enemyName, enemyData, isElite, eliteData) {
+            const modelFile = CREATURE_MODEL_REGISTRY[enemyName];
+
+            if (CREATURE_MODEL_CONFIG.ENABLED && modelFile) {
+                const creatureData = await loadCreatureModel(modelFile);
+                if (creatureData) {
+                    const creatureMesh = createCreatureMeshFromJSON(creatureData, isElite ? 0.6 : 0.4);
+                    if (creatureMesh) {
+                        // Tint with elite color if elite
+                        if (isElite && eliteData) {
+                            creatureMesh.traverse(child => {
+                                if (child.isMesh && child.material) {
+                                    child.material = child.material.clone();
+                                    child.material.emissive = new THREE.Color(eliteData.color);
+                                    child.material.emissiveIntensity += 0.3;
+                                }
+                            });
+                        }
+                        return creatureMesh;
+                    }
+                }
+            }
+
+            // Fallback to simple sphere
+            const mobGeo = new THREE.SphereGeometry(isElite ? 1.0 : 0.8, 16, 16);
+            const mobMat = new THREE.MeshStandardMaterial({
+                color: eliteData ? eliteData.color : enemyData.color,
+                roughness: 0.3,
+                emissive: eliteData ? eliteData.color : enemyData.emissive,
+                emissiveIntensity: isElite ? 0.5 : 0.2
+            });
+            return new THREE.Mesh(mobGeo, mobMat);
+        }
+
+        // Sync version - uses cached model or falls back immediately
+        function createMobMeshSync(enemyName, enemyData, isElite, eliteData) {
+            const modelFile = CREATURE_MODEL_REGISTRY[enemyName];
+
+            if (CREATURE_MODEL_CONFIG.ENABLED && modelFile) {
+                const cachedData = CREATURE_MODEL_CONFIG.CACHE.get(modelFile);
+                if (cachedData) {
+                    const creatureMesh = createCreatureMeshFromJSON(cachedData, isElite ? 0.6 : 0.4);
+                    if (creatureMesh) {
+                        if (isElite && eliteData) {
+                            creatureMesh.traverse(child => {
+                                if (child.isMesh && child.material) {
+                                    child.material = child.material.clone();
+                                    child.material.emissive = new THREE.Color(eliteData.color);
+                                    child.material.emissiveIntensity += 0.3;
+                                }
+                            });
+                        }
+                        return creatureMesh;
+                    }
+                }
+            }
+
+            // Fallback to simple sphere
+            const mobGeo = new THREE.SphereGeometry(isElite ? 1.0 : 0.8, 16, 16);
+            const mobMat = new THREE.MeshStandardMaterial({
+                color: eliteData ? eliteData.color : enemyData.color,
+                roughness: 0.3,
+                emissive: eliteData ? eliteData.color : enemyData.emissive,
+                emissiveIntensity: isElite ? 0.5 : 0.2
+            });
+            return new THREE.Mesh(mobGeo, mobMat);
+        }
+
         // v4.2: Enemy Variety System - Biome-specific enemies
         // v4.5: Added attack telegraphing parameters
         const ENEMY_TYPES = {
@@ -53246,6 +53452,9 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             // v6.19: Load 3D text font early for title display
             loadCopilotTextFont();
 
+            // v9.0: Preload creature models for detailed enemy rendering
+            preloadCreatureModels();
+
             // v4.6: Apply saved settings
             applySettings();
 
@@ -62718,14 +62927,8 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             const baseDamage = enemyData.damage * (eliteData ? eliteData.damageMult : 1);
             const baseSpeed = enemyData.speed * (eliteData ? eliteData.speedMult : 1);
 
-            const mobGeo = new THREE.SphereGeometry(isElite ? 1.0 : 0.8, 16, 16);
-            const mobMat = new THREE.MeshStandardMaterial({
-                color: eliteData ? eliteData.color : enemyData.color,
-                roughness: 0.3,
-                emissive: eliteData ? eliteData.color : enemyData.emissive,
-                emissiveIntensity: isElite ? 0.5 : 0.2
-            });
-            const mob = new THREE.Mesh(mobGeo, mobMat);
+            // v9.0: Use creature model system for detailed 3D enemies
+            const mob = createMobMeshSync(enemyName, enemyData, isElite, eliteData);
 
             const rx = (rng.next() - 0.5) * 60;
             const rz = (rng.next() - 0.5) * 60;
