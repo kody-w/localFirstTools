@@ -58270,6 +58270,14 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 }, 2000);
             }
 
+            // v9.1: Initialize neutral creep camps
+            if (typeof initNeutralCamps === 'function') {
+                // Delay initialization to ensure scene is ready
+                setTimeout(() => {
+                    initNeutralCamps();
+                }, 3000);
+            }
+
             // v6.83: Initialize NPC Memory System update loop
             if (typeof NPC_MEMORY_SYSTEM !== 'undefined') {
                 // Clear any existing interval
@@ -69675,6 +69683,11 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                 updateCreepWaves(dt, time);
             }
 
+            // v9.1: Update neutral creep camps
+            if (typeof updateNeutralCamps === 'function') {
+                updateNeutralCamps(time, dt);
+            }
+
             // v6.66: Update RCT-style base building system
             if (typeof updateBaseBuildingSystem === 'function') {
                 updateBaseBuildingSystem(time);
@@ -70552,6 +70565,47 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
                         creepWaveState.creeps.splice(idx, 1);
                     }
                 }
+
+                worldState.interactTarget = null;
+                return;
+            }
+
+            // v9.1: Handle neutral creature attacks
+            if (data.type === 'neutral') {
+                const damage = getPlayerDamage();
+                data.hp -= damage;
+                data.state = 'aggro'; // Aggro on damage
+
+                // Visual feedback
+                spawnFloater(target.position, `-${damage}`, '#ffaa00');
+                AudioSystem.hit(0);
+                if (particles) particles.emit(target.position, 10, 0xffaa00, { spread: 2.5, lifetime: 600 });
+
+                // Flash effect
+                target.traverse(child => {
+                    if (child.isMesh && child.material) {
+                        const origEmissive = child.material.emissive?.clone();
+                        child.material.emissive = new THREE.Color(0xffffff);
+                        setTimeout(() => {
+                            if (child.material && origEmissive) {
+                                child.material.emissive = origEmissive;
+                            }
+                        }, 100);
+                    }
+                });
+
+                // Update HP bar
+                if (data.hpBar) {
+                    const hpPercent = data.hp / data.maxHp;
+                    data.hpBar.scale.x = Math.max(0.01, hpPercent);
+                    data.hpBar.material.color.setHex(hpPercent > 0.5 ? 0x00ff00 : hpPercent > 0.25 ? 0xffaa00 : 0xff0000);
+                }
+
+                // Scale feedback
+                target.scale.multiplyScalar(0.9);
+                setTimeout(() => { if(target.parent) target.scale.multiplyScalar(1/0.9); }, 100);
+
+                // Death is handled in updateNeutralCamps loop
 
                 worldState.interactTarget = null;
                 return;
@@ -72738,16 +72792,20 @@ You are narrating an EPIC. Make every response feel like it belongs in a dramati
             }
             else if(mode === 'world') {
                 // v6.68: Include hostile creeps and towers in clickable targets
+                // v9.1: Include neutral camp creatures in clickable targets
                 const hostileCreeps = (creepWaveState.creeps || []).filter(c => c && c.userData?.team === 'B');
                 const hostileTowers = (laneSupportState.laneTowers || []).filter(t => t && t.team !== 'robot' && t.mesh).map(t => t.mesh);
-                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers];
+                const neutralCreatures = (typeof neutralCampState !== 'undefined' && neutralCampState.creatures) ? neutralCampState.creatures.filter(c => c && c.userData) : [];
+                const allTargets = [...worldState.interactables, ...worldState.mobs, ...hostileCreeps, ...hostileTowers, ...neutralCreatures];
 
                 const hits = raycaster.intersectObjects(allTargets, true);
                 if(hits.length > 0) {
                     let obj = hits[0].object;
                     while(obj.parent && obj.parent.type !== 'Scene') obj = obj.parent;
                     worldState.interactTarget = obj;
-                    const targetColor = obj.userData.team === 'B' || obj.userData.type === 'hostileTower' ? '#ff4444' : '#0ff';
+                    // v9.1: Orange color for neutral creatures
+                    const targetColor = obj.userData.type === 'neutral' ? '#ffaa00' :
+                                       (obj.userData.team === 'B' || obj.userData.type === 'hostileTower') ? '#ff4444' : '#0ff';
                     spawnFloater(obj.position, "Targeting...", targetColor);
                     return;
                 }
