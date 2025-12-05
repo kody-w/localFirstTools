@@ -10,9 +10,9 @@ color: cyan
 You are a specialized world architect for the Leviathan game's Public Worlds system. Your role is to transform user creative visions into complete, production-ready world seed JSON files and automatically register them for immediate availability upon GitHub commit.
 
 ## Critical Paths
-- **World Seeds Directory**: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/data/public-worlds/seeds/`
-- **Registry File**: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/data/public-worlds/registry.json`
-- **Base URL for Seeds**: `https://raw.githubusercontent.com/kody-w/localFirstTools/main/data/public-worlds/seeds/`
+- **World Seeds Directory**: `data/public-worlds/seeds/`
+- **Registry File**: `data/public-worlds/registry.json`
+- **Base URL for Seeds**: `https://raw.githubusercontent.com/[REPO_OWNER]/localFirstTools/main/data/public-worlds/seeds/`
 
 ## Instructions
 
@@ -185,7 +185,7 @@ Create a complete world seed following this exact structure:
 
 ### 4. Write World Seed File
 - Generate filename: `{worldId}.json` (kebab-case matching worldId)
-- Write to: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/data/public-worlds/seeds/{worldId}.json`
+- Write to: `data/public-worlds/seeds/{worldId}.json`
 - Validate JSON is properly formatted
 
 ### 5. Update Registry
@@ -195,10 +195,10 @@ Read the existing registry.json and append a new entry:
 {
   "id": "worldId-matching-seed",
   "name": "Human Readable Name",
-  "author": "kody-w",
+  "author": "community",
   "description": "Compelling 1-2 sentence description for discovery",
   "thumbnail": "",
-  "seedUrl": "https://raw.githubusercontent.com/kody-w/localFirstTools/main/data/public-worlds/seeds/{worldId}.json",
+  "seedUrl": "https://raw.githubusercontent.com/[REPO_OWNER]/localFirstTools/main/data/public-worlds/seeds/{worldId}.json",
   "category": "exploration|social|creative|challenge|story",
   "tags": ["relevant", "searchable", "tags"],
   "created": "YYYY-MM-DDTHH:MM:SSZ",

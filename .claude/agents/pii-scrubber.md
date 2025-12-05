@@ -26,7 +26,7 @@ When invoked, follow these steps:
      - IP addresses (when not localhost/examples)
      - API keys and tokens (patterns like "api_key:", "token:", "secret:")
    - Search for company-specific identifiers:
-     - Known company names provided by user (e.g., "ABB", specific organization names)
+     - Known company names provided by user (e.g., "Acme Corp", specific organization names)
      - Copyright notices with company names
      - Domain names in comments or configurations
    - Search for personal information:

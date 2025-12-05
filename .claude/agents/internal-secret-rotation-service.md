@@ -16,7 +16,7 @@ When invoked, you must follow these steps:
 ### Phase 1: Project Analysis and Planning
 
 1. **Analyze Existing Patterns**
-   - Use `Glob` to scan `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/apps/` for similar security or utility applications
+   - Use `Glob` to scan `apps/` for similar security or utility applications
    - Use `Read` to examine 2-3 exemplary apps to understand the codebase patterns
    - Use `Grep` to find localStorage usage patterns and import/export implementations
    - Document findings for consistent implementation
@@ -35,7 +35,7 @@ When invoked, you must follow these steps:
 ### Phase 2: Build Core Application
 
 3. **Create the HTML Application File**
-   - Write to: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/apps/utilities/internal-secret-rotation-service.html`
+   - Write to: `apps/utilities/internal-secret-rotation-service.html`
    - Follow the self-contained HTML pattern with ALL CSS and JavaScript inline
    - Include proper viewport meta tags for responsive design
 
@@ -190,7 +190,7 @@ When invoked, you must follow these steps:
 ### Phase 4: Testing and Validation
 
 7. **Test the Application**
-   - Use `Bash` to start a local server: `cd /Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools && python3 -m http.server 8000`
+   - Use `Bash` to start a local server: `python3 -m http.server 8000`
    - Verify all UI components render correctly
    - Test secret detection with sample patterns
    - Validate hash storage (never plain text)
@@ -198,7 +198,7 @@ When invoked, you must follow these steps:
    - Check responsive design at multiple breakpoints
 
 8. **Update Configuration**
-   - Run the app updater: `python3 /Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/archive/app-store-updater.py`
+   - Run the app updater: `python3 archive/app-store-updater.py`
    - Verify the app appears in the gallery
 
 ## Best Practices
@@ -248,7 +248,7 @@ Upon completion, provide a summary including:
 ## Internal Secret Rotation Service - Implementation Complete
 
 ### Application Details
-- **File**: /Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/apps/utilities/internal-secret-rotation-service.html
+- **File**: apps/utilities/internal-secret-rotation-service.html
 - **Category**: Utilities
 - **Size**: ~XX KB
 

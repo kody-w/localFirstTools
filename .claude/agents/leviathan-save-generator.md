@@ -387,9 +387,9 @@ I wonder if they're watching me now, from some fold in reality I can't perceive.
 - Set featured: false unless explicitly requested as featured
 
 ## File Locations
-- Registry: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/data/public-saves/registry.json`
-- Save bundles: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/data/public-saves/bundles/`
-- Game reference: `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/apps/games/levi.html`
+- Registry: `data/public-saves/registry.json`
+- Save bundles: `data/public-saves/bundles/`
+- Game reference: `apps/games/levi.html`
 
 ## Report / Response
 After completing save generation, provide:
