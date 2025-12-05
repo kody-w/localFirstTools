@@ -6,8 +6,8 @@
     <title>🐧 Linux in Your Browser - Auto Boot</title>
     <meta name="description" content="Instantly boot a minimal Linux system right in your browser">
     
-    <!-- Load v86 from the v86-master directory -->
-    <script src="v86-master/build/v86_all.js"></script>
+    <!-- Load v86 from CDN (or use local: v86-master/build/libv86.js) -->
+    <script src="https://copy.sh/v86/build/libv86.js"></script>
     
     <style>
         :root {
@@ -275,8 +275,9 @@
         </div>
 
         <div id="screen_container">
-            <div id="screen"></div>
-            <canvas id="vga"></canvas>
+            <!-- v86 requires this specific structure -->
+            <div style="white-space: pre; font: 14px monospace; line-height: 14px"></div>
+            <canvas style="display: none"></canvas>
         </div>
 
         <div id="terminal"></div>
@@ -336,28 +337,20 @@
     "use strict";
 
     // ============================================
-    // CONFIGURATION
+    // CONFIGURATION - Using copy.sh CDN
     // ============================================
     const CONFIG = {
-        // Buildroot Linux - minimal 4.9MB Linux with Lua, curl, telnet
-        profile: "buildroot",
         memory_size: 128 * 1024 * 1024, // 128 MB
         vga_memory_size: 8 * 1024 * 1024, // 8 MB
         
-        // Base path for v86 assets
-        basePath: "v86-master/",
+        // CDN paths for v86 assets
+        wasm_path: "https://copy.sh/v86/build/v86.wasm",
+        bios_url: "https://copy.sh/v86/bios/seabios.bin",
+        vga_bios_url: "https://copy.sh/v86/bios/vgabios.bin",
         
-        // Profile configurations (matching v86's profiles)
-        profiles: {
-            buildroot: {
-                name: "Buildroot Linux",
-                bzimage: {
-                    url: "https://copy.sh/v86/images/buildroot-bzimage68.bin",
-                },
-                cmdline: "tsc=reliable mitigations=off random.trust_cpu=on",
-                filesystem: {},
-            }
-        }
+        // Buildroot Linux kernel image
+        bzimage_url: "https://copy.sh/v86/images/buildroot-bzimage68.bin",
+        cmdline: "tsc=reliable mitigations=off random.trust_cpu=on",
     };
 
     // ============================================
@@ -398,19 +391,19 @@
         if (!emulator || !startTime) return;
 
         // Update uptime
-        const uptime = Math.floor((Date.now() - startTime) / 1000);
-        const minutes = Math.floor(uptime / 60);
-        const seconds = uptime % 60;
+        const uptimeSec = Math.floor((Date.now() - startTime) / 1000);
+        const minutes = Math.floor(uptimeSec / 60);
+        const seconds = uptimeSec % 60;
         elements.uptime.textContent = minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 
-        // Update speed (MIPS)
-        const ips = emulator.get_instruction_counter() / uptime;
-        elements.speed.textContent = (ips / 1e6).toFixed(1) + ' MIPS';
-
-        // Update resolution if available
-        const screen_size = emulator.screen_adapter?.get_size();
-        if (screen_size) {
-            elements.resolution.textContent = `${screen_size.width}x${screen_size.height}`;
+        // Update speed (MIPS) - safely handle method availability
+        try {
+            if (emulator.get_instruction_counter && uptimeSec > 0) {
+                const ips = emulator.get_instruction_counter() / uptimeSec;
+                elements.speed.textContent = (ips / 1e6).toFixed(1) + ' MIPS';
+            }
+        } catch (e) {
+            // Ignore if not available
         }
     }
 
@@ -461,11 +454,48 @@
     function takeScreenshot() {
         if (!emulator) return;
         
-        const canvas = document.getElementById('vga');
+        // Get the canvas from screen_container
+        const canvas = document.querySelector('#screen_container canvas');
+        if (!canvas) {
+            console.log("No canvas found for screenshot");
+            return;
+        }
         const link = document.createElement('a');
         link.download = 'linux-screenshot-' + Date.now() + '.png';
         link.href = canvas.toDataURL();
         link.click();
+    }
+
+    // ============================================
+    // SERIAL OUTPUT HANDLING
+    // ============================================
+    let serialBuffer = "";
+    let bootComplete = false;
+    
+    function handleSerialOutput(byte) {
+        const char = String.fromCharCode(byte);
+        
+        // Skip carriage returns
+        if (char === "\r") return;
+        
+        // Append to terminal display
+        elements.terminal.textContent += char;
+        
+        // Auto-scroll terminal
+        elements.terminal.scrollTop = elements.terminal.scrollHeight;
+        
+        // Track buffer for prompt detection
+        serialBuffer += char;
+        if (serialBuffer.length > 100) {
+            serialBuffer = serialBuffer.slice(-100);
+        }
+        
+        // Detect shell prompt (indicates boot complete)
+        if (!bootComplete && (serialBuffer.endsWith("~% ") || serialBuffer.endsWith("# ") || serialBuffer.endsWith("$ "))) {
+            bootComplete = true;
+            setStatus('ready', 'Linux is running! Click terminal area then type commands.');
+            enableControls();
+        }
     }
 
     // ============================================
@@ -474,100 +504,109 @@
     function sendCommand(cmd) {
         if (!emulator) return;
         
-        // Type each character
-        for (const char of cmd) {
-            emulator.keyboard_send_text(char);
-        }
-        // Send Enter
-        emulator.keyboard_send_scancodes([0x1C, 0x9C]); // Enter key down and up
+        // Send the command via serial
+        emulator.serial0_send(cmd);
     }
 
     // ============================================
     // BOOT LINUX
     // ============================================
-    async function bootLinux() {
+    function bootLinux() {
         setStatus('booting', 'Loading Buildroot Linux (4.9 MB)...');
-
-        const profile = CONFIG.profiles.buildroot;
+        
+        console.log("Initializing v86 emulator...");
 
         try {
             emulator = new V86({
-                wasm_path: CONFIG.basePath + "build/v86.wasm",
+                wasm_path: CONFIG.wasm_path,
                 memory_size: CONFIG.memory_size,
                 vga_memory_size: CONFIG.vga_memory_size,
                 
+                // Screen container for VGA output
                 screen_container: elements.screenContainer,
-                serial_container_xtermjs: elements.terminal,
                 
+                // BIOS files
                 bios: {
-                    url: CONFIG.basePath + "bios/seabios.bin",
+                    url: CONFIG.bios_url,
                 },
                 vga_bios: {
-                    url: CONFIG.basePath + "bios/vgabios.bin",
+                    url: CONFIG.vga_bios_url,
                 },
                 
-                bzimage: profile.bzimage,
-                cmdline: profile.cmdline,
+                // Linux kernel
+                bzimage: {
+                    url: CONFIG.bzimage_url,
+                    async: false,
+                },
                 
+                // Required for serial/filesystem
+                filesystem: {},
+                
+                // Kernel command line
+                cmdline: CONFIG.cmdline,
+                
+                // Auto-start the emulator
                 autostart: true,
+                
+                // Disable keyboard capture initially (use serial instead)
+                disable_keyboard: false,
             });
 
             startTime = Date.now();
+            window.emulator = emulator; // For debugging
 
             // Listen for emulator ready
             emulator.add_listener("emulator-ready", function() {
-                console.log("Emulator ready");
-                setStatus('booting', 'Booting kernel...');
+                console.log("Emulator ready, kernel loading...");
+                setStatus('booting', 'Kernel loading...');
             });
 
-            // Listen for serial output to detect boot completion
-            emulator.add_listener("serial0-output-byte", function(byte) {
-                // Check for login prompt or shell prompt
-                const char = String.fromCharCode(byte);
-                if (char === '#' || char === '$') {
-                    setStatus('ready', 'Linux is running - Click terminal to interact');
-                    enableControls();
-                }
-            });
+            // Listen for serial output
+            emulator.add_listener("serial0-output-byte", handleSerialOutput);
 
             // Update stats every second
             statsInterval = setInterval(updateStats, 1000);
 
-            // Enable controls after a short delay
+            // Safety timeout - enable controls after 15 seconds even if prompt not detected
             setTimeout(() => {
-                enableControls();
-                if (elements.statusText.textContent.includes('Booting')) {
-                    setStatus('ready', 'Linux is running - Click terminal to interact');
+                if (!bootComplete) {
+                    console.log("Timeout reached, enabling controls anyway");
+                    enableControls();
+                    setStatus('ready', 'Linux should be running - try typing commands');
                 }
-            }, 5000);
+            }, 15000);
 
         } catch (error) {
             console.error("Failed to start emulator:", error);
             setStatus('error', 'Failed to start: ' + error.message);
+            elements.terminal.textContent = "ERROR: " + error.message + "\n\nMake sure you're running this from a web server (not file://)";
         }
     }
 
     // ============================================
     // EVENT LISTENERS
     // ============================================
-    elements.pauseBtn.addEventListener('click', pauseEmulator);
-    elements.resumeBtn.addEventListener('click', resumeEmulator);
-    elements.resetBtn.addEventListener('click', resetEmulator);
-    elements.fullscreenBtn.addEventListener('click', goFullscreen);
-    elements.screenshotBtn.addEventListener('click', takeScreenshot);
+    document.addEventListener('DOMContentLoaded', function() {
+        elements.pauseBtn.addEventListener('click', pauseEmulator);
+        elements.resumeBtn.addEventListener('click', resumeEmulator);
+        elements.resetBtn.addEventListener('click', resetEmulator);
+        elements.fullscreenBtn.addEventListener('click', goFullscreen);
+        elements.screenshotBtn.addEventListener('click', takeScreenshot);
 
-    // Quick command buttons
-    document.querySelectorAll('.command-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-            const cmd = btn.getAttribute('data-cmd');
-            if (cmd) sendCommand(cmd + '\n');
+        // Quick command buttons
+        document.querySelectorAll('.command-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const cmd = btn.getAttribute('data-cmd');
+                if (cmd) {
+                    sendCommand(cmd + '\n');
+                    console.log("Sent command:", cmd);
+                }
+            });
         });
+        
+        // Start the emulator
+        bootLinux();
     });
-
-    // ============================================
-    // START ON LOAD
-    // ============================================
-    window.addEventListener('load', bootLinux);
 
     // Cleanup on unload
     window.addEventListener('beforeunload', () => {
