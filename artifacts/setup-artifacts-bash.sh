@@ -18,8 +18,8 @@ NC='\033[0m' # No Color
 
 # Default values
 REPO_NAME="${1:-localFirstTools}"
-GITHUB_USERNAME="${GITHUB_USERNAME:-kody-w}"
-AUTHOR_NAME="${AUTHOR_NAME:-Kody Wildfeuer}"
+GITHUB_USERNAME="${GITHUB_USERNAME:-[GITHUB_USER]}"
+AUTHOR_NAME="${AUTHOR_NAME:-Project Maintainer}"
 
 # Print colored output
 print_info() {

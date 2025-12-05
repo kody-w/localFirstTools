@@ -1,7 +1,7 @@
 ---
 title: "Code Polishing: How Autonomous Agents Incrementally Perfect Your Systems"
 date: 2025-10-14
-author: Kody Wildfeuer
+author: Project Maintainer
 tags: [ai, autonomous-agents, code-quality, incremental-improvement, claude, local-first, windows95]
 description: "Teaching AI agents to polish code through systematic, non-breaking improvements—like having a tireless apprentice who makes your codebase better while you sleep."
 featured_image: /assets/images/code-polishing/hero-autonomous-polish.png

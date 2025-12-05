@@ -4,21 +4,21 @@
 
 ### Release Builds
 
-Download pre-built extension packages from the [releases page](https://github.com/kody-w/localFirstTools/releases):
+Download pre-built extension packages from the [releases page](https://github.com/[GITHUB_USER]/localFirstTools/releases):
 
 - **Chrome Extension ZIP**: Ready-to-install unpacked extension
 - **Meta Analysis JSON**: Ecosystem analytics data
 
 ### Development Builds
 
-Download pre-built artifacts of main from [GitHub Actions](https://github.com/kody-w/localFirstTools/actions):
+Download pre-built artifacts of main from [GitHub Actions](https://github.com/[GITHUB_USER]/localFirstTools/actions):
 
 - **local-first-tools-extension.zip** - Latest build from main branch
 - **build-report.md** - Build statistics and details
 
 To download:
 
-1. Go to the [Build workflow](https://github.com/kody-w/localFirstTools/actions/workflows/build-extension.yml)
+1. Go to the [Build workflow](https://github.com/[GITHUB_USER]/localFirstTools/actions/workflows/build-extension.yml)
 2. Click on the latest successful run
 3. Scroll down to "Artifacts" section
 4. Download `local-first-tools-extension.zip`
@@ -76,7 +76,7 @@ The extension will appear in your toolbar. Click the puzzle piece icon to access
 
 Pre-release builds are available from pull request workflows. These builds are not included in official releases but can be tested manually:
 
-1. Go to the [Actions tab](https://github.com/kody-w/localFirstTools/actions)
+1. Go to the [Actions tab](https://github.com/[GITHUB_USER]/localFirstTools/actions)
 2. Find the workflow run for the PR you want to test
 3. Download the extension artifact
 4. Follow the standard installation steps above

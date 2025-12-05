@@ -1,7 +1,7 @@
 ---
 title: "From Code Welding to Digital Twins: Teaching Systems to Teach AI"
 date: 2025-10-14
-author: Kody Wildfeuer
+author: Project Maintainer
 tags: [ai, digital-twin, local-first, meta-programming, autonomous-agents, claude, knowledge-systems]
 description: "How I built a self-documenting system where AI learns instantly through JSON injection, agents teach future agents, and knowledge compounds infinitely—all running locally in a browser."
 featured_image: /assets/images/digital-twins/hero-system-architecture.png

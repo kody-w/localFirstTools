@@ -365,6 +365,57 @@ def update_vibe_gallery_config(base_path):
 
     return config_path
 
+def update_embedded_manifest(base_path):
+    """Update the EMBEDDED_MANIFEST in index.html for file:// protocol support"""
+    config_path = Path(base_path) / "vibe_gallery_config.json"
+    index_path = Path(base_path) / "index.html"
+
+    if not config_path.exists() or not index_path.exists():
+        print("⚠️ Skipping embedded manifest update - missing files")
+        return
+
+    # Read the vibe_gallery_config.json
+    with open(config_path, 'r', encoding='utf-8') as f:
+        config = json.load(f)
+
+    # Build compact manifest: [[path, title, icon], ...]
+    compact = []
+    seen = set()
+
+    # Random icons for apps without icons
+    icons = ["🎨", "🔮", "✨", "🌟", "🎭", "🎲", "🎯", "🎪", "🎸", "🎹",
+             "🌊", "🌙", "💎", "🔥", "⚡", "🦋", "💫", "🌸", "🌀", "🌈"]
+    icon_idx = 0
+
+    for artwork in config.get("artworks", []):
+        path = artwork.get("path", "")
+        if path and path not in seen:
+            seen.add(path)
+            title = artwork.get("title", "Untitled")
+            icon = artwork.get("icon", icons[icon_idx % len(icons)])
+            icon_idx += 1
+            compact.append([path, title, icon])
+
+    # Generate the JavaScript array
+    manifest_js = json.dumps(compact, ensure_ascii=False, separators=(',', ':'))
+
+    # Read index.html
+    with open(index_path, 'r', encoding='utf-8') as f:
+        content = f.read()
+
+    # Find and replace the EMBEDDED_MANIFEST
+    pattern = r'const EMBEDDED_MANIFEST = \[.*?\];'
+    replacement = f'const EMBEDDED_MANIFEST = {manifest_js};'
+
+    new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+
+    if new_content != content:
+        with open(index_path, 'w', encoding='utf-8') as f:
+            f.write(new_content)
+        print(f"✅ Updated EMBEDDED_MANIFEST with {len(compact)} apps")
+    else:
+        print("⚠️ EMBEDDED_MANIFEST pattern not found in index.html")
+
 if __name__ == "__main__":
     # Get the base directory (where this script is located or current directory)
     base_dir = Path.cwd()
@@ -375,6 +426,9 @@ if __name__ == "__main__":
     try:
         config_file = update_vibe_gallery_config(base_dir)
         print(f"\n📁 Config file updated: {config_file}")
+
+        # Update embedded manifest for file:// protocol support
+        update_embedded_manifest(base_dir)
     except Exception as e:
         print(f"\n❌ Error updating config: {e}")
         import traceback

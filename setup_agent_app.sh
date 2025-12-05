@@ -20,8 +20,8 @@ cd "$PROJECT_ROOT"
 echo "📝 Creating .env file..."
 cat << 'EOF' > .env
 # Azure Function App Settings
-AZURE_WEBJOBS_STORAGE="DefaultEndpointsProtocol=http;AccountName=devstoreaccount1;AccountKey=Eby8vdM02xWs/Kf4/FwYHQJgHv/OcL/WL/JigdfSdfsf/JpYm0/yN0/bEa/n01B2E/g==;BlobEndpoint=http://azurite:10000/devstoreaccount1;QueueEndpoint=http://azurite:10001/devstoreaccount1;TableEndpoint=http://azurite:10002/devstoreaccount1;"
-AZURE_OPENAI_API_KEY="sk-not-used-for-ollama"
+AZURE_WEBJOBS_STORAGE="DefaultEndpointsProtocol=http;AccountName=[STORAGE_ACCOUNT];AccountKey=[YOUR_ACCOUNT_KEY];BlobEndpoint=http://azurite:10000/[STORAGE_ACCOUNT];QueueEndpoint=http://azurite:10001/[STORAGE_ACCOUNT];TableEndpoint=http://azurite:10002/[STORAGE_ACCOUNT];"
+AZURE_OPENAI_API_KEY="[YOUR_API_KEY]"
 AZURE_OPENAI_API_VERSION="2024-02-01"
 AZURE_OPENAI_ENDPOINT="http://localhost:8000"
 AZURE_OPENAI_DEPLOYMENT_NAME="gpt-deployment"

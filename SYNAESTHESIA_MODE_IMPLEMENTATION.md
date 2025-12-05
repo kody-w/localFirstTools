@@ -4,7 +4,7 @@
 Successfully implemented a comprehensive "Synaesthesia Mode" feature for the Recursive Self-Portrait application that transforms behavioral data into cross-sensory visualizations.
 
 ## File Modified
-- `/Users/kodywildfeuer/Documents/GitHub/m365-agents-for-python/localFirstTools/apps/ai-tools/recursive-self-portrait.html`
+- `/path/to/localFirstTools/apps/ai-tools/recursive-self-portrait.html`
 - **Lines added**: ~3,800+ lines of new code
 - **Final file size**: 472KB (12,855 lines)
 
