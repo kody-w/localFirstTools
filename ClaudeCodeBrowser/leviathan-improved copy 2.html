@@ -1231,6 +1231,7 @@
             worldState.respawnQueue = [];
             worldState.terrain = [];
             worldState.heightMap = [];
+            worldState.terrainEdges = null;
         }
 
         // ============================================================
@@ -1328,6 +1329,9 @@
             worldState.groundMesh.receiveShadow = true;
             scene.add(worldState.groundMesh);
 
+            // Create terrain edge outlines for better elevation visibility
+            createTerrainEdges(biome);
+
             // Spawn props
             for(let x = 0; x < CONFIG.WORLD_SIZE; x++) {
                 for(let z = 0; z < CONFIG.WORLD_SIZE; z++) {
@@ -1388,6 +1392,109 @@
 
             updateInventoryUI();
             updateMinimap();
+        }
+
+        function createTerrainEdges(biome) {
+            // Create edge lines where elevation changes for better depth perception
+            const edgePositions = [];
+            const edgeColors = [];
+
+            // Edge color - darker version of ground color for contrast
+            const baseColor = new THREE.Color(biome.ground);
+            const edgeColor = baseColor.clone().multiplyScalar(0.3); // Dark edge
+            const highlightColor = baseColor.clone().multiplyScalar(1.4).clamp(); // Light top edge
+
+            for(let x = 0; x < CONFIG.WORLD_SIZE - 1; x++) {
+                for(let z = 0; z < CONFIG.WORLD_SIZE - 1; z++) {
+                    const h = worldState.heightMap[x][z];
+                    const hRight = worldState.heightMap[x + 1]?.[z] ?? h;
+                    const hDown = worldState.heightMap[x]?.[z + 1] ?? h;
+                    const hDiag = worldState.heightMap[x + 1]?.[z + 1] ?? h;
+
+                    if(h < 1) continue; // Skip water
+
+                    const wx = (x - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                    const wz = (z - CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
+                    const wy = h * CONFIG.TILE_SIZE / 2;
+
+                    const tileSize = CONFIG.TILE_SIZE;
+
+                    // Check right neighbor - draw vertical edge if height differs
+                    if(hRight < h && hRight >= 1) {
+                        const dropHeight = (h - hRight) * CONFIG.TILE_SIZE / 2;
+                        // Vertical edge line on right side
+                        edgePositions.push(
+                            wx + tileSize/2, wy, wz - tileSize/2,
+                            wx + tileSize/2, wy - dropHeight, wz - tileSize/2
+                        );
+                        edgePositions.push(
+                            wx + tileSize/2, wy, wz + tileSize/2,
+                            wx + tileSize/2, wy - dropHeight, wz + tileSize/2
+                        );
+                        // Horizontal edge at top
+                        edgePositions.push(
+                            wx + tileSize/2, wy + 0.05, wz - tileSize/2,
+                            wx + tileSize/2, wy + 0.05, wz + tileSize/2
+                        );
+                        for(let i = 0; i < 6; i++) {
+                            edgeColors.push(edgeColor.r, edgeColor.g, edgeColor.b);
+                        }
+                    }
+
+                    // Check bottom neighbor - draw vertical edge if height differs
+                    if(hDown < h && hDown >= 1) {
+                        const dropHeight = (h - hDown) * CONFIG.TILE_SIZE / 2;
+                        // Vertical edge line on bottom side
+                        edgePositions.push(
+                            wx - tileSize/2, wy, wz + tileSize/2,
+                            wx - tileSize/2, wy - dropHeight, wz + tileSize/2
+                        );
+                        edgePositions.push(
+                            wx + tileSize/2, wy, wz + tileSize/2,
+                            wx + tileSize/2, wy - dropHeight, wz + tileSize/2
+                        );
+                        // Horizontal edge at top
+                        edgePositions.push(
+                            wx - tileSize/2, wy + 0.05, wz + tileSize/2,
+                            wx + tileSize/2, wy + 0.05, wz + tileSize/2
+                        );
+                        for(let i = 0; i < 6; i++) {
+                            edgeColors.push(edgeColor.r, edgeColor.g, edgeColor.b);
+                        }
+                    }
+
+                    // Draw highlight on top edges where terrain drops on opposite side
+                    if(hRight < h || x === 0 || worldState.heightMap[x-1]?.[z] < h) {
+                        // Top highlight line
+                        edgePositions.push(
+                            wx - tileSize/2, wy + 0.08, wz - tileSize/2,
+                            wx + tileSize/2, wy + 0.08, wz - tileSize/2
+                        );
+                        edgeColors.push(highlightColor.r, highlightColor.g, highlightColor.b);
+                        edgeColors.push(highlightColor.r, highlightColor.g, highlightColor.b);
+                    }
+                }
+            }
+
+            if(edgePositions.length > 0) {
+                const edgeGeo = new THREE.BufferGeometry();
+                edgeGeo.setAttribute('position', new THREE.Float32BufferAttribute(edgePositions, 3));
+                edgeGeo.setAttribute('color', new THREE.Float32BufferAttribute(edgeColors, 3));
+
+                const edgeMat = new THREE.LineBasicMaterial({
+                    vertexColors: true,
+                    linewidth: 2,
+                    transparent: true,
+                    opacity: 0.8
+                });
+
+                const edgeLines = new THREE.LineSegments(edgeGeo, edgeMat);
+                edgeLines.renderOrder = 1;
+                scene.add(edgeLines);
+
+                // Store reference for cleanup
+                worldState.terrainEdges = edgeLines;
+            }
         }
 
         function createProp(type, x, y, z, biome, rng) {
