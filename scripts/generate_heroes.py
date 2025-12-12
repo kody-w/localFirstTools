@@ -901,6 +901,1226 @@ HEROES = {
             "20": ["+75 Thundergod's Wrath Damage", "+0.5s Lightning Bolt Ministun"],
             "25": ["+2.5% Static Field Damage", "Thundergod's Wrath Applies Debuff"]
         }
+    },
+    "arc_warden": {
+        "name": "Arc Warden",
+        "title": "Zet",
+        "attr": "agility",
+        "icon": "spark",
+        "lore": "Before the battle of the Primordials, before the light of the world, before the First Day, there was Zet, the Self-Aware Fragment.",
+        "baseStats": {
+            "maxHp": 85, "maxMana": 100, "hpPerLevel": 22, "manaPerLevel": 22,
+            "baseDamage": 15, "damagePerLevel": 3.0, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 10, "attackSpeed": 1.1
+        },
+        "abilities": {
+            "flux": {
+                "name": "Flux",
+                "type": "active",
+                "description": "Engulfs an enemy in a swirling, slowing field that deals damage over time. Effect is stronger when the enemy is alone.",
+                "damage": 20, "damagePerSecond": 12, "slowPercent": 35, "duration": 6000,
+                "cooldown": 14000, "manaCost": 25, "range": 10
+            },
+            "magneticField": {
+                "name": "Magnetic Field",
+                "type": "active",
+                "description": "Creates a circular distortion field that grants evasion and attack speed to allies inside.",
+                "evasionPercent": 60, "attackSpeedBonus": 60, "duration": 5000, "radius": 4,
+                "cooldown": 18000, "manaCost": 30, "range": 10
+            },
+            "sparkWraith": {
+                "name": "Spark Wraith",
+                "type": "active",
+                "description": "Summons a ghost-like spark that slowly materializes and seeks out enemies to damage and slow them.",
+                "damage": 35, "slowPercent": 20, "activationDelay": 2000, "duration": 45000,
+                "cooldown": 4000, "manaCost": 15, "range": 12
+            },
+            "tempestDouble": {
+                "name": "Tempest Double",
+                "type": "ultimate",
+                "description": "Creates a perfect duplicate of Arc Warden that can use all of his abilities and items.",
+                "doubleDuration": 20000, "cooldown": 50000, "manaCost": 60
+            }
+        },
+        "talents": {
+            "10": ["+175 Flux Cast Range", "+30 Attack Speed"],
+            "15": ["+100 Spark Wraith Damage", "-1.5s Spark Wraith Cooldown"],
+            "20": ["+30% Lifesteal", "+8s Tempest Double Duration"],
+            "25": ["30% Cooldown Reduction", "+250 Magnetic Field AoE"]
+        }
+    },
+    "bane": {
+        "name": "Bane",
+        "title": "Atropos",
+        "attr": "universal",
+        "icon": "nightmare",
+        "lore": "When the gods have nightmares, it is Bane Elemental who brings them. From the Plane of Dreams, he serves Nyctasha.",
+        "baseStats": {
+            "maxHp": 100, "maxMana": 110, "hpPerLevel": 24, "manaPerLevel": 24,
+            "baseDamage": 14, "damagePerLevel": 2.8, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 8, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "enfeeble": {
+                "name": "Enfeeble",
+                "type": "active",
+                "description": "Weakens an enemy, reducing their status resistance and magic resistance.",
+                "statusResistReduction": 30, "magicResistReduction": 25, "duration": 8000,
+                "cooldown": 10000, "manaCost": 20, "range": 10
+            },
+            "brainSap": {
+                "name": "Brain Sap",
+                "type": "active",
+                "description": "Feasts on the target's brain, dealing damage and healing Bane for the same amount.",
+                "damage": 40, "heal": 40, "cooldown": 10000, "manaCost": 25, "range": 8
+            },
+            "nightmare": {
+                "name": "Nightmare",
+                "type": "active",
+                "description": "Puts a target to sleep, making them invulnerable but unable to act. Damage wakes them.",
+                "duration": 4000, "damagePerSecond": 10, "invulnDuration": 1000,
+                "cooldown": 16000, "manaCost": 20, "range": 8
+            },
+            "fiendGrip": {
+                "name": "Fiend's Grip",
+                "type": "ultimate",
+                "description": "Grips an enemy with nightmarish force, stunning and draining their mana while dealing damage.",
+                "damagePerSecond": 50, "manaDrainPercent": 5, "duration": 5000,
+                "cooldown": 80000, "manaCost": 50, "range": 6
+            }
+        },
+        "talents": {
+            "10": ["+7 Armor", "+100 Brain Sap Damage/Heal"],
+            "15": ["-2s Brain Sap Cooldown", "+30 Movement Speed"],
+            "20": ["+100 Enfeeble Damage Reduction", "+6% Fiend's Grip Max Mana Drain"],
+            "25": ["Brain Sap Creates Nightmare Illusion", "+1.5s Fiend's Grip Duration"]
+        }
+    },
+    "batrider": {
+        "name": "Batrider",
+        "title": "Jin'zakk",
+        "attr": "universal",
+        "icon": "bat",
+        "lore": "There is no such thing as a fair fight. Jin'zakk, the Batrider, will tell you that while setting your tower on fire.",
+        "baseStats": {
+            "maxHp": 95, "maxMana": 90, "hpPerLevel": 24, "manaPerLevel": 20,
+            "baseDamage": 13, "damagePerLevel": 2.6, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 11, "attackRange": 8, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "stickyNapalm": {
+                "name": "Sticky Napalm",
+                "type": "active",
+                "description": "Covers enemies with napalm that amplifies damage from Batrider's attacks and slows them.",
+                "bonusDamage": 8, "slowPercent": 3, "maxStacks": 10, "duration": 8000,
+                "cooldown": 3000, "manaCost": 10, "range": 10, "radius": 4
+            },
+            "flamebreak": {
+                "name": "Flamebreak",
+                "type": "active",
+                "description": "Hurls an explosive that knocks back enemies and deals damage over time.",
+                "damage": 35, "dotDamage": 20, "knockback": 3, "dotDuration": 3000,
+                "cooldown": 14000, "manaCost": 25, "range": 12
+            },
+            "firefly": {
+                "name": "Firefly",
+                "type": "active",
+                "description": "Batrider takes to the skies, flying over terrain and leaving a trail of fire that damages enemies.",
+                "damagePerSecond": 15, "trailDuration": 2000, "duration": 12000,
+                "cooldown": 34000, "manaCost": 30
+            },
+            "flamingLasso": {
+                "name": "Flaming Lasso",
+                "type": "ultimate",
+                "description": "Lassoes an enemy and drags them behind Batrider. The victim is stunned for the duration.",
+                "damage": 30, "duration": 3000, "cooldown": 70000, "manaCost": 50, "range": 3
+            }
+        },
+        "talents": {
+            "10": ["+5 Sticky Napalm Damage", "+25 Movement Speed"],
+            "15": ["+4s Firefly Duration", "+2 Sticky Napalm Max Stacks"],
+            "20": ["+150 Flamebreak Knockback", "+15% Firefly Movement Speed"],
+            "25": ["0 Turn Rate in Firefly", "+150 Lasso Cast Range"]
+        }
+    },
+    "beastmaster": {
+        "name": "Beastmaster",
+        "title": "Karroch",
+        "attr": "universal",
+        "icon": "boar",
+        "lore": "Karroch was born a child of the stocks. Raised among the wild creatures of the forest, he learned their ways.",
+        "baseStats": {
+            "maxHp": 120, "maxMana": 80, "hpPerLevel": 28, "manaPerLevel": 18,
+            "baseDamage": 17, "damagePerLevel": 3.0, "armor": 3, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "wildAxes": {
+                "name": "Wild Axes",
+                "type": "active",
+                "description": "Throws axes that travel outward then return. Enemies hit take damage and attack more slowly.",
+                "damage": 35, "attackSlowPercent": 25, "slowDuration": 3000, "range": 12,
+                "cooldown": 10000, "manaCost": 20
+            },
+            "callOfTheWild": {
+                "name": "Call of the Wild",
+                "type": "active",
+                "description": "Summons a loyal boar and hawk to fight alongside Beastmaster.",
+                "boarDamage": 15, "boarSlow": 15, "hawkVision": 10, "duration": 40000,
+                "cooldown": 30000, "manaCost": 25
+            },
+            "innerBeast": {
+                "name": "Inner Beast",
+                "type": "passive",
+                "description": "Unleashes the inner beast of allies, increasing their attack speed.",
+                "attackSpeedBonus": 30, "radius": 10
+            },
+            "primalRoar": {
+                "name": "Primal Roar",
+                "type": "ultimate",
+                "description": "Releases a powerful roar that stuns the target and pushes aside all enemies in its path.",
+                "damage": 50, "stunDuration": 3500, "pushDamage": 25, "pushStun": 1000,
+                "cooldown": 70000, "manaCost": 50, "range": 8
+            }
+        },
+        "talents": {
+            "10": ["+25 Boar Damage", "+20 Movement Speed"],
+            "15": ["+100 Wild Axes Damage", "+400 Hawk HP"],
+            "20": ["+100 Inner Beast Attack Speed", "-30s Call of the Wild Cooldown"],
+            "25": ["+2 Boar/Hawk per Summon", "+1.5s Primal Roar Stun Duration"]
+        }
+    },
+    "bounty_hunter": {
+        "name": "Bounty Hunter",
+        "title": "Gondar",
+        "attr": "agility",
+        "icon": "gold",
+        "lore": "When the first sun rose, a clan of assassins watched its light chase away the night.",
+        "baseStats": {
+            "maxHp": 90, "maxMana": 70, "hpPerLevel": 22, "manaPerLevel": 16,
+            "baseDamage": 18, "damagePerLevel": 3.2, "armor": 3, "armorPerLevel": 0.6,
+            "moveSpeed": 12, "attackRange": 2.5, "attackSpeed": 1.3
+        },
+        "abilities": {
+            "shurikenToss": {
+                "name": "Shuriken Toss",
+                "type": "active",
+                "description": "Hurls a shuriken at an enemy, damaging and mini-stunning them. Bounces to Tracked targets.",
+                "damage": 40, "ministun": 400, "bounceRadius": 10,
+                "cooldown": 8000, "manaCost": 20, "range": 10
+            },
+            "jinada": {
+                "name": "Jinada",
+                "type": "passive",
+                "description": "Bounty Hunter's attacks periodically deal critical damage and steal gold from the target.",
+                "critMultiplier": 1.8, "goldSteal": 20, "cooldown": 6000
+            },
+            "shadowWalk": {
+                "name": "Shadow Walk",
+                "type": "active",
+                "description": "Bounty Hunter becomes invisible and moves faster. His next attack breaks invisibility with bonus damage.",
+                "bonusDamage": 40, "moveSpeedBonus": 25, "duration": 25000, "fadeDuration": 1000,
+                "cooldown": 15000, "manaCost": 15
+            },
+            "track": {
+                "name": "Track",
+                "type": "ultimate",
+                "description": "Tracks an enemy hero, granting true sight and bonus gold when the target dies.",
+                "bonusGold": 150, "allyGold": 75, "duration": 25000, "moveSpeedBonus": 20,
+                "cooldown": 6000, "manaCost": 20, "range": 12
+            }
+        },
+        "talents": {
+            "10": ["+25 Jinada Gold Steal", "+25 Damage"],
+            "15": ["+50% Jinada Critical Strike", "+30 Track Movement Speed"],
+            "20": ["+100 Shuriken Toss Damage", "-30% Track Armor Corruption"],
+            "25": ["No Cooldown on Jinada", "+300 Track Gold"]
+        }
+    },
+    "brewmaster": {
+        "name": "Brewmaster",
+        "title": "Mangix",
+        "attr": "universal",
+        "icon": "brew",
+        "lore": "Deep in the Wailing Mountains lived a monk master of the brewing arts. Mangix was his finest disciple.",
+        "baseStats": {
+            "maxHp": 130, "maxMana": 90, "hpPerLevel": 30, "manaPerLevel": 20,
+            "baseDamage": 18, "damagePerLevel": 3.2, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "thunderClap": {
+                "name": "Thunder Clap",
+                "type": "active",
+                "description": "Slams the ground, dealing damage and slowing enemies in an area.",
+                "damage": 40, "slowPercent": 35, "attackSlowPercent": 35, "duration": 4000, "radius": 5,
+                "cooldown": 12000, "manaCost": 25
+            },
+            "cinderBrew": {
+                "name": "Cinder Brew",
+                "type": "active",
+                "description": "Drenches enemies in alcohol, slowing them and causing fire to ignite them for bonus damage.",
+                "slowPercent": 25, "igniteDamage": 40, "duration": 5000, "radius": 5,
+                "cooldown": 16000, "manaCost": 20, "range": 10
+            },
+            "drunkenBrawler": {
+                "name": "Drunken Brawler",
+                "type": "passive",
+                "description": "Grants a chance to dodge attacks or deal critical damage. Cycles between offense and defense.",
+                "dodgeChance": 70, "critChance": 80, "critMultiplier": 2.0, "cycleDuration": 3000
+            },
+            "primalSplit": {
+                "name": "Primal Split",
+                "type": "ultimate",
+                "description": "Splits into three elemental warriors - Earth, Storm, and Fire - each with unique abilities.",
+                "duration": 16000, "earthHP": 200, "stormHP": 120, "fireHP": 150,
+                "cooldown": 120000, "manaCost": 60
+            }
+        },
+        "talents": {
+            "10": ["+200 Health", "+1.5 Mana Regen"],
+            "15": ["+20% Magic Resistance", "+80 Thunder Clap Damage"],
+            "20": ["+100 Attack Speed", "-40s Primal Split Cooldown"],
+            "25": ["+100% Drunken Brawler Crit/Evasion", "+2 Primal Split Brewlings"]
+        }
+    },
+    "bristleback": {
+        "name": "Bristleback",
+        "title": "Rigwarl",
+        "attr": "strength",
+        "icon": "quill",
+        "lore": "Never one to turn tail in a fight, Rigwarl was known for blunt sarcasm and his legendary spine-covered back.",
+        "baseStats": {
+            "maxHp": 140, "maxMana": 70, "hpPerLevel": 30, "manaPerLevel": 15,
+            "baseDamage": 18, "damagePerLevel": 3.2, "armor": 3, "armorPerLevel": 0.6,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "viscousNasalGoo": {
+                "name": "Viscous Nasal Goo",
+                "type": "active",
+                "description": "Covers an enemy in goo, slowing them and reducing their armor. Stacks multiple times.",
+                "armorReduction": 2, "slowPercent": 10, "maxStacks": 6, "duration": 5000,
+                "cooldown": 1500, "manaCost": 10, "range": 8
+            },
+            "quillSpray": {
+                "name": "Quill Spray",
+                "type": "active",
+                "description": "Sprays quills around Bristleback. Consecutive hits deal stacking damage.",
+                "baseDamage": 15, "stackDamage": 10, "stackDuration": 10000, "radius": 5,
+                "cooldown": 3000, "manaCost": 12
+            },
+            "bristleback": {
+                "name": "Bristleback",
+                "type": "passive",
+                "description": "Takes reduced damage from behind and sides. Releases quill spray when enough damage is taken.",
+                "backDamageReduction": 40, "sideDamageReduction": 20, "quillThreshold": 50
+            },
+            "warpath": {
+                "name": "Warpath",
+                "type": "ultimate",
+                "description": "Each time Bristleback casts a spell, he gains bonus movement speed and damage.",
+                "damagePerStack": 15, "moveSpeedPerStack": 4, "maxStacks": 10, "stackDuration": 10000
+            }
+        },
+        "talents": {
+            "10": ["+20 Movement Speed", "+2 Mana Regen"],
+            "15": ["+25 Quill Stack Damage", "+250 Health"],
+            "20": ["+20 Warpath Damage per Stack", "+25% Goo Slow"],
+            "25": ["+15% Bristleback Damage Reduction", "Quill Spray Applies Nasal Goo"]
+        }
+    },
+    "broodmother": {
+        "name": "Broodmother",
+        "title": "Black Arachnia",
+        "attr": "universal",
+        "icon": "spider",
+        "lore": "For thousands of years, Black Arachnia the Broodmother has dwelt in her silken palace among the ruins.",
+        "baseStats": {
+            "maxHp": 90, "maxMana": 80, "hpPerLevel": 22, "manaPerLevel": 18,
+            "baseDamage": 16, "damagePerLevel": 3.0, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 11, "attackRange": 2.5, "attackSpeed": 1.3
+        },
+        "abilities": {
+            "insatiableHunger": {
+                "name": "Insatiable Hunger",
+                "type": "active",
+                "description": "Broodmother enters a ravenous state, gaining bonus damage and lifesteal.",
+                "bonusDamage": 60, "lifestealPercent": 50, "duration": 8000,
+                "cooldown": 25000, "manaCost": 30
+            },
+            "silkenBola": {
+                "name": "Silken Bola",
+                "type": "active",
+                "description": "Throws bolas at enemies, rooting and dealing damage over time.",
+                "damage": 30, "rootDuration": 2000, "dotDamage": 20, "dotDuration": 4000,
+                "cooldown": 12000, "manaCost": 20, "range": 10
+            },
+            "spinWeb": {
+                "name": "Spin Web",
+                "type": "active",
+                "description": "Spins a web that grants invisibility, movement speed, and regeneration to Broodmother.",
+                "moveSpeedBonus": 60, "hpRegen": 8, "radius": 8, "maxWebs": 8,
+                "cooldown": 0, "manaCost": 10
+            },
+            "spawnSpiderlings": {
+                "name": "Spawn Spiderlings",
+                "type": "ultimate",
+                "description": "Spits venom at a target. If the target dies while debuffed, spiderlings spawn.",
+                "damage": 50, "spiderlingsOnKill": 4, "spiderlingDamage": 12, "duration": 6000,
+                "cooldown": 8000, "manaCost": 25, "range": 10
+            }
+        },
+        "talents": {
+            "10": ["+100 Spawn Spiderlings Damage", "+10 Spiderling Damage"],
+            "15": ["+25 Insatiable Hunger Damage", "+300 Health"],
+            "20": ["+40 Attack Speed", "+20% Insatiable Hunger Lifesteal"],
+            "25": ["+60% Magic Resistance for Spiderlings", "+500 Spiderling HP"]
+        }
+    },
+    "centaur_warrunner": {
+        "name": "Centaur Warrunner",
+        "title": "Bradwarden",
+        "attr": "strength",
+        "icon": "horse",
+        "lore": "It's said that a centaur's strength comes from the fury of the sun. Bradwarden proved this with every charge.",
+        "baseStats": {
+            "maxHp": 160, "maxMana": 70, "hpPerLevel": 35, "manaPerLevel": 15,
+            "baseDamage": 19, "damagePerLevel": 3.4, "armor": 3, "armorPerLevel": 0.6,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 0.9
+        },
+        "abilities": {
+            "hoofstomp": {
+                "name": "Hoof Stomp",
+                "type": "active",
+                "description": "Slams the ground, stunning and damaging nearby enemies.",
+                "damage": 40, "stunDuration": 2000, "radius": 4,
+                "cooldown": 13000, "manaCost": 25
+            },
+            "doubleEdge": {
+                "name": "Double Edge",
+                "type": "active",
+                "description": "Centaur strikes a mighty blow, damaging both himself and the enemy.",
+                "damage": 80, "selfDamagePercent": 30, "cooldown": 6000, "manaCost": 0, "range": 2.5
+            },
+            "retaliate": {
+                "name": "Retaliate",
+                "type": "passive",
+                "description": "Centaur's skin returns damage to attackers based on his strength.",
+                "returnDamage": 20, "strMultiplier": 0.5
+            },
+            "stampede": {
+                "name": "Stampede",
+                "type": "ultimate",
+                "description": "All allied heroes gain maximum movement speed and trample enemies for damage based on Centaur's strength.",
+                "strDamageMultiplier": 2.0, "duration": 4000, "slowPercent": 50, "slowDuration": 2000,
+                "cooldown": 90000, "manaCost": 50
+            }
+        },
+        "talents": {
+            "10": ["+30 Movement Speed", "+10 Retaliate Damage"],
+            "15": ["+300 Double Edge Damage", "+40 Damage"],
+            "20": ["+1s Hoof Stomp Stun Duration", "+20% Stampede Slow"],
+            "25": ["Gains Retaliate Aura", "+1.5s Stampede Duration"]
+        }
+    },
+    "chaos_knight": {
+        "name": "Chaos Knight",
+        "title": "Nessaj",
+        "attr": "strength",
+        "icon": "chaos",
+        "lore": "The oldest Fundamental, Chaos Knight rides forth to bring the ultimate discord across all planes of existence.",
+        "baseStats": {
+            "maxHp": 130, "maxMana": 60, "hpPerLevel": 30, "manaPerLevel": 14,
+            "baseDamage": 22, "damagePerLevel": 3.6, "armor": 3, "armorPerLevel": 0.6,
+            "moveSpeed": 11, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "chaosBolt": {
+                "name": "Chaos Bolt",
+                "type": "active",
+                "description": "Throws a bolt of chaotic energy, dealing random damage and stunning for a random duration.",
+                "minDamage": 30, "maxDamage": 60, "minStun": 1000, "maxStun": 3000,
+                "cooldown": 10000, "manaCost": 25, "range": 8
+            },
+            "realityRift": {
+                "name": "Reality Rift",
+                "type": "active",
+                "description": "Teleports Chaos Knight and his illusions to a target, reducing their armor.",
+                "armorReduction": 5, "armorDuration": 6000, "bonusDamage": 30,
+                "cooldown": 8000, "manaCost": 20, "range": 8
+            },
+            "chaosStrike": {
+                "name": "Chaos Strike",
+                "type": "passive",
+                "description": "Each attack has a chance to deal critical damage and steal HP from the target.",
+                "critChance": 33, "critMultiplier": 2.0, "lifestealPercent": 40
+            },
+            "phantasm": {
+                "name": "Phantasm",
+                "type": "ultimate",
+                "description": "Creates illusions of Chaos Knight that deal significant damage.",
+                "illusionCount": 3, "illusionDamage": 100, "illusionTaken": 260, "duration": 30000,
+                "cooldown": 120000, "manaCost": 60
+            }
+        },
+        "talents": {
+            "10": ["+20 Movement Speed", "+1s Chaos Bolt Duration"],
+            "15": ["+150 Reality Rift Pull Distance", "+15 Strength"],
+            "20": ["+1 Phantasm Illusion", "+10% Chaos Strike Lifesteal"],
+            "25": ["Reality Rift Pierces Spell Immune", "-3 Reality Rift Armor Reduction"]
+        }
+    },
+    "chen": {
+        "name": "Chen",
+        "title": "Holy Knight",
+        "attr": "universal",
+        "icon": "cross",
+        "lore": "Born in the desert of Hazhadal Baab, Chen was called the Holy Knight for bringing warriors of the wild into the faith.",
+        "baseStats": {
+            "maxHp": 95, "maxMana": 110, "hpPerLevel": 24, "manaPerLevel": 24,
+            "baseDamage": 12, "damagePerLevel": 2.4, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 10, "attackSpeed": 0.9
+        },
+        "abilities": {
+            "penitence": {
+                "name": "Penitence",
+                "type": "active",
+                "description": "Forces an enemy to feel remorse, slowing them and causing them to take more damage.",
+                "slowPercent": 30, "damageAmpPercent": 25, "duration": 6000,
+                "cooldown": 10000, "manaCost": 20, "range": 10
+            },
+            "holyPersuasion": {
+                "name": "Holy Persuasion",
+                "type": "active",
+                "description": "Converts enemy creeps to fight for Chen, gaining their abilities.",
+                "maxCreeps": 4, "bonusHP": 100, "bonusMoveSpeed": 10,
+                "cooldown": 30000, "manaCost": 30, "range": 8
+            },
+            "divineFavor": {
+                "name": "Divine Favor",
+                "type": "passive",
+                "description": "Chen and his converted creeps gain bonus HP regeneration and attack speed.",
+                "hpRegen": 4, "attackSpeedBonus": 15
+            },
+            "handOfGod": {
+                "name": "Hand of God",
+                "type": "ultimate",
+                "description": "Heals all allied heroes and controlled units globally.",
+                "healAmount": 200, "cooldown": 120000, "manaCost": 60
+            }
+        },
+        "talents": {
+            "10": ["+30 Movement Speed", "+200 Holy Persuasion Minimum HP"],
+            "15": ["+150 Hand of God Heal", "-25s Holy Persuasion Cooldown"],
+            "20": ["+1 Max Holy Persuasion Creeps", "+40% XP Gain"],
+            "25": ["Hand of God Grants 75% Magic Resistance", "+1200 Holy Persuasion HP Bonus"]
+        }
+    },
+    "clinkz": {
+        "name": "Clinkz",
+        "title": "Bone Fletcher",
+        "attr": "agility",
+        "icon": "skeleton",
+        "lore": "At the crossing of Bleeding Hills, a demon and a great wizard battled. Clinkz, an archer, slew the demon but was cursed to burn eternally.",
+        "baseStats": {
+            "maxHp": 80, "maxMana": 75, "hpPerLevel": 20, "manaPerLevel": 16,
+            "baseDamage": 18, "damagePerLevel": 3.4, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 13, "attackRange": 10, "attackSpeed": 1.5
+        },
+        "abilities": {
+            "strafeFire": {
+                "name": "Strafe",
+                "type": "active",
+                "description": "Clinkz gains a rapid burst of attack speed and attack damage for a short duration.",
+                "attackSpeedBonus": 200, "bonusDamage": 30, "duration": 4000,
+                "cooldown": 20000, "manaCost": 25
+            },
+            "searingArrows": {
+                "name": "Searing Arrows",
+                "type": "toggle",
+                "description": "Imbues arrows with fire, dealing bonus damage to targets.",
+                "bonusDamage": 40, "manaCost": 8
+            },
+            "deathPact": {
+                "name": "Death Pact",
+                "type": "active",
+                "description": "Clinkz consumes a target creep, gaining bonus HP and damage based on its health.",
+                "hpPercent": 80, "damagePercent": 8, "duration": 35000,
+                "cooldown": 60000, "manaCost": 20, "range": 4
+            },
+            "burningBarrage": {
+                "name": "Burning Barrage",
+                "type": "ultimate",
+                "description": "Channels to fire a volley of arrows in a direction, dealing attack damage plus bonus.",
+                "waves": 6, "bonusDamagePerWave": 20, "range": 12,
+                "cooldown": 25000, "manaCost": 40
+            }
+        },
+        "talents": {
+            "10": ["+1.5 Mana Regen", "+15 Searing Arrows Damage"],
+            "15": ["+30 Attack Speed", "+100 Burning Barrage Range"],
+            "20": ["+100% Strafe Attack Speed", "+20 Health Regen"],
+            "25": ["Searing Arrows Multishot", "+2 Burning Barrage Waves"]
+        }
+    },
+    "clockwerk": {
+        "name": "Clockwerk",
+        "title": "Rattletrap",
+        "attr": "universal",
+        "icon": "gear",
+        "lore": "Rattletrap descends from a line of inventors. His clockwork exosuit bristles with traps, rockets, and blades.",
+        "baseStats": {
+            "maxHp": 120, "maxMana": 80, "hpPerLevel": 28, "manaPerLevel": 18,
+            "baseDamage": 16, "damagePerLevel": 3.0, "armor": 3, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "batterAssault": {
+                "name": "Battery Assault",
+                "type": "active",
+                "description": "Releases mini-shrapnel at nearby enemies, dealing damage and mini-stunning them.",
+                "damagePerShrapnel": 15, "interval": 500, "duration": 6000, "radius": 4,
+                "cooldown": 18000, "manaCost": 25
+            },
+            "powerCogs": {
+                "name": "Power Cogs",
+                "type": "active",
+                "description": "Creates a ring of cogs around Clockwerk that knock back and drain mana from enemies.",
+                "manaDrain": 50, "damage": 30, "duration": 8000,
+                "cooldown": 16000, "manaCost": 20
+            },
+            "rocketFlare": {
+                "name": "Rocket Flare",
+                "type": "active",
+                "description": "Fires a global-range rocket that reveals the targeted area and damages enemies.",
+                "damage": 35, "visionDuration": 6000, "radius": 5,
+                "cooldown": 14000, "manaCost": 15, "range": 999
+            },
+            "hookshot": {
+                "name": "Hookshot",
+                "type": "ultimate",
+                "description": "Fires a grappling hook that latches to the first enemy hero, pulling Clockwerk and stunning them.",
+                "damage": 50, "stunDuration": 2000, "range": 20,
+                "cooldown": 40000, "manaCost": 50
+            }
+        },
+        "talents": {
+            "10": ["+2 Battery Assault Attacks", "+5 Armor"],
+            "15": ["+100 Rocket Flare Damage", "+125 Power Cogs Mana Drain"],
+            "20": ["+150 Hookshot Damage", "+12 Battery Assault Damage"],
+            "25": ["-0.15s Battery Assault Interval", "+1200 Hookshot Range"]
+        }
+    },
+    "dark_seer": {
+        "name": "Dark Seer",
+        "title": "Ish'Kafel",
+        "attr": "universal",
+        "icon": "void",
+        "lore": "Fast when he needs to be, and with a mind cunning and deadly, Ish'Kafel earned his title of Dark Seer.",
+        "baseStats": {
+            "maxHp": 110, "maxMana": 100, "hpPerLevel": 26, "manaPerLevel": 22,
+            "baseDamage": 14, "damagePerLevel": 2.8, "armor": 3, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "vacuum": {
+                "name": "Vacuum",
+                "type": "active",
+                "description": "Drags all enemies in an area to a target point, dealing damage.",
+                "damage": 35, "radius": 6, "pullRadius": 8,
+                "cooldown": 28000, "manaCost": 30, "range": 10
+            },
+            "ionShell": {
+                "name": "Ion Shell",
+                "type": "active",
+                "description": "Surrounds a unit with a rotating shield of ions that damages nearby enemies.",
+                "damagePerSecond": 30, "radius": 3, "duration": 22000,
+                "cooldown": 9000, "manaCost": 25, "range": 8
+            },
+            "surge": {
+                "name": "Surge",
+                "type": "active",
+                "description": "Charges a target allied unit with energy, granting them maximum movement speed for a short time.",
+                "duration": 5000, "cooldown": 12000, "manaCost": 20, "range": 8
+            },
+            "wallOfReplica": {
+                "name": "Wall of Replica",
+                "type": "ultimate",
+                "description": "Creates a wall that slows enemies and creates illusions of enemy heroes who pass through.",
+                "slowPercent": 50, "illusionDamagePercent": 80, "duration": 30000, "wallLength": 12,
+                "cooldown": 80000, "manaCost": 60, "range": 10
+            }
+        },
+        "talents": {
+            "10": ["+100 Ion Shell Radius", "+8% Ion Shell Damage as Heal"],
+            "15": ["+75 Vacuum AoE", "+1.5 Surge Duration"],
+            "20": ["+100 Ion Shell Damage", "Parallel Wall"],
+            "25": ["400 AoE Surge", "+30% Wall of Replica Illusion Damage"]
+        }
+    },
+    "dark_willow": {
+        "name": "Dark Willow",
+        "title": "Mireska Sunbreeze",
+        "attr": "universal",
+        "icon": "fairy",
+        "lore": "Children love telling scary stories, but Mireska Sunbreeze, the Dark Willow, is the scary story herself.",
+        "baseStats": {
+            "maxHp": 85, "maxMana": 110, "hpPerLevel": 21, "manaPerLevel": 24,
+            "baseDamage": 13, "damagePerLevel": 2.7, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 11, "attackRange": 10, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "brambleMaze": {
+                "name": "Bramble Maze",
+                "type": "active",
+                "description": "Creates a maze of brambles that root and damage enemies who enter.",
+                "damage": 40, "rootDuration": 2000, "duration": 11000, "radius": 6,
+                "cooldown": 16000, "manaCost": 25, "range": 12
+            },
+            "shadowRealm": {
+                "name": "Shadow Realm",
+                "type": "active",
+                "description": "Dark Willow recedes into the shadows, becoming untargetable. Her next attack deals bonus damage.",
+                "maxBonusDamage": 100, "duration": 4000, "fadeTime": 0.5,
+                "cooldown": 20000, "manaCost": 20
+            },
+            "cursedCrown": {
+                "name": "Cursed Crown",
+                "type": "active",
+                "description": "Places a curse on a target that stuns them and enemies around them after a delay.",
+                "stunDuration": 2500, "delay": 4000, "stunRadius": 4,
+                "cooldown": 14000, "manaCost": 20, "range": 10
+            },
+            "bedlam": {
+                "name": "Bedlam",
+                "type": "ultimate",
+                "description": "Dark Willow's companion Jex attacks nearby enemies rapidly.",
+                "damagePerAttack": 50, "attacksPerSecond": 2, "duration": 4000, "radius": 5,
+                "cooldown": 30000, "manaCost": 40
+            }
+        },
+        "talents": {
+            "10": ["+20 Movement Speed", "+30 Damage"],
+            "15": ["+100 Shadow Realm Max Damage", "+1s Cursed Crown Stun Duration"],
+            "20": ["+300 Bedlam Damage", "+100 Attack Range"],
+            "25": ["+2s Shadow Realm Duration", "Terrorize Pierces Spell Immune"]
+        }
+    },
+    "dawnbreaker": {
+        "name": "Dawnbreaker",
+        "title": "Valora",
+        "attr": "strength",
+        "icon": "sun",
+        "lore": "Valora, the Dawnbreaker, is the last of the Children of Light. She wields a massive hammer forged from the sun itself.",
+        "baseStats": {
+            "maxHp": 130, "maxMana": 80, "hpPerLevel": 30, "manaPerLevel": 18,
+            "baseDamage": 19, "damagePerLevel": 3.2, "armor": 3, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "starbreaker": {
+                "name": "Starbreaker",
+                "type": "active",
+                "description": "Dawnbreaker whirls her hammer, damaging enemies and stunning those hit by the final strike.",
+                "damage": 25, "slamDamage": 50, "stunDuration": 1200, "radius": 4,
+                "cooldown": 11000, "manaCost": 20
+            },
+            "celestialHammer": {
+                "name": "Celestial Hammer",
+                "type": "active",
+                "description": "Hurls her hammer, damaging enemies and leaving a trail of fire. Can recall to teleport.",
+                "damage": 35, "trailDamage": 15, "range": 12, "recallDelay": 1500,
+                "cooldown": 14000, "manaCost": 25
+            },
+            "luminosity": {
+                "name": "Luminosity",
+                "type": "passive",
+                "description": "After a number of attacks, Dawnbreaker's next attack heals herself and nearby allies.",
+                "attacksRequired": 3, "healPercent": 35, "healRadius": 5, "critMultiplier": 1.4
+            },
+            "solarGuardian": {
+                "name": "Solar Guardian",
+                "type": "ultimate",
+                "description": "Dawnbreaker flies to an ally, creating a pulsing sun that heals allies and damages enemies.",
+                "healPerPulse": 30, "damagePerPulse": 30, "pulses": 6, "landingDamage": 60, "stunDuration": 1500,
+                "cooldown": 100000, "manaCost": 50, "range": 999
+            }
+        },
+        "talents": {
+            "10": ["+15 Luminosity Attack Damage", "+20 Movement Speed"],
+            "15": ["+40 Starbreaker Swipe Damage", "+30% Luminosity Crit"],
+            "20": ["-12s Solar Guardian Cooldown", "+2 Starbreaker Swipes"],
+            "25": ["+3 Celestial Hammer Charges", "Solar Guardian Stuns"]
+        }
+    },
+    "dazzle": {
+        "name": "Dazzle",
+        "title": "Shadow Priest",
+        "attr": "universal",
+        "icon": "purple",
+        "lore": "Each morning, in the village of Dezun, Dazzle would watch the sun rise, knowing his power over life and death grew stronger.",
+        "baseStats": {
+            "maxHp": 90, "maxMana": 110, "hpPerLevel": 22, "manaPerLevel": 24,
+            "baseDamage": 12, "damagePerLevel": 2.5, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 8, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "poisonTouch": {
+                "name": "Poison Touch",
+                "type": "active",
+                "description": "Casts a poisonous hex on enemies, slowing them and dealing damage over time.",
+                "damage": 8, "slowPercent": 25, "duration": 6000, "maxTargets": 4,
+                "cooldown": 10000, "manaCost": 20, "range": 10
+            },
+            "shallowGrave": {
+                "name": "Shallow Grave",
+                "type": "active",
+                "description": "Prevents an ally from dying for a short duration. They cannot drop below 1 HP.",
+                "duration": 4000, "cooldown": 18000, "manaCost": 25, "range": 10
+            },
+            "shadowWave": {
+                "name": "Shadow Wave",
+                "type": "active",
+                "description": "Sends a wave of healing that bounces between allies, damaging enemies near each target.",
+                "healAmount": 40, "damage": 40, "bounces": 6, "bounceRadius": 6,
+                "cooldown": 12000, "manaCost": 20, "range": 10
+            },
+            "badJuju": {
+                "name": "Bad Juju",
+                "type": "ultimate",
+                "description": "Dazzle gains armor and reduces ability cooldowns whenever he casts a spell. Enemies near him lose armor.",
+                "armorPerStack": 2, "armorReductionAura": 2, "cooldownReductionPercent": 35, "radius": 8
+            }
+        },
+        "talents": {
+            "10": ["+1.5 Mana Regen", "+60 Damage"],
+            "15": ["+30 Shadow Wave Heal/Damage", "-3s Shadow Wave Cooldown"],
+            "20": ["+35 Poison Touch DPS", "+0.5s Shallow Grave Duration"],
+            "25": ["+0.5s Hex on Poison Touch", "-4s Shallow Grave Cooldown"]
+        }
+    },
+    "death_prophet": {
+        "name": "Death Prophet",
+        "title": "Krobelus",
+        "attr": "intelligence",
+        "icon": "ghost",
+        "lore": "Krobelus was a Death Prophet, a seer who could speak with the spirits of the dead. She learned her own death was near.",
+        "baseStats": {
+            "maxHp": 95, "maxMana": 120, "hpPerLevel": 24, "manaPerLevel": 26,
+            "baseDamage": 14, "damagePerLevel": 2.8, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 11, "attackRange": 10, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "cryptSwarm": {
+                "name": "Crypt Swarm",
+                "type": "active",
+                "description": "Sends a swarm of bats in a line, dealing damage to enemies they pass through.",
+                "damage": 45, "width": 4, "range": 12,
+                "cooldown": 7000, "manaCost": 20
+            },
+            "silence": {
+                "name": "Silence",
+                "type": "active",
+                "description": "Silences all enemies in an area, preventing them from casting spells.",
+                "duration": 5000, "radius": 5,
+                "cooldown": 15000, "manaCost": 25, "range": 10
+            },
+            "spiritSiphon": {
+                "name": "Spirit Siphon",
+                "type": "active",
+                "description": "Creates a link between Death Prophet and an enemy, draining their HP and slowing them.",
+                "drainPercent": 6, "slowPercent": 15, "duration": 4000, "charges": 3,
+                "chargeRestore": 35000, "manaCost": 15, "range": 8
+            },
+            "exorcism": {
+                "name": "Exorcism",
+                "type": "ultimate",
+                "description": "Releases vengeful spirits that swarm enemies, dealing physical damage and healing Death Prophet.",
+                "spirits": 20, "damagePerSpirit": 18, "healPercent": 25, "duration": 30000,
+                "cooldown": 140000, "manaCost": 60
+            }
+        },
+        "talents": {
+            "10": ["+30 Damage", "+12% Magic Resistance"],
+            "15": ["-2s Crypt Swarm Cooldown", "+1% Spirit Siphon Max HP Drain"],
+            "20": ["+400 Health", "+8 Exorcism Spirits"],
+            "25": ["Exorcism Grants Haste", "-25s Exorcism Cooldown"]
+        }
+    },
+    "disruptor": {
+        "name": "Disruptor",
+        "title": "Thrall",
+        "attr": "intelligence",
+        "icon": "storm",
+        "lore": "High on the wind plains of Druud, riders know the sky gods favor them. Thrall is the greatest stormcrafter of his tribe.",
+        "baseStats": {
+            "maxHp": 85, "maxMana": 120, "hpPerLevel": 21, "manaPerLevel": 26,
+            "baseDamage": 13, "damagePerLevel": 2.6, "armor": 2, "armorPerLevel": 0.4,
+            "moveSpeed": 10, "attackRange": 10, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "thunderStrike": {
+                "name": "Thunder Strike",
+                "type": "active",
+                "description": "Repeatedly strikes an enemy with lightning, dealing damage and revealing them.",
+                "damagePerStrike": 20, "strikes": 4, "interval": 2000,
+                "cooldown": 12000, "manaCost": 20, "range": 10
+            },
+            "glimpse": {
+                "name": "Glimpse",
+                "type": "active",
+                "description": "Teleports an enemy hero back to where they were a few seconds ago.",
+                "lookbackTime": 4000, "cooldown": 16000, "manaCost": 25, "range": 12
+            },
+            "kineticField": {
+                "name": "Kinetic Field",
+                "type": "active",
+                "description": "Creates a circular field that prevents enemies from leaving.",
+                "duration": 3000, "formationTime": 1200, "radius": 4,
+                "cooldown": 12000, "manaCost": 20, "range": 10
+            },
+            "staticStorm": {
+                "name": "Static Storm",
+                "type": "ultimate",
+                "description": "Creates a damaging storm that silences enemies within it. Damage increases over time.",
+                "maxDamagePerSecond": 80, "duration": 5000, "radius": 5,
+                "cooldown": 80000, "manaCost": 50, "range": 10
+            }
+        },
+        "talents": {
+            "10": ["+40 Thunder Strike Damage", "+150 Cast Range"],
+            "15": ["+150 Glimpse Cast Range", "-2s Kinetic Field Cooldown"],
+            "20": ["+1.5s Static Storm Duration", "+1.5s Kinetic Field Duration"],
+            "25": ["3 Thunder Strike Hits Kinetic Field", "Static Storm Grants Disruptor True Sight"]
+        }
+    },
+    "doom": {
+        "name": "Doom",
+        "title": "Lucifer",
+        "attr": "strength",
+        "icon": "fire",
+        "lore": "He who was once the morning star, Lucifer, fell from grace and became the lord of all demons, Doom.",
+        "baseStats": {
+            "maxHp": 140, "maxMana": 70, "hpPerLevel": 32, "manaPerLevel": 15,
+            "baseDamage": 21, "damagePerLevel": 3.4, "armor": 3, "armorPerLevel": 0.6,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 0.9
+        },
+        "abilities": {
+            "devour": {
+                "name": "Devour",
+                "type": "active",
+                "description": "Consumes a creep, gaining bonus gold and the creep's abilities.",
+                "bonusGold": 100, "digestTime": 70000, "cooldown": 60000, "manaCost": 30, "range": 3
+            },
+            "scorchedEarth": {
+                "name": "Scorched Earth",
+                "type": "active",
+                "description": "Doom engulfs himself in flames, damaging nearby enemies and gaining bonus movement speed and regen.",
+                "damagePerSecond": 30, "healPerSecond": 30, "moveSpeedBonus": 14, "duration": 12000, "radius": 5,
+                "cooldown": 30000, "manaCost": 30
+            },
+            "infernalBlade": {
+                "name": "Infernal Blade",
+                "type": "passive",
+                "description": "Doom's attacks deal bonus damage based on the enemy's max HP and stun briefly.",
+                "hpBurnPercent": 2, "ministun": 400, "dotDuration": 4000, "cooldown": 14000
+            },
+            "doom_ability": {
+                "name": "Doom",
+                "type": "ultimate",
+                "description": "Inflicts Doom on the target, dealing massive damage over time and muting all items and abilities.",
+                "damagePerSecond": 40, "duration": 16000, "cooldown": 140000, "manaCost": 60, "range": 8
+            }
+        },
+        "talents": {
+            "10": ["+15 Scorched Earth Movement Speed", "+1.5% Infernal Blade Damage"],
+            "15": ["+120 Devour Bonus Gold", "+15 Scorched Earth Damage"],
+            "20": ["+50 Doom DPS", "Devour Can Target Ancients"],
+            "25": ["+2% Infernal Blade Damage", "Doom Applies Break"]
+        }
+    },
+    "dragon_knight": {
+        "name": "Dragon Knight",
+        "title": "Davion",
+        "attr": "strength",
+        "icon": "dragon",
+        "lore": "After years of training, Davion the Dragon Knight joined the Dragonguard. In a final battle, he slew the dragon Slyrak but was transformed.",
+        "baseStats": {
+            "maxHp": 130, "maxMana": 75, "hpPerLevel": 30, "manaPerLevel": 16,
+            "baseDamage": 18, "damagePerLevel": 3.2, "armor": 4, "armorPerLevel": 0.6,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "breatheFire": {
+                "name": "Breathe Fire",
+                "type": "active",
+                "description": "Breathes fire in a cone, damaging enemies and reducing their attack damage.",
+                "damage": 45, "attackReduction": 30, "reductionDuration": 8000, "range": 8,
+                "cooldown": 11000, "manaCost": 25
+            },
+            "dragonTail": {
+                "name": "Dragon Tail",
+                "type": "active",
+                "description": "Strikes an enemy with his shield, stunning them and dealing damage.",
+                "damage": 30, "stunDuration": 2500, "cooldown": 10000, "manaCost": 20, "range": 2.5
+            },
+            "dragonBlood": {
+                "name": "Dragon Blood",
+                "type": "passive",
+                "description": "Grants increased health regeneration and armor from dragon heritage.",
+                "hpRegen": 8, "bonusArmor": 8
+            },
+            "elderDragonForm": {
+                "name": "Elder Dragon Form",
+                "type": "ultimate",
+                "description": "Transforms into a powerful dragon with ranged attacks and special abilities.",
+                "bonusAttackRange": 8, "poisonDamage": 15, "splashPercent": 50, "slowPercent": 35, "duration": 50000,
+                "cooldown": 100000, "manaCost": 40
+            }
+        },
+        "talents": {
+            "10": ["+2.5 Mana Regen", "+15 Damage"],
+            "15": ["+30 Dragon Tail Damage", "+500 Night Vision"],
+            "20": ["+25 Strength", "+150 Breathe Fire Damage"],
+            "25": ["+1.8s Dragon Tail Stun Duration", "2x Dragon Blood HP Regen/Armor"]
+        }
+    },
+    "earth_spirit": {
+        "name": "Earth Spirit",
+        "title": "Kaolin",
+        "attr": "strength",
+        "icon": "rock",
+        "lore": "Deep in the barren hills of Narshen, Kaolin the Earth Spirit was one of the four spirits, guardians of elemental balance.",
+        "baseStats": {
+            "maxHp": 120, "maxMana": 90, "hpPerLevel": 28, "manaPerLevel": 20,
+            "baseDamage": 17, "damagePerLevel": 3.0, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 11, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "boulderSmash": {
+                "name": "Boulder Smash",
+                "type": "active",
+                "description": "Earth Spirit kicks a Stone Remnant or enemy unit, stunning and damaging units in its path.",
+                "damage": 40, "stunDuration": 1500, "range": 12,
+                "cooldown": 14000, "manaCost": 20
+            },
+            "rollingBoulder": {
+                "name": "Rolling Boulder",
+                "type": "active",
+                "description": "Earth Spirit rolls as a boulder, stunning and damaging enemies. Travels faster if it passes through a Remnant.",
+                "damage": 35, "stunDuration": 1200, "speed": 15, "remnantSpeed": 25,
+                "cooldown": 12000, "manaCost": 25, "range": 10
+            },
+            "geomagneticGrip": {
+                "name": "Geomagnetic Grip",
+                "type": "active",
+                "description": "Pulls a Stone Remnant toward Earth Spirit, silencing enemies it passes through.",
+                "silenceDuration": 3000, "damage": 30,
+                "cooldown": 13000, "manaCost": 20, "range": 12
+            },
+            "magnetize": {
+                "name": "Magnetize",
+                "type": "ultimate",
+                "description": "Magnetizes nearby enemies, causing them to take damage over time. Remnants refresh and spread the debuff.",
+                "damagePerSecond": 40, "duration": 6000, "radius": 5,
+                "cooldown": 80000, "manaCost": 50
+            }
+        },
+        "talents": {
+            "10": ["+250 Rolling Boulder Damage", "+10 Strength"],
+            "15": ["+2s Geomagnetic Grip Silence", "-50 Rolling Boulder Cooldown"],
+            "20": ["+15% Spell Amplification", "+150 Boulder Smash Damage"],
+            "25": ["Magnetize Undispellable", "+2s Magnetize Duration"]
+        }
+    },
+    "elder_titan": {
+        "name": "Elder Titan",
+        "title": "Worldsmith",
+        "attr": "strength",
+        "icon": "titan",
+        "lore": "The Elder Titan was the creator of worlds. Now, searching for a flaw in his design, he wanders alone.",
+        "baseStats": {
+            "maxHp": 130, "maxMana": 85, "hpPerLevel": 30, "manaPerLevel": 18,
+            "baseDamage": 17, "damagePerLevel": 3.0, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 2.5, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "echoStomp": {
+                "name": "Echo Stomp",
+                "type": "active",
+                "description": "Elder Titan and his Astral Spirit stomp together, sleeping all nearby enemies.",
+                "damage": 40, "sleepDuration": 4000, "radius": 5, "channelTime": 1400,
+                "cooldown": 11000, "manaCost": 25
+            },
+            "astralSpirit": {
+                "name": "Astral Spirit",
+                "type": "active",
+                "description": "Sends out Elder Titan's spirit, damaging enemies and returning with bonus damage and speed for each hero hit.",
+                "damage": 30, "bonusDamagePerHero": 20, "bonusSpeedPerHero": 5, "duration": 8000,
+                "cooldown": 16000, "manaCost": 20, "range": 12
+            },
+            "naturalOrder": {
+                "name": "Natural Order",
+                "type": "passive",
+                "description": "Elder Titan's presence strips enemies of their natural defenses, reducing armor and magic resistance.",
+                "armorReductionPercent": 75, "magicResistReductionPercent": 75, "radius": 4
+            },
+            "earthSplitter": {
+                "name": "Earth Splitter",
+                "type": "ultimate",
+                "description": "Cracks the earth, dealing a percentage of enemies' max HP and slowing them.",
+                "maxHpDamagePercent": 35, "slowPercent": 50, "slowDuration": 4000, "delay": 3000, "length": 14,
+                "cooldown": 100000, "manaCost": 50
+            }
+        },
+        "talents": {
+            "10": ["+200 Health", "+20 Astral Spirit Hero Damage"],
+            "15": ["+100% Cleave", "+100 Echo Stomp Damage"],
+            "20": ["+30% Magic Resistance", "+100 Astral Spirit Damage"],
+            "25": ["+50% Earth Splitter Damage", "0% Natural Order Armor"]
+        }
+    },
+    "ember_spirit": {
+        "name": "Ember Spirit",
+        "title": "Xin",
+        "attr": "agility",
+        "icon": "flame",
+        "lore": "Xin the Ember Spirit was one of four celestial spirits dedicated to maintaining universal balance.",
+        "baseStats": {
+            "maxHp": 90, "maxMana": 80, "hpPerLevel": 22, "manaPerLevel": 18,
+            "baseDamage": 17, "damagePerLevel": 3.2, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 12, "attackRange": 2.5, "attackSpeed": 1.2
+        },
+        "abilities": {
+            "searingChains": {
+                "name": "Searing Chains",
+                "type": "active",
+                "description": "Ember Spirit unleashes chains that bind and damage nearby enemies.",
+                "damage": 25, "duration": 2500, "maxTargets": 2, "radius": 4,
+                "cooldown": 10000, "manaCost": 20
+            },
+            "slightOfFist": {
+                "name": "Sleight of Fist",
+                "type": "active",
+                "description": "Ember Spirit dashes around, attacking all enemies in an area and returning to his origin point.",
+                "bonusDamage": 40, "radius": 6, "cooldown": 6000, "manaCost": 20, "range": 10
+            },
+            "flameguard": {
+                "name": "Flame Guard",
+                "type": "active",
+                "description": "Ember Spirit surrounds himself with fire, absorbing magic damage and dealing damage to nearby enemies.",
+                "damageAbsorb": 100, "damagePerSecond": 25, "duration": 10000, "radius": 4,
+                "cooldown": 30000, "manaCost": 30
+            },
+            "fireRemnant": {
+                "name": "Fire Remnant",
+                "type": "ultimate",
+                "description": "Places fire remnants that Ember Spirit can dash to, damaging enemies in his path.",
+                "damageOnDash": 50, "maxRemnants": 3, "remnantDuration": 45000, "remnantCooldown": 35000,
+                "dashCooldown": 0, "manaCostPerRemnant": 35, "range": 15
+            }
+        },
+        "talents": {
+            "10": ["+15 Damage", "+0.5s Searing Chains"],
+            "15": ["+1s Fire Remnant Duration", "+50 Flame Guard Damage/Shield"],
+            "20": ["+80 Sleight of Fist Damage", "True Strike"],
+            "25": ["-12s Fire Remnant Charge Restore", "+2 Searing Chain Targets"]
+        }
+    },
+    "enchantress": {
+        "name": "Enchantress",
+        "title": "Aiushtha",
+        "attr": "universal",
+        "icon": "deer",
+        "lore": "Aiushtha appears to be a Dryad, but no mere forest sprite has her power. The Enchantress charms all who meet her.",
+        "baseStats": {
+            "maxHp": 85, "maxMana": 100, "hpPerLevel": 21, "manaPerLevel": 22,
+            "baseDamage": 12, "damagePerLevel": 2.5, "armor": 1, "armorPerLevel": 0.4,
+            "moveSpeed": 11, "attackRange": 8, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "untouchable": {
+                "name": "Untouchable",
+                "type": "passive",
+                "description": "Enchantress beguiles her enemies, slowing their attacks when they assault her.",
+                "attackSlowPercent": 100
+            },
+            "enchant": {
+                "name": "Enchant",
+                "type": "active",
+                "description": "Takes control of an enemy creep or slows an enemy hero.",
+                "slowPercent": 55, "slowDuration": 5000, "controlDuration": 80000,
+                "cooldown": 20000, "manaCost": 25, "range": 8
+            },
+            "naturesAttendants": {
+                "name": "Nature's Attendants",
+                "type": "active",
+                "description": "Wisps surround Enchantress, healing her and nearby allies over time.",
+                "healPerWisp": 2, "numWisps": 8, "duration": 10000, "radius": 5,
+                "cooldown": 35000, "manaCost": 30
+            },
+            "impetus": {
+                "name": "Impetus",
+                "type": "ultimate",
+                "description": "Places a magical charge on attacks that deals bonus damage based on distance traveled.",
+                "damagePerDistance": 3, "maxDistance": 20, "manaCost": 15
+            }
+        },
+        "talents": {
+            "10": ["+15% Magic Resistance", "+8 Nature's Attendants Wisps"],
+            "15": ["+8 Enchant Slow", "+35 Movement Speed"],
+            "20": ["+100 Impetus Distance Damage", "+8% Untouchable Slow"],
+            "25": ["+25 Nature's Attendants Heal", "+4% Impetus Distance Damage"]
+        }
+    },
+    "enigma": {
+        "name": "Enigma",
+        "title": "Void Entity",
+        "attr": "universal",
+        "icon": "void",
+        "lore": "Nothing is known of Enigma's past, save that he is a fundamental force of the universe, a being of pure malice.",
+        "baseStats": {
+            "maxHp": 105, "maxMana": 100, "hpPerLevel": 26, "manaPerLevel": 22,
+            "baseDamage": 14, "damagePerLevel": 2.8, "armor": 2, "armorPerLevel": 0.5,
+            "moveSpeed": 10, "attackRange": 8, "attackSpeed": 1.0
+        },
+        "abilities": {
+            "malefice": {
+                "name": "Malefice",
+                "type": "active",
+                "description": "Repeatedly stuns and damages a target enemy over several seconds.",
+                "damagePerStun": 20, "stunDuration": 600, "stuns": 4, "totalDuration": 4500,
+                "cooldown": 14000, "manaCost": 25, "range": 8
+            },
+            "demonic_conversion": {
+                "name": "Demonic Conversion",
+                "type": "active",
+                "description": "Transforms a creep into three Eidolons that multiply when attacking.",
+                "eidolonDamage": 20, "eidolonHP": 150, "duration": 35000, "attacksToSplit": 6,
+                "cooldown": 30000, "manaCost": 30, "range": 8
+            },
+            "midnightPulse": {
+                "name": "Midnight Pulse",
+                "type": "active",
+                "description": "Creates a zone of pure void that deals damage based on enemies' max HP.",
+                "damagePercent": 4, "duration": 10000, "radius": 5,
+                "cooldown": 30000, "manaCost": 25, "range": 10
+            },
+            "blackHole": {
+                "name": "Black Hole",
+                "type": "ultimate",
+                "description": "Creates a vortex that sucks in and disables all nearby enemies while dealing massive damage.",
+                "damagePerSecond": 60, "duration": 4000, "radius": 5,
+                "cooldown": 160000, "manaCost": 60, "range": 8
+            }
+        },
+        "talents": {
+            "10": ["+20 Eidolon Damage", "+15 Malefice Instance Damage"],
+            "15": ["+150 Cast Range", "+15 Eidolon Health"],
+            "20": ["+100 Black Hole DPS", "+3% Midnight Pulse Damage"],
+            "25": ["+5 Demonic Conversion Eidolons", "Black Hole Undispellable"]
+        }
     }
 }
 
