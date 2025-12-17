@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2 Lockout - Multiplayer FPS v1.51</title>
+    <title>Halo 2 Lockout - Multiplayer FPS v1.54</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -2424,6 +2424,29 @@
         // HALO 2 LOCKOUT - MULTIPLAYER FPS
         // A tribute to Bungie's iconic arena shooter
         // ============================================================
+        /// v1.53 - Weapon UI and Pickup Visibility State Caching (Round 29):
+        // - Weapon UI State Caching: Added _lastWeaponName, _lastCurrentAmmo, _lastReserveAmmo
+        //   * updateWeaponUI() called every frame (~60x/sec) but values rarely change
+        //   * Previously: 3 textContent updates per frame = 180 DOM writes/sec
+        //   * Now: Only updates DOM when weapon name or ammo values actually change
+        //   * Impact: Eliminates ~177 redundant textContent updates per second during combat
+        // - Weapon Pickup Visibility Caching: Added _lastPickupVisible state tracking
+        //   * classList.add/remove was called every frame regardless of state
+        //   * Now only updates classList when visibility state transitions (true->false or false->true)
+        //   * Also moved pickup name textContent update inside visibility check (only when visible)
+        //   * Impact: Eliminates ~60 classList operations + ~60 textContent updates per second
+        // - Combined Impact: ~300 fewer DOM operations per second during active gameplay
+        //
+        /// v1.52 - Timer UI and FPS Counter Micro-Optimizations (Round 28):
+        // - Timer UI: Added _lastTimerText caching to skip DOM updates when text unchanged
+        //   * Reduces ~59 redundant textContent assignments per second at 60fps
+        //   * Timer only changes once per second, so 59/60 frames were wasted updates
+        // - FPS Counter: Added _lastFpsState tracking to skip classList operations when state unchanged
+        //   * FPS state (normal/warning/critical) changes rarely during stable gameplay
+        //   * Previously called classList.remove() every frame even when state was unchanged
+        //   * State encoded as: 0=normal (>=45fps), 1=warning (30-44fps), 2=critical (<30fps)
+        // - Impact: Eliminates ~60 unnecessary DOM operations per second during normal gameplay
+        //
         /// v1.51 - Final Code Quality Audit (Round 27):
         // - Verified timer management: 2 setInterval with 4 clearInterval (proper balance)
         // - Verified DOM caching: 98 getElementById calls, 97 cached in getUICache()
@@ -2946,7 +2969,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '1.51'; // v1.51: Final code quality audit - verified all systems at production maturity
+        const APP_VERSION = '1.54'; // v1.54: Footstep timing cache optimization (uses _frameTimeSec instead of Date.now()/1000)
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -3007,6 +3030,14 @@
         // v1.47: Cached frame time in seconds (set once per frame in gameLoop)
         // All time-dependent code should use this instead of performance.now()/1000
         let _frameTimeSec = 0;
+        // v1.52: Cached FPS state to avoid redundant classList operations (0=normal, 1=warning, 2=critical)
+        let _lastFpsState = 0;
+        // v1.53: Cached weapon pickup visibility state (avoids classList.add/remove when unchanged)
+        let _lastPickupVisible = false;
+        // v1.53: Cached weapon UI state to skip redundant textContent updates (~60x/sec -> only on change)
+        let _lastWeaponName = '';
+        let _lastCurrentAmmo = -1;
+        let _lastReserveAmmo = -1;
         const HALF_PI = PI / 2;
         const DEG_TO_RAD = PI / 180;
         const RAD_TO_DEG = 180 / PI;
@@ -11329,15 +11360,27 @@
         /**
          * v1.11: Enhanced with reload progress indicator (8/8 consensus)
          * v1.22: Uses cached DOM references for ammo display and reload progress
+         * v1.53: State caching for textContent updates (only updates DOM when values change)
          */
         function updateWeaponUI() {
             const weapon = PlayerController.weapons[PlayerController.currentWeaponIndex];
             if (!weapon) return;
 
             const ui = getUICache();
-            ui.weaponName.textContent = weapon.config.name;
-            ui.currentAmmo.textContent = weapon.currentAmmo;
-            ui.reserveAmmo.textContent = weapon.reserveAmmo;
+            // v1.53: Only update DOM when values change (saves ~180 textContent updates/sec at 60fps)
+            const weaponName = weapon.config.name;
+            if (weaponName !== _lastWeaponName) {
+                _lastWeaponName = weaponName;
+                ui.weaponName.textContent = weaponName;
+            }
+            if (weapon.currentAmmo !== _lastCurrentAmmo) {
+                _lastCurrentAmmo = weapon.currentAmmo;
+                ui.currentAmmo.textContent = weapon.currentAmmo;
+            }
+            if (weapon.reserveAmmo !== _lastReserveAmmo) {
+                _lastReserveAmmo = weapon.reserveAmmo;
+                ui.reserveAmmo.textContent = weapon.reserveAmmo;
+            }
 
             /// v1.10: Low ammo warning - visual indicator and audio alert
             /// v1.22: Uses cached ammoDisplay reference
@@ -11427,11 +11470,18 @@
             getUICache().playerScore.textContent = PlayerController.kills || 0;
         }
 
+        /// v1.52: Cache previous timer text to avoid DOM updates when unchanged
+        let _lastTimerText = '';
+
         function updateTimerUI() {
             const minutes = Math.floor(GameState.matchTime / 60);
             const seconds = Math.floor(GameState.matchTime % 60);
-            getUICache().matchTimer.textContent =
-                `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            const timerText = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+            // v1.52: Only update DOM if text changed (saves ~59 textContent assignments/sec)
+            if (timerText !== _lastTimerText) {
+                _lastTimerText = timerText;
+                getUICache().matchTimer.textContent = timerText;
+            }
         }
 
         /**
@@ -11886,17 +11936,21 @@
 
             /// v1.03: Update FPS counter display
             /// v1.22: Uses cached DOM references
+            /// v1.52: Added state tracking to avoid redundant classList operations
             const ui = getUICache();
             if (ui.fpsValue) {
                 const fps = perfMonitor.getFPS();
                 ui.fpsValue.textContent = fps;
 
-                // Color code FPS counter based on performance
-                if (ui.fpsCounter) {
+                // v1.52: Track FPS state to avoid classList operations when unchanged
+                // State: 0 = normal (>=45), 1 = warning (30-44), 2 = critical (<30)
+                const newFpsState = fps < 30 ? 2 : (fps < 45 ? 1 : 0);
+                if (newFpsState !== _lastFpsState && ui.fpsCounter) {
+                    _lastFpsState = newFpsState;
                     ui.fpsCounter.classList.remove('warning', 'critical');
-                    if (fps < 30) {
+                    if (newFpsState === 2) {
                         ui.fpsCounter.classList.add('critical');
-                    } else if (fps < 45) {
+                    } else if (newFpsState === 1) {
                         ui.fpsCounter.classList.add('warning');
                     }
                 }
@@ -11967,12 +12021,20 @@
 
             /// v1.01: Check for nearby weapon pickups using cached DOM
             /// v1.22: Reuses ui variable from above for consistency
+            /// v1.53: State caching to avoid redundant classList operations
             const nearbyPickup = WeaponPickups.checkPickup(PlayerController.position);
-            if (nearbyPickup) {
-                ui.weaponPickup.classList.add('visible');
+            const pickupVisible = !!nearbyPickup;
+            if (pickupVisible !== _lastPickupVisible) {
+                _lastPickupVisible = pickupVisible;
+                if (pickupVisible) {
+                    ui.weaponPickup.classList.add('visible');
+                } else {
+                    ui.weaponPickup.classList.remove('visible');
+                }
+            }
+            // Only update pickup name when visible (and on visibility change)
+            if (pickupVisible) {
                 ui.pickupWeaponName.textContent = WeaponTypes[nearbyPickup.weaponType].name;
-            } else {
-                ui.weaponPickup.classList.remove('visible');
             }
 
             // Update minimap
@@ -12241,11 +12303,12 @@
             PlayerController.position.copy(newPos);
 
             // Footstep sounds
+            // v1.54: Use cached _frameTimeSec instead of Date.now()/1000 (eliminates 2 Date.now() + 2 division ops per frame when moving)
             if (PlayerController.isGrounded && (forward !== 0 || right !== 0)) {
                 const footstepInterval = PlayerController.isCrouching ? 0.6 : 0.45;
-                if (Date.now() / 1000 - lastFootstepTime > footstepInterval) {
+                if (_frameTimeSec - lastFootstepTime > footstepInterval) {
                     AudioSystem.playFootstep();
-                    lastFootstepTime = Date.now() / 1000;
+                    lastFootstepTime = _frameTimeSec;
                 }
             }
         }
