@@ -512,6 +512,55 @@
         };
 
         // ============================================================
+        // CAMERA SHAKE SYSTEM (v1.1)
+        // ============================================================
+        const CameraShake = {
+            trauma: 0,         // Current trauma level (0-1)
+            decay: 2.0,        // Trauma decay per second
+            maxOffset: 0.5,    // Maximum position offset
+            maxAngle: 0.03,    // Maximum rotation offset (radians)
+            offset: new THREE.Vector3(),
+            rotationOffset: new THREE.Euler(),
+
+            // Add trauma (will be clamped to 0-1)
+            add(amount) {
+                this.trauma = Math.min(1, this.trauma + amount);
+            },
+
+            // Update shake - call each frame
+            update(delta) {
+                if (this.trauma <= 0) {
+                    this.offset.set(0, 0, 0);
+                    this.rotationOffset.set(0, 0, 0);
+                    return;
+                }
+
+                // Decay trauma
+                this.trauma = Math.max(0, this.trauma - this.decay * delta);
+
+                // Calculate shake (trauma^2 for smoother falloff)
+                const shake = this.trauma * this.trauma;
+                const time = performance.now() * 0.001;
+
+                // Use noise-like pattern for organic shake
+                this.offset.x = (Math.sin(time * 25) * 0.5 + Math.sin(time * 40) * 0.3 + Math.sin(time * 55) * 0.2) * this.maxOffset * shake;
+                this.offset.y = (Math.sin(time * 30) * 0.5 + Math.sin(time * 45) * 0.3 + Math.sin(time * 60) * 0.2) * this.maxOffset * shake;
+                this.offset.z = (Math.sin(time * 35) * 0.5 + Math.sin(time * 50) * 0.3 + Math.sin(time * 65) * 0.2) * this.maxOffset * shake * 0.5;
+
+                // Rotation shake
+                this.rotationOffset.x = (Math.sin(time * 28) * 0.6 + Math.sin(time * 42) * 0.4) * this.maxAngle * shake;
+                this.rotationOffset.z = (Math.sin(time * 32) * 0.6 + Math.sin(time * 48) * 0.4) * this.maxAngle * shake;
+            },
+
+            // Apply shake to camera
+            apply(camera) {
+                camera.position.add(this.offset);
+                camera.rotation.x += this.rotationOffset.x;
+                camera.rotation.z += this.rotationOffset.z;
+            }
+        };
+
+        // ============================================================
         // THREE.JS SETUP
         // ============================================================
         let scene, camera, renderer, clock;
@@ -831,6 +880,9 @@
                 GameState.health = Math.max(0, GameState.health - amount);
                 UI.updateStats();
 
+                // Camera shake on damage (v1.1)
+                CameraShake.add(amount / 50); // Scale shake by damage
+
                 if (GameState.health <= 0) {
                     this.die();
                 }
@@ -972,6 +1024,12 @@
             explode() {
                 // Create explosion effect
                 console.log('Vehicle exploded!');
+
+                // Camera shake for explosion (v1.1)
+                const distToPlayer = this.position.distanceTo(Player.position);
+                const shakeIntensity = Math.max(0, 1 - distToPlayer / 50); // Shake falls off with distance
+                CameraShake.add(shakeIntensity * 0.8);
+
                 // Eject player if inside
                 if (this.hasDriver && Player.currentVehicle === this) {
                     Player.exitVehicle();
@@ -1239,17 +1297,70 @@
                 canvas.width = 200;
                 canvas.height = 200;
 
-                ctx.fillStyle = '#1a1a2e';
+                // Background - darker at night (v1.1)
+                const hour = GameState.gameTime / 60;
+                const isNight = hour < 6 || hour >= 20;
+                ctx.fillStyle = isNight ? '#0a0a15' : '#1a1a2e';
                 ctx.fillRect(0, 0, 200, 200);
 
-                // Draw roads (simplified)
-                ctx.strokeStyle = '#444';
-                ctx.lineWidth = 2;
-
-                // Draw player position
                 const scale = 0.5;
                 const centerX = 100;
                 const centerY = 100;
+                const playerX = Player.position.x;
+                const playerZ = Player.position.z;
+
+                // Draw roads on minimap (v1.1)
+                ctx.strokeStyle = isNight ? '#333344' : '#444455';
+                ctx.lineWidth = 4;
+                for (const road of CityMap.roads) {
+                    const dx = (road.x - playerX) * scale;
+                    const dz = (road.z - playerZ) * scale;
+                    // Only draw roads within view
+                    if (Math.abs(dx) < 150 && Math.abs(dz) < 150) {
+                        ctx.beginPath();
+                        if (road.isVertical) {
+                            const halfLen = (road.length / 2) * scale;
+                            ctx.moveTo(centerX + dx, centerY + dz - halfLen);
+                            ctx.lineTo(centerX + dx, centerY + dz + halfLen);
+                        } else {
+                            const halfLen = (road.width / 2) * scale;
+                            ctx.moveTo(centerX + dx - halfLen, centerY + dz);
+                            ctx.lineTo(centerX + dx + halfLen, centerY + dz);
+                        }
+                        ctx.stroke();
+                    }
+                }
+
+                // Draw road center lines (yellow)
+                ctx.strokeStyle = isNight ? '#666622' : '#888833';
+                ctx.lineWidth = 1;
+                for (const road of CityMap.roads) {
+                    const dx = (road.x - playerX) * scale;
+                    const dz = (road.z - playerZ) * scale;
+                    if (Math.abs(dx) < 150 && Math.abs(dz) < 150) {
+                        ctx.beginPath();
+                        if (road.isVertical) {
+                            const halfLen = (road.length / 2) * scale;
+                            ctx.moveTo(centerX + dx, centerY + dz - halfLen);
+                            ctx.lineTo(centerX + dx, centerY + dz + halfLen);
+                        } else {
+                            const halfLen = (road.width / 2) * scale;
+                            ctx.moveTo(centerX + dx - halfLen, centerY + dz);
+                            ctx.lineTo(centerX + dx + halfLen, centerY + dz);
+                        }
+                        ctx.stroke();
+                    }
+                }
+
+                // North indicator (v1.1)
+                ctx.fillStyle = '#ff6666';
+                ctx.font = 'bold 12px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.save();
+                ctx.translate(centerX, centerY);
+                ctx.rotate(-Player.rotation.y);
+                ctx.fillText('N', 0, -85);
+                ctx.restore();
 
                 // Player arrow
                 ctx.save();
@@ -1265,15 +1376,25 @@
                 ctx.restore();
 
                 // Draw nearby vehicles as dots
-                ctx.fillStyle = '#ff4444';
+                ctx.fillStyle = Player.inVehicle ? '#ffff00' : '#ff4444';
                 for (const vehicle of GameState.vehicles) {
-                    const dx = (vehicle.position.x - Player.position.x) * scale;
-                    const dz = (vehicle.position.z - Player.position.z) * scale;
+                    if (Player.currentVehicle === vehicle) continue; // Skip player's vehicle
+                    const dx = (vehicle.position.x - playerX) * scale;
+                    const dz = (vehicle.position.z - playerZ) * scale;
                     if (Math.abs(dx) < 100 && Math.abs(dz) < 100) {
                         ctx.beginPath();
                         ctx.arc(centerX + dx, centerY + dz, 3, 0, Math.PI * 2);
                         ctx.fill();
                     }
+                }
+
+                // Minimap border glow at night (v1.1)
+                if (isNight) {
+                    ctx.strokeStyle = 'rgba(100, 150, 255, 0.3)';
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(100, 100, 98, 0, Math.PI * 2);
+                    ctx.stroke();
                 }
             }
         };
@@ -1330,9 +1451,12 @@
         };
 
         // ============================================================
-        // DAY/NIGHT CYCLE
+        // DAY/NIGHT CYCLE (v1.1 - with gameplay effects)
         // ============================================================
         const DayNightCycle = {
+            timeOfDay: 'day',  // 'dawn', 'day', 'dusk', 'night'
+            lastTimeOfDay: 'day',
+
             update(delta) {
                 // Advance game time
                 GameState.gameTime += delta * GameState.timeScale;
@@ -1342,6 +1466,23 @@
 
                 // Update lighting based on time
                 const hour = GameState.gameTime / 60;
+
+                // Determine time of day period (v1.1)
+                if (hour >= 6 && hour < 8) {
+                    this.timeOfDay = 'dawn';
+                } else if (hour >= 8 && hour < 18) {
+                    this.timeOfDay = 'day';
+                } else if (hour >= 18 && hour < 20) {
+                    this.timeOfDay = 'dusk';
+                } else {
+                    this.timeOfDay = 'night';
+                }
+
+                // Trigger events on time change (v1.1)
+                if (this.timeOfDay !== this.lastTimeOfDay) {
+                    this.onTimeChange(this.lastTimeOfDay, this.timeOfDay);
+                    this.lastTimeOfDay = this.timeOfDay;
+                }
 
                 // Sun position
                 const sunAngle = ((hour - 6) / 12) * Math.PI; // 6am to 6pm arc
@@ -1356,22 +1497,94 @@
                     sunLight.intensity = 0.1;
                 }
 
-                // Sky color
-                if (hour >= 6 && hour < 8) {
-                    // Sunrise
-                    scene.background.setHex(0xffaa77);
-                } else if (hour >= 8 && hour < 18) {
-                    // Day
-                    scene.background.setHex(0x87ceeb);
-                } else if (hour >= 18 && hour < 20) {
-                    // Sunset
-                    scene.background.setHex(0xff6644);
+                // Ambient light varies by time (v1.1)
+                if (this.timeOfDay === 'night') {
+                    ambientLight.intensity = 0.15;
+                    ambientLight.color.setHex(0x4466aa); // Blue tint at night
+                } else if (this.timeOfDay === 'dawn' || this.timeOfDay === 'dusk') {
+                    ambientLight.intensity = 0.3;
+                    ambientLight.color.setHex(0xffaa88); // Warm tint
                 } else {
-                    // Night
-                    scene.background.setHex(0x0a0a1a);
+                    ambientLight.intensity = 0.4;
+                    ambientLight.color.setHex(0xffffff);
                 }
 
+                // Sky color
+                if (this.timeOfDay === 'dawn') {
+                    scene.background.setHex(0xffaa77);
+                    scene.fog.color.setHex(0xffaa77);
+                } else if (this.timeOfDay === 'day') {
+                    scene.background.setHex(0x87ceeb);
+                    scene.fog.color.setHex(0x87ceeb);
+                } else if (this.timeOfDay === 'dusk') {
+                    scene.background.setHex(0xff6644);
+                    scene.fog.color.setHex(0xff6644);
+                } else {
+                    scene.background.setHex(0x0a0a1a);
+                    scene.fog.color.setHex(0x0a0a1a);
+                }
+
+                // Building window lights at night (v1.1)
+                this.updateBuildingLights();
+
                 Phone.updateTime();
+            },
+
+            // Called when time period changes (v1.1)
+            onTimeChange(from, to) {
+                if (to === 'night') {
+                    UI.showNotification('Night has fallen...', 2000);
+                    // Increase crime rate at night
+                    GAME_CONFIG.WANTED_DECAY_TIME = 45; // Wanted level decays slower at night
+                } else if (to === 'dawn') {
+                    UI.showNotification('A new day begins', 2000);
+                    GAME_CONFIG.WANTED_DECAY_TIME = 30; // Normal decay during day
+                } else if (to === 'dusk') {
+                    UI.showNotification('Evening approaches...', 2000);
+                }
+            },
+
+            // Update building window emissive (v1.1)
+            updateBuildingLights() {
+                const windowBrightness = this.timeOfDay === 'night' ? 1.0 :
+                                        this.timeOfDay === 'dusk' ? 0.5 :
+                                        this.timeOfDay === 'dawn' ? 0.3 : 0.1;
+
+                // Update window materials on buildings
+                for (const building of CityMap.buildings) {
+                    if (building.mesh && building.mesh.children) {
+                        for (const child of building.mesh.children) {
+                            if (child.material && child.material.color) {
+                                // Windows glow more at night
+                                const glowIntensity = Math.random() > 0.3 ? windowBrightness : windowBrightness * 0.2;
+                                child.material.color.setRGB(
+                                    0.5 + glowIntensity * 0.5,
+                                    0.7 + glowIntensity * 0.3,
+                                    0.8 + glowIntensity * 0.2
+                                );
+                            }
+                        }
+                    }
+                }
+            },
+
+            // Gameplay modifiers based on time (v1.1)
+            getCrimeMultiplier() {
+                // Higher crime rate at night
+                return this.timeOfDay === 'night' ? 1.5 : 1.0;
+            },
+
+            getPoliceResponseTime() {
+                // Slower police response at night
+                return this.timeOfDay === 'night' ? 1.5 : 1.0;
+            },
+
+            isShopOpen(shopType) {
+                // Most shops closed at night
+                if (this.timeOfDay === 'night') {
+                    return shopType === 'club' || shopType === 'bar' || shopType === '24hour';
+                }
+                return true;
             }
         };
 
@@ -1426,6 +1639,10 @@
             Player.update(delta);
             DayNightCycle.update(delta);
             UI.updateMinimap();
+
+            // Update camera shake (v1.1)
+            CameraShake.update(delta);
+            CameraShake.apply(camera);
 
             // Update vehicles
             for (const vehicle of GameState.vehicles) {
