@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.2</title>
+    <title>Halo 2: THE CAGE - Campaign v2.3</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -4721,9 +4721,35 @@
             },
 
             fireWeapon(enemy, target) {
-                // Will integrate with existing projectile system
-                // For now, just log
-                devLog(`[CovenantAI] ${enemy.config.name} fires ${enemy.weapon}`);
+                // v2.3: Actually damage the player based on accuracy
+                const dist = this.distanceTo(enemy.position, target);
+
+                // Accuracy falloff with distance
+                let hitChance = enemy.accuracy;
+                if (dist > 20) hitChance *= 0.7; // Reduced at medium range
+                if (dist > 35) hitChance *= 0.5; // Further reduced at long range
+
+                // Random hit check
+                if (Math.random() < hitChance) {
+                    // Calculate damage based on weapon type
+                    const damages = {
+                        'PLASMA_PISTOL': 8,
+                        'PLASMA_RIFLE': 6,
+                        'CARBINE': 12,
+                        'FUEL_ROD': 50,
+                        'NEEDLER': 4
+                    };
+                    const damage = damages[enemy.weapon] || 5;
+
+                    // Apply damage to player
+                    if (PlayerController && PlayerController.takeDamage) {
+                        PlayerController.takeDamage(damage, enemy.id);
+                    }
+
+                    devLog(`[CovenantAI] ${enemy.config.name} HIT player for ${damage} damage`);
+                } else {
+                    devLog(`[CovenantAI] ${enemy.config.name} fires ${enemy.weapon} - MISS`);
+                }
             },
 
             damageEnemy(enemy, damage, hitPosition) {
@@ -4777,9 +4803,46 @@
                     }
                 }
 
-                // Play death effect
+                // v2.3: Play death effect - enemy falls over and fades out
                 if (enemy.mesh) {
-                    // Death animation would go here
+                    const mesh = enemy.mesh;
+                    const startTime = performance.now();
+                    const duration = 1500; // 1.5s death animation
+
+                    // Death animation loop
+                    const animateDeath = () => {
+                        const elapsed = performance.now() - startTime;
+                        const t = Math.min(elapsed / duration, 1);
+
+                        // Fall over rotation
+                        mesh.rotation.x = t * (Math.PI / 2);
+                        mesh.position.y = enemy.position.y - t * (enemy.config.height * 0.3);
+
+                        // Fade out all materials
+                        mesh.traverse(child => {
+                            if (child.isMesh && child.material) {
+                                child.material.transparent = true;
+                                child.material.opacity = 1 - t;
+                            }
+                        });
+
+                        if (t < 1) {
+                            requestAnimationFrame(animateDeath);
+                        } else {
+                            // Remove mesh after animation completes
+                            scene.remove(mesh);
+                            enemy.mesh = null;
+                        }
+                    };
+                    animateDeath();
+
+                    // Spawn death particles
+                    if (particleSystem && particleSystem.spawnImpact) {
+                        particleSystem.spawnImpact(
+                            new THREE.Vector3(enemy.position.x, enemy.position.y + 1, enemy.position.z),
+                            new THREE.Vector3(0, 1, 0)
+                        );
+                    }
                 }
 
                 devLog(`[CovenantAI] ${enemy.config.name} killed! Total kills: ${CampaignState.stats.kills}`);
@@ -13288,6 +13351,66 @@
             return null;
         }
 
+        // v2.3: Cached Vector3 for Covenant raycast normal
+        const _covenantRaycastNormal = new THREE.Vector3();
+
+        /**
+         * v2.3: Covenant enemy raycast - Check for hits on enemy meshes
+         * In campaign mode, player shots need to hit Covenant enemies
+         *
+         * @param {THREE.Vector3} origin - Ray origin point
+         * @param {THREE.Vector3} direction - Ray direction (normalized)
+         * @param {number} maxDistance - Maximum raycast distance
+         * @returns {Object|null} Hit result with {point, normal, distance, enemy, isHeadshot} or null
+         */
+        function performCovenantRaycast(origin, direction, maxDistance) {
+            if (!CAMPAIGN_MODE || !CovenantAI.enemies || CovenantAI.enemies.length === 0) {
+                return null;
+            }
+
+            raycaster.set(origin, direction);
+            raycaster.far = maxDistance;
+
+            // Collect all Covenant enemy meshes
+            const enemyMeshes = [];
+            for (const enemy of CovenantAI.enemies) {
+                if (enemy.state !== CovenantAI.STATE.DEAD && enemy.mesh) {
+                    enemy.mesh.traverse(child => {
+                        if (child.isMesh) {
+                            child.userData.enemyRef = enemy;
+                            enemyMeshes.push(child);
+                        }
+                    });
+                }
+            }
+
+            if (enemyMeshes.length === 0) return null;
+
+            const intersects = raycaster.intersectObjects(enemyMeshes, false);
+
+            if (intersects.length > 0) {
+                const hit = intersects[0];
+                const enemy = hit.object.userData.enemyRef;
+                const normal = hit.face
+                    ? _covenantRaycastNormal.copy(hit.face.normal).transformDirection(hit.object.matrixWorld)
+                    : new THREE.Vector3(0, 1, 0);
+
+                // Headshot detection - hit upper portion of enemy (head height)
+                const enemyTopY = enemy.position.y + enemy.config.height;
+                const isHeadshot = hit.point.y > (enemyTopY - enemy.config.height * 0.25);
+
+                return {
+                    point: hit.point,
+                    normal: normal,
+                    distance: hit.distance,
+                    enemy: enemy,
+                    isHeadshot: isHeadshot
+                };
+            }
+
+            return null;
+        }
+
         // v1.41: Cached Vector3s for bullet magnetism (called per shot)
         const _magnetismTargetPos = new THREE.Vector3();
         const _magnetismToTarget = new THREE.Vector3();
@@ -13428,6 +13551,37 @@
                     if (bot) {
                         applyDamageToPlayer(bot, damage, 'player', isHeadshot);
                     }
+                }
+
+                return true;
+            }
+
+            /// v2.3: Check for Covenant enemy hit (campaign mode)
+            const covenantHit = performCovenantRaycast(origin, direction, config.range);
+            if (covenantHit) {
+                // Spawn impact particles
+                if (particleSystem && particleSystem.spawnImpact && covenantHit.point) {
+                    particleSystem.spawnImpact(covenantHit.point, covenantHit.normal);
+                }
+
+                // Calculate damage
+                let damage = config.damage / config.burstCount;
+                const isHeadshot = covenantHit.isHeadshot;
+
+                // Apply headshot multiplier
+                if (isHeadshot) {
+                    damage *= config.headshotMultiplier;
+                }
+
+                // Show hit marker
+                showHitMarker(covenantHit.enemy.health <= damage, isHeadshot);
+
+                // Apply damage to enemy
+                CovenantAI.damageEnemy(covenantHit.enemy, damage, covenantHit.point);
+
+                // Play hit audio
+                if (AudioSystem && AudioSystem.playHitMarkerSound) {
+                    AudioSystem.playHitMarkerSound();
                 }
 
                 return true;
@@ -16213,6 +16367,15 @@
             // v2.0: Update Marine allies in campaign mode
             if (CAMPAIGN_MODE && MarineAI.marines.length > 0) {
                 MarineAI.update(delta, PlayerController.position, CovenantAI.enemies);
+            }
+
+            // v2.3: Update campaign stats HUD
+            if (CAMPAIGN_MODE && CampaignUI.elements) {
+                CampaignUI.updateStats(
+                    CampaignState.stats.kills,
+                    MarineAI.getAliveCount ? MarineAI.getAliveCount() : 0,
+                    CampaignState.currentSection
+                );
             }
 
             // v1.47: Update remote players and bot models - converted forEach to for-of
