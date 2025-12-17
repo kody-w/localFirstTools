@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2 Lockout - Multiplayer FPS v1.22</title>
+    <title>Halo 2 Lockout - Multiplayer FPS v1.23</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -7187,6 +7187,7 @@
 
             // v1.05: Update single bot with null safety
             // v1.20: Added spawn protection support
+            // v1.23: Uses squared distance for performance (avoids sqrt in hot path)
             updateBot(bot, delta) {
                 if (!bot || !bot.position || !bot.rotation || !bot.ai) return; // v1.05: Null safety
                 if (!PlayerController || !PlayerController.position) return; // v1.05: Null safety
@@ -7204,17 +7205,21 @@
                 const playerPos = PlayerController.position;
                 const botPos = bot.position;
 
-                // Calculate distance to player
+                // v1.23: Calculate squared distance to player (avoids sqrt)
                 const dx = playerPos.x - botPos.x;
                 const dy = playerPos.y - botPos.y;
                 const dz = playerPos.z - botPos.z;
-                const distToPlayer = Math.sqrt(dx * dx + dy * dy + dz * dz);
+                const distToPlayerSq = dx * dx + dy * dy + dz * dz;
 
-                // Check if player is in line of sight
-                const canSeePlayer = distToPlayer < this.detectionRange && !PlayerController.isDead;
+                // v1.23: Pre-compute squared ranges for comparison
+                const detectionRangeSq = this.detectionRange * this.detectionRange;
+                const shootRangeSq = this.shootRange * this.shootRange;
 
-                // State machine
-                if (canSeePlayer && distToPlayer < this.shootRange) {
+                // Check if player is in line of sight (using squared distance)
+                const canSeePlayer = distToPlayerSq < detectionRangeSq && !PlayerController.isDead;
+
+                // State machine (using squared distance comparisons)
+                if (canSeePlayer && distToPlayerSq < shootRangeSq) {
                     bot.ai.state = 'attack';
                 } else if (canSeePlayer) {
                     bot.ai.state = 'chase';
@@ -7223,6 +7228,9 @@
                 } else {
                     bot.ai.state = 'patrol';
                 }
+
+                // v1.23: Only compute sqrt when needed for attack (accuracy falloff)
+                const distToPlayer = bot.ai.state === 'attack' ? Math.sqrt(distToPlayerSq) : 0;
 
                 // Execute behavior based on state
                 switch (bot.ai.state) {
@@ -8896,16 +8904,16 @@
             this.spawnProtectionActive = true;
             this.spawnProtectionEndTime = performance.now() / 1000 + GAME_CONSTANTS.SPAWN_PROTECTION_DURATION;
 
-            // Show spawn protection UI
-            const spawnProtection = document.getElementById('spawn-protection');
-            if (spawnProtection) {
-                spawnProtection.classList.add('active');
+            // v1.23: Use cached DOM references for spawn protection UI
+            const ui = getUICache();
+            if (ui.spawnProtection) {
+                ui.spawnProtection.classList.add('active');
             }
 
             // v1.17: Activate spawn protection visual overlay (5/8 consensus)
-            const spawnOverlay = document.getElementById('spawn-protection-overlay');
-            if (spawnOverlay) {
-                spawnOverlay.classList.add('active');
+            // v1.23: Uses cached DOM reference
+            if (ui.spawnProtectionOverlay) {
+                ui.spawnProtectionOverlay.classList.add('active');
             }
 
             // Audio cue + accessibility announcement
@@ -8925,7 +8933,7 @@
             updateWeaponUI();
 
             // v1.01: Use cached DOM reference
-            getUICache().respawnScreen.classList.remove('visible');
+            ui.respawnScreen.classList.remove('visible');
 
             // Network respawn
             if (GameState.isMultiplayer) {
@@ -9314,10 +9322,23 @@
             }
         }
 
+        // v1.23: Scoreboard update throttle state
+        let _lastScoreboardUpdate = 0;
+        const SCOREBOARD_UPDATE_INTERVAL = 500; // ms - reduces DOM thrashing
+
         // v1.22: Uses cached player-name reference
+        // v1.23: Throttled to 500ms intervals for performance
         function updateScoreboard() {
-            // v1.01: Use cached DOM reference
+            // v1.23: Throttle scoreboard updates (only when visible or on interval)
+            const now = performance.now();
             const ui = getUICache();
+            const isVisible = ui.scoreboard && ui.scoreboard.classList.contains('visible');
+
+            // Only update if scoreboard is visible OR interval has passed
+            if (!isVisible && now - _lastScoreboardUpdate < SCOREBOARD_UPDATE_INTERVAL) {
+                return; // Skip update - scoreboard not visible and not time yet
+            }
+            _lastScoreboardUpdate = now;
             ui.scoreboardRows.innerHTML = '';
 
             // Sort players by kills
@@ -9934,16 +9955,16 @@
                         burstTimer = 0; // Start burst immediately
 
                         // v1.14: Break spawn protection on weapon fire (prevents abuse)
+                        // v1.23: Uses cached DOM references
                         if (PlayerController.spawnProtectionActive) {
                             PlayerController.spawnProtectionActive = false;
-                            const spawnProtection = document.getElementById('spawn-protection');
-                            if (spawnProtection) {
-                                spawnProtection.classList.remove('active');
+                            const spawnUI = getUICache();
+                            if (spawnUI.spawnProtection) {
+                                spawnUI.spawnProtection.classList.remove('active');
                             }
                             // v1.17: Deactivate spawn protection visual overlay (5/8 consensus)
-                            const spawnOverlay = document.getElementById('spawn-protection-overlay');
-                            if (spawnOverlay) {
-                                spawnOverlay.classList.remove('active');
+                            if (spawnUI.spawnProtectionOverlay) {
+                                spawnUI.spawnProtectionOverlay.classList.remove('active');
                             }
                         }
                     }
