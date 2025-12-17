@@ -5066,6 +5066,394 @@
         };
 
         // ============================================================
+        /// v2.0: CAMPAIGN AUDIO SYSTEM - Music, voice, ambient sounds
+        // Loads from GitHub raw URLs with procedural fallbacks
+        // ============================================================
+
+        const CampaignAudio = {
+            // GitHub raw URL base for assets (update with your repo path)
+            ASSET_BASE: 'https://raw.githubusercontent.com/user/m365-agents-for-python/main/localFirstTools/assets/audio',
+
+            // Audio context and nodes
+            context: null,
+            masterGain: null,
+            musicGain: null,
+            voiceGain: null,
+            ambientGain: null,
+
+            // Audio buffers cache
+            buffers: new Map(),
+
+            // Currently playing sources
+            currentMusic: null,
+            currentAmbient: null,
+            voiceQueue: [],
+
+            // State
+            musicVolume: 0.4,
+            voiceVolume: 0.8,
+            ambientVolume: 0.3,
+            isInCombat: false,
+
+            // Track definitions (file paths relative to ASSET_BASE)
+            TRACKS: {
+                music: {
+                    ambient: 'music/halo2_ambient.mp3',
+                    combat: 'music/halo2_combat.mp3',
+                    victory: 'music/halo2_victory.mp3',
+                    tension: 'music/halo2_tension.mp3'
+                },
+                voice: {
+                    cortana_intro: 'voice/cortana_intro.mp3',
+                    cortana_enemies: 'voice/cortana_enemies.mp3',
+                    cortana_checkpoint: 'voice/cortana_checkpoint.mp3',
+                    cortana_extraction: 'voice/cortana_extraction.mp3',
+                    marine_contact: 'voice/marine_contact.mp3',
+                    marine_covering: 'voice/marine_covering.mp3',
+                    marine_grenade: 'voice/marine_grenade.mp3'
+                },
+                ambient: {
+                    wind: 'ambient/wind_loop.mp3',
+                    facility: 'ambient/facility_hum.mp3',
+                    forerunner: 'ambient/forerunner_drone.mp3'
+                }
+            },
+
+            init() {
+                if (this.context) return;
+
+                try {
+                    this.context = new (window.AudioContext || window.webkitAudioContext)();
+
+                    // Create gain nodes for mixing
+                    this.masterGain = this.context.createGain();
+                    this.masterGain.gain.value = 0.7;
+                    this.masterGain.connect(this.context.destination);
+
+                    this.musicGain = this.context.createGain();
+                    this.musicGain.gain.value = this.musicVolume;
+                    this.musicGain.connect(this.masterGain);
+
+                    this.voiceGain = this.context.createGain();
+                    this.voiceGain.gain.value = this.voiceVolume;
+                    this.voiceGain.connect(this.masterGain);
+
+                    this.ambientGain = this.context.createGain();
+                    this.ambientGain.gain.value = this.ambientVolume;
+                    this.ambientGain.connect(this.masterGain);
+
+                    devLog('[CampaignAudio] Initialized');
+
+                    // Start ambient sounds
+                    this.playAmbient('wind');
+                    this.playMusic('ambient');
+
+                } catch (e) {
+                    devLog('[CampaignAudio] Failed to initialize: ' + e.message);
+                }
+            },
+
+            // Load audio file from GitHub or use procedural fallback
+            async loadAudio(trackKey, category) {
+                const cacheKey = `${category}/${trackKey}`;
+                if (this.buffers.has(cacheKey)) {
+                    return this.buffers.get(cacheKey);
+                }
+
+                const trackPath = this.TRACKS[category]?.[trackKey];
+                if (!trackPath) {
+                    devLog(`[CampaignAudio] Unknown track: ${category}/${trackKey}`);
+                    return null;
+                }
+
+                const url = `${this.ASSET_BASE}/${trackPath}`;
+
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                    const arrayBuffer = await response.arrayBuffer();
+                    const audioBuffer = await this.context.decodeAudioData(arrayBuffer);
+
+                    this.buffers.set(cacheKey, audioBuffer);
+                    devLog(`[CampaignAudio] Loaded: ${cacheKey}`);
+                    return audioBuffer;
+
+                } catch (e) {
+                    devLog(`[CampaignAudio] Failed to load ${url}, using procedural fallback`);
+                    return this.generateProceduralAudio(category, trackKey);
+                }
+            },
+
+            // Generate procedural audio as fallback when files aren't available
+            generateProceduralAudio(category, trackKey) {
+                if (!this.context) return null;
+
+                const sampleRate = this.context.sampleRate;
+                let duration, buffer;
+
+                switch (category) {
+                    case 'music':
+                        duration = 30; // 30 second loops
+                        buffer = this.generateProceduralMusic(trackKey, duration, sampleRate);
+                        break;
+                    case 'ambient':
+                        duration = 10; // 10 second loops
+                        buffer = this.generateProceduralAmbient(trackKey, duration, sampleRate);
+                        break;
+                    case 'voice':
+                        // Voice can't be procedurally generated - return silence
+                        duration = 0.1;
+                        buffer = this.context.createBuffer(1, sampleRate * duration, sampleRate);
+                        break;
+                    default:
+                        return null;
+                }
+
+                const cacheKey = `${category}/${trackKey}`;
+                this.buffers.set(cacheKey, buffer);
+                return buffer;
+            },
+
+            // Generate procedural music (ambient pads, combat drums)
+            generateProceduralMusic(trackKey, duration, sampleRate) {
+                const numSamples = duration * sampleRate;
+                const buffer = this.context.createBuffer(2, numSamples, sampleRate);
+                const leftChannel = buffer.getChannelData(0);
+                const rightChannel = buffer.getChannelData(1);
+
+                // Base frequencies for Halo-style music
+                const baseFreqs = trackKey === 'combat'
+                    ? [55, 110, 165, 220] // Minor, aggressive
+                    : [65.41, 130.81, 196.0, 261.63]; // C major, peaceful
+
+                const tempo = trackKey === 'combat' ? 140 : 80;
+                const beatSamples = Math.floor((60 / tempo) * sampleRate);
+
+                for (let i = 0; i < numSamples; i++) {
+                    const t = i / sampleRate;
+                    let sample = 0;
+
+                    // Pad synth layers
+                    for (let f = 0; f < baseFreqs.length; f++) {
+                        const freq = baseFreqs[f];
+                        const detune = 1 + Math.sin(t * 0.1 + f) * 0.002;
+                        sample += Math.sin(2 * Math.PI * freq * detune * t) * 0.15 / (f + 1);
+                    }
+
+                    // LFO modulation for movement
+                    const lfo = 0.5 + 0.5 * Math.sin(t * 0.5);
+                    sample *= 0.7 + 0.3 * lfo;
+
+                    // Combat: add rhythmic elements
+                    if (trackKey === 'combat') {
+                        const beatPos = i % beatSamples;
+                        const beatPhase = beatPos / beatSamples;
+
+                        // Kick on beats 1 and 3
+                        if (beatPhase < 0.1 && (Math.floor(i / beatSamples) % 2 === 0)) {
+                            const kickEnv = 1 - beatPhase * 10;
+                            sample += Math.sin(2 * Math.PI * 60 * (1 - beatPhase * 0.5) * t) * kickEnv * 0.3;
+                        }
+
+                        // Hi-hat on off-beats
+                        if (beatPhase > 0.45 && beatPhase < 0.55) {
+                            sample += (Math.random() - 0.5) * 0.1 * (1 - (beatPhase - 0.45) * 10);
+                        }
+                    }
+
+                    // Fade in/out for seamless looping
+                    const fadeLen = sampleRate * 2;
+                    let envelope = 1;
+                    if (i < fadeLen) envelope = i / fadeLen;
+                    if (i > numSamples - fadeLen) envelope = (numSamples - i) / fadeLen;
+
+                    sample *= envelope * 0.5;
+
+                    // Stereo spread
+                    leftChannel[i] = sample * (0.9 + 0.1 * Math.sin(t * 0.3));
+                    rightChannel[i] = sample * (0.9 + 0.1 * Math.cos(t * 0.3));
+                }
+
+                return buffer;
+            },
+
+            // Generate procedural ambient sounds (wind, facility hum)
+            generateProceduralAmbient(trackKey, duration, sampleRate) {
+                const numSamples = duration * sampleRate;
+                const buffer = this.context.createBuffer(2, numSamples, sampleRate);
+                const leftChannel = buffer.getChannelData(0);
+                const rightChannel = buffer.getChannelData(1);
+
+                for (let i = 0; i < numSamples; i++) {
+                    const t = i / sampleRate;
+                    let sample = 0;
+
+                    switch (trackKey) {
+                        case 'wind':
+                            // Filtered noise with slow modulation
+                            const windNoise = Math.random() - 0.5;
+                            const windMod = 0.3 + 0.7 * (0.5 + 0.5 * Math.sin(t * 0.2));
+                            sample = windNoise * windMod * 0.15;
+                            break;
+
+                        case 'facility':
+                            // Low frequency hum with harmonics
+                            sample = Math.sin(2 * Math.PI * 60 * t) * 0.1;
+                            sample += Math.sin(2 * Math.PI * 120 * t) * 0.05;
+                            sample += Math.sin(2 * Math.PI * 180 * t) * 0.02;
+                            // Occasional electrical crackle
+                            if (Math.random() < 0.0001) {
+                                sample += (Math.random() - 0.5) * 0.3;
+                            }
+                            break;
+
+                        case 'forerunner':
+                            // Ethereal drone with moving frequencies
+                            const droneFreq = 100 + 20 * Math.sin(t * 0.1);
+                            sample = Math.sin(2 * Math.PI * droneFreq * t) * 0.08;
+                            sample += Math.sin(2 * Math.PI * droneFreq * 1.5 * t) * 0.04;
+                            // Subtle shimmer
+                            sample += Math.sin(2 * Math.PI * 800 * t) * 0.01 * (0.5 + 0.5 * Math.sin(t * 2));
+                            break;
+                    }
+
+                    // Fade for seamless loop
+                    const fadeLen = sampleRate * 0.5;
+                    let envelope = 1;
+                    if (i < fadeLen) envelope = i / fadeLen;
+                    if (i > numSamples - fadeLen) envelope = (numSamples - i) / fadeLen;
+
+                    sample *= envelope;
+
+                    leftChannel[i] = sample;
+                    rightChannel[i] = sample;
+                }
+
+                return buffer;
+            },
+
+            // Play music track (crossfades between tracks)
+            async playMusic(trackKey) {
+                if (!this.context) return;
+
+                const buffer = await this.loadAudio(trackKey, 'music');
+                if (!buffer) return;
+
+                // Fade out current music
+                if (this.currentMusic) {
+                    const oldGain = this.currentMusic.gainNode;
+                    oldGain.gain.linearRampToValueAtTime(0, this.context.currentTime + 2);
+                    setTimeout(() => {
+                        try { this.currentMusic.source.stop(); } catch (e) {}
+                    }, 2000);
+                }
+
+                // Create new source
+                const source = this.context.createBufferSource();
+                source.buffer = buffer;
+                source.loop = true;
+
+                const gainNode = this.context.createGain();
+                gainNode.gain.value = 0;
+                gainNode.gain.linearRampToValueAtTime(this.musicVolume, this.context.currentTime + 2);
+
+                source.connect(gainNode);
+                gainNode.connect(this.musicGain);
+                source.start();
+
+                this.currentMusic = { source, gainNode, trackKey };
+                devLog(`[CampaignAudio] Playing music: ${trackKey}`);
+            },
+
+            // Play ambient sound (loops continuously)
+            async playAmbient(trackKey) {
+                if (!this.context) return;
+
+                const buffer = await this.loadAudio(trackKey, 'ambient');
+                if (!buffer) return;
+
+                // Stop current ambient
+                if (this.currentAmbient) {
+                    try { this.currentAmbient.source.stop(); } catch (e) {}
+                }
+
+                const source = this.context.createBufferSource();
+                source.buffer = buffer;
+                source.loop = true;
+
+                source.connect(this.ambientGain);
+                source.start();
+
+                this.currentAmbient = { source, trackKey };
+                devLog(`[CampaignAudio] Playing ambient: ${trackKey}`);
+            },
+
+            // Play voice line (queues if another is playing)
+            async playVoice(trackKey) {
+                if (!this.context) return;
+
+                const buffer = await this.loadAudio(trackKey, 'voice');
+                if (!buffer || buffer.duration < 0.2) {
+                    // No voice file, show text instead
+                    devLog(`[CampaignAudio] Voice not available: ${trackKey}`);
+                    return;
+                }
+
+                const source = this.context.createBufferSource();
+                source.buffer = buffer;
+                source.connect(this.voiceGain);
+                source.start();
+
+                devLog(`[CampaignAudio] Playing voice: ${trackKey}`);
+            },
+
+            // Combat state management (switches music)
+            enterCombat() {
+                if (this.isInCombat) return;
+                this.isInCombat = true;
+                this.playMusic('combat');
+            },
+
+            exitCombat() {
+                if (!this.isInCombat) return;
+                this.isInCombat = false;
+                this.playMusic('ambient');
+            },
+
+            // Section-based ambient changes
+            onSectionChange(sectionName) {
+                switch (sectionName) {
+                    case 'insertion':
+                    case 'approach':
+                        this.playAmbient('wind');
+                        break;
+                    case 'labs':
+                        this.playAmbient('facility');
+                        break;
+                    case 'cage':
+                    case 'towers':
+                        this.playAmbient('forerunner');
+                        break;
+                    case 'extraction':
+                        this.playAmbient('wind');
+                        this.playMusic('tension');
+                        break;
+                }
+            },
+
+            // Cleanup
+            stop() {
+                if (this.currentMusic) {
+                    try { this.currentMusic.source.stop(); } catch (e) {}
+                }
+                if (this.currentAmbient) {
+                    try { this.currentAmbient.source.stop(); } catch (e) {}
+                }
+            }
+        };
+
+        // ============================================================
         /// v2.0: CAMPAIGN MAP LAYOUT - Extended map for full mission
         // ============================================================
 
@@ -16029,9 +16417,17 @@
             /// v1.21: Initialize fusion cores (explosive barrels)
             FusionCores.init();
 
-            /// v2.0: Initialize campaign UI if in campaign mode
+            /// v2.0: Initialize campaign systems if in campaign mode
             if (CAMPAIGN_MODE) {
                 CampaignUI.init();
+
+                // Initialize campaign audio (requires user interaction for AudioContext)
+                document.addEventListener('click', () => {
+                    if (!CampaignAudio.context) {
+                        CampaignAudio.init();
+                    }
+                }, { once: true });
+
                 // Show intro section title and first objective
                 setTimeout(() => {
                     CampaignUI.showSectionTitle('INSERTION', 'Forerunner Delta Site');
