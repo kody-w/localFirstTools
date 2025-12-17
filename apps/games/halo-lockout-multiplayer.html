@@ -9112,136 +9112,396 @@
         /// v1.43: Cached push vector for checkWallCollision (avoids allocation per call)
         const _wallPushResult = { x: 0, y: 0, z: 0 };
 
+        // ============================================================
+        /// v2.1: SIMPLIFIED MAP SYSTEM - Loads from external JSON
+        // Replaces 1000+ lines of inline geometry with dynamic loader
+        // ============================================================
+
         const LockoutMap = {
-            // Collision data
-            platforms: [],  // Floor/ceiling collision
-            walls: [],      // Wall collision
+            // Collision data (populated by build)
+            platforms: [],
+            walls: [],
 
-            // Gravity lift in LIFT TOWER (separate from BR Tower!) - authentic Lockout
-            gravLift: { x: 24, y: -2, z: 0, topY: 12, radius: 2.5, active: true },
+            // Map data (loaded from JSON)
+            mapData: null,
+            isLoaded: false,
 
-            /// v1.67: AUTHENTIC Lockout weapon spawns based on Halopedia/StrategyWiki research
-            // Lift Tower bottom: Shotgun + SMG (in green hallway)
-            // Lift Tower top: BR + 2 Magnums
-            // BR Tower: BR
-            // Sniper Tower: Sniper (with fusion coils nearby)
-            // Underneath center: Sword
-            weaponSpawns: [
-                { pos: { x: 24, y: 8.5, z: 0 }, weapon: 'BR55' },       // Lift Tower top
-                { pos: { x: -20, y: 10.5, z: 0 }, weapon: 'BR55' },     // BR Tower top
-                { pos: { x: 0, y: 8.5, z: 24 }, weapon: 'SNIPER' },     // Sniper Tower perch (fusion coils nearby)
-                { pos: { x: 24, y: -1.5, z: 0 }, weapon: 'SHOTGUN' },   // Lift Tower bottom (green hallway)
-                { pos: { x: 24, y: -1.5, z: 4 }, weapon: 'SMG' },       // Lift Tower bottom
-                { pos: { x: 0, y: -3.5, z: 0 }, weapon: 'SWORD' },      // UNDERNEATH center (authentic!)
-                { pos: { x: 24, y: 8.5, z: 3 }, weapon: 'PISTOL' },     // Lift Tower top (Magnum 1)
-                { pos: { x: 24, y: 8.5, z: -3 }, weapon: 'PISTOL' }     // Lift Tower top (Magnum 2)
-            ],
+            // Gravity lift (disabled in campaign - simple hallway layout)
+            gravLift: { x: 0, y: 0, z: 0, topY: 0, radius: 0, active: false },
 
-            /// v1.67: Updated spawn points for authentic Lockout layout
-            spawnPoints: [
-                { x: -20, y: 10.5, z: 2 },      // BR Tower top
-                { x: -20, y: 10.5, z: -2 },     // BR Tower top
-                { x: 24, y: 8.5, z: 2 },        // Lift Tower top
-                { x: 24, y: 8.5, z: -2 },       // Lift Tower top
-                { x: 0, y: 5.5, z: 20 },        // Sniper Tower main
-                { x: 0, y: 4.5, z: -18 },       // Library
-                { x: 8, y: 5.5, z: 12 },        // Observation Platform (Elbow)
-                { x: 24, y: -1.5, z: 0 },       // Lift Tower bottom (green hallway)
-                { x: 0, y: 4.5, z: 0 }          // Center platform
-            ],
+            // Spawn points (set after map loads)
+            spawnPoints: [{ x: 0, y: 1, z: 0 }],
+            weaponSpawns: [],
 
-            build(scene) {
-                /// v1.01: Authentic Forerunner/Lockout materials - cold, icy metal with purple/blue accents
-                /// v1.67: Now with procedural textures for authentic Halo 2 look
-                const floorMat = new THREE.MeshStandardMaterial({
-                    color: 0x6a7a8a, // Lighter base to show texture detail
-                    metalness: 0.7,
-                    roughness: 0.35,
-                    map: LockoutTextures.generateMetalFloor(0x4a5a6a)
-                });
-                const wallMat = new THREE.MeshStandardMaterial({
-                    color: 0x5a6a7a, // Lighter base for texture
-                    metalness: 0.75,
-                    roughness: 0.25,
-                    map: LockoutTextures.generateMetalWall(0x3a4a5a)
-                });
-                const accentMat = new THREE.MeshStandardMaterial({
-                    color: 0x7799dd, // Forerunner blue-purple
-                    metalness: 0.85,
-                    roughness: 0.15,
-                    emissive: 0x223366,
-                    emissiveIntensity: 0.4,
-                    map: LockoutTextures.generateForerunnerGlow(0x5577bb)
-                });
-                const glassMat = new THREE.MeshStandardMaterial({
-                    color: 0x7799dd, metalness: 0.3, roughness: 0.05,
-                    transparent: true, opacity: 0.4 // More transparent, icy look
-                });
-                const glowMat = new THREE.MeshBasicMaterial({
-                    color: 0x88bbff, transparent: true, opacity: 0.85 // Brighter Forerunner glow
-                });
+            // Materials (created once, reused)
+            materials: null,
 
-                /// v1.26: Ice/frost material for platform edges - authentic snowy Lockout feel
-                /// v1.67: Now with procedural ice crystal texture
-                const iceMat = new THREE.MeshStandardMaterial({
-                    color: 0xd8f4ff, // Brighter base for ice texture
-                    metalness: 0.2,
-                    roughness: 0.3,
-                    transparent: true,
-                    opacity: 0.7,
-                    map: LockoutTextures.generateIce(0xb8d4e8)
-                });
-
-                /// v1.67: Green Room materials - underground tunnel with shotgun
-                const greenMat = new THREE.MeshStandardMaterial({
-                    color: 0x2a4a3a, metalness: 0.6, roughness: 0.4,
-                    emissive: 0x1a3a2a, emissiveIntensity: 0.3
-                });
-                const greenGlowMat = new THREE.MeshBasicMaterial({
-                    color: 0x44ff88, transparent: true, opacity: 0.7
-                });
-
-                // === HELPER FUNCTIONS ===
-
-                // Create floor platform with collision
-                const addFloor = (x, y, z, w, d, mat = floorMat) => {
-                    const h = 0.5;
-                    const geo = new THREE.BoxGeometry(w, h, d);
-                    const mesh = new THREE.Mesh(geo, mat);
-                    mesh.position.set(x, y - h/2, z);
-                    mesh.receiveShadow = true;
-                    mesh.castShadow = true;
-                    mesh.userData.isMapGeometry = true; /// v1.58: Mark for bot LOS raycasting
-                    scene.add(mesh);
-
-                    this.platforms.push({
-                        minX: x - w/2, maxX: x + w/2,
-                        minY: y - h, maxY: y,
-                        minZ: z - d/2, maxZ: z + d/2,
-                        isFloor: true
-                    });
+            // Initialize materials
+            initMaterials() {
+                if (this.materials) return;
+                this.materials = {
+                    floor: new THREE.MeshStandardMaterial({
+                        color: 0x3a4a5a, metalness: 0.6, roughness: 0.5
+                    }),
+                    wall: new THREE.MeshStandardMaterial({
+                        color: 0x4a5a6a, metalness: 0.5, roughness: 0.4
+                    }),
+                    ceiling: new THREE.MeshStandardMaterial({
+                        color: 0x2a3a4a, metalness: 0.4, roughness: 0.6
+                    }),
+                    accent: new THREE.MeshStandardMaterial({
+                        color: 0x6688aa, metalness: 0.7, roughness: 0.3,
+                        emissive: 0x223344, emissiveIntensity: 0.3
+                    }),
+                    light: new THREE.MeshBasicMaterial({
+                        color: 0x88bbff
+                    }),
+                    cover: new THREE.MeshStandardMaterial({
+                        color: 0x445566, metalness: 0.6, roughness: 0.4
+                    })
                 };
+            },
 
-                // Create wall with collision
-                const addWall = (x, y, z, w, h, d, mat = wallMat) => {
-                    const geo = new THREE.BoxGeometry(w, h, d);
-                    const mesh = new THREE.Mesh(geo, mat);
-                    mesh.position.set(x, y + h/2, z);
-                    mesh.receiveShadow = true;
-                    mesh.castShadow = true;
-                    mesh.userData.isMapGeometry = true; /// v1.58: Mark for bot LOS raycasting
-                    scene.add(mesh);
+            // Build a single room from JSON data
+            buildRoom(scene, room) {
+                const m = this.materials;
+                const pos = room.position;
+                const size = room.size;
+                const halfW = size.w / 2;
+                const halfD = size.d / 2;
 
+                // Floor
+                const floorGeo = new THREE.BoxGeometry(size.w, 0.5, size.d);
+                const floor = new THREE.Mesh(floorGeo, m.floor);
+                floor.position.set(pos.x, pos.y - 0.25, pos.z);
+                floor.receiveShadow = true;
+                scene.add(floor);
+                this.platforms.push({
+                    minX: pos.x - halfW, maxX: pos.x + halfW,
+                    minY: pos.y - 0.5, maxY: pos.y,
+                    minZ: pos.z - halfD, maxZ: pos.z + halfD,
+                    isFloor: true
+                });
+
+                // Ceiling
+                const ceilGeo = new THREE.BoxGeometry(size.w, 0.5, size.d);
+                const ceil = new THREE.Mesh(ceilGeo, m.ceiling);
+                ceil.position.set(pos.x, pos.y + size.h + 0.25, pos.z);
+                scene.add(ceil);
+
+                // Walls (with door cutouts)
+                const doors = room.doors || [];
+                const getDoor = (wall) => doors.find(d => d.wall === wall);
+
+                // North wall (z+)
+                const northDoor = getDoor('north');
+                if (!northDoor) {
+                    const wallGeo = new THREE.BoxGeometry(size.w, size.h, 0.5);
+                    const wall = new THREE.Mesh(wallGeo, m.wall);
+                    wall.position.set(pos.x, pos.y + size.h/2, pos.z + halfD + 0.25);
+                    wall.castShadow = true;
+                    scene.add(wall);
                     this.walls.push({
-                        minX: x - w/2, maxX: x + w/2,
-                        minY: y, maxY: y + h,
-                        minZ: z - d/2, maxZ: z + d/2
+                        minX: pos.x - halfW, maxX: pos.x + halfW,
+                        minY: pos.y, maxY: pos.y + size.h,
+                        minZ: pos.z + halfD, maxZ: pos.z + halfD + 0.5
                     });
-                };
+                } else {
+                    // Wall with door - left and right segments + top
+                    const doorHalfW = northDoor.width / 2;
+                    const doorH = northDoor.height;
+                    const leftW = halfW - doorHalfW + northDoor.offset;
+                    const rightW = halfW - doorHalfW - northDoor.offset;
+                    if (leftW > 0.5) {
+                        const geo = new THREE.BoxGeometry(leftW, size.h, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x - halfW + leftW/2, pos.y + size.h/2, pos.z + halfD + 0.25);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x - halfW, maxX: pos.x - halfW + leftW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z + halfD, maxZ: pos.z + halfD + 0.5 });
+                    }
+                    if (rightW > 0.5) {
+                        const geo = new THREE.BoxGeometry(rightW, size.h, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + halfW - rightW/2, pos.y + size.h/2, pos.z + halfD + 0.25);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x + halfW - rightW, maxX: pos.x + halfW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z + halfD, maxZ: pos.z + halfD + 0.5 });
+                    }
+                    if (doorH < size.h) {
+                        const geo = new THREE.BoxGeometry(northDoor.width, size.h - doorH, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + northDoor.offset, pos.y + doorH + (size.h - doorH)/2, pos.z + halfD + 0.25);
+                        scene.add(wall);
+                    }
+                }
 
-                // Create ramp (series of steps)
-                // v1.67: SMOOTH RAMPS (not stairs!) - authentic Lockout
-                // v2.0: Fixed collision - ramps now have proper AABB bounds for getGroundHeight()
+                // South wall (z-)
+                const southDoor = getDoor('south');
+                if (!southDoor) {
+                    const wallGeo = new THREE.BoxGeometry(size.w, size.h, 0.5);
+                    const wall = new THREE.Mesh(wallGeo, m.wall);
+                    wall.position.set(pos.x, pos.y + size.h/2, pos.z - halfD - 0.25);
+                    wall.castShadow = true;
+                    scene.add(wall);
+                    this.walls.push({
+                        minX: pos.x - halfW, maxX: pos.x + halfW,
+                        minY: pos.y, maxY: pos.y + size.h,
+                        minZ: pos.z - halfD - 0.5, maxZ: pos.z - halfD
+                    });
+                } else {
+                    const doorHalfW = southDoor.width / 2;
+                    const doorH = southDoor.height;
+                    const leftW = halfW - doorHalfW + southDoor.offset;
+                    const rightW = halfW - doorHalfW - southDoor.offset;
+                    if (leftW > 0.5) {
+                        const geo = new THREE.BoxGeometry(leftW, size.h, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x - halfW + leftW/2, pos.y + size.h/2, pos.z - halfD - 0.25);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x - halfW, maxX: pos.x - halfW + leftW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z - halfD - 0.5, maxZ: pos.z - halfD });
+                    }
+                    if (rightW > 0.5) {
+                        const geo = new THREE.BoxGeometry(rightW, size.h, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + halfW - rightW/2, pos.y + size.h/2, pos.z - halfD - 0.25);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x + halfW - rightW, maxX: pos.x + halfW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z - halfD - 0.5, maxZ: pos.z - halfD });
+                    }
+                    if (doorH < size.h) {
+                        const geo = new THREE.BoxGeometry(southDoor.width, size.h - doorH, 0.5);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + southDoor.offset, pos.y + doorH + (size.h - doorH)/2, pos.z - halfD - 0.25);
+                        scene.add(wall);
+                    }
+                }
+
+                // East wall (x+)
+                const eastDoor = getDoor('east');
+                if (!eastDoor) {
+                    const wallGeo = new THREE.BoxGeometry(0.5, size.h, size.d);
+                    const wall = new THREE.Mesh(wallGeo, m.wall);
+                    wall.position.set(pos.x + halfW + 0.25, pos.y + size.h/2, pos.z);
+                    wall.castShadow = true;
+                    scene.add(wall);
+                    this.walls.push({
+                        minX: pos.x + halfW, maxX: pos.x + halfW + 0.5,
+                        minY: pos.y, maxY: pos.y + size.h,
+                        minZ: pos.z - halfD, maxZ: pos.z + halfD
+                    });
+                } else {
+                    const doorHalfD = eastDoor.width / 2;
+                    const doorH = eastDoor.height;
+                    const frontD = halfD - doorHalfD + eastDoor.offset;
+                    const backD = halfD - doorHalfD - eastDoor.offset;
+                    if (frontD > 0.5) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h, frontD);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + halfW + 0.25, pos.y + size.h/2, pos.z - halfD + frontD/2);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x + halfW, maxX: pos.x + halfW + 0.5, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z - halfD, maxZ: pos.z - halfD + frontD });
+                    }
+                    if (backD > 0.5) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h, backD);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + halfW + 0.25, pos.y + size.h/2, pos.z + halfD - backD/2);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x + halfW, maxX: pos.x + halfW + 0.5, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z + halfD - backD, maxZ: pos.z + halfD });
+                    }
+                    if (doorH < size.h) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h - doorH, eastDoor.width);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x + halfW + 0.25, pos.y + doorH + (size.h - doorH)/2, pos.z + eastDoor.offset);
+                        scene.add(wall);
+                    }
+                }
+
+                // West wall (x-)
+                const westDoor = getDoor('west');
+                if (!westDoor) {
+                    const wallGeo = new THREE.BoxGeometry(0.5, size.h, size.d);
+                    const wall = new THREE.Mesh(wallGeo, m.wall);
+                    wall.position.set(pos.x - halfW - 0.25, pos.y + size.h/2, pos.z);
+                    wall.castShadow = true;
+                    scene.add(wall);
+                    this.walls.push({
+                        minX: pos.x - halfW - 0.5, maxX: pos.x - halfW,
+                        minY: pos.y, maxY: pos.y + size.h,
+                        minZ: pos.z - halfD, maxZ: pos.z + halfD
+                    });
+                } else {
+                    const doorHalfD = westDoor.width / 2;
+                    const doorH = westDoor.height;
+                    const frontD = halfD - doorHalfD + westDoor.offset;
+                    const backD = halfD - doorHalfD - westDoor.offset;
+                    if (frontD > 0.5) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h, frontD);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x - halfW - 0.25, pos.y + size.h/2, pos.z - halfD + frontD/2);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x - halfW - 0.5, maxX: pos.x - halfW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z - halfD, maxZ: pos.z - halfD + frontD });
+                    }
+                    if (backD > 0.5) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h, backD);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x - halfW - 0.25, pos.y + size.h/2, pos.z + halfD - backD/2);
+                        scene.add(wall);
+                        this.walls.push({ minX: pos.x - halfW - 0.5, maxX: pos.x - halfW, minY: pos.y, maxY: pos.y + size.h, minZ: pos.z + halfD - backD, maxZ: pos.z + halfD });
+                    }
+                    if (doorH < size.h) {
+                        const geo = new THREE.BoxGeometry(0.5, size.h - doorH, westDoor.width);
+                        const wall = new THREE.Mesh(geo, m.wall);
+                        wall.position.set(pos.x - halfW - 0.25, pos.y + doorH + (size.h - doorH)/2, pos.z + westDoor.offset);
+                        scene.add(wall);
+                    }
+                }
+
+                // Ceiling lights
+                if (room.lights) {
+                    for (const light of room.lights) {
+                        const lGeo = new THREE.BoxGeometry(light.size.w, 0.1, light.size.d);
+                        const lMesh = new THREE.Mesh(lGeo, m.light);
+                        lMesh.position.set(light.position.x, light.position.y, light.position.z);
+                        scene.add(lMesh);
+                    }
+                }
+
+                // Cover objects
+                if (room.cover) {
+                    for (const cov of room.cover) {
+                        const cGeo = new THREE.BoxGeometry(cov.size.w, cov.size.h, cov.size.d);
+                        const cMesh = new THREE.Mesh(cGeo, m.cover);
+                        cMesh.position.set(cov.position.x, cov.position.y + cov.size.h/2, cov.position.z);
+                        cMesh.castShadow = true;
+                        scene.add(cMesh);
+                        // Cover collision
+                        this.walls.push({
+                            minX: cov.position.x - cov.size.w/2, maxX: cov.position.x + cov.size.w/2,
+                            minY: cov.position.y, maxY: cov.position.y + cov.size.h,
+                            minZ: cov.position.z - cov.size.d/2, maxZ: cov.position.z + cov.size.d/2
+                        });
+                    }
+                }
+
+                // Extraction pad special
+                if (room.special && room.special.type === 'extraction_pad') {
+                    const padGeo = new THREE.CylinderGeometry(room.special.radius, room.special.radius, 0.2, 32);
+                    const padMat = new THREE.MeshStandardMaterial({
+                        color: 0x4488ff, metalness: 0.8, roughness: 0.2,
+                        emissive: 0x2244aa, emissiveIntensity: 0.5
+                    });
+                    const pad = new THREE.Mesh(padGeo, padMat);
+                    pad.position.set(room.special.position.x, room.special.position.y, room.special.position.z);
+                    scene.add(pad);
+                }
+            },
+
+            // Main build function - loads JSON and builds map
+            async build(scene) {
+                this.initMaterials();
+                this.platforms = [];
+                this.walls = [];
+
+                // Try to load map from JSON
+                const mapUrl = CAMPAIGN_CONFIG.assetBaseUrl + 'data/map_the_cage.json';
+                devLog('[Map] Loading map from: ' + mapUrl);
+
+                try {
+                    const response = await fetch(mapUrl);
+                    if (response.ok) {
+                        this.mapData = await response.json();
+                        devLog('[Map] Loaded map: ' + this.mapData.name);
+                    }
+                } catch (e) {
+                    devLog('[Map] Failed to load JSON, using fallback: ' + e.message);
+                }
+
+                // Build from JSON or use fallback
+                if (this.mapData && this.mapData.sections) {
+                    // Set player start from JSON
+                    if (this.mapData.playerStart) {
+                        this.spawnPoints = [this.mapData.playerStart];
+                    }
+
+                    // Build each section
+                    for (const section of this.mapData.sections) {
+                        for (const room of section.rooms) {
+                            this.buildRoom(scene, room);
+                        }
+                    }
+                    devLog('[Map] Built ' + this.mapData.sections.length + ' sections from JSON');
+                } else {
+                    // Fallback: Simple inline map
+                    devLog('[Map] Using fallback inline map');
+                    this.buildFallbackMap(scene);
+                }
+
+                // Add ambient lighting
+                const ambient = new THREE.AmbientLight(0x334455, 0.5);
+                scene.add(ambient);
+
+                // Add fog for atmosphere
+                scene.fog = new THREE.FogExp2(0x1a2a3a, 0.012);
+
+                // Store spawn points
+                GameState.spawnPoints = this.spawnPoints;
+                this.isLoaded = true;
+            },
+
+            // Fallback map if JSON fails to load
+            buildFallbackMap(scene) {
+                const m = this.materials;
+
+                // Simple starting room
+                const startRoom = {
+                    id: 'fallback_start',
+                    position: { x: 0, y: 0, z: 0 },
+                    size: { w: 20, h: 8, d: 20 },
+                    doors: [{ wall: 'east', offset: 0, width: 4, height: 4 }],
+                    lights: [{ type: 'strip', position: { x: 0, y: 7.9, z: 0 }, size: { w: 15, d: 0.5 } }],
+                    cover: [
+                        { position: { x: -5, y: 0, z: 5 }, size: { w: 2, h: 1.2, d: 2 } },
+                        { position: { x: 5, y: 0, z: -5 }, size: { w: 2, h: 1.2, d: 2 } }
+                    ]
+                };
+                this.buildRoom(scene, startRoom);
+
+                // Hallway
+                const hallway = {
+                    id: 'fallback_hall',
+                    position: { x: 22, y: 0, z: 0 },
+                    size: { w: 24, h: 6, d: 8 },
+                    doors: [
+                        { wall: 'west', offset: 0, width: 4, height: 4 },
+                        { wall: 'east', offset: 0, width: 4, height: 4 }
+                    ],
+                    lights: [{ type: 'strip', position: { x: 22, y: 5.9, z: 0 }, size: { w: 20, d: 0.3 } }]
+                };
+                this.buildRoom(scene, hallway);
+
+                // Combat room
+                const combatRoom = {
+                    id: 'fallback_combat',
+                    position: { x: 48, y: 0, z: 0 },
+                    size: { w: 24, h: 10, d: 24 },
+                    doors: [{ wall: 'west', offset: 0, width: 4, height: 4 }],
+                    lights: [
+                        { type: 'strip', position: { x: 48, y: 9.9, z: 0 }, size: { w: 20, d: 0.5 } },
+                        { type: 'strip', position: { x: 48, y: 9.9, z: 0 }, size: { w: 0.5, d: 20 } }
+                    ],
+                    cover: [
+                        { position: { x: 42, y: 0, z: 6 }, size: { w: 3, h: 1.5, d: 2 } },
+                        { position: { x: 54, y: 0, z: -6 }, size: { w: 3, h: 1.5, d: 2 } },
+                        { position: { x: 48, y: 0, z: 0 }, size: { w: 4, h: 2, d: 4 } }
+                    ]
+                };
+                this.buildRoom(scene, combatRoom);
+
+                this.spawnPoints = [{ x: 0, y: 1, z: 0 }];
+                devLog('[Map] Fallback map built: 3 rooms');
+            },
+
+            // [OLD HELPER FUNCTIONS REMOVED - See map_the_cage.json]
+            _oldCodeRemovalMarker1: true,
+            _startOldCodeBlock() {
                 const addRamp = (x1, y1, z1, x2, y2, z2, width, thickness = 0.3) => {
                     // Calculate ramp dimensions
                     const dx = x2 - x1;
@@ -10143,10 +10403,6 @@
                         scene.add(cap);
                     }
                 }
-
-                // Store spawn points
-                GameState.spawnPoints = this.spawnPoints;
-            },
 
             /// v1.01: Check if player is in gravity lift - uses squared distance for performance
             checkGravLift(position) {
