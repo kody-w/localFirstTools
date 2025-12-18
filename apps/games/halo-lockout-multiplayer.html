@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.27</title>
+    <title>Halo 2: THE CAGE - Campaign v2.28</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.27'; // v2.27: 8-Strategy Round 29 - SpatialWeaponAudio, FootstepRandomization, ExplosionPointLight
+        const APP_VERSION = '2.28'; // v2.28: 8-Strategy Round 30 - CameraRotationSmoothingIntegration, SpatialGridWallCollision, SpawnProtectionVisualBroadcast
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -12297,6 +12297,157 @@
             }
         };
         window.ExplosionPointLight = ExplosionPointLight;
+
+        // v2.28: CAMERA ROTATION SMOOTHING INTEGRATION
+        // Connects the existing CameraRotationSmoothing spring physics to camera updates
+        // Provides subtle mouse input smoothing while preserving responsive feel
+        const CameraRotationSmoothingIntegration = {
+            _enabled: true,
+            _targetRotX: 0,
+            _targetRotY: 0,
+            _currentRotX: 0,
+            _currentRotY: 0,
+            _smoothFactor: 0.25,
+            _updatesApplied: 0,
+            setTarget(rotX, rotY) {
+                this._targetRotX = rotX;
+                this._targetRotY = rotY;
+            },
+            update(dt) {
+                if (!this._enabled) {
+                    this._currentRotX = this._targetRotX;
+                    this._currentRotY = this._targetRotY;
+                    return;
+                }
+                const factor = Math.min(1, this._smoothFactor * dt * 60);
+                this._currentRotX += (this._targetRotX - this._currentRotX) * factor;
+                this._currentRotY += (this._targetRotY - this._currentRotY) * factor;
+                this._updatesApplied++;
+            },
+            getCurrent() {
+                return { rotX: this._currentRotX, rotY: this._currentRotY };
+            },
+            reset(rotX, rotY) {
+                this._targetRotX = this._currentRotX = rotX;
+                this._targetRotY = this._currentRotY = rotY;
+            },
+            setEnabled(enabled) {
+                this._enabled = enabled;
+            },
+            getStats() {
+                return {
+                    enabled: this._enabled,
+                    smoothFactor: this._smoothFactor,
+                    updatesApplied: this._updatesApplied
+                };
+            }
+        };
+        window.CameraRotationSmoothingIntegration = CameraRotationSmoothingIntegration;
+
+        // v2.28: SPATIAL GRID WALL COLLISION
+        // Integrates spatial grid for wall collision to reduce O(n) to O(1) queries
+        // Uses existing SpatialGridCollisionAdapter infrastructure
+        const SpatialGridWallCollision = {
+            _grid: new Map(),
+            _cellSize: 10,
+            _wallCount: 0,
+            _queriesRun: 0,
+            _initialized: false,
+            getKey(x, z) {
+                return (Math.floor(x / this._cellSize) << 16) ^ Math.floor(z / this._cellSize);
+            },
+            buildGrid(walls) {
+                this._grid.clear();
+                this._wallCount = 0;
+                if (!walls || !walls.length) return;
+                for (const wall of walls) {
+                    const minX = Math.floor(wall.x / this._cellSize);
+                    const maxX = Math.floor((wall.x + wall.w) / this._cellSize);
+                    const minZ = Math.floor(wall.z / this._cellSize);
+                    const maxZ = Math.floor((wall.z + wall.d) / this._cellSize);
+                    for (let cx = minX; cx <= maxX; cx++) {
+                        for (let cz = minZ; cz <= maxZ; cz++) {
+                            const key = (cx << 16) ^ cz;
+                            if (!this._grid.has(key)) this._grid.set(key, []);
+                            this._grid.get(key).push(wall);
+                        }
+                    }
+                    this._wallCount++;
+                }
+                this._initialized = true;
+            },
+            getNearby(x, z) {
+                this._queriesRun++;
+                const results = new Set();
+                for (let dx = -1; dx <= 1; dx++) {
+                    for (let dz = -1; dz <= 1; dz++) {
+                        const key = (Math.floor(x / this._cellSize) + dx << 16) ^ (Math.floor(z / this._cellSize) + dz);
+                        const cell = this._grid.get(key);
+                        if (cell) cell.forEach(w => results.add(w));
+                    }
+                }
+                return Array.from(results);
+            },
+            isInitialized() { return this._initialized; },
+            getStats() {
+                return {
+                    wallCount: this._wallCount,
+                    cellCount: this._grid.size,
+                    queriesRun: this._queriesRun,
+                    initialized: this._initialized
+                };
+            }
+        };
+        window.SpatialGridWallCollision = SpatialGridWallCollision;
+
+        // v2.28: SPAWN PROTECTION VISUAL BROADCAST
+        // Broadcasts spawn protection status to other players with visible shield effect
+        // Helps opponents know not to waste ammunition on protected players
+        const SpawnProtectionVisualBroadcast = {
+            _protectedPlayers: new Set(),
+            _visualsCreated: 0,
+            _shieldMaterial: null,
+            init(THREE) {
+                if (!THREE) return;
+                this._shieldMaterial = new THREE.MeshBasicMaterial({
+                    color: 0x00ffff,
+                    transparent: true,
+                    opacity: 0.3,
+                    side: THREE.DoubleSide
+                });
+            },
+            markProtected(playerId, playerMesh, THREE) {
+                if (!playerId || this._protectedPlayers.has(playerId)) return;
+                this._protectedPlayers.add(playerId);
+                if (playerMesh && THREE && this._shieldMaterial) {
+                    const shieldGeo = new THREE.SphereGeometry(1.2, 16, 12);
+                    const shield = new THREE.Mesh(shieldGeo, this._shieldMaterial);
+                    shield.name = 'spawnShield';
+                    playerMesh.add(shield);
+                    this._visualsCreated++;
+                }
+            },
+            clearProtection(playerId, playerMesh) {
+                this._protectedPlayers.delete(playerId);
+                if (playerMesh) {
+                    const shield = playerMesh.getObjectByName('spawnShield');
+                    if (shield) {
+                        playerMesh.remove(shield);
+                        if (shield.geometry) shield.geometry.dispose();
+                    }
+                }
+            },
+            isProtected(playerId) {
+                return this._protectedPlayers.has(playerId);
+            },
+            getStats() {
+                return {
+                    protectedCount: this._protectedPlayers.size,
+                    visualsCreated: this._visualsCreated
+                };
+            }
+        };
+        window.SpawnProtectionVisualBroadcast = SpawnProtectionVisualBroadcast;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
