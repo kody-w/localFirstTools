@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.4</title>
+    <title>Halo 2: THE CAGE - Campaign v2.5</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -6000,6 +6000,220 @@
 
             getStats() {
                 return { enabled: this.enabled, deltaThreshold: this.deltaThreshold };
+            }
+        };
+
+        // ============================================================
+        /// v2.5: KEYBOARD-ACCESSIBLE MENU SYSTEM (5/8 CONSENSUS)
+        // Enables full keyboard navigation for all menus and dialogs
+        // ============================================================
+        const KeyboardMenuSystem = {
+            focusableSelector: 'button, [tabindex], input, select, a[href]',
+            currentMenu: null,
+            focusIndex: 0,
+
+            init() {
+                document.addEventListener('keydown', (e) => this.handleKeydown(e));
+                console.log('[KeyboardMenuSystem] Initialized');
+            },
+
+            handleKeydown(e) {
+                if (!this.currentMenu) return;
+                const focusable = this.getFocusableElements();
+                if (focusable.length === 0) return;
+
+                switch(e.key) {
+                    case 'ArrowDown':
+                    case 'ArrowRight':
+                        e.preventDefault();
+                        this.focusIndex = (this.focusIndex + 1) % focusable.length;
+                        focusable[this.focusIndex].focus();
+                        break;
+                    case 'ArrowUp':
+                    case 'ArrowLeft':
+                        e.preventDefault();
+                        this.focusIndex = (this.focusIndex - 1 + focusable.length) % focusable.length;
+                        focusable[this.focusIndex].focus();
+                        break;
+                    case 'Enter':
+                    case ' ':
+                        if (document.activeElement?.click) {
+                            e.preventDefault();
+                            document.activeElement.click();
+                        }
+                        break;
+                    case 'Escape':
+                        this.closeCurrentMenu();
+                        break;
+                }
+            },
+
+            getFocusableElements() {
+                if (!this.currentMenu) return [];
+                return Array.from(this.currentMenu.querySelectorAll(this.focusableSelector))
+                    .filter(el => el.offsetParent !== null && !el.disabled);
+            },
+
+            openMenu(menuElement) {
+                this.currentMenu = menuElement;
+                this.focusIndex = 0;
+                const focusable = this.getFocusableElements();
+                if (focusable.length > 0) {
+                    focusable[0].focus();
+                }
+            },
+
+            closeCurrentMenu() {
+                this.currentMenu = null;
+                this.focusIndex = 0;
+            },
+
+            getStats() {
+                return { activeMenu: !!this.currentMenu, focusIndex: this.focusIndex };
+            }
+        };
+
+        // ============================================================
+        /// v2.5: WEBRTC AUTO-RECONNECT SYSTEM (5/8 CONSENSUS)
+        // Automatic connection recovery with exponential backoff
+        // ============================================================
+        const WebRTCReconnect = {
+            maxRetries: 3,
+            baseDelay: 1000,
+            maxDelay: 15000,
+            retryCount: 0,
+            isReconnecting: false,
+            lastPeerId: null,
+            connectionState: 'disconnected',
+
+            init(networkRef) {
+                this.network = networkRef;
+                console.log('[WebRTCReconnect] Initialized with', this.maxRetries, 'max retries');
+            },
+
+            onConnectionLost(peerId) {
+                if (this.isReconnecting) return;
+                this.lastPeerId = peerId;
+                this.connectionState = 'reconnecting';
+                this.attemptReconnect();
+            },
+
+            attemptReconnect() {
+                if (this.retryCount >= this.maxRetries) {
+                    this.connectionState = 'failed';
+                    console.error('[WebRTCReconnect] Max retries reached');
+                    if (typeof showNotification === 'function') {
+                        showNotification('Connection lost. Please rejoin the game.', 'error');
+                    }
+                    this.reset();
+                    return;
+                }
+
+                this.isReconnecting = true;
+                const delay = Math.min(this.baseDelay * Math.pow(2, this.retryCount), this.maxDelay);
+                this.retryCount++;
+
+                console.log(`[WebRTCReconnect] Attempt ${this.retryCount}/${this.maxRetries} in ${delay}ms`);
+
+                setTimeout(() => {
+                    if (this.network && this.lastPeerId) {
+                        try {
+                            const conn = this.network.peer.connect(this.lastPeerId);
+                            conn.on('open', () => {
+                                this.connectionState = 'connected';
+                                console.log('[WebRTCReconnect] Reconnected successfully');
+                                this.reset();
+                            });
+                            conn.on('error', () => this.attemptReconnect());
+                        } catch (e) {
+                            this.attemptReconnect();
+                        }
+                    }
+                }, delay);
+            },
+
+            reset() {
+                this.retryCount = 0;
+                this.isReconnecting = false;
+                this.lastPeerId = null;
+            },
+
+            getStats() {
+                return {
+                    state: this.connectionState,
+                    retries: this.retryCount,
+                    maxRetries: this.maxRetries,
+                    isReconnecting: this.isReconnecting
+                };
+            }
+        };
+
+        // ============================================================
+        /// v2.5: NETWORK LATENCY DISPLAY (4/8 CONSENSUS)
+        // Real-time ping indicator with color-coded quality
+        // ============================================================
+        const NetworkLatencyDisplay = {
+            pingHistory: [],
+            maxHistorySize: 20,
+            currentPing: 0,
+            displayElement: null,
+            updateInterval: null,
+
+            init() {
+                this.createDisplay();
+                this.updateInterval = setInterval(() => this.updateDisplay(), 1000);
+                console.log('[NetworkLatencyDisplay] Initialized');
+            },
+
+            createDisplay() {
+                this.displayElement = document.createElement('div');
+                this.displayElement.id = 'ping-display';
+                this.displayElement.style.cssText = `
+                    position: fixed; top: 10px; right: 10px; z-index: 1000;
+                    background: rgba(0,0,0,0.7); color: #0f0; padding: 5px 10px;
+                    border-radius: 4px; font-family: monospace; font-size: 12px;
+                    display: none;
+                `;
+                this.displayElement.textContent = 'PING: --ms';
+                document.body.appendChild(this.displayElement);
+            },
+
+            recordPing(pingMs) {
+                this.pingHistory.push(pingMs);
+                if (this.pingHistory.length > this.maxHistorySize) {
+                    this.pingHistory.shift();
+                }
+                this.currentPing = pingMs;
+            },
+
+            getAveragePing() {
+                if (this.pingHistory.length === 0) return 0;
+                return Math.round(this.pingHistory.reduce((a, b) => a + b, 0) / this.pingHistory.length);
+            },
+
+            updateDisplay() {
+                if (!this.displayElement) return;
+                const avg = this.getAveragePing();
+                const color = avg < 50 ? '#0f0' : avg < 100 ? '#ff0' : avg < 200 ? '#f80' : '#f00';
+                this.displayElement.style.color = color;
+                this.displayElement.textContent = `PING: ${avg}ms`;
+            },
+
+            show() {
+                if (this.displayElement) this.displayElement.style.display = 'block';
+            },
+
+            hide() {
+                if (this.displayElement) this.displayElement.style.display = 'none';
+            },
+
+            destroy() {
+                if (this.updateInterval) clearInterval(this.updateInterval);
+                if (this.displayElement) this.displayElement.remove();
+            },
+
+            getStats() {
+                return { current: this.currentPing, average: this.getAveragePing(), samples: this.pingHistory.length };
             }
         };
 
