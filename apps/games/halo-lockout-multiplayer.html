@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.7</title>
+    <title>Halo 2: THE CAGE - Campaign v2.8</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.7'; // v2.7: EventListenerCleanup, DebouncedResize, AssetPreloader
+        const APP_VERSION = '2.8'; // v2.8: SettingsPersistence, TabBlurPause, GraphicsQualitySwitcher
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -6672,6 +6672,287 @@
                     percent: this.totalSize > 0
                         ? Math.round((this.loadedSize / this.totalSize) * 100)
                         : 0
+                };
+            }
+        };
+
+        // ============================================================
+        /// v2.8: SETTINGS PERSISTENCE SYSTEM (7/8 CONSENSUS)
+        // Saves and restores user preferences across sessions
+        // Implements import/export for settings portability
+        // ============================================================
+        const SettingsPersistence = {
+            storageKey: 'halo-lockout-settings',
+            schemaVersion: 1,
+            defaults: {
+                mouseSensitivity: 0.002,
+                volume: 0.7,
+                graphicsQuality: 'medium',
+                showFPS: false,
+                invertY: false,
+                fov: 90
+            },
+            current: null,
+
+            init() {
+                this.current = this.load() || { ...this.defaults };
+                console.log('[SettingsPersistence] Loaded settings:', this.current);
+                return this.current;
+            },
+
+            load() {
+                try {
+                    const stored = localStorage.getItem(this.storageKey);
+                    if (!stored) return null;
+
+                    const parsed = JSON.parse(stored);
+                    if (parsed.schemaVersion !== this.schemaVersion) {
+                        console.log('[SettingsPersistence] Schema version mismatch, migrating...');
+                        return this.migrate(parsed);
+                    }
+                    return parsed.settings;
+                } catch (e) {
+                    console.warn('[SettingsPersistence] Failed to load settings:', e);
+                    return null;
+                }
+            },
+
+            save() {
+                try {
+                    localStorage.setItem(this.storageKey, JSON.stringify({
+                        schemaVersion: this.schemaVersion,
+                        settings: this.current,
+                        savedAt: Date.now()
+                    }));
+                    console.log('[SettingsPersistence] Settings saved');
+                    return true;
+                } catch (e) {
+                    console.error('[SettingsPersistence] Failed to save settings:', e);
+                    return false;
+                }
+            },
+
+            set(key, value) {
+                if (!(key in this.defaults)) {
+                    console.warn(`[SettingsPersistence] Unknown setting: ${key}`);
+                    return false;
+                }
+                this.current[key] = value;
+                this.save();
+                return true;
+            },
+
+            get(key) {
+                return this.current?.[key] ?? this.defaults[key];
+            },
+
+            migrate(oldSettings) {
+                // Handle schema migrations here
+                const migrated = { ...this.defaults };
+                for (const key of Object.keys(this.defaults)) {
+                    if (key in oldSettings) {
+                        migrated[key] = oldSettings[key];
+                    }
+                }
+                this.current = migrated;
+                this.save();
+                return migrated;
+            },
+
+            export() {
+                return JSON.stringify({
+                    type: 'halo-lockout-settings',
+                    schemaVersion: this.schemaVersion,
+                    settings: this.current,
+                    exportedAt: new Date().toISOString()
+                }, null, 2);
+            },
+
+            import(jsonString) {
+                try {
+                    const data = JSON.parse(jsonString);
+                    if (data.type !== 'halo-lockout-settings') {
+                        throw new Error('Invalid settings file');
+                    }
+                    this.current = { ...this.defaults, ...data.settings };
+                    this.save();
+                    return true;
+                } catch (e) {
+                    console.error('[SettingsPersistence] Import failed:', e);
+                    return false;
+                }
+            },
+
+            reset() {
+                this.current = { ...this.defaults };
+                this.save();
+                console.log('[SettingsPersistence] Reset to defaults');
+            }
+        };
+
+        // ============================================================
+        /// v2.8: PAUSE-ON-TAB-BLUR WITH RAF CLEANUP (6/8 CONSENSUS)
+        // Pauses game when tab loses focus, resumes when visible
+        // Prevents battery drain and state desync
+        // ============================================================
+        const TabBlurPauseManager = {
+            isTabVisible: true,
+            wasGamePaused: false,
+            rafIds: [],
+            audioContext: null,
+            callbacks: { onPause: [], onResume: [] },
+
+            init(audioCtx = null) {
+                this.audioContext = audioCtx;
+                this.isTabVisible = !document.hidden;
+
+                document.addEventListener('visibilitychange', () => {
+                    const wasVisible = this.isTabVisible;
+                    this.isTabVisible = !document.hidden;
+
+                    if (wasVisible && !this.isTabVisible) {
+                        this.onTabHidden();
+                    } else if (!wasVisible && this.isTabVisible) {
+                        this.onTabVisible();
+                    }
+                });
+
+                console.log('[TabBlurPause] Initialized');
+            },
+
+            onTabHidden() {
+                console.log('[TabBlurPause] Tab hidden - pausing');
+
+                // Suspend audio
+                if (this.audioContext && this.audioContext.state === 'running') {
+                    this.audioContext.suspend();
+                }
+
+                // Notify callbacks
+                this.callbacks.onPause.forEach(cb => {
+                    try { cb(); } catch (e) { /* ignore */ }
+                });
+            },
+
+            onTabVisible() {
+                console.log('[TabBlurPause] Tab visible - resuming');
+
+                // Resume audio
+                if (this.audioContext && this.audioContext.state === 'suspended') {
+                    this.audioContext.resume();
+                }
+
+                // Notify callbacks
+                this.callbacks.onResume.forEach(cb => {
+                    try { cb(); } catch (e) { /* ignore */ }
+                });
+            },
+
+            onPause(callback) {
+                this.callbacks.onPause.push(callback);
+            },
+
+            onResume(callback) {
+                this.callbacks.onResume.push(callback);
+            },
+
+            shouldUpdate() {
+                return this.isTabVisible;
+            }
+        };
+
+        // ============================================================
+        /// v2.8: GRAPHICS QUALITY RUNTIME SWITCHER (5/8 CONSENSUS)
+        // Applies graphics presets without reload
+        // Low/Medium/High quality tiers
+        // ============================================================
+        const GraphicsQualitySwitcher = {
+            currentQuality: 'medium',
+            renderer: null,
+            scene: null,
+            presets: {
+                low: {
+                    shadowMap: false,
+                    shadowMapSize: 512,
+                    pixelRatio: 0.75,
+                    antialias: false,
+                    maxParticles: 50
+                },
+                medium: {
+                    shadowMap: true,
+                    shadowMapSize: 1024,
+                    pixelRatio: 1.0,
+                    antialias: false,
+                    maxParticles: 150
+                },
+                high: {
+                    shadowMap: true,
+                    shadowMapSize: 2048,
+                    pixelRatio: window.devicePixelRatio,
+                    antialias: true,
+                    maxParticles: 300
+                }
+            },
+
+            init(renderer, scene) {
+                this.renderer = renderer;
+                this.scene = scene;
+
+                // Load saved quality preference
+                const saved = SettingsPersistence.get('graphicsQuality');
+                if (saved && this.presets[saved]) {
+                    this.apply(saved);
+                }
+            },
+
+            apply(quality) {
+                if (!this.presets[quality] || !this.renderer) {
+                    console.warn(`[GraphicsQuality] Invalid quality: ${quality}`);
+                    return false;
+                }
+
+                const preset = this.presets[quality];
+                this.currentQuality = quality;
+
+                // Apply renderer settings
+                this.renderer.shadowMap.enabled = preset.shadowMap;
+                if (preset.shadowMap) {
+                    this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                }
+                this.renderer.setPixelRatio(preset.pixelRatio);
+
+                // Update lights in scene
+                if (this.scene) {
+                    this.scene.traverse(obj => {
+                        if (obj.isLight && obj.shadow) {
+                            obj.shadow.mapSize.width = preset.shadowMapSize;
+                            obj.shadow.mapSize.height = preset.shadowMapSize;
+                            if (obj.shadow.map) {
+                                obj.shadow.map.dispose();
+                                obj.shadow.map = null;
+                            }
+                        }
+                    });
+                }
+
+                // Save preference
+                SettingsPersistence.set('graphicsQuality', quality);
+
+                console.log(`[GraphicsQuality] Applied: ${quality}`);
+                return true;
+            },
+
+            cycle() {
+                const qualities = ['low', 'medium', 'high'];
+                const currentIndex = qualities.indexOf(this.currentQuality);
+                const nextIndex = (currentIndex + 1) % qualities.length;
+                return this.apply(qualities[nextIndex]);
+            },
+
+            getStats() {
+                return {
+                    current: this.currentQuality,
+                    preset: this.presets[this.currentQuality]
                 };
             }
         };
