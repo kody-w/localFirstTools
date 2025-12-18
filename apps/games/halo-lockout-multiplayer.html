@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.13</title>
+    <title>Halo 2: THE CAGE - Campaign v2.14</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.13'; // v2.13: CameraSmoothing, UIMotionDesign, RespawnCeremony
+        const APP_VERSION = '2.14'; // v2.14: RAFErrorBoundary, NetworkDesyncRecovery, AssetLoadingTimeout
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -8629,6 +8629,459 @@
         };
 
         window.RespawnCeremonySequence = RespawnCeremonySequence;
+
+        // ============================================================
+        // v2.14: RAF ERROR BOUNDARY WRAPPER (8/8 CONSENSUS)
+        // Safe requestAnimationFrame wrapper that catches and recovers from errors
+        // Part of Error Resilience strategy from 8-strategy analysis
+        // ============================================================
+        const RAFErrorBoundary = {
+            errorCount: 0,
+            maxErrors: 5,
+            errorCooldown: 5000,
+            lastErrorTime: 0,
+            callbacks: new Map(),
+            paused: false,
+            frameId: null,
+
+            init() {
+                console.log('[RAFErrorBoundary] Initialized RAF error protection');
+            },
+
+            requestAnimationFrame(callback, context = 'unknown') {
+                const wrappedCallback = (timestamp) => {
+                    if (this.paused) return;
+
+                    try {
+                        callback(timestamp);
+                    } catch (error) {
+                        this.handleError(error, context);
+                    }
+                };
+
+                return window.requestAnimationFrame(wrappedCallback);
+            },
+
+            createLoop(updateFn, context = 'gameLoop') {
+                let running = true;
+
+                const loop = (timestamp) => {
+                    if (!running || this.paused) return;
+
+                    try {
+                        updateFn(timestamp);
+                    } catch (error) {
+                        this.handleError(error, context);
+                    }
+
+                    if (running && !this.paused) {
+                        this.frameId = window.requestAnimationFrame(loop);
+                    }
+                };
+
+                this.frameId = window.requestAnimationFrame(loop);
+
+                return {
+                    stop: () => {
+                        running = false;
+                        if (this.frameId) {
+                            window.cancelAnimationFrame(this.frameId);
+                        }
+                    },
+                    resume: () => {
+                        if (!running) {
+                            running = true;
+                            this.frameId = window.requestAnimationFrame(loop);
+                        }
+                    }
+                };
+            },
+
+            handleError(error, context) {
+                const now = performance.now();
+
+                // Reset error count after cooldown
+                if (now - this.lastErrorTime > this.errorCooldown) {
+                    this.errorCount = 0;
+                }
+
+                this.errorCount++;
+                this.lastErrorTime = now;
+
+                console.error(`[RAFErrorBoundary] Error in ${context}:`, error);
+
+                if (this.errorCount >= this.maxErrors) {
+                    console.warn('[RAFErrorBoundary] Too many errors, pausing render loop');
+                    this.paused = true;
+
+                    // Auto-resume after cooldown
+                    setTimeout(() => {
+                        console.log('[RAFErrorBoundary] Attempting to resume render loop');
+                        this.paused = false;
+                        this.errorCount = 0;
+                    }, this.errorCooldown);
+                }
+            },
+
+            safeExec(fn, fallback = null, context = 'unknown') {
+                try {
+                    return fn();
+                } catch (error) {
+                    console.error(`[RAFErrorBoundary] safeExec error in ${context}:`, error);
+                    return typeof fallback === 'function' ? fallback() : fallback;
+                }
+            },
+
+            getStats() {
+                return {
+                    errorCount: this.errorCount,
+                    paused: this.paused,
+                    maxErrors: this.maxErrors
+                };
+            }
+        };
+
+        window.RAFErrorBoundary = RAFErrorBoundary;
+
+        // ============================================================
+        // v2.14: NETWORK DESYNC DETECTION & RECOVERY (8/8 CONSENSUS)
+        // Detects network synchronization issues and attempts recovery
+        // Part of Network Efficiency strategy from 8-strategy analysis
+        // ============================================================
+        const NetworkDesyncRecovery = {
+            positionThreshold: 5.0, // Units of position desync to trigger
+            velocityThreshold: 10.0,
+            checksPerSecond: 4,
+            lastCheck: 0,
+            desyncHistory: [],
+            maxHistory: 20,
+            recoveryAttempts: 0,
+            maxRecoveryAttempts: 3,
+            isRecovering: false,
+
+            init() {
+                console.log('[NetworkDesyncRecovery] Initialized desync detection');
+            },
+
+            checkSync(localState, remoteState, timestamp) {
+                const now = timestamp || performance.now();
+                if (now - this.lastCheck < 1000 / this.checksPerSecond) {
+                    return { synced: true };
+                }
+                this.lastCheck = now;
+
+                const desyncData = this.calculateDesync(localState, remoteState);
+
+                if (desyncData.isDesynced) {
+                    this.recordDesync(desyncData);
+                    return {
+                        synced: false,
+                        severity: desyncData.severity,
+                        recommendation: this.getRecoveryRecommendation(desyncData)
+                    };
+                }
+
+                return { synced: true };
+            },
+
+            calculateDesync(local, remote) {
+                if (!local || !remote) {
+                    return { isDesynced: false };
+                }
+
+                const positionDesync = this.calculateDistance(
+                    local.position,
+                    remote.position
+                );
+
+                const velocityDesync = this.calculateDistance(
+                    local.velocity,
+                    remote.velocity
+                );
+
+                const isDesynced = positionDesync > this.positionThreshold ||
+                                   velocityDesync > this.velocityThreshold;
+
+                let severity = 'none';
+                if (positionDesync > this.positionThreshold * 3) {
+                    severity = 'critical';
+                } else if (positionDesync > this.positionThreshold * 2) {
+                    severity = 'high';
+                } else if (isDesynced) {
+                    severity = 'moderate';
+                }
+
+                return {
+                    isDesynced,
+                    positionDesync,
+                    velocityDesync,
+                    severity,
+                    timestamp: performance.now()
+                };
+            },
+
+            calculateDistance(a, b) {
+                if (!a || !b) return 0;
+                const dx = (a.x || 0) - (b.x || 0);
+                const dy = (a.y || 0) - (b.y || 0);
+                const dz = (a.z || 0) - (b.z || 0);
+                return Math.sqrt(dx * dx + dy * dy + dz * dz);
+            },
+
+            recordDesync(data) {
+                this.desyncHistory.push(data);
+                if (this.desyncHistory.length > this.maxHistory) {
+                    this.desyncHistory.shift();
+                }
+            },
+
+            getRecoveryRecommendation(desyncData) {
+                const recentDesyncs = this.desyncHistory.filter(
+                    d => performance.now() - d.timestamp < 5000
+                ).length;
+
+                if (desyncData.severity === 'critical' || recentDesyncs >= 5) {
+                    return 'full-resync';
+                } else if (desyncData.severity === 'high' || recentDesyncs >= 3) {
+                    return 'position-snap';
+                } else {
+                    return 'interpolate';
+                }
+            },
+
+            async attemptRecovery(connection, recommendation) {
+                if (this.isRecovering) return false;
+                if (this.recoveryAttempts >= this.maxRecoveryAttempts) {
+                    console.warn('[NetworkDesyncRecovery] Max recovery attempts reached');
+                    return false;
+                }
+
+                this.isRecovering = true;
+                this.recoveryAttempts++;
+
+                console.log(`[NetworkDesyncRecovery] Attempting recovery: ${recommendation}`);
+
+                try {
+                    switch (recommendation) {
+                        case 'full-resync':
+                            if (connection && typeof connection.requestFullState === 'function') {
+                                await connection.requestFullState();
+                            }
+                            break;
+                        case 'position-snap':
+                            // Request position update only
+                            if (connection && typeof connection.requestPositionSync === 'function') {
+                                await connection.requestPositionSync();
+                            }
+                            break;
+                        case 'interpolate':
+                            // Just let normal interpolation handle it
+                            break;
+                    }
+
+                    this.isRecovering = false;
+                    return true;
+                } catch (error) {
+                    console.error('[NetworkDesyncRecovery] Recovery failed:', error);
+                    this.isRecovering = false;
+                    return false;
+                }
+            },
+
+            reset() {
+                this.desyncHistory = [];
+                this.recoveryAttempts = 0;
+                this.isRecovering = false;
+            },
+
+            getStats() {
+                const recentDesyncs = this.desyncHistory.filter(
+                    d => performance.now() - d.timestamp < 10000
+                );
+
+                return {
+                    totalDesyncs: this.desyncHistory.length,
+                    recentDesyncs: recentDesyncs.length,
+                    recoveryAttempts: this.recoveryAttempts,
+                    isRecovering: this.isRecovering,
+                    averageSeverity: recentDesyncs.length > 0
+                        ? recentDesyncs.reduce((sum, d) =>
+                            sum + (d.severity === 'critical' ? 3 : d.severity === 'high' ? 2 : 1), 0
+                          ) / recentDesyncs.length
+                        : 0
+                };
+            }
+        };
+
+        window.NetworkDesyncRecovery = NetworkDesyncRecovery;
+
+        // ============================================================
+        // v2.14: ASSET LOADING TIMEOUT & FALLBACK (7/8 CONSENSUS)
+        // Timeout handling for asset loading with fallback options
+        // Part of Error Resilience strategy from 8-strategy analysis
+        // ============================================================
+        const AssetLoadingTimeout = {
+            defaultTimeout: 10000,
+            retryAttempts: 2,
+            retryDelay: 1000,
+            loadingAssets: new Map(),
+            failedAssets: new Set(),
+            successCallbacks: new Map(),
+
+            init() {
+                console.log('[AssetLoadingTimeout] Initialized asset loading protection');
+            },
+
+            loadWithTimeout(url, options = {}) {
+                const {
+                    timeout = this.defaultTimeout,
+                    retries = this.retryAttempts,
+                    fallback = null,
+                    type = 'auto',
+                    onProgress = null
+                } = options;
+
+                return new Promise((resolve, reject) => {
+                    this.attemptLoad(url, timeout, retries, fallback, type, onProgress, resolve, reject);
+                });
+            },
+
+            attemptLoad(url, timeout, retriesLeft, fallback, type, onProgress, resolve, reject) {
+                const loadId = `${url}-${Date.now()}`;
+                const timeoutId = setTimeout(() => {
+                    this.handleTimeout(loadId, url, timeout, retriesLeft, fallback, type, onProgress, resolve, reject);
+                }, timeout);
+
+                this.loadingAssets.set(loadId, { url, timeoutId, startTime: performance.now() });
+
+                const assetType = type === 'auto' ? this.detectType(url) : type;
+
+                let loadPromise;
+                switch (assetType) {
+                    case 'image':
+                        loadPromise = this.loadImage(url, onProgress);
+                        break;
+                    case 'audio':
+                        loadPromise = this.loadAudio(url, onProgress);
+                        break;
+                    case 'json':
+                        loadPromise = this.loadJSON(url, onProgress);
+                        break;
+                    default:
+                        loadPromise = this.loadGeneric(url, onProgress);
+                }
+
+                loadPromise
+                    .then(asset => {
+                        clearTimeout(timeoutId);
+                        this.loadingAssets.delete(loadId);
+                        resolve(asset);
+                    })
+                    .catch(error => {
+                        clearTimeout(timeoutId);
+                        this.handleLoadError(loadId, url, error, timeout, retriesLeft, fallback, type, onProgress, resolve, reject);
+                    });
+            },
+
+            handleTimeout(loadId, url, timeout, retriesLeft, fallback, type, onProgress, resolve, reject) {
+                console.warn(`[AssetLoadingTimeout] Timeout loading: ${url}`);
+                this.loadingAssets.delete(loadId);
+
+                if (retriesLeft > 0) {
+                    console.log(`[AssetLoadingTimeout] Retrying (${retriesLeft} left)...`);
+                    setTimeout(() => {
+                        this.attemptLoad(url, timeout, retriesLeft - 1, fallback, type, onProgress, resolve, reject);
+                    }, this.retryDelay);
+                } else if (fallback !== null) {
+                    console.log('[AssetLoadingTimeout] Using fallback');
+                    this.failedAssets.add(url);
+                    resolve(fallback);
+                } else {
+                    this.failedAssets.add(url);
+                    reject(new Error(`Asset load timeout: ${url}`));
+                }
+            },
+
+            handleLoadError(loadId, url, error, timeout, retriesLeft, fallback, type, onProgress, resolve, reject) {
+                this.loadingAssets.delete(loadId);
+
+                if (retriesLeft > 0) {
+                    console.log(`[AssetLoadingTimeout] Load error, retrying (${retriesLeft} left)...`);
+                    setTimeout(() => {
+                        this.attemptLoad(url, timeout, retriesLeft - 1, fallback, type, onProgress, resolve, reject);
+                    }, this.retryDelay);
+                } else if (fallback !== null) {
+                    console.log('[AssetLoadingTimeout] Using fallback after error');
+                    this.failedAssets.add(url);
+                    resolve(fallback);
+                } else {
+                    this.failedAssets.add(url);
+                    reject(error);
+                }
+            },
+
+            detectType(url) {
+                const ext = url.split('.').pop().toLowerCase();
+                if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg'].includes(ext)) return 'image';
+                if (['mp3', 'wav', 'ogg', 'webm'].includes(ext)) return 'audio';
+                if (ext === 'json') return 'json';
+                return 'generic';
+            },
+
+            loadImage(url, onProgress) {
+                return new Promise((resolve, reject) => {
+                    const img = new Image();
+                    img.crossOrigin = 'anonymous';
+                    img.onload = () => resolve(img);
+                    img.onerror = () => reject(new Error(`Failed to load image: ${url}`));
+                    img.src = url;
+                });
+            },
+
+            loadAudio(url, onProgress) {
+                return new Promise((resolve, reject) => {
+                    const audio = new Audio();
+                    audio.crossOrigin = 'anonymous';
+                    audio.oncanplaythrough = () => resolve(audio);
+                    audio.onerror = () => reject(new Error(`Failed to load audio: ${url}`));
+                    audio.src = url;
+                    audio.load();
+                });
+            },
+
+            loadJSON(url, onProgress) {
+                return fetch(url)
+                    .then(response => {
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        return response.json();
+                    });
+            },
+
+            loadGeneric(url, onProgress) {
+                return fetch(url)
+                    .then(response => {
+                        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                        return response.blob();
+                    });
+            },
+
+            cancelAll() {
+                this.loadingAssets.forEach(({ timeoutId }) => {
+                    clearTimeout(timeoutId);
+                });
+                this.loadingAssets.clear();
+            },
+
+            getStats() {
+                return {
+                    loading: this.loadingAssets.size,
+                    failed: this.failedAssets.size,
+                    failedUrls: Array.from(this.failedAssets).slice(0, 10)
+                };
+            }
+        };
+
+        window.AssetLoadingTimeout = AssetLoadingTimeout;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
