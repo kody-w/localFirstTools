@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.23</title>
+    <title>Halo 2: THE CAGE - Campaign v2.24</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.23'; // v2.23: 8-Strategy Round 25 - BoundingSpherePooling, DefensivePoolAcquisition, RedReticleThrottle
+        const APP_VERSION = '2.24'; // v2.24: 8-Strategy Round 26 - DynamicRangeCompression, DataValidationPipeline, AtomicSaveTransaction
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -11666,6 +11666,187 @@
         };
         RedReticleThrottle.init();
         window.RedReticleThrottle = RedReticleThrottle;
+
+        // v2.24: DYNAMIC RANGE COMPRESSION
+        // Strategy: AUDIO (Impact: 7, Complexity: 2)
+        // Applies dynamic range compression to prevent audio clipping and normalize levels
+        const DynamicRangeCompression = {
+            _compressor: null,
+            _threshold: -24,
+            _knee: 30,
+            _ratio: 12,
+            _attack: 0.003,
+            _release: 0.25,
+            _connected: false,
+            _connectionCount: 0,
+            init() {
+                // Will initialize when audio context is available
+            },
+            connect(audioContext, destination) {
+                if (!audioContext || this._connected) return null;
+                try {
+                    this._compressor = audioContext.createDynamicsCompressor();
+                    this._compressor.threshold.value = this._threshold;
+                    this._compressor.knee.value = this._knee;
+                    this._compressor.ratio.value = this._ratio;
+                    this._compressor.attack.value = this._attack;
+                    this._compressor.release.value = this._release;
+                    this._compressor.connect(destination);
+                    this._connected = true;
+                    this._connectionCount++;
+                    return this._compressor;
+                } catch (e) {
+                    return null;
+                }
+            },
+            getNode() { return this._compressor; },
+            isConnected() { return this._connected; },
+            disconnect() {
+                if (this._compressor && this._connected) {
+                    try { this._compressor.disconnect(); } catch(e) {}
+                    this._connected = false;
+                }
+            },
+            getStats() {
+                return {
+                    connected: this._connected,
+                    threshold: this._threshold,
+                    ratio: this._ratio,
+                    connectionCount: this._connectionCount
+                };
+            }
+        };
+        DynamicRangeCompression.init();
+        window.DynamicRangeCompression = DynamicRangeCompression;
+
+        // v2.24: DATA VALIDATION PIPELINE
+        // Strategy: DATA INTEGRITY (Impact: 9, Complexity: 3)
+        // Validates save data against expected schema before loading
+        const DataValidationPipeline = {
+            _validationsRun: 0,
+            _validationsPassed: 0,
+            _validationsFailed: 0,
+            _lastError: null,
+            _requiredFields: ['version', 'timestamp'],
+            init() {},
+            addRequiredField(field) {
+                if (!this._requiredFields.includes(field)) {
+                    this._requiredFields.push(field);
+                }
+            },
+            validate(data, schema) {
+                this._validationsRun++;
+                this._lastError = null;
+
+                if (!data || typeof data !== 'object') {
+                    this._validationsFailed++;
+                    this._lastError = 'Data must be an object';
+                    return { valid: false, error: this._lastError };
+                }
+
+                // Check required fields
+                for (const field of this._requiredFields) {
+                    if (!(field in data)) {
+                        this._validationsFailed++;
+                        this._lastError = `Missing required field: ${field}`;
+                        return { valid: false, error: this._lastError };
+                    }
+                }
+
+                // Optional schema validation
+                if (schema) {
+                    for (const [key, type] of Object.entries(schema)) {
+                        if (key in data && typeof data[key] !== type) {
+                            this._validationsFailed++;
+                            this._lastError = `Invalid type for ${key}: expected ${type}`;
+                            return { valid: false, error: this._lastError };
+                        }
+                    }
+                }
+
+                this._validationsPassed++;
+                return { valid: true, error: null };
+            },
+            getLastError() { return this._lastError; },
+            getStats() {
+                return {
+                    validationsRun: this._validationsRun,
+                    passed: this._validationsPassed,
+                    failed: this._validationsFailed,
+                    successRate: this._validationsRun > 0
+                        ? ((this._validationsPassed / this._validationsRun) * 100).toFixed(1) + '%'
+                        : 'N/A'
+                };
+            }
+        };
+        DataValidationPipeline.init();
+        window.DataValidationPipeline = DataValidationPipeline;
+
+        // v2.24: ATOMIC SAVE TRANSACTION
+        // Strategy: DATA INTEGRITY (Impact: 8, Complexity: 5)
+        // Implements atomic save operations with rollback on failure
+        const AtomicSaveTransaction = {
+            _pendingTransaction: null,
+            _successfulSaves: 0,
+            _failedSaves: 0,
+            _rollbackCount: 0,
+            _storageKey: 'halo-lockout-atomic-backup',
+            init() {},
+            begin(key, currentData) {
+                // Backup current state before modification
+                this._pendingTransaction = {
+                    key: key,
+                    backup: currentData ? JSON.stringify(currentData) : null,
+                    startTime: Date.now()
+                };
+                return true;
+            },
+            commit(key, newData) {
+                if (!this._pendingTransaction || this._pendingTransaction.key !== key) {
+                    return false;
+                }
+                try {
+                    const serialized = JSON.stringify(newData);
+                    localStorage.setItem(key, serialized);
+                    // Verify write
+                    const verification = localStorage.getItem(key);
+                    if (verification !== serialized) {
+                        throw new Error('Write verification failed');
+                    }
+                    this._successfulSaves++;
+                    this._pendingTransaction = null;
+                    return true;
+                } catch (e) {
+                    this.rollback();
+                    return false;
+                }
+            },
+            rollback() {
+                if (!this._pendingTransaction) return false;
+                try {
+                    if (this._pendingTransaction.backup) {
+                        localStorage.setItem(this._pendingTransaction.key, this._pendingTransaction.backup);
+                    }
+                    this._rollbackCount++;
+                    this._failedSaves++;
+                } catch (e) {
+                    // Rollback failed - data may be corrupted
+                }
+                this._pendingTransaction = null;
+                return true;
+            },
+            isPending() { return this._pendingTransaction !== null; },
+            getStats() {
+                return {
+                    successfulSaves: this._successfulSaves,
+                    failedSaves: this._failedSaves,
+                    rollbackCount: this._rollbackCount,
+                    hasPending: this._pendingTransaction !== null
+                };
+            }
+        };
+        AtomicSaveTransaction.init();
+        window.AtomicSaveTransaction = AtomicSaveTransaction;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
