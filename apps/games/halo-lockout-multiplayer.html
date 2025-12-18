@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.21</title>
+    <title>Halo 2: THE CAGE - Campaign v2.22</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.21'; // v2.21: 8-Strategy Round 23 - ParticleSystemConstructorGuard, GlobalErrorBoundary, AutoFireToggle
+        const APP_VERSION = '2.22'; // v2.22: 8-Strategy Round 24 - FocusRestoration, RoamingFocusTrap, ButtonDisabledStates
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -11311,6 +11311,198 @@
 
         AutoFireToggle.init();
         window.AutoFireToggle = AutoFireToggle;
+
+        // v2.22: FOCUS RESTORATION
+        // Strategy: ACCESSIBILITY (Impact: 8, Complexity: 3)
+        // Saves and restores focus state when overlays/menus open/close
+        const FocusRestoration = {
+            _focusStack: [],
+            _maxStackSize: 10,
+            _restorations: 0,
+            _saves: 0,
+
+            init() {
+                this._focusStack = [];
+            },
+
+            saveFocus() {
+                const activeElement = document.activeElement;
+                if (activeElement && activeElement !== document.body) {
+                    this._focusStack.push(activeElement);
+                    this._saves++;
+                    if (this._focusStack.length > this._maxStackSize) {
+                        this._focusStack.shift();
+                    }
+                    return true;
+                }
+                return false;
+            },
+
+            restoreFocus() {
+                while (this._focusStack.length > 0) {
+                    const element = this._focusStack.pop();
+                    if (element && document.contains(element)) {
+                        try {
+                            element.focus();
+                            this._restorations++;
+                            return true;
+                        } catch (e) {
+                            // Element not focusable, try next
+                        }
+                    }
+                }
+                return false;
+            },
+
+            clear() {
+                this._focusStack = [];
+            },
+
+            getStats() {
+                return {
+                    stackDepth: this._focusStack.length,
+                    saves: this._saves,
+                    restorations: this._restorations
+                };
+            }
+        };
+        FocusRestoration.init();
+        window.FocusRestoration = FocusRestoration;
+
+        // v2.22: ROAMING FOCUS TRAP
+        // Strategy: ACCESSIBILITY (Impact: 7, Complexity: 3)
+        // Traps focus within modal dialogs for keyboard navigation
+        const RoamingFocusTrap = {
+            _activeContainer: null,
+            _focusableSelector: 'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+            _trapCount: 0,
+            _releaseCount: 0,
+            _handler: null,
+
+            init() {
+                this._handler = this._handleKeydown.bind(this);
+            },
+
+            _handleKeydown(e) {
+                if (e.key !== 'Tab' || !this._activeContainer) return;
+
+                const focusable = Array.from(
+                    this._activeContainer.querySelectorAll(this._focusableSelector)
+                ).filter(el => !el.disabled && el.offsetParent !== null);
+
+                if (focusable.length === 0) return;
+
+                const firstEl = focusable[0];
+                const lastEl = focusable[focusable.length - 1];
+
+                if (e.shiftKey && document.activeElement === firstEl) {
+                    e.preventDefault();
+                    lastEl.focus();
+                } else if (!e.shiftKey && document.activeElement === lastEl) {
+                    e.preventDefault();
+                    firstEl.focus();
+                }
+            },
+
+            trap(container) {
+                if (this._activeContainer) {
+                    this.release();
+                }
+                this._activeContainer = container;
+                document.addEventListener('keydown', this._handler);
+                this._trapCount++;
+
+                // Focus first focusable element
+                const firstFocusable = container.querySelector(this._focusableSelector);
+                if (firstFocusable) firstFocusable.focus();
+            },
+
+            release() {
+                if (this._activeContainer) {
+                    document.removeEventListener('keydown', this._handler);
+                    this._activeContainer = null;
+                    this._releaseCount++;
+                }
+            },
+
+            isActive() {
+                return this._activeContainer !== null;
+            },
+
+            getStats() {
+                return {
+                    isTrapped: this.isActive(),
+                    trapCount: this._trapCount,
+                    releaseCount: this._releaseCount
+                };
+            }
+        };
+        RoamingFocusTrap.init();
+        window.RoamingFocusTrap = RoamingFocusTrap;
+
+        // v2.22: BUTTON DISABLED STATES
+        // Strategy: UX POLISH (Impact: 7, Complexity: 3)
+        // Manages button disabled states with visual feedback during async operations
+        const ButtonDisabledStates = {
+            _managedButtons: new WeakMap(),
+            _disableCount: 0,
+            _enableCount: 0,
+
+            init() {},
+
+            disable(button, reason = 'Processing...') {
+                if (!button || this._managedButtons.has(button)) return false;
+
+                const originalState = {
+                    disabled: button.disabled,
+                    text: button.textContent,
+                    cursor: button.style.cursor,
+                    opacity: button.style.opacity
+                };
+
+                this._managedButtons.set(button, originalState);
+
+                button.disabled = true;
+                button.setAttribute('aria-busy', 'true');
+                button.style.cursor = 'wait';
+                button.style.opacity = '0.6';
+                if (reason) button.setAttribute('title', reason);
+
+                this._disableCount++;
+                return true;
+            },
+
+            enable(button) {
+                if (!button) return false;
+
+                const originalState = this._managedButtons.get(button);
+                if (!originalState) return false;
+
+                button.disabled = originalState.disabled;
+                button.removeAttribute('aria-busy');
+                button.style.cursor = originalState.cursor || '';
+                button.style.opacity = originalState.opacity || '';
+                button.removeAttribute('title');
+
+                this._managedButtons.delete(button);
+                this._enableCount++;
+                return true;
+            },
+
+            isManaged(button) {
+                return this._managedButtons.has(button);
+            },
+
+            getStats() {
+                return {
+                    disableCount: this._disableCount,
+                    enableCount: this._enableCount,
+                    activeDisabled: this._disableCount - this._enableCount
+                };
+            }
+        };
+        ButtonDisabledStates.init();
+        window.ButtonDisabledStates = ButtonDisabledStates;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
