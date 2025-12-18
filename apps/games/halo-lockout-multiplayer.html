@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.6</title>
+    <title>Halo 2: THE CAGE - Campaign v2.7</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.6'; // v2.6: AudioNodePool, SharedParticleMaterials, Duplicate playWeaponFire fix
+        const APP_VERSION = '2.7'; // v2.7: EventListenerCleanup, DebouncedResize, AssetPreloader
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -6434,6 +6434,245 @@
                 this.materials = {};
                 this.instanceCounts = {};
                 this.initialized = false;
+            }
+        };
+
+        // ============================================================
+        /// v2.7: EVENT LISTENER CLEANUP SYSTEM (6/8 CONSENSUS)
+        // Tracks all addEventListener calls for automatic cleanup
+        // Prevents memory leaks from orphaned listeners
+        // ============================================================
+        const EventListenerCleanup = {
+            listeners: [],
+            _idCounter: 0,
+
+            add(element, eventType, handler, options = {}) {
+                const id = ++this._idCounter;
+                element.addEventListener(eventType, handler, options);
+
+                this.listeners.push({
+                    id,
+                    element,
+                    eventType,
+                    handler,
+                    options,
+                    timestamp: Date.now()
+                });
+
+                return id;
+            },
+
+            remove(id) {
+                const index = this.listeners.findIndex(l => l.id === id);
+                if (index === -1) return false;
+
+                const listener = this.listeners[index];
+                try {
+                    listener.element.removeEventListener(
+                        listener.eventType,
+                        listener.handler,
+                        listener.options
+                    );
+                } catch (e) { /* Element may be gone */ }
+
+                this.listeners.splice(index, 1);
+                return true;
+            },
+
+            removeByElement(element) {
+                const toRemove = this.listeners.filter(l => l.element === element);
+                toRemove.forEach(l => this.remove(l.id));
+                return toRemove.length;
+            },
+
+            cleanup() {
+                let removed = 0;
+                const detached = this.listeners.filter(l => {
+                    return !document.body.contains(l.element);
+                });
+
+                detached.forEach(l => {
+                    this.remove(l.id);
+                    removed++;
+                });
+
+                if (removed > 0) {
+                    console.log(`[EventListenerCleanup] Removed ${removed} orphaned listeners`);
+                }
+                return removed;
+            },
+
+            cleanupAll() {
+                const count = this.listeners.length;
+                this.listeners.forEach(l => {
+                    try {
+                        l.element.removeEventListener(l.eventType, l.handler, l.options);
+                    } catch (e) { /* ignore */ }
+                });
+                this.listeners = [];
+                console.log(`[EventListenerCleanup] Removed all ${count} listeners`);
+                return count;
+            },
+
+            getStats() {
+                const byType = {};
+                this.listeners.forEach(l => {
+                    byType[l.eventType] = (byType[l.eventType] || 0) + 1;
+                });
+                return { total: this.listeners.length, byType };
+            }
+        };
+
+        // ============================================================
+        /// v2.7: DEBOUNCED RESIZE HANDLER (5/8 CONSENSUS)
+        // RAF-based throttling for window resize events
+        // Eliminates 100+ redundant camera updates during resize
+        // ============================================================
+        const DebouncedResizeHandler = {
+            rafId: null,
+            handlers: [],
+            lastWidth: 0,
+            lastHeight: 0,
+            resizeCount: 0,
+            batchedCount: 0,
+
+            init() {
+                this.lastWidth = window.innerWidth;
+                this.lastHeight = window.innerHeight;
+
+                window.addEventListener('resize', () => this.scheduleUpdate());
+                console.log('[DebouncedResizeHandler] Initialized');
+            },
+
+            addHandler(callback) {
+                this.handlers.push(callback);
+            },
+
+            scheduleUpdate() {
+                this.resizeCount++;
+
+                // Cancel any pending update
+                if (this.rafId) return;
+
+                // Schedule batched update
+                this.rafId = requestAnimationFrame(() => {
+                    this.rafId = null;
+                    this.batchedCount++;
+
+                    const width = window.innerWidth;
+                    const height = window.innerHeight;
+
+                    // Only update if size actually changed
+                    if (width === this.lastWidth && height === this.lastHeight) return;
+
+                    this.lastWidth = width;
+                    this.lastHeight = height;
+
+                    // Call all registered handlers
+                    this.handlers.forEach(handler => {
+                        try {
+                            handler(width, height);
+                        } catch (e) {
+                            console.error('[DebouncedResizeHandler] Handler error:', e);
+                        }
+                    });
+                });
+            },
+
+            getStats() {
+                return {
+                    rawResizeEvents: this.resizeCount,
+                    batchedUpdates: this.batchedCount,
+                    savedCalls: this.resizeCount - this.batchedCount,
+                    efficiency: this.resizeCount > 0
+                        ? ((1 - this.batchedCount / this.resizeCount) * 100).toFixed(1) + '%'
+                        : '0%'
+                };
+            }
+        };
+
+        // ============================================================
+        /// v2.7: ASSET PRELOADER WITH PROGRESS (5/8 CONSENSUS)
+        // Loads Three.js assets during loading screen with visual feedback
+        // Eliminates initial freeze during synchronous asset loading
+        // ============================================================
+        const AssetPreloader = {
+            assets: [],
+            loaded: new Map(),
+            totalSize: 0,
+            loadedSize: 0,
+            isLoading: false,
+            progressCallback: null,
+
+            register(name, type, loadFn, estimatedSize = 1) {
+                this.assets.push({ name, type, loadFn, estimatedSize, status: 'pending' });
+                this.totalSize += estimatedSize;
+            },
+
+            async load(progressCallback) {
+                if (this.isLoading) return this.loaded;
+                this.isLoading = true;
+                this.progressCallback = progressCallback;
+
+                for (const asset of this.assets) {
+                    if (asset.status !== 'pending') continue;
+
+                    try {
+                        asset.status = 'loading';
+                        this.reportProgress(asset.name, 'loading');
+
+                        const result = await asset.loadFn();
+                        this.loaded.set(asset.name, result);
+                        asset.status = 'loaded';
+                        this.loadedSize += asset.estimatedSize;
+
+                        this.reportProgress(asset.name, 'loaded');
+
+                    } catch (error) {
+                        asset.status = 'error';
+                        asset.error = error;
+                        this.loadedSize += asset.estimatedSize;
+                        console.warn(`[AssetPreloader] Failed to load ${asset.name}:`, error);
+                        this.reportProgress(asset.name, 'error');
+                    }
+                }
+
+                this.isLoading = false;
+                return this.loaded;
+            },
+
+            reportProgress(assetName, status) {
+                if (!this.progressCallback) return;
+
+                const percent = this.totalSize > 0
+                    ? Math.round((this.loadedSize / this.totalSize) * 100)
+                    : 0;
+
+                this.progressCallback({
+                    asset: assetName,
+                    status,
+                    loaded: this.loadedSize,
+                    total: this.totalSize,
+                    percent,
+                    message: `Loading ${assetName}... (${percent}%)`
+                });
+            },
+
+            get(name) {
+                return this.loaded.get(name);
+            },
+
+            getStats() {
+                const byStatus = { pending: 0, loading: 0, loaded: 0, error: 0 };
+                this.assets.forEach(a => byStatus[a.status]++);
+                return {
+                    total: this.assets.length,
+                    loaded: byStatus.loaded,
+                    errors: byStatus.error,
+                    percent: this.totalSize > 0
+                        ? Math.round((this.loadedSize / this.totalSize) * 100)
+                        : 0
+                };
             }
         };
 
