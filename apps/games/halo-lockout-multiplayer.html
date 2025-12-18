@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.22</title>
+    <title>Halo 2: THE CAGE - Campaign v2.23</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.22'; // v2.22: 8-Strategy Round 24 - FocusRestoration, RoamingFocusTrap, ButtonDisabledStates
+        const APP_VERSION = '2.23'; // v2.23: 8-Strategy Round 25 - BoundingSpherePooling, DefensivePoolAcquisition, RedReticleThrottle
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -11503,6 +11503,169 @@
         };
         ButtonDisabledStates.init();
         window.ButtonDisabledStates = ButtonDisabledStates;
+
+        // v2.23: BOUNDING SPHERE POOLING
+        // Strategy: PERFORMANCE (Impact: 7, Complexity: 2)
+        // Eliminates bounding sphere cloning in frustum culling loop
+        const BoundingSpherePooling = {
+            _pooledSphere: null,
+            _tempCenter: null,
+            _reuseCount: 0,
+            _allocationsAvoided: 0,
+
+            init() {
+                if (typeof THREE !== 'undefined') {
+                    this._pooledSphere = new THREE.Sphere();
+                    this._tempCenter = new THREE.Vector3();
+                }
+            },
+
+            getSphere() {
+                if (!this._pooledSphere && typeof THREE !== 'undefined') {
+                    this._pooledSphere = new THREE.Sphere();
+                    this._tempCenter = new THREE.Vector3();
+                }
+                this._reuseCount++;
+                return this._pooledSphere;
+            },
+
+            applyTransform(originalSphere, matrixWorld) {
+                if (!this._pooledSphere || !originalSphere) return originalSphere;
+
+                this._tempCenter.copy(originalSphere.center);
+                this._tempCenter.applyMatrix4(matrixWorld);
+                this._pooledSphere.center.copy(this._tempCenter);
+                this._pooledSphere.radius = originalSphere.radius;
+                this._allocationsAvoided++;
+
+                return this._pooledSphere;
+            },
+
+            getStats() {
+                return {
+                    reuseCount: this._reuseCount,
+                    allocationsAvoided: this._allocationsAvoided
+                };
+            }
+        };
+        BoundingSpherePooling.init();
+        window.BoundingSpherePooling = BoundingSpherePooling;
+
+        // v2.23: DEFENSIVE POOL ACQUISITION
+        // Strategy: CODE QUALITY (Impact: 8, Complexity: 4)
+        // Enforces validation after pool acquire() and tracks starvation events
+        const DefensivePoolAcquisition = {
+            _starvationEvents: [],
+            _maxStarvationLog: 50,
+            _totalAcquisitions: 0,
+            _failedAcquisitions: 0,
+
+            init() {
+                this._starvationEvents = [];
+            },
+
+            acquire(pool, poolName) {
+                this._totalAcquisitions++;
+                const item = pool?.acquire?.();
+
+                if (item === null || item === undefined) {
+                    this._failedAcquisitions++;
+                    this._logStarvation(poolName);
+                    return null;
+                }
+
+                return item;
+            },
+
+            _logStarvation(poolName) {
+                const event = {
+                    pool: poolName,
+                    timestamp: performance.now(),
+                    time: new Date().toISOString()
+                };
+
+                this._starvationEvents.push(event);
+                if (this._starvationEvents.length > this._maxStarvationLog) {
+                    this._starvationEvents.shift();
+                }
+
+                console.warn(`[DefensivePoolAcquisition] Pool exhausted: ${poolName}`);
+            },
+
+            isHealthy() {
+                return this._failedAcquisitions === 0 ||
+                    (this._failedAcquisitions / this._totalAcquisitions) < 0.05;
+            },
+
+            getRecentStarvations(count = 10) {
+                return this._starvationEvents.slice(-count);
+            },
+
+            getStats() {
+                return {
+                    total: this._totalAcquisitions,
+                    failed: this._failedAcquisitions,
+                    failRate: this._failedAcquisitions / this._totalAcquisitions || 0,
+                    healthy: this.isHealthy(),
+                    recentEvents: this._starvationEvents.length
+                };
+            }
+        };
+        DefensivePoolAcquisition.init();
+        window.DefensivePoolAcquisition = DefensivePoolAcquisition;
+
+        // v2.23: RED RETICLE THROTTLE
+        // Strategy: PERFORMANCE (Impact: 6, Complexity: 3)
+        // Throttles red reticle raycast calculations to every other frame
+        const RedReticleThrottle = {
+            _frameCounter: 0,
+            _throttleEveryN: 2,
+            _cachedResult: false,
+            _cachedTarget: null,
+            _checksThrottled: 0,
+            _checksPerformed: 0,
+
+            init() {
+                this._frameCounter = 0;
+            },
+
+            shouldCheck() {
+                this._frameCounter++;
+                if (this._frameCounter % this._throttleEveryN === 0) {
+                    this._checksPerformed++;
+                    return true;
+                }
+                this._checksThrottled++;
+                return false;
+            },
+
+            cacheResult(isOnTarget, targetId) {
+                this._cachedResult = isOnTarget;
+                this._cachedTarget = targetId;
+            },
+
+            getCachedResult() {
+                return {
+                    isOnTarget: this._cachedResult,
+                    targetId: this._cachedTarget
+                };
+            },
+
+            setThrottleRate(everyN) {
+                this._throttleEveryN = Math.max(1, Math.min(everyN, 10));
+            },
+
+            getStats() {
+                return {
+                    throttled: this._checksThrottled,
+                    performed: this._checksPerformed,
+                    savings: this._checksThrottled / (this._checksThrottled + this._checksPerformed) || 0,
+                    rate: this._throttleEveryN
+                };
+            }
+        };
+        RedReticleThrottle.init();
+        window.RedReticleThrottle = RedReticleThrottle;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
