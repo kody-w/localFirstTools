@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.14</title>
+    <title>Halo 2: THE CAGE - Campaign v2.15</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.14'; // v2.14: RAFErrorBoundary, NetworkDesyncRecovery, AssetLoadingTimeout
+        const APP_VERSION = '2.15'; // v2.15: ShadowMapBatchOptimizer, ColorblindModeManager, ClientSideMovementPrediction
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -9082,6 +9082,387 @@
         };
 
         window.AssetLoadingTimeout = AssetLoadingTimeout;
+
+        // ============================================================
+        // v2.15: SHADOW MAP BATCH OPTIMIZER (8/8 CONSENSUS)
+        // Dynamic shadow resolution by distance for GPU optimization
+        // Part of Performance strategy from 8-strategy analysis
+        // ============================================================
+        const ShadowMapBatchOptimizer = {
+            config: {
+                enabled: true,
+                nearResolution: 2048,
+                midResolution: 1024,
+                farResolution: 512,
+                nearThreshold: 20,
+                farThreshold: 50,
+                cacheThreshold: 0.5, // Camera movement threshold for cache invalidation
+                updateInterval: 100 // ms between resolution checks
+            },
+
+            lastCameraPosition: null,
+            lastUpdateTime: 0,
+            shadowCacheValid: false,
+            currentResolutions: new Map(),
+
+            init(renderer, camera) {
+                this.renderer = renderer;
+                this.camera = camera;
+                this.lastCameraPosition = camera?.position?.clone() || { x: 0, y: 0, z: 0 };
+                console.log('[ShadowMapBatchOptimizer] Initialized shadow optimization');
+            },
+
+            update(lights, timestamp) {
+                if (!this.config.enabled || !this.camera) return;
+
+                // Throttle updates
+                if (timestamp - this.lastUpdateTime < this.config.updateInterval) return;
+                this.lastUpdateTime = timestamp;
+
+                // Check if camera moved significantly
+                const cameraPos = this.camera.position;
+                const dx = cameraPos.x - this.lastCameraPosition.x;
+                const dy = cameraPos.y - this.lastCameraPosition.y;
+                const dz = cameraPos.z - this.lastCameraPosition.z;
+                const cameraMoved = Math.sqrt(dx * dx + dy * dy + dz * dz) > this.config.cacheThreshold;
+
+                if (!cameraMoved && this.shadowCacheValid) return;
+
+                this.lastCameraPosition.x = cameraPos.x;
+                this.lastCameraPosition.y = cameraPos.y;
+                this.lastCameraPosition.z = cameraPos.z;
+
+                // Update shadow resolutions based on distance
+                if (lights && Array.isArray(lights)) {
+                    lights.forEach((light, index) => {
+                        if (light.shadow && light.position) {
+                            const resolution = this.getResolutionForDistance(
+                                this.getDistanceToCamera(light.position)
+                            );
+                            this.updateLightShadow(light, resolution);
+                        }
+                    });
+                }
+
+                this.shadowCacheValid = true;
+            },
+
+            getDistanceToCamera(position) {
+                if (!this.camera) return 0;
+                const dx = position.x - this.camera.position.x;
+                const dy = position.y - this.camera.position.y;
+                const dz = position.z - this.camera.position.z;
+                return Math.sqrt(dx * dx + dy * dy + dz * dz);
+            },
+
+            getResolutionForDistance(distance) {
+                if (distance < this.config.nearThreshold) {
+                    return this.config.nearResolution;
+                } else if (distance < this.config.farThreshold) {
+                    return this.config.midResolution;
+                }
+                return this.config.farResolution;
+            },
+
+            updateLightShadow(light, resolution) {
+                const currentRes = this.currentResolutions.get(light) || 0;
+                if (currentRes === resolution) return;
+
+                if (light.shadow.mapSize) {
+                    light.shadow.mapSize.width = resolution;
+                    light.shadow.mapSize.height = resolution;
+                    this.currentResolutions.set(light, resolution);
+
+                    // Dispose old shadow map to apply new resolution
+                    if (light.shadow.map) {
+                        light.shadow.map.dispose();
+                        light.shadow.map = null;
+                    }
+                }
+            },
+
+            invalidateCache() {
+                this.shadowCacheValid = false;
+            },
+
+            getStats() {
+                const resolutions = {};
+                this.currentResolutions.forEach((res, light) => {
+                    resolutions[light.uuid || 'unknown'] = res;
+                });
+                return {
+                    enabled: this.config.enabled,
+                    cacheValid: this.shadowCacheValid,
+                    lightCount: this.currentResolutions.size,
+                    resolutions
+                };
+            }
+        };
+
+        window.ShadowMapBatchOptimizer = ShadowMapBatchOptimizer;
+
+        // ============================================================
+        // v2.15: COLORBLIND MODE MANAGER (8/8 CONSENSUS)
+        // Provides color filters for various types of colorblindness
+        // Part of Accessibility strategy from 8-strategy analysis
+        // ============================================================
+        const ColorblindModeManager = {
+            currentMode: 'normal',
+            filterElement: null,
+            modes: {
+                normal: null,
+                deuteranopia: {
+                    name: 'Deuteranopia (Red-Green)',
+                    matrix: [
+                        0.625, 0.375, 0, 0, 0,
+                        0.7, 0.3, 0, 0, 0,
+                        0, 0.3, 0.7, 0, 0,
+                        0, 0, 0, 1, 0
+                    ]
+                },
+                protanopia: {
+                    name: 'Protanopia (Red)',
+                    matrix: [
+                        0.567, 0.433, 0, 0, 0,
+                        0.558, 0.442, 0, 0, 0,
+                        0, 0.242, 0.758, 0, 0,
+                        0, 0, 0, 1, 0
+                    ]
+                },
+                tritanopia: {
+                    name: 'Tritanopia (Blue-Yellow)',
+                    matrix: [
+                        0.95, 0.05, 0, 0, 0,
+                        0, 0.433, 0.567, 0, 0,
+                        0, 0.475, 0.525, 0, 0,
+                        0, 0, 0, 1, 0
+                    ]
+                },
+                highContrast: {
+                    name: 'High Contrast',
+                    filter: 'contrast(1.5) saturate(1.2)'
+                }
+            },
+
+            init() {
+                // Create SVG filter container
+                this.createFilterElement();
+
+                // Load saved preference
+                const saved = localStorage.getItem('colorblindMode');
+                if (saved && this.modes[saved]) {
+                    this.setMode(saved);
+                }
+
+                console.log('[ColorblindModeManager] Initialized with mode:', this.currentMode);
+            },
+
+            createFilterElement() {
+                // Create hidden SVG for color matrix filters
+                const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+                svg.setAttribute('style', 'position: absolute; width: 0; height: 0;');
+                svg.innerHTML = `
+                    <defs>
+                        <filter id="colorblind-deuteranopia">
+                            <feColorMatrix type="matrix" values="${this.modes.deuteranopia.matrix.join(' ')}"/>
+                        </filter>
+                        <filter id="colorblind-protanopia">
+                            <feColorMatrix type="matrix" values="${this.modes.protanopia.matrix.join(' ')}"/>
+                        </filter>
+                        <filter id="colorblind-tritanopia">
+                            <feColorMatrix type="matrix" values="${this.modes.tritanopia.matrix.join(' ')}"/>
+                        </filter>
+                    </defs>
+                `;
+                document.body.appendChild(svg);
+                this.filterElement = svg;
+            },
+
+            setMode(mode) {
+                if (!this.modes.hasOwnProperty(mode)) {
+                    console.warn('[ColorblindModeManager] Unknown mode:', mode);
+                    return false;
+                }
+
+                this.currentMode = mode;
+                const gameCanvas = document.querySelector('canvas');
+                const gameContainer = document.getElementById('game-container') || document.body;
+
+                // Remove existing filters
+                gameContainer.style.filter = '';
+                if (gameCanvas) gameCanvas.style.filter = '';
+
+                if (mode === 'normal') {
+                    // No filter
+                } else if (mode === 'highContrast') {
+                    gameContainer.style.filter = this.modes.highContrast.filter;
+                } else {
+                    gameContainer.style.filter = `url(#colorblind-${mode})`;
+                }
+
+                // Save preference
+                localStorage.setItem('colorblindMode', mode);
+                console.log('[ColorblindModeManager] Mode set to:', mode);
+                return true;
+            },
+
+            getMode() {
+                return this.currentMode;
+            },
+
+            getModes() {
+                return Object.keys(this.modes).map(key => ({
+                    id: key,
+                    name: this.modes[key]?.name || key,
+                    active: key === this.currentMode
+                }));
+            },
+
+            cycleMode() {
+                const modeKeys = Object.keys(this.modes);
+                const currentIndex = modeKeys.indexOf(this.currentMode);
+                const nextIndex = (currentIndex + 1) % modeKeys.length;
+                this.setMode(modeKeys[nextIndex]);
+                return this.currentMode;
+            },
+
+            getStats() {
+                return {
+                    currentMode: this.currentMode,
+                    availableModes: Object.keys(this.modes).length
+                };
+            }
+        };
+
+        window.ColorblindModeManager = ColorblindModeManager;
+
+        // ============================================================
+        // v2.15: CLIENT SIDE MOVEMENT PREDICTION (8/8 CONSENSUS)
+        // Smooth remote player movement using velocity-based prediction
+        // Part of Network strategy from 8-strategy analysis
+        // ============================================================
+        const ClientSideMovementPrediction = {
+            playerStates: new Map(),
+            config: {
+                enabled: true,
+                interpolationDuration: 100, // ms
+                predictionHorizon: 50, // ms to predict ahead
+                maxCorrectionDistance: 2.0, // Max snap distance
+                correctionSpeed: 0.2 // Blend factor per frame
+            },
+
+            init() {
+                console.log('[ClientSideMovementPrediction] Initialized movement prediction');
+            },
+
+            updatePlayerState(playerId, position, velocity, rotation, timestamp) {
+                const state = this.playerStates.get(playerId) || this.createPlayerState();
+
+                // Store previous for interpolation
+                state.previousPosition = { ...state.currentPosition };
+                state.previousRotation = { ...state.currentRotation };
+
+                // Update with new server state
+                state.serverPosition = { x: position.x, y: position.y, z: position.z };
+                state.serverRotation = { x: rotation.x, y: rotation.y, z: rotation.z };
+                state.velocity = { x: velocity.x || 0, y: velocity.y || 0, z: velocity.z || 0 };
+                state.lastUpdateTime = timestamp || performance.now();
+                state.hasUpdate = true;
+
+                this.playerStates.set(playerId, state);
+            },
+
+            createPlayerState() {
+                return {
+                    currentPosition: { x: 0, y: 0, z: 0 },
+                    currentRotation: { x: 0, y: 0, z: 0 },
+                    previousPosition: { x: 0, y: 0, z: 0 },
+                    previousRotation: { x: 0, y: 0, z: 0 },
+                    serverPosition: { x: 0, y: 0, z: 0 },
+                    serverRotation: { x: 0, y: 0, z: 0 },
+                    velocity: { x: 0, y: 0, z: 0 },
+                    lastUpdateTime: 0,
+                    hasUpdate: false
+                };
+            },
+
+            getPredictedPosition(playerId, currentTime) {
+                const state = this.playerStates.get(playerId);
+                if (!state || !this.config.enabled) {
+                    return null;
+                }
+
+                const elapsed = currentTime - state.lastUpdateTime;
+                const t = Math.min(elapsed / this.config.interpolationDuration, 1);
+
+                // Predict position based on velocity
+                const predictionTime = Math.min(elapsed, this.config.predictionHorizon) / 1000;
+                const predicted = {
+                    x: state.serverPosition.x + state.velocity.x * predictionTime,
+                    y: state.serverPosition.y + state.velocity.y * predictionTime,
+                    z: state.serverPosition.z + state.velocity.z * predictionTime
+                };
+
+                // Smooth correction towards predicted position
+                const correctionDistance = this.distance(state.currentPosition, predicted);
+
+                if (correctionDistance > this.config.maxCorrectionDistance) {
+                    // Snap if too far
+                    state.currentPosition = { ...predicted };
+                } else {
+                    // Smooth blend
+                    state.currentPosition.x = this.lerp(state.currentPosition.x, predicted.x, this.config.correctionSpeed);
+                    state.currentPosition.y = this.lerp(state.currentPosition.y, predicted.y, this.config.correctionSpeed);
+                    state.currentPosition.z = this.lerp(state.currentPosition.z, predicted.z, this.config.correctionSpeed);
+                }
+
+                // Smooth rotation
+                state.currentRotation.x = this.lerpAngle(state.currentRotation.x, state.serverRotation.x, this.config.correctionSpeed);
+                state.currentRotation.y = this.lerpAngle(state.currentRotation.y, state.serverRotation.y, this.config.correctionSpeed);
+                state.currentRotation.z = this.lerpAngle(state.currentRotation.z, state.serverRotation.z, this.config.correctionSpeed);
+
+                return {
+                    position: state.currentPosition,
+                    rotation: state.currentRotation
+                };
+            },
+
+            lerp(a, b, t) {
+                return a + (b - a) * t;
+            },
+
+            lerpAngle(a, b, t) {
+                let diff = b - a;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                return a + diff * t;
+            },
+
+            distance(a, b) {
+                const dx = b.x - a.x;
+                const dy = b.y - a.y;
+                const dz = b.z - a.z;
+                return Math.sqrt(dx * dx + dy * dy + dz * dz);
+            },
+
+            removePlayer(playerId) {
+                this.playerStates.delete(playerId);
+            },
+
+            clear() {
+                this.playerStates.clear();
+            },
+
+            getStats() {
+                return {
+                    enabled: this.config.enabled,
+                    trackedPlayers: this.playerStates.size,
+                    config: { ...this.config }
+                };
+            }
+        };
+
+        window.ClientSideMovementPrediction = ClientSideMovementPrediction;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
