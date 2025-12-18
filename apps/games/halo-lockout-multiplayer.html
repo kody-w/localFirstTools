@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.11</title>
+    <title>Halo 2: THE CAGE - Campaign v2.12</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.11'; // v2.11: InputValidator, MatchTimer, MemoryMonitor
+        const APP_VERSION = '2.12'; // v2.12: FloatingDamageNumbers, MobileAdaptiveHUD, LazyMinimap
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -7958,6 +7958,348 @@
             }
         };
         MemoryMonitor.init();
+
+        // ============================================================
+        /// v2.12: FLOATING DAMAGE NUMBERS (5/8 CONSENSUS)
+        // Visual damage feedback with physics-based animation
+        // ============================================================
+        const FloatingDamageNumbers = {
+            pool: [],
+            poolSize: 30,
+            container: null,
+
+            init() {
+                this.createContainer();
+                this.createPool();
+                console.log('[FloatingDamageNumbers] Initialized with pool of', this.poolSize);
+            },
+
+            createContainer() {
+                this.container = document.createElement('div');
+                this.container.id = 'damage-numbers-container';
+                this.container.style.cssText = `
+                    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                    pointer-events: none; z-index: 999; overflow: hidden;
+                `;
+                document.body.appendChild(this.container);
+            },
+
+            createPool() {
+                for (let i = 0; i < this.poolSize; i++) {
+                    const el = document.createElement('div');
+                    el.className = 'damage-number';
+                    el.style.cssText = `
+                        position: absolute; font-family: 'Impact', sans-serif;
+                        font-weight: bold; text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+                        transform: translate(-50%, -50%); opacity: 0;
+                        transition: none; will-change: transform, opacity;
+                    `;
+                    this.pool.push({ element: el, active: false });
+                    this.container.appendChild(el);
+                }
+            },
+
+            show(x, y, damage, options = {}) {
+                const item = this.pool.find(p => !p.active);
+                if (!item) return;
+
+                item.active = true;
+                const el = item.element;
+
+                // Configure appearance
+                const isCrit = options.critical || false;
+                const isHeadshot = options.headshot || false;
+                const color = isHeadshot ? '#ff4444' : isCrit ? '#ffaa00' : '#ffffff';
+                const size = isHeadshot ? 32 : isCrit ? 28 : 22;
+
+                el.textContent = isHeadshot ? `${damage}!` : damage.toString();
+                el.style.color = color;
+                el.style.fontSize = `${size}px`;
+                el.style.left = `${x}px`;
+                el.style.top = `${y}px`;
+                el.style.opacity = '1';
+                el.style.transform = 'translate(-50%, -50%) scale(1.2)';
+
+                // Animate with physics
+                const velocityX = (Math.random() - 0.5) * 60;
+                const velocityY = -40 - Math.random() * 30;
+                let posX = x;
+                let posY = y;
+                let velY = velocityY;
+                let opacity = 1;
+                const gravity = 120;
+                let startTime = performance.now();
+
+                const animate = (time) => {
+                    const elapsed = (time - startTime) / 1000;
+                    startTime = time;
+
+                    posX += velocityX * elapsed;
+                    velY += gravity * elapsed;
+                    posY += velY * elapsed;
+                    opacity -= elapsed * 1.5;
+
+                    if (opacity <= 0) {
+                        item.active = false;
+                        el.style.opacity = '0';
+                        return;
+                    }
+
+                    el.style.left = `${posX}px`;
+                    el.style.top = `${posY}px`;
+                    el.style.opacity = opacity.toString();
+                    el.style.transform = `translate(-50%, -50%) scale(${0.8 + opacity * 0.4})`;
+
+                    requestAnimationFrame(animate);
+                };
+
+                requestAnimationFrame(animate);
+            },
+
+            showAtWorldPosition(worldPos, camera, damage, options = {}) {
+                if (!camera || !worldPos) return;
+
+                // Project 3D position to screen
+                const vector = worldPos.clone();
+                vector.project(camera);
+
+                const x = (vector.x * 0.5 + 0.5) * window.innerWidth;
+                const y = (1 - (vector.y * 0.5 + 0.5)) * window.innerHeight;
+
+                // Only show if in front of camera
+                if (vector.z < 1) {
+                    this.show(x, y, damage, options);
+                }
+            },
+
+            getStats() {
+                return {
+                    poolSize: this.poolSize,
+                    activeCount: this.pool.filter(p => p.active).length
+                };
+            }
+        };
+
+        window.FloatingDamageNumbers = FloatingDamageNumbers;
+
+        // ============================================================
+        /// v2.12: MOBILE ADAPTIVE HUD (4/8 CONSENSUS)
+        // HUD elements scale based on viewport and device type
+        // ============================================================
+        const MobileAdaptiveHUD = {
+            baseScale: 1,
+            currentScale: 1,
+            isMobile: false,
+            breakpoints: {
+                small: 480,
+                medium: 768,
+                large: 1024
+            },
+            elements: new Map(),
+
+            init() {
+                this.detectDevice();
+                this.calculateScale();
+                this.setupResizeHandler();
+                console.log('[MobileAdaptiveHUD] Initialized, scale:', this.currentScale.toFixed(2));
+            },
+
+            detectDevice() {
+                this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent) ||
+                    ('ontouchstart' in window && window.innerWidth < 1024);
+            },
+
+            calculateScale() {
+                const width = window.innerWidth;
+                const height = window.innerHeight;
+                const minDimension = Math.min(width, height);
+
+                if (this.isMobile) {
+                    // Mobile scaling
+                    if (minDimension < this.breakpoints.small) {
+                        this.currentScale = 0.7;
+                    } else if (minDimension < this.breakpoints.medium) {
+                        this.currentScale = 0.85;
+                    } else {
+                        this.currentScale = 1.0;
+                    }
+                } else {
+                    // Desktop scaling based on screen size
+                    if (width < this.breakpoints.medium) {
+                        this.currentScale = 0.8;
+                    } else if (width < this.breakpoints.large) {
+                        this.currentScale = 0.9;
+                    } else {
+                        this.currentScale = 1.0;
+                    }
+                }
+
+                this.applyScale();
+            },
+
+            setupResizeHandler() {
+                let resizeTimeout;
+                window.addEventListener('resize', () => {
+                    clearTimeout(resizeTimeout);
+                    resizeTimeout = setTimeout(() => {
+                        this.detectDevice();
+                        this.calculateScale();
+                    }, 100);
+                }, { passive: true });
+            },
+
+            register(id, element, options = {}) {
+                if (!element) return;
+
+                this.elements.set(id, {
+                    element,
+                    baseSize: options.baseSize || 16,
+                    minScale: options.minScale || 0.6,
+                    maxScale: options.maxScale || 1.2
+                });
+
+                this.applyScaleToElement(id);
+            },
+
+            applyScale() {
+                this.elements.forEach((_, id) => this.applyScaleToElement(id));
+
+                // Also apply to common HUD selectors
+                const hudElements = document.querySelectorAll('.hud-element, .hud-text, #health-bar, #ammo-display');
+                hudElements.forEach(el => {
+                    el.style.transform = `scale(${this.currentScale})`;
+                    el.style.transformOrigin = 'center center';
+                });
+            },
+
+            applyScaleToElement(id) {
+                const config = this.elements.get(id);
+                if (!config) return;
+
+                const scale = Math.max(config.minScale, Math.min(config.maxScale, this.currentScale));
+                config.element.style.fontSize = `${config.baseSize * scale}px`;
+            },
+
+            getScale() {
+                return this.currentScale;
+            },
+
+            getStats() {
+                return {
+                    currentScale: this.currentScale,
+                    isMobile: this.isMobile,
+                    registeredElements: this.elements.size,
+                    viewport: { width: window.innerWidth, height: window.innerHeight }
+                };
+            }
+        };
+
+        window.MobileAdaptiveHUD = MobileAdaptiveHUD;
+
+        // ============================================================
+        /// v2.12: LAZY MINIMAP UPDATE (4/8 CONSENSUS)
+        // Minimap updates every 250ms instead of every frame
+        // Reduces CPU load on mobile devices
+        // ============================================================
+        const LazyMinimapUpdate = {
+            updateInterval: 250,
+            lastUpdate: 0,
+            cachedCanvas: null,
+            cachedCtx: null,
+            pendingUpdate: false,
+            positions: new Map(),
+            mapSize: 150,
+
+            init() {
+                this.createCachedCanvas();
+                console.log('[LazyMinimapUpdate] Initialized with', this.updateInterval, 'ms interval');
+            },
+
+            createCachedCanvas() {
+                this.cachedCanvas = document.createElement('canvas');
+                this.cachedCanvas.width = this.mapSize;
+                this.cachedCanvas.height = this.mapSize;
+                this.cachedCtx = this.cachedCanvas.getContext('2d');
+            },
+
+            updatePosition(id, x, z, color = '#00ff00', size = 4) {
+                this.positions.set(id, { x, z, color, size, lastSeen: Date.now() });
+            },
+
+            removePosition(id) {
+                this.positions.delete(id);
+            },
+
+            shouldUpdate() {
+                const now = performance.now();
+                if (now - this.lastUpdate >= this.updateInterval) {
+                    this.lastUpdate = now;
+                    return true;
+                }
+                return false;
+            },
+
+            render(targetCtx, mapBounds, playerX, playerZ) {
+                if (!this.shouldUpdate()) {
+                    // Use cached version
+                    if (this.cachedCanvas) {
+                        targetCtx.drawImage(this.cachedCanvas, 0, 0);
+                    }
+                    return;
+                }
+
+                const ctx = this.cachedCtx;
+                const size = this.mapSize;
+
+                // Clear
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(0, 0, size, size);
+
+                // Border
+                ctx.strokeStyle = '#0af';
+                ctx.lineWidth = 2;
+                ctx.strokeRect(0, 0, size, size);
+
+                // Scale factors
+                const scaleX = size / (mapBounds.maxX - mapBounds.minX);
+                const scaleZ = size / (mapBounds.maxZ - mapBounds.minZ);
+
+                // Draw positions
+                this.positions.forEach((pos, id) => {
+                    const screenX = (pos.x - mapBounds.minX) * scaleX;
+                    const screenZ = (pos.z - mapBounds.minZ) * scaleZ;
+
+                    ctx.beginPath();
+                    ctx.arc(screenX, screenZ, pos.size, 0, Math.PI * 2);
+                    ctx.fillStyle = pos.color;
+                    ctx.fill();
+
+                    // Highlight player
+                    if (id === 'player') {
+                        ctx.strokeStyle = '#fff';
+                        ctx.lineWidth = 1;
+                        ctx.stroke();
+                    }
+                });
+
+                // Draw to target
+                targetCtx.drawImage(this.cachedCanvas, 0, 0);
+            },
+
+            setUpdateInterval(ms) {
+                this.updateInterval = Math.max(50, Math.min(1000, ms));
+            },
+
+            getStats() {
+                return {
+                    updateInterval: this.updateInterval,
+                    trackedPositions: this.positions.size,
+                    timeSinceUpdate: performance.now() - this.lastUpdate
+                };
+            }
+        };
+
+        window.LazyMinimapUpdate = LazyMinimapUpdate;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
