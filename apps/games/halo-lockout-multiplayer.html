@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.9</title>
+    <title>Halo 2: THE CAGE - Campaign v2.10</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.9'; // v2.9: FrustumCulling, DamageIndicators, NetworkInterpolation
+        const APP_VERSION = '2.10'; // v2.10: WebGLRecovery, GamepadHaptics, KillStreakAnnouncer
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -7224,6 +7224,377 @@
                 };
             }
         };
+
+        // ============================================================
+        /// v2.10: WEBGL CONTEXT LOSS RECOVERY (5/8 CONSENSUS)
+        // Handles GPU context loss gracefully
+        // Preserves game state, rebuilds scene, resumes gameplay
+        // ============================================================
+        const WebGLContextRecovery = {
+            contextLost: false,
+            renderer: null,
+            scene: null,
+            camera: null,
+            gameStateSnapshot: null,
+
+            init(renderer, scene, camera) {
+                this.renderer = renderer;
+                this.scene = scene;
+                this.camera = camera;
+
+                if (!renderer?.domElement) {
+                    console.warn('[WebGLRecovery] No renderer canvas available');
+                    return;
+                }
+
+                const canvas = renderer.domElement;
+
+                canvas.addEventListener('webglcontextlost', (event) => {
+                    event.preventDefault();
+                    this.contextLost = true;
+                    this.handleContextLost();
+                });
+
+                canvas.addEventListener('webglcontextrestored', () => {
+                    this.handleContextRestored();
+                });
+
+                console.log('[WebGLRecovery] Initialized');
+            },
+
+            handleContextLost() {
+                console.warn('[WebGLRecovery] Context lost!');
+
+                // Save game state
+                this.gameStateSnapshot = this.captureState();
+
+                // Pause game loop
+                if (typeof TabBlurPauseManager !== 'undefined') {
+                    TabBlurPauseManager.pause();
+                }
+
+                // Show notification
+                this.showRecoveryOverlay(true);
+            },
+
+            handleContextRestored() {
+                console.log('[WebGLRecovery] Context restored');
+                this.contextLost = false;
+
+                // Rebuild scene
+                this.rebuildScene();
+
+                // Restore game state
+                if (this.gameStateSnapshot) {
+                    this.restoreState(this.gameStateSnapshot);
+                }
+
+                // Resume game
+                if (typeof TabBlurPauseManager !== 'undefined') {
+                    TabBlurPauseManager.resume();
+                }
+
+                // Hide notification
+                this.showRecoveryOverlay(false);
+            },
+
+            captureState() {
+                return {
+                    timestamp: Date.now(),
+                    cameraPosition: this.camera?.position?.clone(),
+                    cameraRotation: this.camera?.rotation?.clone()
+                };
+            },
+
+            restoreState(snapshot) {
+                if (!snapshot) return;
+
+                if (snapshot.cameraPosition && this.camera) {
+                    this.camera.position.copy(snapshot.cameraPosition);
+                }
+                if (snapshot.cameraRotation && this.camera) {
+                    this.camera.rotation.copy(snapshot.cameraRotation);
+                }
+            },
+
+            rebuildScene() {
+                // Force material/texture recompilation
+                if (this.scene) {
+                    this.scene.traverse(obj => {
+                        if (obj.material) {
+                            obj.material.needsUpdate = true;
+                        }
+                        if (obj.geometry) {
+                            obj.geometry.attributes?.position?.needsUpdate;
+                        }
+                    });
+                }
+
+                // Reinitialize renderer settings
+                if (this.renderer) {
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                    if (typeof GraphicsQualitySwitcher !== 'undefined') {
+                        GraphicsQualitySwitcher.apply(GraphicsQualitySwitcher.currentQuality);
+                    }
+                }
+
+                console.log('[WebGLRecovery] Scene rebuilt');
+            },
+
+            showRecoveryOverlay(show) {
+                let overlay = document.getElementById('webgl-recovery-overlay');
+
+                if (show) {
+                    if (!overlay) {
+                        overlay = document.createElement('div');
+                        overlay.id = 'webgl-recovery-overlay';
+                        overlay.style.cssText = `
+                            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+                            background: rgba(0,0,0,0.9); z-index: 10000;
+                            display: flex; align-items: center; justify-content: center;
+                            flex-direction: column; color: #fff; font-family: sans-serif;
+                        `;
+                        overlay.innerHTML = `
+                            <div style="font-size: 24px; margin-bottom: 20px;">Restoring Graphics...</div>
+                            <div style="font-size: 14px; color: #888;">GPU context lost, recovering...</div>
+                        `;
+                        document.body.appendChild(overlay);
+                    }
+                    overlay.style.display = 'flex';
+                } else if (overlay) {
+                    overlay.style.display = 'none';
+                }
+            },
+
+            getStats() {
+                return {
+                    contextLost: this.contextLost,
+                    hasSnapshot: !!this.gameStateSnapshot
+                };
+            }
+        };
+
+        // ============================================================
+        /// v2.10: GAMEPAD HAPTIC FEEDBACK (5/8 CONSENSUS)
+        // Provides controller vibration for Xbox/PlayStation gamepads
+        // Distinct patterns for damage, kills, deaths
+        // ============================================================
+        const GamepadHaptics = {
+            supported: false,
+            activeGamepad: null,
+            enabled: true,
+
+            init() {
+                window.addEventListener('gamepadconnected', (e) => {
+                    this.activeGamepad = e.gamepad;
+                    this.supported = !!e.gamepad.vibrationActuator;
+                    if (this.supported) {
+                        console.log('[GamepadHaptics] Controller connected with haptics');
+                    }
+                });
+
+                window.addEventListener('gamepaddisconnected', () => {
+                    this.activeGamepad = null;
+                    this.supported = false;
+                });
+
+                // Load preference
+                const saved = localStorage.getItem('gamepad-haptics');
+                this.enabled = saved !== 'false';
+
+                console.log('[GamepadHaptics] Initialized');
+            },
+
+            pulse(intensity = 0.5, duration = 50) {
+                if (!this.enabled || !this.activeGamepad) return;
+
+                // Get fresh gamepad reference
+                const gamepads = navigator.getGamepads ? navigator.getGamepads() : [];
+                const gamepad = gamepads[this.activeGamepad.index];
+
+                if (gamepad?.vibrationActuator) {
+                    gamepad.vibrationActuator.playEffect('dual-rumble', {
+                        startDelay: 0,
+                        duration: duration,
+                        weakMagnitude: intensity * 0.3,
+                        strongMagnitude: intensity
+                    }).catch(() => {}); // Ignore errors
+                }
+            },
+
+            onHit() { this.pulse(0.2, 10); },
+            onDamage() { this.pulse(0.4, 80); },
+            onKill() { this.pulse(0.8, 200); },
+            onDeath() { this.pulse(1.0, 400); },
+            onShoot() { this.pulse(0.15, 30); },
+            onReload() { this.pulse(0.3, 100); },
+
+            toggle() {
+                this.enabled = !this.enabled;
+                localStorage.setItem('gamepad-haptics', String(this.enabled));
+
+                if (this.enabled) this.pulse(0.5, 100);
+
+                console.log(`[GamepadHaptics] ${this.enabled ? 'Enabled' : 'Disabled'}`);
+                return this.enabled;
+            },
+
+            getStats() {
+                return {
+                    supported: this.supported,
+                    enabled: this.enabled,
+                    connected: !!this.activeGamepad
+                };
+            }
+        };
+        GamepadHaptics.init();
+
+        // ============================================================
+        /// v2.10: KILL STREAK AUDIO ANNOUNCER (5/8 CONSENSUS)
+        // Announces kill streaks with authentic Halo-style voice
+        // Uses Web Speech API with fallback to text display
+        // ============================================================
+        const KillStreakAnnouncer = {
+            synth: window.speechSynthesis,
+            voice: null,
+            killStreak: 0,
+            lastKillTime: 0,
+            streakWindow: 4000, // 4 seconds between kills to maintain streak
+            enabled: true,
+
+            messages: {
+                2: 'Double Kill!',
+                3: 'Triple Kill!',
+                4: 'Overkill!',
+                5: 'Killtacular!',
+                6: 'Killtrocity!',
+                7: 'Killimanjaro!',
+                10: 'Running Riot!',
+                15: 'Rampage!',
+                20: 'Untouchable!'
+            },
+
+            init() {
+                if (!this.synth) {
+                    console.log('[KillStreakAnnouncer] Speech synthesis not available');
+                    return;
+                }
+
+                // Find best voice
+                const loadVoices = () => {
+                    const voices = this.synth.getVoices();
+                    this.voice = voices.find(v => v.name.includes('Male') && v.lang.startsWith('en')) ||
+                                 voices.find(v => v.lang.startsWith('en')) ||
+                                 voices[0];
+                };
+
+                if (this.synth.getVoices().length > 0) {
+                    loadVoices();
+                } else {
+                    this.synth.addEventListener('voiceschanged', loadVoices);
+                }
+
+                // Load preference
+                const saved = localStorage.getItem('kill-announcer');
+                this.enabled = saved !== 'false';
+
+                console.log('[KillStreakAnnouncer] Initialized');
+            },
+
+            registerKill() {
+                const now = Date.now();
+
+                // Check if streak continues
+                if (now - this.lastKillTime < this.streakWindow) {
+                    this.killStreak++;
+                } else {
+                    this.killStreak = 1;
+                }
+
+                this.lastKillTime = now;
+
+                // Announce if threshold met
+                const message = this.messages[this.killStreak];
+                if (message) {
+                    this.announce(message);
+                }
+
+                return this.killStreak;
+            },
+
+            announce(message) {
+                if (!this.enabled) return;
+
+                // Voice announcement
+                if (this.synth && this.voice) {
+                    const utterance = new SpeechSynthesisUtterance(message);
+                    utterance.voice = this.voice;
+                    utterance.rate = 1.1;
+                    utterance.pitch = 0.8;
+                    utterance.volume = 0.7;
+
+                    this.synth.cancel(); // Stop any previous
+                    this.synth.speak(utterance);
+                }
+
+                // Visual banner
+                this.showBanner(message);
+
+                // Haptic feedback
+                if (typeof GamepadHaptics !== 'undefined') {
+                    GamepadHaptics.pulse(0.6, 150);
+                }
+            },
+
+            showBanner(message) {
+                let banner = document.getElementById('killstreak-banner');
+
+                if (!banner) {
+                    banner = document.createElement('div');
+                    banner.id = 'killstreak-banner';
+                    banner.style.cssText = `
+                        position: fixed; top: 30%; left: 50%; transform: translateX(-50%);
+                        font-size: 36px; font-weight: bold; color: #ffd700;
+                        text-shadow: 0 0 20px #ff6600, 0 0 40px #ff3300;
+                        z-index: 5000; pointer-events: none; opacity: 0;
+                        transition: opacity 0.2s ease-in, transform 0.3s ease-out;
+                        font-family: 'Trebuchet MS', sans-serif;
+                    `;
+                    document.body.appendChild(banner);
+                }
+
+                banner.textContent = message;
+                banner.style.opacity = '1';
+                banner.style.transform = 'translateX(-50%) scale(1.2)';
+
+                // Animate out
+                setTimeout(() => {
+                    banner.style.opacity = '0';
+                    banner.style.transform = 'translateX(-50%) scale(1)';
+                }, 2000);
+            },
+
+            resetStreak() {
+                this.killStreak = 0;
+            },
+
+            toggle() {
+                this.enabled = !this.enabled;
+                localStorage.setItem('kill-announcer', String(this.enabled));
+
+                console.log(`[KillStreakAnnouncer] ${this.enabled ? 'Enabled' : 'Disabled'}`);
+                return this.enabled;
+            },
+
+            getStats() {
+                return {
+                    enabled: this.enabled,
+                    currentStreak: this.killStreak,
+                    hasVoice: !!this.voice
+                };
+            }
+        };
+        KillStreakAnnouncer.init();
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
