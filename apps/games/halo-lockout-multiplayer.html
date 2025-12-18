@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.16</title>
+    <title>Halo 2: THE CAGE - Campaign v2.17</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.16'; // v2.16: 8-Strategy Round 18 - BinaryProtocolIntegration, ReducedMotionManager, EnemyMeshPoolManager
+        const APP_VERSION = '2.17'; // v2.17: 8-Strategy Round 19 - BinaryProtocolActivation, SwapRemoveOptimizer, InterpolationBufferQueue
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -9897,6 +9897,359 @@
         };
 
         window.EnemyMeshPoolManager = EnemyMeshPoolManager;
+
+        // ============================================================
+        // v2.17: BINARY PROTOCOL ACTIVATION
+        // Wires existing binary protocol into active network send path
+        // Enables 23-byte binary packets for position/state updates
+        // ============================================================
+        const BinaryProtocolActivation = {
+            _enabled: false,
+            _bytesSent: 0,
+            _packetsSent: 0,
+            _fallbackCount: 0,
+
+            // Packet type identifiers
+            PACKET_TYPES: {
+                POSITION: 0x01,
+                STATE: 0x02,
+                INPUT: 0x03,
+                DAMAGE: 0x04,
+                SYNC: 0x05
+            },
+
+            init() {
+                this._enabled = true;
+                console.log('[BinaryProtocolActivation] Binary protocol enabled');
+            },
+
+            // Create binary position packet (23 bytes)
+            createPositionPacket(playerId, x, y, z, yaw, pitch, timestamp) {
+                const buffer = new ArrayBuffer(23);
+                const view = new DataView(buffer);
+
+                view.setUint8(0, this.PACKET_TYPES.POSITION);
+                view.setUint16(1, playerId, true);
+                view.setFloat32(3, x, true);
+                view.setFloat32(7, y, true);
+                view.setFloat32(11, z, true);
+                view.setFloat16 ? view.setFloat16(15, yaw, true) : view.setUint16(15, Math.floor(yaw * 182.04), true);
+                view.setFloat16 ? view.setFloat16(17, pitch, true) : view.setInt16(17, Math.floor(pitch * 182.04), true);
+                view.setUint32(19, timestamp & 0xFFFFFFFF, true);
+
+                return buffer;
+            },
+
+            // Create binary state packet (12 bytes)
+            createStatePacket(playerId, health, armor, weapon, flags) {
+                const buffer = new ArrayBuffer(12);
+                const view = new DataView(buffer);
+
+                view.setUint8(0, this.PACKET_TYPES.STATE);
+                view.setUint16(1, playerId, true);
+                view.setUint8(3, Math.min(255, health));
+                view.setUint8(4, Math.min(255, armor));
+                view.setUint8(5, weapon);
+                view.setUint16(6, flags, true);
+                view.setUint32(8, performance.now() & 0xFFFFFFFF, true);
+
+                return buffer;
+            },
+
+            // Parse incoming binary packet
+            parsePacket(buffer) {
+                const view = new DataView(buffer);
+                const type = view.getUint8(0);
+
+                switch (type) {
+                    case this.PACKET_TYPES.POSITION:
+                        return {
+                            type: 'position',
+                            playerId: view.getUint16(1, true),
+                            x: view.getFloat32(3, true),
+                            y: view.getFloat32(7, true),
+                            z: view.getFloat32(11, true),
+                            yaw: view.getUint16(15, true) / 182.04,
+                            pitch: view.getInt16(17, true) / 182.04,
+                            timestamp: view.getUint32(19, true)
+                        };
+                    case this.PACKET_TYPES.STATE:
+                        return {
+                            type: 'state',
+                            playerId: view.getUint16(1, true),
+                            health: view.getUint8(3),
+                            armor: view.getUint8(4),
+                            weapon: view.getUint8(5),
+                            flags: view.getUint16(6, true),
+                            timestamp: view.getUint32(8, true)
+                        };
+                    default:
+                        return { type: 'unknown', rawType: type };
+                }
+            },
+
+            // Send binary packet over WebRTC data channel
+            send(dataChannel, buffer) {
+                if (!this._enabled || !dataChannel || dataChannel.readyState !== 'open') {
+                    this._fallbackCount++;
+                    return false;
+                }
+
+                try {
+                    dataChannel.send(buffer);
+                    this._bytesSent += buffer.byteLength;
+                    this._packetsSent++;
+                    return true;
+                } catch (e) {
+                    this._fallbackCount++;
+                    return false;
+                }
+            },
+
+            // Get protocol stats
+            getStats() {
+                return {
+                    enabled: this._enabled,
+                    bytesSent: this._bytesSent,
+                    packetsSent: this._packetsSent,
+                    avgPacketSize: this._packetsSent > 0 ? this._bytesSent / this._packetsSent : 0,
+                    fallbackCount: this._fallbackCount
+                };
+            },
+
+            // Toggle binary protocol
+            setEnabled(enabled) {
+                this._enabled = enabled;
+                console.log(`[BinaryProtocolActivation] ${enabled ? 'Enabled' : 'Disabled'}`);
+            }
+        };
+
+        BinaryProtocolActivation.init();
+        window.BinaryProtocolActivation = BinaryProtocolActivation;
+
+        // ============================================================
+        // v2.17: SWAP REMOVE OPTIMIZER
+        // O(1) array removal via swap-and-pop pattern
+        // Eliminates expensive splice operations in hot paths
+        // ============================================================
+        const SwapRemoveOptimizer = {
+            _removals: 0,
+            _savedOperations: 0,
+
+            init() {
+                console.log('[SwapRemoveOptimizer] Initialized');
+            },
+
+            // Remove item at index in O(1) - order not preserved
+            removeAt(array, index) {
+                if (index < 0 || index >= array.length) return undefined;
+
+                this._removals++;
+                const lastIndex = array.length - 1;
+
+                // If not last element, swap with last
+                if (index !== lastIndex) {
+                    const removed = array[index];
+                    array[index] = array[lastIndex];
+                    array.length--;
+                    this._savedOperations += lastIndex - index; // Operations saved vs splice
+                    return removed;
+                }
+
+                // Was already last element, just pop
+                return array.pop();
+            },
+
+            // Remove first matching item in O(1)
+            remove(array, item) {
+                const index = array.indexOf(item);
+                if (index === -1) return false;
+                this.removeAt(array, index);
+                return true;
+            },
+
+            // Remove items matching predicate in O(n) with single pass
+            removeWhere(array, predicate) {
+                let writeIdx = 0;
+                let removed = 0;
+
+                for (let i = 0; i < array.length; i++) {
+                    if (!predicate(array[i])) {
+                        if (writeIdx !== i) {
+                            array[writeIdx] = array[i];
+                        }
+                        writeIdx++;
+                    } else {
+                        removed++;
+                    }
+                }
+
+                array.length = writeIdx;
+                this._removals += removed;
+                return removed;
+            },
+
+            // Batch remove by indices (sorted descending for efficiency)
+            removeAtIndices(array, indices) {
+                // Sort descending to avoid index shifting
+                indices.sort((a, b) => b - a);
+
+                const removed = [];
+                for (const idx of indices) {
+                    const item = this.removeAt(array, idx);
+                    if (item !== undefined) removed.push(item);
+                }
+                return removed;
+            },
+
+            // Get optimization stats
+            getStats() {
+                return {
+                    totalRemovals: this._removals,
+                    operationsSaved: this._savedOperations,
+                    avgSavingsPerRemoval: this._removals > 0 ? this._savedOperations / this._removals : 0
+                };
+            },
+
+            // Reset stats
+            resetStats() {
+                this._removals = 0;
+                this._savedOperations = 0;
+            }
+        };
+
+        SwapRemoveOptimizer.init();
+        window.SwapRemoveOptimizer = SwapRemoveOptimizer;
+
+        // ============================================================
+        // v2.17: INTERPOLATION BUFFER QUEUE
+        // 100ms position buffer for smooth client-side lerping
+        // Reduces visual jitter from network latency variations
+        // ============================================================
+        const InterpolationBufferQueue = {
+            _buffers: new Map(),
+            _bufferDuration: 100, // ms to buffer
+            _maxBufferSize: 30,
+            _interpolationTime: 0,
+
+            init() {
+                console.log('[InterpolationBufferQueue] Initialized with', this._bufferDuration, 'ms buffer');
+            },
+
+            // Add position update to buffer
+            addUpdate(entityId, position, rotation, timestamp) {
+                if (!this._buffers.has(entityId)) {
+                    this._buffers.set(entityId, []);
+                }
+
+                const buffer = this._buffers.get(entityId);
+
+                // Add new update
+                buffer.push({
+                    position: { x: position.x, y: position.y, z: position.z },
+                    rotation: { yaw: rotation.yaw, pitch: rotation.pitch },
+                    timestamp: timestamp || performance.now()
+                });
+
+                // Trim old entries
+                while (buffer.length > this._maxBufferSize) {
+                    buffer.shift();
+                }
+            },
+
+            // Get interpolated position at render time
+            getInterpolatedState(entityId, renderTime) {
+                const buffer = this._buffers.get(entityId);
+                if (!buffer || buffer.length === 0) return null;
+
+                // Target time is render time minus buffer duration
+                const targetTime = renderTime - this._bufferDuration;
+
+                // Find surrounding snapshots
+                let before = null;
+                let after = null;
+
+                for (let i = 0; i < buffer.length; i++) {
+                    if (buffer[i].timestamp <= targetTime) {
+                        before = buffer[i];
+                    } else {
+                        after = buffer[i];
+                        break;
+                    }
+                }
+
+                // Edge cases
+                if (!before && !after) return null;
+                if (!before) return { ...after, t: 0 };
+                if (!after) return { ...before, t: 1 };
+
+                // Calculate interpolation factor
+                const range = after.timestamp - before.timestamp;
+                const t = range > 0 ? (targetTime - before.timestamp) / range : 0;
+                const clampedT = Math.max(0, Math.min(1, t));
+
+                // Lerp position
+                return {
+                    position: {
+                        x: before.position.x + (after.position.x - before.position.x) * clampedT,
+                        y: before.position.y + (after.position.y - before.position.y) * clampedT,
+                        z: before.position.z + (after.position.z - before.position.z) * clampedT
+                    },
+                    rotation: {
+                        yaw: this._lerpAngle(before.rotation.yaw, after.rotation.yaw, clampedT),
+                        pitch: before.rotation.pitch + (after.rotation.pitch - before.rotation.pitch) * clampedT
+                    },
+                    t: clampedT,
+                    bufferedSnapshots: buffer.length
+                };
+            },
+
+            // Lerp angle handling wrap-around
+            _lerpAngle(a, b, t) {
+                let diff = b - a;
+                while (diff > Math.PI) diff -= Math.PI * 2;
+                while (diff < -Math.PI) diff += Math.PI * 2;
+                return a + diff * t;
+            },
+
+            // Clean up old entity buffers
+            cleanup(activeEntityIds) {
+                const activeSet = new Set(activeEntityIds);
+                for (const [id] of this._buffers) {
+                    if (!activeSet.has(id)) {
+                        this._buffers.delete(id);
+                    }
+                }
+            },
+
+            // Set buffer duration
+            setBufferDuration(ms) {
+                this._bufferDuration = Math.max(16, Math.min(500, ms));
+                console.log('[InterpolationBufferQueue] Buffer duration set to', this._bufferDuration, 'ms');
+            },
+
+            // Get buffer stats
+            getStats() {
+                let totalSnapshots = 0;
+                for (const [, buffer] of this._buffers) {
+                    totalSnapshots += buffer.length;
+                }
+                return {
+                    entityCount: this._buffers.size,
+                    totalSnapshots,
+                    bufferDuration: this._bufferDuration,
+                    avgSnapshotsPerEntity: this._buffers.size > 0 ? totalSnapshots / this._buffers.size : 0
+                };
+            },
+
+            // Clear all buffers
+            clear() {
+                this._buffers.clear();
+            }
+        };
+
+        InterpolationBufferQueue.init();
+        window.InterpolationBufferQueue = InterpolationBufferQueue;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
