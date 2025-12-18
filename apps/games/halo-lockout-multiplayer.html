@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.10</title>
+    <title>Halo 2: THE CAGE - Campaign v2.11</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.10'; // v2.10: WebGLRecovery, GamepadHaptics, KillStreakAnnouncer
+        const APP_VERSION = '2.11'; // v2.11: InputValidator, MatchTimer, MemoryMonitor
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -7595,6 +7595,369 @@
             }
         };
         KillStreakAnnouncer.init();
+
+        // ============================================================
+        /// v2.11: INPUT VALIDATION & SANITIZATION (4/8 CONSENSUS)
+        // Validates player names, lobby codes, and JSON imports
+        // Prevents XSS, corruption, and UI breakage
+        // ============================================================
+        const InputValidator = {
+            maxPlayerNameLength: 32,
+            lobbyCodePattern: /^[A-Z0-9]{6}$/,
+            dangerousChars: /<|>|&|"|'|`|\\/g,
+
+            sanitizePlayerName(name) {
+                if (!name || typeof name !== 'string') return 'Player';
+
+                // Remove dangerous characters
+                let safe = name.replace(this.dangerousChars, '');
+
+                // Trim whitespace and limit length
+                safe = safe.trim().slice(0, this.maxPlayerNameLength);
+
+                // Ensure non-empty
+                return safe || 'Player';
+            },
+
+            validateLobbyCode(code) {
+                if (!code || typeof code !== 'string') return { valid: false, error: 'Code required' };
+
+                const normalized = code.toUpperCase().trim();
+
+                if (!this.lobbyCodePattern.test(normalized)) {
+                    return { valid: false, error: 'Code must be 6 alphanumeric characters' };
+                }
+
+                return { valid: true, code: normalized };
+            },
+
+            validateJSON(jsonString, schema = null) {
+                try {
+                    const parsed = JSON.parse(jsonString);
+
+                    // Basic schema validation
+                    if (schema) {
+                        for (const key of Object.keys(schema)) {
+                            if (schema[key].required && parsed[key] === undefined) {
+                                return { valid: false, error: `Missing required field: ${key}` };
+                            }
+                            if (parsed[key] !== undefined && schema[key].type &&
+                                typeof parsed[key] !== schema[key].type) {
+                                return { valid: false, error: `Invalid type for ${key}` };
+                            }
+                        }
+                    }
+
+                    return { valid: true, data: parsed };
+                } catch (e) {
+                    return { valid: false, error: 'Invalid JSON format' };
+                }
+            },
+
+            sanitizeHTML(html) {
+                if (!html || typeof html !== 'string') return '';
+                return html.replace(this.dangerousChars, (c) => ({
+                    '<': '&lt;', '>': '&gt;', '&': '&amp;',
+                    '"': '&quot;', "'": '&#39;', '`': '&#96;', '\\': '&#92;'
+                }[c] || c));
+            },
+
+            isValidNumber(value, min = -Infinity, max = Infinity) {
+                const num = Number(value);
+                return !isNaN(num) && num >= min && num <= max;
+            }
+        };
+
+        // ============================================================
+        /// v2.11: MATCH TIMER WITH COUNTDOWN (4/8 CONSENSUS)
+        // Prominent match timer display with pre-match countdown
+        // Shows remaining time, round info, match phase
+        // ============================================================
+        const MatchTimerUI = {
+            container: null,
+            matchDuration: 600, // 10 minutes default
+            timeRemaining: 600,
+            isCountingDown: false,
+            countdownValue: 30,
+            intervalId: null,
+            phase: 'waiting', // waiting, countdown, active, overtime, ended
+
+            init() {
+                this.createUI();
+                console.log('[MatchTimer] Initialized');
+            },
+
+            createUI() {
+                this.container = document.createElement('div');
+                this.container.id = 'match-timer-ui';
+                this.container.style.cssText = `
+                    position: fixed; top: 10px; left: 50%; transform: translateX(-50%);
+                    z-index: 500; font-family: 'Trebuchet MS', sans-serif;
+                    text-align: center; pointer-events: none;
+                `;
+                this.container.innerHTML = `
+                    <div id="match-phase" style="font-size: 12px; color: #888; margin-bottom: 2px;"></div>
+                    <div id="match-time" style="font-size: 24px; font-weight: bold; color: #fff;
+                        text-shadow: 0 0 10px rgba(0,255,255,0.5);"></div>
+                `;
+                document.body.appendChild(this.container);
+            },
+
+            startCountdown(seconds = 30) {
+                this.phase = 'countdown';
+                this.countdownValue = seconds;
+                this.isCountingDown = true;
+
+                this.showCountdownOverlay();
+
+                if (this.intervalId) clearInterval(this.intervalId);
+                this.intervalId = setInterval(() => {
+                    this.countdownValue--;
+                    this.updateCountdownDisplay();
+
+                    if (this.countdownValue <= 0) {
+                        this.isCountingDown = false;
+                        this.hideCountdownOverlay();
+                        this.startMatch();
+                    }
+                }, 1000);
+            },
+
+            showCountdownOverlay() {
+                let overlay = document.getElementById('countdown-overlay');
+                if (!overlay) {
+                    overlay = document.createElement('div');
+                    overlay.id = 'countdown-overlay';
+                    overlay.style.cssText = `
+                        position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%);
+                        font-size: 72px; font-weight: bold; color: #ffd700;
+                        text-shadow: 0 0 30px #ff6600, 0 0 60px #ff3300;
+                        z-index: 1000; pointer-events: none;
+                        font-family: 'Impact', sans-serif;
+                    `;
+                    document.body.appendChild(overlay);
+                }
+                overlay.style.display = 'block';
+            },
+
+            updateCountdownDisplay() {
+                const overlay = document.getElementById('countdown-overlay');
+                if (overlay) {
+                    overlay.textContent = this.countdownValue > 3 ?
+                        `STARTING IN ${this.countdownValue}` :
+                        this.countdownValue > 0 ? this.countdownValue : 'GO!';
+                }
+
+                const phaseEl = document.getElementById('match-phase');
+                if (phaseEl) phaseEl.textContent = 'MATCH STARTING';
+            },
+
+            hideCountdownOverlay() {
+                const overlay = document.getElementById('countdown-overlay');
+                if (overlay) overlay.style.display = 'none';
+            },
+
+            startMatch(duration = 600) {
+                this.phase = 'active';
+                this.matchDuration = duration;
+                this.timeRemaining = duration;
+
+                if (this.intervalId) clearInterval(this.intervalId);
+                this.intervalId = setInterval(() => {
+                    this.timeRemaining--;
+                    this.updateTimerDisplay();
+
+                    if (this.timeRemaining <= 0) {
+                        this.endMatch();
+                    }
+                }, 1000);
+            },
+
+            updateTimerDisplay() {
+                const minutes = Math.floor(this.timeRemaining / 60);
+                const seconds = this.timeRemaining % 60;
+                const timeStr = `${minutes}:${seconds.toString().padStart(2, '0')}`;
+
+                const timeEl = document.getElementById('match-time');
+                const phaseEl = document.getElementById('match-phase');
+
+                if (timeEl) {
+                    timeEl.textContent = timeStr;
+                    // Urgent color when low time
+                    timeEl.style.color = this.timeRemaining <= 30 ? '#ff3333' : '#fff';
+                }
+                if (phaseEl) phaseEl.textContent = 'MATCH IN PROGRESS';
+            },
+
+            endMatch() {
+                this.phase = 'ended';
+                if (this.intervalId) clearInterval(this.intervalId);
+
+                const timeEl = document.getElementById('match-time');
+                const phaseEl = document.getElementById('match-phase');
+
+                if (timeEl) timeEl.textContent = 'MATCH OVER';
+                if (phaseEl) phaseEl.textContent = 'FINAL SCORE';
+            },
+
+            getStats() {
+                return {
+                    phase: this.phase,
+                    timeRemaining: this.timeRemaining,
+                    isCountingDown: this.isCountingDown
+                };
+            }
+        };
+
+        // ============================================================
+        /// v2.11: MEMORY PRESSURE MONITORING (4/8 CONSENSUS)
+        // Debug panel showing heap usage, frame rate, object pools
+        // Toggled with 'D' key for developers
+        // ============================================================
+        const MemoryMonitor = {
+            container: null,
+            visible: false,
+            updateInterval: null,
+            stats: {
+                heapUsed: 0,
+                heapLimit: 0,
+                fps: 60,
+                objectPools: {},
+                listeners: 0,
+                localStorageSize: 0
+            },
+
+            init() {
+                this.createUI();
+
+                // Toggle with D key
+                document.addEventListener('keydown', (e) => {
+                    if (e.key.toLowerCase() === 'd' && e.ctrlKey) {
+                        this.toggle();
+                    }
+                });
+
+                console.log('[MemoryMonitor] Initialized (Ctrl+D to toggle)');
+            },
+
+            createUI() {
+                this.container = document.createElement('div');
+                this.container.id = 'memory-monitor';
+                this.container.style.cssText = `
+                    position: fixed; top: 60px; right: 10px; width: 200px;
+                    background: rgba(0, 0, 0, 0.85); border: 1px solid #0ff;
+                    border-radius: 5px; padding: 10px; z-index: 9999;
+                    font-family: monospace; font-size: 11px; color: #0ff;
+                    display: none;
+                `;
+                this.container.innerHTML = `
+                    <div style="font-weight: bold; margin-bottom: 8px; border-bottom: 1px solid #0ff; padding-bottom: 5px;">
+                        MEMORY MONITOR
+                    </div>
+                    <div id="mem-heap">Heap: --</div>
+                    <div id="mem-fps">FPS: --</div>
+                    <div id="mem-pools">Pools: --</div>
+                    <div id="mem-listeners">Listeners: --</div>
+                    <div id="mem-storage">Storage: --</div>
+                    <div style="margin-top: 8px; font-size: 9px; color: #888;">
+                        Ctrl+D to close
+                    </div>
+                `;
+                document.body.appendChild(this.container);
+            },
+
+            toggle() {
+                this.visible = !this.visible;
+                this.container.style.display = this.visible ? 'block' : 'none';
+
+                if (this.visible) {
+                    this.startUpdating();
+                } else {
+                    this.stopUpdating();
+                }
+            },
+
+            startUpdating() {
+                this.update(); // Immediate update
+                this.updateInterval = setInterval(() => this.update(), 1000);
+            },
+
+            stopUpdating() {
+                if (this.updateInterval) {
+                    clearInterval(this.updateInterval);
+                    this.updateInterval = null;
+                }
+            },
+
+            update() {
+                // Heap memory (if available)
+                if (performance.memory) {
+                    this.stats.heapUsed = performance.memory.usedJSHeapSize;
+                    this.stats.heapLimit = performance.memory.jsHeapSizeLimit;
+                }
+
+                // Calculate localStorage size
+                try {
+                    let size = 0;
+                    for (const key in localStorage) {
+                        if (localStorage.hasOwnProperty(key)) {
+                            size += localStorage[key].length * 2; // UTF-16
+                        }
+                    }
+                    this.stats.localStorageSize = size;
+                } catch (e) {}
+
+                // Get object pool stats
+                if (typeof AudioNodePool !== 'undefined') {
+                    this.stats.objectPools.audio = Object.values(AudioNodePool.pools || {})
+                        .reduce((sum, pool) => sum + pool.length, 0);
+                }
+
+                // Update display
+                this.updateDisplay();
+            },
+
+            updateDisplay() {
+                const heapEl = document.getElementById('mem-heap');
+                const fpsEl = document.getElementById('mem-fps');
+                const poolsEl = document.getElementById('mem-pools');
+                const listenersEl = document.getElementById('mem-listeners');
+                const storageEl = document.getElementById('mem-storage');
+
+                if (heapEl && performance.memory) {
+                    const used = (this.stats.heapUsed / 1024 / 1024).toFixed(1);
+                    const limit = (this.stats.heapLimit / 1024 / 1024).toFixed(0);
+                    const pct = ((this.stats.heapUsed / this.stats.heapLimit) * 100).toFixed(1);
+                    heapEl.textContent = `Heap: ${used}MB / ${limit}MB (${pct}%)`;
+                    heapEl.style.color = pct > 80 ? '#ff3333' : '#0ff';
+                }
+
+                if (fpsEl && typeof PerformanceMonitor !== 'undefined') {
+                    const fps = PerformanceMonitor.fps || 60;
+                    fpsEl.textContent = `FPS: ${Math.round(fps)}`;
+                    fpsEl.style.color = fps < 30 ? '#ff3333' : fps < 50 ? '#ffaa00' : '#0ff';
+                }
+
+                if (poolsEl) {
+                    const poolCount = Object.values(this.stats.objectPools).reduce((s, v) => s + v, 0);
+                    poolsEl.textContent = `Pools: ${poolCount} objects`;
+                }
+
+                if (listenersEl && typeof EventListenerCleanup !== 'undefined') {
+                    listenersEl.textContent = `Listeners: ${EventListenerCleanup.listeners?.length || 0}`;
+                }
+
+                if (storageEl) {
+                    const kb = (this.stats.localStorageSize / 1024).toFixed(1);
+                    storageEl.textContent = `Storage: ${kb} KB`;
+                }
+            },
+
+            getStats() {
+                return { ...this.stats, visible: this.visible };
+            }
+        };
+        MemoryMonitor.init();
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
