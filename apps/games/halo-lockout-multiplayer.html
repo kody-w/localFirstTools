@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Halo 2: THE CAGE - Campaign v2.26</title>
+    <title>Halo 2: THE CAGE - Campaign v2.27</title>
     <meta name="description" content="Multiplayer first-person shooter inspired by Halo 2's iconic Lockout map with WebRTC P2P networking">
     <!-- 3d, fps, multiplayer, webrtc, game, shooter -->
     <style>
@@ -3650,7 +3650,7 @@
         // ============================================================
 
         const APP_NAME = 'halo-lockout-fps';
-        const APP_VERSION = '2.26'; // v2.26: 8-Strategy Round 28 - SpawnTimerTextCache, SpatialGridCollisionAdapter, HealthBarStyleCache
+        const APP_VERSION = '2.27'; // v2.27: 8-Strategy Round 29 - SpatialWeaponAudio, FootstepRandomization, ExplosionPointLight
 
         // ============================================================
         /// v1.18: RAPPID INTEGRATION SYSTEM
@@ -12136,6 +12136,167 @@
         };
         HealthBarStyleCache.init();
         window.HealthBarStyleCache = HealthBarStyleCache;
+
+        // v2.27: SPATIAL WEAPON AUDIO
+        // Extends 3D PannerNode positioning to weapon fire and explosions from bots/remote players
+        // Enables directional audio for competitive FPS gameplay
+        const SpatialWeaponAudio = {
+            _spatializedCount: 0,
+            _fallbackCount: 0,
+            _panner: null,
+            _listener: null,
+            init(audioCtx) {
+                if (audioCtx && audioCtx.listener) {
+                    this._listener = audioCtx.listener;
+                }
+            },
+            createPanner(audioCtx) {
+                const panner = audioCtx.createPanner();
+                panner.panningModel = 'HRTF';
+                panner.distanceModel = 'inverse';
+                panner.refDistance = 5;
+                panner.maxDistance = 100;
+                panner.rolloffFactor = 1.2;
+                panner.coneInnerAngle = 360;
+                panner.coneOuterAngle = 360;
+                return panner;
+            },
+            playAt(audioCtx, destination, position, soundFn) {
+                if (!position || typeof position.x !== 'number') {
+                    this._fallbackCount++;
+                    return soundFn(destination);
+                }
+                const panner = this.createPanner(audioCtx);
+                panner.positionX.setValueAtTime(position.x, audioCtx.currentTime);
+                panner.positionY.setValueAtTime(position.y || 0, audioCtx.currentTime);
+                panner.positionZ.setValueAtTime(position.z, audioCtx.currentTime);
+                panner.connect(destination);
+                this._spatializedCount++;
+                return soundFn(panner);
+            },
+            updateListenerPosition(position, forward) {
+                if (this._listener && position) {
+                    if (this._listener.positionX) {
+                        this._listener.positionX.value = position.x;
+                        this._listener.positionY.value = position.y || 0;
+                        this._listener.positionZ.value = position.z;
+                    }
+                    if (forward && this._listener.forwardX) {
+                        this._listener.forwardX.value = forward.x;
+                        this._listener.forwardY.value = forward.y || 0;
+                        this._listener.forwardZ.value = forward.z;
+                    }
+                }
+            },
+            getStats() {
+                return {
+                    spatializedSounds: this._spatializedCount,
+                    fallbackSounds: this._fallbackCount,
+                    spatializationRate: this._spatializedCount + this._fallbackCount > 0 ?
+                        (this._spatializedCount / (this._spatializedCount + this._fallbackCount) * 100).toFixed(1) + '%' : 'N/A'
+                };
+            }
+        };
+        window.SpatialWeaponAudio = SpatialWeaponAudio;
+
+        // v2.27: FOOTSTEP RANDOMIZATION
+        // Adds pitch variation, timing jitter, and stereo panning to footsteps
+        // Eliminates robotic repetition in footstep sounds
+        const FootstepRandomization = {
+            _pitchRange: { min: 0.9, max: 1.1 },
+            _timingJitterMs: 30,
+            _stereoPanRange: 0.3,
+            _lastSide: 0,
+            _randomizedCount: 0,
+            getRandomPitch() {
+                return this._pitchRange.min + Math.random() * (this._pitchRange.max - this._pitchRange.min);
+            },
+            getTimingJitter() {
+                return (Math.random() * 2 - 1) * this._timingJitterMs;
+            },
+            getStereoPan() {
+                this._lastSide = -this._lastSide || 1;
+                return this._lastSide * (Math.random() * this._stereoPanRange);
+            },
+            applyRandomization(oscillator, panNode) {
+                if (oscillator && oscillator.playbackRate) {
+                    oscillator.playbackRate.value = this.getRandomPitch();
+                }
+                if (panNode && panNode.pan) {
+                    panNode.pan.value = this.getStereoPan();
+                }
+                this._randomizedCount++;
+            },
+            createRandomizedParams() {
+                this._randomizedCount++;
+                return {
+                    pitch: this.getRandomPitch(),
+                    pan: this.getStereoPan(),
+                    delay: this.getTimingJitter()
+                };
+            },
+            getStats() {
+                return {
+                    randomizedFootsteps: this._randomizedCount,
+                    pitchRange: `${this._pitchRange.min}-${this._pitchRange.max}`,
+                    jitterMs: this._timingJitterMs
+                };
+            }
+        };
+        window.FootstepRandomization = FootstepRandomization;
+
+        // v2.27: EXPLOSION POINT LIGHT
+        // Adds temporary point light to grenade/fusion core explosions
+        // Illuminates nearby geometry during detonation for dramatic effect
+        const ExplosionPointLight = {
+            _activeLights: [],
+            _maxLights: 4,
+            _lightPool: [],
+            _explosionCount: 0,
+            init(scene, THREE) {
+                this._scene = scene;
+                this._THREE = THREE;
+                for (let i = 0; i < this._maxLights; i++) {
+                    const light = new THREE.PointLight(0xff6600, 0, 20);
+                    light.visible = false;
+                    this._lightPool.push(light);
+                }
+            },
+            trigger(position, color = 0xff6600, intensity = 3, duration = 300) {
+                if (!this._scene || !this._THREE) return;
+                let light = this._lightPool.find(l => !l.visible);
+                if (!light) {
+                    light = this._lightPool[0];
+                }
+                light.position.set(position.x, position.y || 2, position.z);
+                light.color.setHex(color);
+                light.intensity = intensity;
+                light.visible = true;
+                if (!light.parent) this._scene.add(light);
+                this._explosionCount++;
+                const startTime = performance.now();
+                const fadeOut = () => {
+                    const elapsed = performance.now() - startTime;
+                    const progress = Math.min(elapsed / duration, 1);
+                    light.intensity = intensity * (1 - progress * progress);
+                    if (progress < 1) {
+                        requestAnimationFrame(fadeOut);
+                    } else {
+                        light.visible = false;
+                        light.intensity = 0;
+                    }
+                };
+                requestAnimationFrame(fadeOut);
+            },
+            getStats() {
+                return {
+                    explosionsLit: this._explosionCount,
+                    activeLights: this._lightPool.filter(l => l.visible).length,
+                    poolSize: this._lightPool.length
+                };
+            }
+        };
+        window.ExplosionPointLight = ExplosionPointLight;
 
         // ============================================================
         /// v1.03: PERFORMANCE MONITOR - FPS tracking and performance metrics
