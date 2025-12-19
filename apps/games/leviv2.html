@@ -7,7 +7,7 @@
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="description" content="LEVIATHAN OMNIVERSE - A 3D space exploration game with procedural galaxies, planets, combat, and RPG progression">
-    <title>LEVIATHAN: OMNIVERSE v2.4</title>
+    <title>LEVIATHAN: OMNIVERSE v2.5</title>
     <style>
         /* ============================================
          * LEVIATHAN v2.0 - STREAMLINED CSS
@@ -3748,6 +3748,155 @@
     };
 
     // ============================================
+    // STAGGER SYSTEM (from levi.html)
+    // Interrupt enemy attacks by dealing damage during telegraph
+    // ============================================
+    const STAGGER_CONFIG = {
+        defaultThreshold: 15,       // Base damage to stagger
+        eliteMultiplier: 2.0,       // Elites need 2x damage to stagger
+        bossMultiplier: 3.0,        // Bosses need 3x damage to stagger
+        staggerDuration: 600,       // ms enemy is stunned
+        staggerCooldown: 3000,      // ms before can be staggered again
+        styleBonus: 50              // Style points for successful stagger
+    };
+
+    const staggerTracking = new Map();  // Track damage per mob during telegraph
+
+    function accumulateStaggerDamage(mob, damage) {
+        if (!mob || !mob.userData) return false;
+        if (!mob.userData.isTelegraphing) return false;
+
+        // Check cooldown
+        const now = performance.now();
+        if (mob.userData.lastStaggerTime && now - mob.userData.lastStaggerTime < STAGGER_CONFIG.staggerCooldown) {
+            return false;
+        }
+
+        // Calculate threshold based on mob type
+        let threshold = STAGGER_CONFIG.defaultThreshold;
+        if (mob.userData.isBoss) threshold *= STAGGER_CONFIG.bossMultiplier;
+        else if (mob.userData.isElite) threshold *= STAGGER_CONFIG.eliteMultiplier;
+
+        // Accumulate damage
+        const mobId = mob.uuid || mob.id;
+        const current = staggerTracking.get(mobId) || 0;
+        const newTotal = current + damage;
+        staggerTracking.set(mobId, newTotal);
+
+        // Check if stagger threshold reached
+        if (newTotal >= threshold) {
+            triggerStagger(mob);
+            staggerTracking.delete(mobId);
+            return true;
+        }
+        return false;
+    }
+
+    function triggerStagger(mob) {
+        if (!mob || !mob.userData) return;
+
+        // Cancel telegraph
+        mob.userData.isTelegraphing = false;
+        mob.userData.lastStaggerTime = performance.now();
+
+        // Restore visual state
+        if (mob.userData.originalScale) {
+            mob.scale.setScalar(mob.userData.originalScale);
+        }
+        if (mob.material && mob.userData.originalEmissive !== undefined) {
+            mob.material.emissiveIntensity = mob.userData.originalEmissive;
+        }
+
+        // Apply stun
+        mob.userData.isStunned = true;
+        setTimeout(() => {
+            if (mob.userData) mob.userData.isStunned = false;
+        }, STAGGER_CONFIG.staggerDuration);
+
+        // Visual feedback: yellow flash
+        if (mob.material) {
+            const originalColor = mob.material.color.getHex();
+            mob.material.color.setHex(0xffff00);
+            mob.material.emissiveIntensity = 1.0;
+            setTimeout(() => {
+                if (mob.material) {
+                    mob.material.color.setHex(originalColor);
+                    mob.material.emissiveIntensity = mob.userData?.originalEmissive || 0.1;
+                }
+            }, 200);
+        }
+
+        // Particles
+        if (particles) {
+            particles.emit(mob.position.clone().add(new THREE.Vector3(0, 1, 0)), 10, 0xffff00, {
+                spread: 1.5, lifetime: 400, size: 0.2
+            });
+        }
+
+        // Audio and floater
+        Audio.play(300, 0.3, 'square', 0.15);
+        Audio.play(800, 0.2, 'sine', 0.1);
+        spawnFloater(mob.position, '💫 STAGGER!', '#ffff00');
+
+        // Style points
+        stylePoints += STAGGER_CONFIG.styleBonus;
+        trackStat('enemiesStaggered');
+    }
+
+    // Clear stagger tracking when mob dies or telegraph ends
+    function clearStaggerTracking(mob) {
+        if (mob) {
+            const mobId = mob.uuid || mob.id;
+            staggerTracking.delete(mobId);
+        }
+    }
+
+    // ============================================
+    // AUDIO DUCKING SYSTEM (from levi.html)
+    // Lower music volume during sound effects
+    // ============================================
+    const AUDIO_DUCKING = {
+        enabled: true,
+        duckAmount: 0.4,        // Reduce to 40% during sounds
+        fadeInTime: 0.05,       // Quick fade down (50ms)
+        fadeOutTime: 0.3,       // Smooth restore (300ms)
+        holdTime: 0.2,          // Hold ducked state (200ms)
+        activeDucks: 0,
+        masterVolume: 1.0,
+        duckTimer: null
+    };
+
+    function duckAudio() {
+        if (!AUDIO_DUCKING.enabled) return;
+
+        if (AUDIO_DUCKING.duckTimer) {
+            clearTimeout(AUDIO_DUCKING.duckTimer);
+            AUDIO_DUCKING.duckTimer = null;
+        }
+
+        AUDIO_DUCKING.activeDucks++;
+        if (AUDIO_DUCKING.activeDucks === 1) {
+            // First duck - lower master volume
+            AUDIO_DUCKING.masterVolume = AUDIO_DUCKING.duckAmount;
+        }
+    }
+
+    function unduckAudio(delay = 0) {
+        if (!AUDIO_DUCKING.enabled) return;
+
+        const actualDelay = delay + AUDIO_DUCKING.holdTime * 1000;
+
+        AUDIO_DUCKING.duckTimer = setTimeout(() => {
+            AUDIO_DUCKING.activeDucks = Math.max(0, AUDIO_DUCKING.activeDucks - 1);
+            if (AUDIO_DUCKING.activeDucks === 0) {
+                // No more active ducks - restore volume
+                AUDIO_DUCKING.masterVolume = 1.0;
+            }
+            AUDIO_DUCKING.duckTimer = null;
+        }, actualDelay);
+    }
+
+    // ============================================
     // ACHIEVEMENT SYSTEM (Round 4 Consensus)
     // ============================================
     const ACHIEVEMENTS = {
@@ -3780,14 +3929,73 @@
         reactionMaster: { name: 'Reaction Master', icon: '⚗️', desc: 'Trigger 50 elemental reactions', check: s => s.reactionsTriggered >= 50, reward: { gold: 150 } }
     };
 
-    // Round 11: Skill Level Milestone Rewards
+    // Round 11/22: Enhanced Skill Level Milestone Rewards with stat bonuses
     const SKILL_MILESTONES = {
-        5: { gold: 50, skillPoints: 1, name: 'Apprentice' },
-        10: { gold: 150, skillPoints: 2, name: 'Journeyman' },
-        15: { gold: 300, skillPoints: 2, name: 'Expert' },
-        20: { gold: 500, skillPoints: 3, name: 'Master' },
-        25: { gold: 1000, skillPoints: 5, name: 'Grandmaster' }
+        5: { gold: 50, skillPoints: 1, name: 'Apprentice', bonuses: {} },
+        10: { gold: 150, skillPoints: 2, name: 'Journeyman', bonuses: {} },
+        15: { gold: 300, skillPoints: 2, name: 'Expert', bonuses: { xpBonus: 0.05 } },
+        20: { gold: 500, skillPoints: 3, name: 'Master', bonuses: { xpBonus: 0.10 } },
+        25: { gold: 1000, skillPoints: 5, name: 'Grandmaster', bonuses: { xpBonus: 0.15 } }
     };
+
+    // Round 22: Skill-specific mastery bonuses
+    const MASTERY_BONUSES = {
+        combat: {
+            5: { damage: 0.02 },
+            10: { damage: 0.05, critChance: 0.02 },
+            15: { damage: 0.08, critChance: 0.05 },
+            20: { damage: 0.12, critChance: 0.08, lifesteal: 0.02 },
+            25: { damage: 0.18, critChance: 0.12, lifesteal: 0.05 }
+        },
+        mining: {
+            5: { resourceYield: 0.05 },
+            10: { resourceYield: 0.10, rareFind: 0.02 },
+            15: { resourceYield: 0.15, rareFind: 0.05 },
+            20: { resourceYield: 0.20, rareFind: 0.08, goldBonus: 0.05 },
+            25: { resourceYield: 0.30, rareFind: 0.12, goldBonus: 0.10 }
+        },
+        exploration: {
+            5: { moveSpeed: 0.02 },
+            10: { moveSpeed: 0.05, detectRange: 0.10 },
+            15: { moveSpeed: 0.08, detectRange: 0.20 },
+            20: { moveSpeed: 0.10, detectRange: 0.30, xpBonus: 0.05 },
+            25: { moveSpeed: 0.15, detectRange: 0.50, xpBonus: 0.10 }
+        }
+    };
+
+    function getMasteryBonuses() {
+        const bonuses = {
+            damage: 0, critChance: 0, lifesteal: 0,
+            resourceYield: 0, rareFind: 0, goldBonus: 0,
+            moveSpeed: 0, detectRange: 0, xpBonus: 0
+        };
+
+        if (!gameData.skillMilestones) return bonuses;
+
+        for (const [key, claimed] of Object.entries(gameData.skillMilestones)) {
+            if (!claimed) continue;
+            const [skill, levelStr] = key.split('_');
+            const level = parseInt(levelStr);
+
+            // Add skill-specific bonuses
+            if (MASTERY_BONUSES[skill] && MASTERY_BONUSES[skill][level]) {
+                const skillBonus = MASTERY_BONUSES[skill][level];
+                for (const [stat, value] of Object.entries(skillBonus)) {
+                    bonuses[stat] = (bonuses[stat] || 0) + value;
+                }
+            }
+
+            // Add universal milestone bonuses
+            const milestone = SKILL_MILESTONES[level];
+            if (milestone && milestone.bonuses) {
+                for (const [stat, value] of Object.entries(milestone.bonuses)) {
+                    bonuses[stat] = (bonuses[stat] || 0) + value;
+                }
+            }
+        }
+
+        return bonuses;
+    }
 
     function checkSkillMilestones(skill, newLevel) {
         if (!gameData.skillMilestones) gameData.skillMilestones = {};
@@ -3810,9 +4018,21 @@
             gameData.skillPoints += milestone.skillPoints;
         }
 
-        // Celebration feedback
+        // Build reward message
         const skillName = skill.charAt(0).toUpperCase() + skill.slice(1);
-        notify(`🎯 MILESTONE: ${skillName} ${milestone.name}! +${milestone.gold}g, +${milestone.skillPoints} SP`, 'success');
+        let rewardText = `+${milestone.gold}g, +${milestone.skillPoints} SP`;
+
+        // Show mastery bonus unlocked
+        const masteryBonus = MASTERY_BONUSES[skill]?.[newLevel];
+        if (masteryBonus) {
+            const bonusKeys = Object.keys(masteryBonus);
+            if (bonusKeys.length > 0) {
+                const bonusStr = bonusKeys.map(k => `+${Math.round(masteryBonus[k] * 100)}% ${k}`).join(', ');
+                rewardText += ` | ${bonusStr}`;
+            }
+        }
+
+        notify(`🎯 MILESTONE: ${skillName} ${milestone.name}! ${rewardText}`, 'success');
 
         // Enhanced audio
         Audio.levelUp();
@@ -9330,6 +9550,9 @@
 
         target.userData.hp -= damage;
 
+        // Round 22: Try to stagger enemy during telegraph
+        accumulateStaggerDamage(target, damage);
+
         // Round 9: Enemy hit flash
         flashMobOnHit(target, isCrit);
 
@@ -9581,6 +9804,8 @@
                         const critMult = isCrit ? (equipStats.critDamage || 1.5) : 1;
                         const damage = Math.floor(baseDamage * comboMult * buffMult * critMult * vulnerabilityMult);
                         mob.userData.hp -= damage;
+                        // Round 22: Try to stagger enemy during telegraph
+                        accumulateStaggerDamage(mob, damage);
                         // Round 5: Check for elemental reactions
                         const reactionResult = checkElementalReaction(mob, equipStats.element, 'powerStrike');
                         if (reactionResult) {
@@ -9625,6 +9850,8 @@
                         const critMult = isCrit ? (equipStats.critDamage || 1.5) : 1;
                         const damage = Math.floor(baseDamage * comboMult * buffMult * critMult);
                         mob.userData.hp -= damage;
+                        // Round 22: Try to stagger enemy during telegraph
+                        accumulateStaggerDamage(mob, damage);
                         DamageNumberSystem.spawn(mob.position, damage, {
                             color: equipStats.element ? getElementColor(equipStats.element) : '#00ffff',
                             isCrit: isCrit
