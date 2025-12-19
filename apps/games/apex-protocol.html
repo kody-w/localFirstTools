@@ -1620,11 +1620,17 @@
         function renderViewmodel() {
             if (!viewmodelScene || !viewmodelCamera) return;
 
-            // Clear depth buffer so viewmodel renders on top
+            // Disable auto-clear so we don't wipe the main scene
+            renderer.autoClear = false;
+
+            // Clear only depth buffer so viewmodel renders on top
             renderer.clearDepth();
 
-            // Render viewmodel scene
+            // Render viewmodel scene on top of main scene
             renderer.render(viewmodelScene, viewmodelCamera);
+
+            // Re-enable auto-clear for next frame
+            renderer.autoClear = true;
         }
 
         const canvas = document.getElementById('game-canvas');
@@ -1633,8 +1639,8 @@
 
         function initThreeJS() {
             scene = new THREE.Scene();
-            scene.background = new THREE.Color(0x1a1a35);
-            scene.fog = new THREE.FogExp2(0x1a1a35, 0.008);
+            scene.background = new THREE.Color(0x050510);
+            scene.fog = new THREE.FogExp2(0x050510, 0.015);
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.copy(state.player.position);
@@ -1650,7 +1656,7 @@
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
             renderer.outputColorSpace = THREE.SRGBColorSpace;
             renderer.toneMapping = THREE.ACESFilmicToneMapping;
-            renderer.toneMappingExposure = 2.0;
+            renderer.toneMappingExposure = 1.2;
 
             composer = new EffectComposer(renderer);
             composer.addPass(new RenderPass(scene, camera));
@@ -1662,10 +1668,10 @@
             composer.addPass(bloomPass);
 
             // Lighting
-            const ambientLight = new THREE.AmbientLight(0x404060, 1.5);
+            const ambientLight = new THREE.AmbientLight(0x404060, 0.4);
             scene.add(ambientLight);
 
-            const mainLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            const mainLight = new THREE.DirectionalLight(0xffffff, 1);
             mainLight.position.set(20, 40, 20);
             mainLight.castShadow = true;
             mainLight.shadow.mapSize.width = 2048;
@@ -1871,18 +1877,19 @@
             for (const [manifestKey, gameKey] of Object.entries(EnemyTypeMapping)) {
                 if (gameAssets.enemies[manifestKey]) {
                     const manifestEnemy = gameAssets.enemies[manifestKey];
+                    const attackRange = manifestEnemy.attackRange || FallbackEnemyTypes[gameKey].attackRange;
                     EnemyTypes[gameKey] = {
                         name: manifestEnemy.modelData?.name || gameKey,
                         health: manifestEnemy.health || FallbackEnemyTypes[gameKey].health,
                         damage: manifestEnemy.damage || FallbackEnemyTypes[gameKey].damage,
                         speed: manifestEnemy.speed || FallbackEnemyTypes[gameKey].speed,
                         score: manifestEnemy.points || FallbackEnemyTypes[gameKey].score,
-                        attackRange: manifestEnemy.attackRange || FallbackEnemyTypes[gameKey].attackRange,
+                        attackRange: attackRange,
                         attackRate: manifestEnemy.fireRate || FallbackEnemyTypes[gameKey].attackRate,
                         size: manifestEnemy.modelData?.scale || FallbackEnemyTypes[gameKey].size,
                         color: FallbackEnemyTypes[gameKey].color,
                         modelData: manifestEnemy.modelData,
-                        ranged: gameKey === 'SNIPER',
+                        ranged: attackRange >= 8, // Enemies with attackRange >= 8 shoot projectiles
                         isBoss: gameKey === 'BOSS',
                         shield: manifestEnemy.shield || 0
                     };
@@ -2526,34 +2533,45 @@
         }
 
         function createEnemyProjectile(position, direction, damage, color) {
-            const projectileGeometry = new THREE.SphereGeometry(0.25, 8, 6);
-            const projectileMaterial = new THREE.MeshBasicMaterial({ color: color });
+            // Larger, more visible projectile core
+            const projectileGeometry = new THREE.SphereGeometry(0.4, 12, 8);
+            const projectileMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff }); // White hot core
             const projectile = new THREE.Mesh(projectileGeometry, projectileMaterial);
             projectile.position.copy(position);
             scene.add(projectile);
 
-            // Add glowing trail to enemy projectile
-            const trailGeometry = new THREE.CylinderGeometry(0.08, 0.2, 1.5, 8);
+            // Colored outer shell
+            const shellGeometry = new THREE.SphereGeometry(0.55, 12, 8);
+            const shellMaterial = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.7
+            });
+            const shell = new THREE.Mesh(shellGeometry, shellMaterial);
+            projectile.add(shell);
+
+            // Long glowing trail behind projectile
+            const trailGeometry = new THREE.CylinderGeometry(0.15, 0.4, 3.0, 8);
             const trailMaterial = new THREE.MeshBasicMaterial({
                 color: color,
                 transparent: true,
-                opacity: 0.6
+                opacity: 0.8
             });
             const trail = new THREE.Mesh(trailGeometry, trailMaterial);
             trail.rotation.x = Math.PI / 2;
-            trail.position.z = 0.75;
+            trail.position.z = 1.5;
             projectile.add(trail);
 
-            // Add point light for glow effect
-            const glowLight = new THREE.PointLight(color, 2, 8);
+            // Bright point light for dramatic glow
+            const glowLight = new THREE.PointLight(color, 5, 15);
             projectile.add(glowLight);
 
-            // Add outer glow sphere
-            const glowGeometry = new THREE.SphereGeometry(0.4, 8, 6);
+            // Large outer glow sphere
+            const glowGeometry = new THREE.SphereGeometry(0.9, 12, 8);
             const glowMaterial = new THREE.MeshBasicMaterial({
                 color: color,
                 transparent: true,
-                opacity: 0.3
+                opacity: 0.4
             });
             const glowSphere = new THREE.Mesh(glowGeometry, glowMaterial);
             projectile.add(glowSphere);
@@ -2576,34 +2594,59 @@
         }
 
         function createTracerLine(startPos, direction, color, length) {
-            // Create a visible tracer line showing the shot path
-            const points = [
-                startPos.clone(),
-                startPos.clone().addScaledVector(direction, length)
-            ];
+            // Create a thick, visible beam showing the shot path
+            const endPos = startPos.clone().addScaledVector(direction, length);
 
-            const geometry = new THREE.BufferGeometry().setFromPoints(points);
-            const material = new THREE.LineBasicMaterial({
+            // Calculate beam orientation
+            const beamDir = new THREE.Vector3().subVectors(endPos, startPos);
+            const beamLength = beamDir.length();
+            const beamCenter = startPos.clone().add(endPos).multiplyScalar(0.5);
+
+            // Create cylinder for thick beam
+            const beamGeometry = new THREE.CylinderGeometry(0.08, 0.15, beamLength, 8);
+            const beamMaterial = new THREE.MeshBasicMaterial({
                 color: color,
                 transparent: true,
-                opacity: 0.8,
-                linewidth: 2
+                opacity: 0.9
             });
-            const line = new THREE.Line(geometry, material);
-            scene.add(line);
+            const beam = new THREE.Mesh(beamGeometry, beamMaterial);
+
+            // Orient beam along direction
+            beam.position.copy(beamCenter);
+            beam.quaternion.setFromUnitVectors(
+                new THREE.Vector3(0, 1, 0),
+                beamDir.normalize()
+            );
+            scene.add(beam);
+
+            // Outer glow cylinder
+            const glowGeometry = new THREE.CylinderGeometry(0.2, 0.35, beamLength, 8);
+            const glowMaterial = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.4
+            });
+            const glow = new THREE.Mesh(glowGeometry, glowMaterial);
+            glow.position.copy(beamCenter);
+            glow.quaternion.copy(beam.quaternion);
+            scene.add(glow);
 
             // Fade out and remove tracer
-            let opacity = 0.8;
+            let opacity = 0.9;
             const fadeInterval = setInterval(() => {
-                opacity -= 0.1;
-                material.opacity = opacity;
+                opacity -= 0.08;
+                beamMaterial.opacity = opacity;
+                glowMaterial.opacity = opacity * 0.4;
                 if (opacity <= 0) {
                     clearInterval(fadeInterval);
-                    scene.remove(line);
-                    geometry.dispose();
-                    material.dispose();
+                    scene.remove(beam);
+                    scene.remove(glow);
+                    beamGeometry.dispose();
+                    beamMaterial.dispose();
+                    glowGeometry.dispose();
+                    glowMaterial.dispose();
                 }
-            }, 20);
+            }, 25);
         }
 
         function createEnemyMuzzleFlash(position, color) {
