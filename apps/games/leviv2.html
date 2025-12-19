@@ -9326,6 +9326,139 @@
             worldState.decorations.push(decorMesh);
         }
 
+        // HARVESTABLE PROPS - Trees and Rocks with HP (can be harvested for resources)
+        worldState.props = [];
+        const PROP_TYPES = {
+            tree: {
+                hp: 3, drops: ['Wood', 'Wood', 'Leaf'], xpType: 'woodcutting',
+                colors: { Terra: 0x2d5a27, Desert: 0x8b7355, Ice: 0x6699aa, Volcanic: 0x3d2817, Alien: 0x5533aa }
+            },
+            rock: {
+                hp: 4, drops: ['Stone', 'Stone', 'Ore'], xpType: 'mining',
+                colors: { Terra: 0x666666, Desert: 0x9a8866, Ice: 0x99aacc, Volcanic: 0x443322, Alien: 0x554466 }
+            }
+        };
+
+        const propCount = 20 + rng.int(0, 15);
+        for (let i = 0; i < propCount; i++) {
+            const propType = rng.next() > 0.5 ? 'tree' : 'rock';
+            const propDef = PROP_TYPES[propType];
+
+            // Spawn in playable areas (lanes and jungle, not mountains)
+            let px, pz, attempts = 0;
+            do {
+                px = rng.range(-50, 50);
+                pz = rng.range(-50, 50);
+                attempts++;
+            } while (getMountainFactor(px, pz) > 0.5 && attempts < 10);
+
+            const py = getTerrainHeight(px, pz);
+            const propColor = propDef.colors[planetData.type] || propDef.colors.Terra;
+
+            let propMesh;
+            if (propType === 'tree') {
+                propMesh = new THREE.Group();
+                // Trunk
+                const trunkGeo = new THREE.CylinderGeometry(0.15, 0.25, 2, 8);
+                const trunkMat = new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.9 });
+                const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+                trunk.position.y = 1;
+                trunk.castShadow = true;
+                propMesh.add(trunk);
+                // Foliage
+                const foliageGeo = new THREE.ConeGeometry(1.2, 2.5, 8);
+                const foliageMat = new THREE.MeshStandardMaterial({ color: propColor, roughness: 0.8 });
+                const foliage = new THREE.Mesh(foliageGeo, foliageMat);
+                foliage.position.y = 3;
+                foliage.castShadow = true;
+                propMesh.add(foliage);
+            } else {
+                // Rock - varied geometry
+                const rockGeos = [
+                    new THREE.DodecahedronGeometry(0.8, 0),
+                    new THREE.IcosahedronGeometry(0.9, 0),
+                    new THREE.OctahedronGeometry(0.7, 0)
+                ];
+                const rockGeo = rockGeos[rng.int(0, 2)];
+                const rockMat = new THREE.MeshStandardMaterial({ color: propColor, roughness: 0.85, metalness: 0.1 });
+                propMesh = new THREE.Mesh(rockGeo, rockMat);
+                propMesh.scale.set(1 + rng.next() * 0.5, 0.7 + rng.next() * 0.4, 1 + rng.next() * 0.5);
+                propMesh.castShadow = true;
+            }
+
+            propMesh.position.set(px, py + (propType === 'rock' ? 0.5 : 0), pz);
+            propMesh.rotation.y = rng.range(0, Math.PI * 2);
+
+            propMesh.userData = {
+                type: 'prop',
+                propType: propType,
+                hp: propDef.hp,
+                maxHp: propDef.hp,
+                drops: propDef.drops,
+                xpType: propDef.xpType
+            };
+
+            planetGroup.add(propMesh);
+            worldState.props.push(propMesh);
+        }
+        console.log(`[WORLD] Harvestable props added: ${propCount}`);
+
+        // FISHING SPOTS - Water areas for fishing minigame
+        worldState.fishingSpots = [];
+        if (planetData.type !== 'Desert' && planetData.type !== 'Volcanic') {
+            const fishSpotCount = 3 + rng.int(0, 4);
+            for (let i = 0; i < fishSpotCount; i++) {
+                // Find water areas (low noise values)
+                let fx, fz, foundWater = false;
+                for (let attempt = 0; attempt < 20; attempt++) {
+                    fx = rng.range(-40, 40);
+                    fz = rng.range(-40, 40);
+                    const noiseVal = noise2D(fx, fz);
+                    if (noiseVal < waterThreshold * 0.8) {
+                        foundWater = true;
+                        break;
+                    }
+                }
+
+                if (foundWater) {
+                    const fy = getTerrainHeight(fx, fz) + 0.5;
+
+                    // Fishing spot visual - rippling ring
+                    const spotGroup = new THREE.Group();
+                    const ringGeo = new THREE.RingGeometry(0.8, 1.2, 16);
+                    const ringMat = new THREE.MeshBasicMaterial({
+                        color: 0x44aaff,
+                        transparent: true,
+                        opacity: 0.6,
+                        side: THREE.DoubleSide
+                    });
+                    const ring = new THREE.Mesh(ringGeo, ringMat);
+                    ring.rotation.x = -Math.PI / 2;
+                    spotGroup.add(ring);
+
+                    // Bobbing marker
+                    const markerGeo = new THREE.SphereGeometry(0.2, 8, 8);
+                    const markerMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+                    const marker = new THREE.Mesh(markerGeo, markerMat);
+                    marker.position.y = 0.3;
+                    spotGroup.add(marker);
+
+                    spotGroup.position.set(fx, fy, fz);
+                    spotGroup.userData = {
+                        type: 'fishingSpot',
+                        active: true,
+                        cooldown: 0,
+                        ring: ring,
+                        marker: marker
+                    };
+
+                    planetGroup.add(spotGroup);
+                    worldState.fishingSpots.push(spotGroup);
+                }
+            }
+            console.log(`[WORLD] Fishing spots added: ${worldState.fishingSpots.length}`);
+        }
+
         // Mobs - Biome-specific enemy types in playable areas
         worldState.mobs = [];
         const mobCount = 6 + rng.int(0, 6);
@@ -9932,7 +10065,7 @@
         // Show world instructions
         document.getElementById('instructions').style.display = 'block';
         document.getElementById('instruction-text').innerHTML =
-            '<b>WASD</b> Move | <b>Click</b> Attack | <b>Space</b> Collect | <b>G</b> Galaxy';
+            '<b>WASD</b> Move | <b>Click</b> Attack/Harvest | <b>Space</b> Collect/Fish | <b>G</b> Galaxy';
         document.body.style.cursor = 'default';
 
         Audio.warp();
@@ -10672,20 +10805,29 @@
                 initiatePlanetApproach(planet.userData, planet);
             }
         } else if (mode === 'world') {
-            // Attack nearest mob
-            if (worldState.player && worldState.mobs.length > 0) {
-                let nearest = null;
-                let nearestDist = 5;
+            // Attack nearest mob OR harvest nearest prop
+            if (worldState.player) {
+                let nearestMob = null;
+                let nearestMobDist = 5;
 
-                worldState.mobs.forEach(mob => {
-                    const dist = worldState.player.position.distanceTo(mob.position);
-                    if (dist < nearestDist) {
-                        nearest = mob;
-                        nearestDist = dist;
-                    }
-                });
+                // Check for mobs first (combat priority)
+                if (worldState.mobs) {
+                    worldState.mobs.forEach(mob => {
+                        if (!mob.userData || mob.userData.hp <= 0) return;
+                        const dist = worldState.player.position.distanceTo(mob.position);
+                        if (dist < nearestMobDist) {
+                            nearestMob = mob;
+                            nearestMobDist = dist;
+                        }
+                    });
+                }
 
-                if (nearest) attack(nearest);
+                if (nearestMob) {
+                    attack(nearestMob);
+                } else if (worldState.propTarget) {
+                    // No mob in range - harvest prop instead
+                    harvestProp(worldState.propTarget);
+                }
             }
         }
     }
@@ -11386,9 +11528,53 @@
         });
 
         // Collect resource on space
-        if (keys[' '] && worldState.interactTarget) {
+        if (keys[' '] && worldState.interactTarget && !fishingState.active) {
             collectResource(worldState.interactTarget);
             keys[' '] = false;
+        }
+
+        // HARVESTABLE PROP interaction - find nearest prop
+        worldState.propTarget = null;
+        if (worldState.props) {
+            let nearestProp = null;
+            let nearestDist = 3; // Harvest range
+            worldState.props.forEach(prop => {
+                if (!prop.userData || prop.userData.hp <= 0) return;
+                const dist = player.position.distanceTo(prop.position);
+                if (dist < nearestDist) {
+                    nearestProp = prop;
+                    nearestDist = dist;
+                }
+            });
+            worldState.propTarget = nearestProp;
+        }
+
+        // FISHING SPOT interaction - find nearest spot
+        worldState.fishingTarget = null;
+        if (worldState.fishingSpots && !fishingState.active) {
+            worldState.fishingSpots.forEach(spot => {
+                if (!spot.userData.active) return;
+                if (player.position.distanceTo(spot.position) < 3) {
+                    worldState.fishingTarget = spot;
+                }
+            });
+        }
+
+        // Update fishing state
+        updateFishing(time);
+
+        // Space key interactions (priority order)
+        if (keys[' ']) {
+            if (fishingState.active && fishingState.hasBite) {
+                // Catch fish if bite is active
+                catchFish();
+                keys[' '] = false;
+            } else if (worldState.fishingTarget && !fishingState.active) {
+                // Start fishing at nearby spot
+                startFishing(worldState.fishingTarget);
+                keys[' '] = false;
+            }
+            // Resources already handled above
         }
 
         // POI interaction (Round 3)
@@ -11444,6 +11630,177 @@
 
         Audio.collect();
         spawnFloater(resource.position, `+1 ${item.name}`, '#00ff88');
+    }
+
+    // HARVEST PROP - Trees and rocks with HP, drops resources
+    function harvestProp(prop) {
+        if (!prop || !prop.userData || prop.userData.hp <= 0) return;
+
+        // Deal damage to prop
+        prop.userData.hp--;
+
+        // Visual feedback - shake
+        const origPos = prop.position.clone();
+        prop.position.x += (Math.random() - 0.5) * 0.2;
+        prop.position.z += (Math.random() - 0.5) * 0.2;
+        setTimeout(() => {
+            if (prop.parent) prop.position.copy(origPos);
+        }, 100);
+
+        // Particles
+        if (particles) {
+            const pColor = prop.userData.propType === 'tree' ? 0x88ff88 : 0xaaaaaa;
+            particles.emit(prop.position.clone().add(new THREE.Vector3(0, 1, 0)), 6, pColor, { spread: 1, lifetime: 400, size: 0.1 });
+        }
+
+        // Sound
+        Audio.play(prop.userData.propType === 'tree' ? 200 : 150, 0.2, 'square', 0.1);
+
+        // HP floater
+        spawnFloater(prop.position, `${prop.userData.hp}/${prop.userData.maxHp}`, '#ffaa00');
+
+        // XP per hit
+        addXP(prop.userData.xpType || 'mining', 3);
+
+        // Check if destroyed
+        if (prop.userData.hp <= 0) {
+            // Drop resources
+            const drops = prop.userData.drops || ['Wood'];
+            drops.forEach((dropName, i) => {
+                setTimeout(() => {
+                    const item = { name: dropName, icon: dropName === 'Wood' ? '🪵' : (dropName === 'Stone' ? '🪨' : '✨'), count: 1 };
+                    const existing = gameData.inventory.find(inv => inv && inv.name === item.name);
+                    if (existing) {
+                        existing.count++;
+                    } else {
+                        const emptySlot = gameData.inventory.findIndex(inv => !inv);
+                        if (emptySlot !== -1) gameData.inventory[emptySlot] = item;
+                        else gameData.inventory.push(item);
+                    }
+                    spawnFloater(prop.position.clone().add(new THREE.Vector3(i * 0.3 - 0.3, 0.5, 0)), `+1 ${dropName}`, '#44ff88');
+                }, i * 150);
+            });
+
+            // Bonus XP for destruction
+            addXP(prop.userData.xpType || 'mining', 10);
+
+            // Remove prop
+            const idx = worldState.props.indexOf(prop);
+            if (idx !== -1) worldState.props.splice(idx, 1);
+            planetGroup.remove(prop);
+
+            // Dispose geometry/materials
+            prop.traverse(child => {
+                if (child.geometry) child.geometry.dispose();
+                if (child.material) child.material.dispose();
+            });
+
+            // Sound for destruction
+            Audio.play(100, 0.3, 'sawtooth', 0.2);
+            if (particles) {
+                particles.emit(prop.position, 15, 0xffaa00, { spread: 2, lifetime: 600, size: 0.15 });
+            }
+        }
+    }
+
+    // FISHING - Cast line at fishing spot
+    let fishingState = { active: false, spot: null, castTime: 0, biteTime: 0, hasBite: false };
+
+    function startFishing(spot) {
+        if (!spot || !spot.userData.active || fishingState.active) return;
+
+        fishingState = {
+            active: true,
+            spot: spot,
+            castTime: performance.now(),
+            biteTime: performance.now() + 2000 + Math.random() * 3000,
+            hasBite: false
+        };
+
+        spot.userData.active = false;
+        notify('Fishing... wait for a bite!', 'info');
+        Audio.play(400, 0.15, 'sine', 0.15);
+    }
+
+    function updateFishing(time) {
+        if (!fishingState.active) return;
+
+        const spot = fishingState.spot;
+        if (!spot) {
+            fishingState.active = false;
+            return;
+        }
+
+        // Animate bobber
+        if (spot.userData.marker) {
+            spot.userData.marker.position.y = 0.3 + Math.sin(time * 0.005) * 0.15;
+        }
+
+        // Check for bite
+        if (!fishingState.hasBite && time > fishingState.biteTime) {
+            fishingState.hasBite = true;
+            notify('🐟 BITE! Press SPACE!', 'warning');
+            Audio.play(600, 0.25, 'square', 0.1);
+
+            // Visual - spot pulses
+            if (spot.userData.ring) {
+                spot.userData.ring.material.color.setHex(0x00ff00);
+            }
+
+            // Auto-fail after 1.5 seconds
+            setTimeout(() => {
+                if (fishingState.active && fishingState.hasBite && fishingState.spot === spot) {
+                    endFishing(false);
+                }
+            }, 1500);
+        }
+    }
+
+    function catchFish() {
+        if (!fishingState.active || !fishingState.hasBite) return;
+        endFishing(true);
+    }
+
+    function endFishing(success) {
+        const spot = fishingState.spot;
+
+        if (success) {
+            // Caught a fish!
+            const fishTypes = [
+                { name: 'Common Fish', icon: '🐟', xp: 8 },
+                { name: 'Rare Fish', icon: '🐠', xp: 15 },
+                { name: 'Exotic Fish', icon: '🦈', xp: 30 }
+            ];
+            const roll = Math.random();
+            const fish = roll < 0.6 ? fishTypes[0] : (roll < 0.9 ? fishTypes[1] : fishTypes[2]);
+
+            const item = { name: fish.name, icon: fish.icon, count: 1 };
+            const existing = gameData.inventory.find(i => i && i.name === item.name);
+            if (existing) existing.count++;
+            else {
+                const emptySlot = gameData.inventory.findIndex(i => !i);
+                if (emptySlot !== -1) gameData.inventory[emptySlot] = item;
+                else gameData.inventory.push(item);
+            }
+
+            addXP('fishing', fish.xp);
+            spawnFloater(spot.position, `${fish.icon} Caught!`, '#00ff88');
+            Audio.play(500, 0.2, 'sine', 0.2);
+            Audio.play(700, 0.15, 'sine', 0.15);
+        } else {
+            spawnFloater(spot.position, 'Got away!', '#ff4444');
+            Audio.play(200, 0.15, 'sawtooth', 0.1);
+        }
+
+        // Reset spot after cooldown
+        setTimeout(() => {
+            if (spot && spot.userData) {
+                spot.userData.active = true;
+                if (spot.userData.ring) spot.userData.ring.material.color.setHex(0x44aaff);
+            }
+        }, 10000);
+
+        fishingState = { active: false, spot: null, castTime: 0, biteTime: 0, hasBite: false };
     }
 
     function updateMinimap() {
@@ -11505,6 +11862,33 @@
                 ctx.lineTo(px - 3, pz);
                 ctx.closePath();
                 ctx.fill();
+            });
+        }
+
+        // Harvestable Props (trees = green, rocks = gray)
+        if (worldState.props) {
+            worldState.props.forEach(prop => {
+                if (!prop.userData || prop.userData.hp <= 0) return;
+                const px = prop.position.x * scale + offset;
+                const pz = prop.position.z * scale + offset;
+                ctx.fillStyle = prop.userData.propType === 'tree' ? '#228822' : '#888888';
+                ctx.beginPath();
+                ctx.arc(px, pz, 2, 0, Math.PI * 2);
+                ctx.fill();
+            });
+        }
+
+        // Fishing Spots (blue circles)
+        if (worldState.fishingSpots) {
+            worldState.fishingSpots.forEach(spot => {
+                if (!spot.userData.active) return;
+                const fx = spot.position.x * scale + offset;
+                const fz = spot.position.z * scale + offset;
+                ctx.strokeStyle = '#44aaff';
+                ctx.lineWidth = 1.5;
+                ctx.beginPath();
+                ctx.arc(fx, fz, 3, 0, Math.PI * 2);
+                ctx.stroke();
             });
         }
     }
