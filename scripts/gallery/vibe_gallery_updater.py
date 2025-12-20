@@ -351,6 +351,39 @@ def update_vibe_gallery_config(base_path):
     # Update timestamp
     config["vibeGallery"]["lastUpdated"] = datetime.now().strftime("%Y-%m-%d")
 
+    # --- VERSION GROUPING LOGIC ---
+    for category in config["vibeGallery"]["categories"].values():
+        apps = category.get("apps", [])
+        if not apps:
+            continue
+
+        grouped_apps = {}
+        for app in apps:
+            # Create a canonical title by removing version-like suffixes
+            title = app["title"]
+            # Remove " copy", " copy 2", " (1)", " v2", " - fixed", etc.
+            canonical_title = re.sub(r'\s*(copy\s*\d*|\(\d+\)|v\d+|fixed|backup).*$', '', title, flags=re.IGNORECASE).strip()
+
+            if canonical_title not in grouped_apps:
+                grouped_apps[canonical_title] = []
+            grouped_apps[canonical_title].append(app)
+
+        new_apps_list = []
+        for canonical_title, variants in grouped_apps.items():
+            # Sort variants by filename length (original is usually shortest)
+            # or try to find the one without "copy"
+            variants.sort(key=lambda x: len(x["filename"]))
+
+            primary = variants[0]
+            if len(variants) > 1:
+                primary["versions"] = [
+                    {"filename": v["filename"], "path": v["path"], "title": v["title"]}
+                    for v in variants[1:]
+                ]
+            new_apps_list.append(primary)
+
+        category["apps"] = sorted(new_apps_list, key=lambda x: (not x.get("featured", False), x["title"]))
+
     # Write updated config to root directory
     with open(config_path, 'w') as f:
         json.dump(config, f, indent=2)
@@ -387,14 +420,19 @@ def update_embedded_manifest(base_path):
              "🌊", "🌙", "💎", "🔥", "⚡", "🦋", "💫", "🌸", "🌀", "🌈"]
     icon_idx = 0
 
-    for artwork in config.get("artworks", []):
-        path = artwork.get("path", "")
-        if path and path not in seen:
-            seen.add(path)
-            title = artwork.get("title", "Untitled")
-            icon = artwork.get("icon", icons[icon_idx % len(icons)])
-            icon_idx += 1
-            compact.append([path, title, icon])
+    # Traverse all categories to find apps
+    vibe_gallery = config.get("vibeGallery", {})
+    categories = vibe_gallery.get("categories", {})
+
+    for category in categories.values():
+        for app in category.get("apps", []):
+            path = app.get("path", "")
+            if path and path not in seen:
+                seen.add(path)
+                title = app.get("title", "Untitled")
+                icon = app.get("icon", icons[icon_idx % len(icons)])
+                icon_idx += 1
+                compact.append([path, title, icon])
 
     # Generate the JavaScript array
     manifest_js = json.dumps(compact, ensure_ascii=False, separators=(',', ':'))
