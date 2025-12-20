@@ -12,7 +12,7 @@ from pathlib import Path
 from datetime import datetime
 
 # Import the updater function
-from vibe_gallery_updater import update_vibe_gallery_config
+from vibe_gallery_updater import update_vibe_gallery_config, update_embedded_manifest
 
 def main():
     print("🎨 Vibe Gallery Quick Update")
@@ -31,6 +31,7 @@ def main():
     try:
         start_time = datetime.now()
         update_vibe_gallery_config(base_dir)
+        update_embedded_manifest(base_dir)
 
         # Calculate duration
         duration = (datetime.now() - start_time).total_seconds()

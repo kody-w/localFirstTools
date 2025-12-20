@@ -4,7 +4,7 @@
 # Quick way to refresh the gallery configuration
 
 echo "🎨 Updating Vibe Gallery..."
-python3 update_gallery.py
+python3 scripts/gallery/update_gallery.py
 
 # Optional: Show summary of changes
 echo ""

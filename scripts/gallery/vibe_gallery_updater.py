@@ -442,7 +442,7 @@ def update_embedded_manifest(base_path):
         content = f.read()
 
     # Find and replace the EMBEDDED_MANIFEST
-    pattern = r'const EMBEDDED_MANIFEST = \[.*?\];'
+    pattern = r'const EMBEDDED_MANIFEST\s*=\s*\[.*?\]\s*;'
     replacement = f'const EMBEDDED_MANIFEST = {manifest_js};'
 
     new_content = re.sub(pattern, replacement, content, flags=re.DOTALL)
