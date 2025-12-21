@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Builder</title>
+    <meta name="description" content="Build your own neural network. Drag neurons, connect synapses, and watch intelligence emerge.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #0a0a12; font-family: 'Segoe UI', sans-serif; color: #eee; }
+        canvas { display: block; }
+        
+        #ui {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 250px;
+            height: 100%;
+            background: rgba(20, 20, 30, 0.9);
+            border-right: 1px solid #333;
+            padding: 20px;
+            box-sizing: border-box;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        
+        h1 { margin: 0 0 10px 0; font-size: 20px; color: #00ffff; }
+        
+        .tool-btn {
+            background: #222;
+            border: 1px solid #444;
+            color: #aaa;
+            padding: 10px;
+            cursor: pointer;
+            text-align: left;
+            transition: all 0.2s;
+            border-radius: 4px;
+        }
+        
+        .tool-btn:hover { background: #333; color: #fff; border-color: #666; }
+        .tool-btn.active { background: #004444; color: #00ffff; border-color: #00ffff; }
+        
+        .section-title { font-size: 12px; color: #666; text-transform: uppercase; margin-top: 10px; }
+        
+        #controls {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        
+        .action-btn {
+            background: #0066cc;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 0 10px rgba(0, 102, 204, 0.5);
+        }
+        
+        .action-btn:hover { background: #0088ff; transform: scale(1.05); }
+        
+        #tooltip {
+            position: absolute;
+            background: rgba(0,0,0,0.8);
+            padding: 5px 10px;
+            border-radius: 4px;
+            pointer-events: none;
+            display: none;
+            font-size: 12px;
+            border: 1px solid #444;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>Neural Builder</h1>
+        
+        <div class="section-title">Tools</div>
+        <button class="tool-btn active" id="tool-move" onclick="setTool('move')">✋ Move / Select</button>
+        <button class="tool-btn" id="tool-neuron" onclick="setTool('neuron')">⚪ Add Neuron</button>
+        <button class="tool-btn" id="tool-input" onclick="setTool('input')">Input Node</button>
+        <button class="tool-btn" id="tool-output" onclick="setTool('output')">Output Node</button>
+        <button class="tool-btn" id="tool-connect" onclick="setTool('connect')">🔗 Connect</button>
+        <button class="tool-btn" id="tool-delete" onclick="setTool('delete')">❌ Delete</button>
+        
+        <div class="section-title">Simulation</div>
+        <div style="font-size: 12px;">
+            Signal Speed: <input type="range" id="speed-slider" min="1" max="10" value="5">
+        </div>
+        
+        <div id="info-panel" style="margin-top: auto; font-size: 12px; color: #888;">
+            Select a node to see details.
+        </div>
+    </div>
+
+    <div id="controls">
+        <button class="action-btn" onclick="fireInputs()">⚡ Fire Inputs</button>
+        <button class="action-btn" onclick="clearGraph()" style="background: #cc3300;">🗑 Clear</button>
+    </div>
+    
+    <div id="tooltip"></div>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Graph Data ---
+        let nodes = [];
+        let links = [];
+        let nextId = 1;
+        
+        class Node {
+            constructor(x, y, type) {
+                this.id = nextId++;
+                this.x = x;
+                this.y = y;
+                this.type = type; // 'neuron', 'input', 'output'
+                this.activation = 0;
+                this.bias = 0;
+                this.radius = type === 'neuron' ? 20 : 15;
+                this.label = type === 'input' ? 'In' : (type === 'output' ? 'Out' : '');
+            }
+        }
+        
+        class Link {
+            constructor(source, target) {
+                this.source = source;
+                this.target = target;
+                this.weight = (Math.random() * 2 - 1).toFixed(2);
+                this.signals = []; // Array of {t: 0..1} for animation
+            }
+        }
+
+        // --- Interaction State ---
+        let tool = 'move';
+        let selectedNode = null;
+        let hoverNode = null;
+        let dragNode = null;
+        let connectStartNode = null;
+        
+        // --- Simulation State ---
+        let signals = []; // Global signal list for animation
+
+        function setTool(t) {
+            tool = t;
+            document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById('tool-' + t).classList.add('active');
+            connectStartNode = null;
+            selectedNode = null;
+            updateInfo();
+        }
+
+        // --- Input Handling ---
+        canvas.addEventListener('mousemove', e => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            hoverNode = nodes.find(n => Math.hypot(n.x - x, n.y - y) < n.radius + 5);
+            
+            if (dragNode) {
+                dragNode.x = x;
+                dragNode.y = y;
+            }
+            
+            // Tooltip
+            const tt = document.getElementById('tooltip');
+            if (hoverNode) {
+                tt.style.display = 'block';
+                tt.style.left = (e.clientX + 15) + 'px';
+                tt.style.top = (e.clientY + 15) + 'px';
+                tt.textContent = `${hoverNode.type} (a: ${hoverNode.activation.toFixed(2)})`;
+            } else {
+                tt.style.display = 'none';
+            }
+        });
+
+        canvas.addEventListener('mousedown', e => {
+            if (e.button !== 0) return;
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            
+            if (tool === 'move') {
+                if (hoverNode) {
+                    dragNode = hoverNode;
+                    selectedNode = hoverNode;
+                    updateInfo();
+                } else {
+                    selectedNode = null;
+                    updateInfo();
+                }
+            } else if (tool === 'neuron' || tool === 'input' || tool === 'output') {
+                nodes.push(new Node(x, y, tool));
+            } else if (tool === 'delete') {
+                if (hoverNode) {
+                    nodes = nodes.filter(n => n !== hoverNode);
+                    links = links.filter(l => l.source !== hoverNode && l.target !== hoverNode);
+                }
+            } else if (tool === 'connect') {
+                if (hoverNode) {
+                    if (!connectStartNode) {
+                        connectStartNode = hoverNode;
+                    } else {
+                        if (connectStartNode !== hoverNode) {
+                            // Check if link exists
+                            if (!links.find(l => l.source === connectStartNode && l.target === hoverNode)) {
+                                links.push(new Link(connectStartNode, hoverNode));
+                            }
+                        }
+                        connectStartNode = null;
+                    }
+                } else {
+                    connectStartNode = null;
+                }
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            dragNode = null;
+        });
+        
+        // --- Simulation Logic ---
+        function fireInputs() {
+            nodes.filter(n => n.type === 'input').forEach(n => {
+                n.activation = 1;
+                propagate(n);
+            });
+        }
+        
+        function propagate(sourceNode) {
+            // Find outgoing links
+            const outgoing = links.filter(l => l.source === sourceNode);
+            outgoing.forEach(l => {
+                l.signals.push({ t: 0, val: sourceNode.activation * l.weight });
+            });
+        }
+        
+        function updateSimulation() {
+            const speed = document.getElementById('speed-slider').value * 0.01;
+            
+            links.forEach(l => {
+                for (let i = l.signals.length - 1; i >= 0; i--) {
+                    const s = l.signals[i];
+                    s.t += speed;
+                    if (s.t >= 1) {
+                        // Signal arrived
+                        l.target.activation = Math.tanh(l.target.activation + s.val); // Simple accumulation + activation
+                        
+                        // Decay activation over time? Or just keep it?
+                        // For visual effect, let's propagate if activation changed significantly
+                        if (Math.abs(s.val) > 0.1 && l.target.type !== 'output') {
+                            propagate(l.target);
+                        }
+                        
+                        l.signals.splice(i, 1);
+                    }
+                }
+            });
+            
+            // Decay nodes slowly
+            nodes.forEach(n => {
+                if (n.type !== 'input') {
+                    n.activation *= 0.99;
+                }
+            });
+        }
+
+        // --- Rendering ---
+        function draw() {
+            ctx.fillStyle = '#0a0a12';
+            ctx.fillRect(0, 0, width, height);
+            
+            // Draw Links
+            links.forEach(l => {
+                ctx.beginPath();
+                ctx.moveTo(l.source.x, l.source.y);
+                ctx.lineTo(l.target.x, l.target.y);
+                const w = Math.abs(l.weight);
+                ctx.lineWidth = 1 + w * 3;
+                ctx.strokeStyle = l.weight > 0 ? '#00ff00' : '#ff0000';
+                ctx.globalAlpha = 0.5;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+                
+                // Draw Signals
+                l.signals.forEach(s => {
+                    const x = l.source.x + (l.target.x - l.source.x) * s.t;
+                    const y = l.source.y + (l.target.y - l.source.y) * s.t;
+                    
+                    ctx.beginPath();
+                    ctx.arc(x, y, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = '#fff';
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = '#fff';
+                    ctx.fill();
+                    ctx.shadowBlur = 0;
+                });
+            });
+            
+            // Draw Connection Line (Draft)
+            if (tool === 'connect' && connectStartNode) {
+                const rect = canvas.getBoundingClientRect();
+                // Need mouse pos, but we don't track it globally easily without extra listener
+                // Skip for now or add global mouse tracker
+            }
+            
+            // Draw Nodes
+            nodes.forEach(n => {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.radius, 0, Math.PI * 2);
+                
+                // Color based on activation
+                const val = Math.max(-1, Math.min(1, n.activation));
+                let r = 50, g = 50, b = 50;
+                
+                if (n.type === 'input') { r=0; g=100; b=200; }
+                else if (n.type === 'output') { r=200; g=100; b=0; }
+                
+                // Add activation glow
+                if (val > 0) { g += val * 155; }
+                else { r += -val * 155; }
+                
+                ctx.fillStyle = `rgb(${r},${g},${b})`;
+                ctx.fill();
+                
+                // Border
+                ctx.lineWidth = 2;
+                ctx.strokeStyle = (n === selectedNode) ? '#fff' : '#555';
+                ctx.stroke();
+                
+                // Label
+                ctx.fillStyle = '#fff';
+                ctx.font = '10px Arial';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(n.label || n.activation.toFixed(1), n.x, n.y);
+            });
+            
+            updateSimulation();
+            requestAnimationFrame(draw);
+        }
+        
+        function updateInfo() {
+            const panel = document.getElementById('info-panel');
+            if (selectedNode) {
+                panel.innerHTML = `
+                    <strong>Node #${selectedNode.id}</strong><br>
+                    Type: ${selectedNode.type}<br>
+                    Activation: ${selectedNode.activation.toFixed(3)}<br>
+                    Bias: ${selectedNode.bias}
+                `;
+            } else {
+                panel.textContent = "Select a node to see details.";
+            }
+        }
+        
+        function clearGraph() {
+            if(confirm("Clear all?")) {
+                nodes = [];
+                links = [];
+                nextId = 1;
+            }
+        }
+
+        // Initial Setup (XOR-like structure)
+        function initDemo() {
+            const i1 = new Node(width/2 - 100, height/2 - 100, 'input');
+            const i2 = new Node(width/2 - 100, height/2 + 100, 'input');
+            const h1 = new Node(width/2, height/2 - 50, 'neuron');
+            const h2 = new Node(width/2, height/2 + 50, 'neuron');
+            const o1 = new Node(width/2 + 100, height/2, 'output');
+            
+            nodes.push(i1, i2, h1, h2, o1);
+            
+            links.push(new Link(i1, h1));
+            links.push(new Link(i1, h2));
+            links.push(new Link(i2, h1));
+            links.push(new Link(i2, h2));
+            links.push(new Link(h1, o1));
+            links.push(new Link(h2, o1));
+        }
+        
+        // Wait for resize then init
+        setTimeout(initDemo, 100);
+        
+        draw();
+
+    </script>
+</body>
+</html>

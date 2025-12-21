@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Time-Travel Code Editor</title>
+    <meta name="description" content="A code editor with a navigable timeline. Scrub back in time, fork your history, and visualize your coding journey.">
+    <style>
+        body {
+            margin: 0;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #toolbar {
+            background: #252526;
+            padding: 10px;
+            display: flex;
+            gap: 10px;
+            border-bottom: 1px solid #333;
+            align-items: center;
+        }
+
+        h1 { margin: 0; font-size: 18px; color: #007acc; margin-right: 20px; }
+
+        button {
+            background: #0e639c;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-family: inherit;
+        }
+
+        button:hover { background: #1177bb; }
+
+        #main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+
+        #editor-container {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid #333;
+        }
+
+        textarea {
+            flex: 1;
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: none;
+            padding: 20px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 14px;
+            resize: none;
+            outline: none;
+            line-height: 1.5;
+        }
+
+        #timeline-container {
+            height: 150px;
+            background: #252526;
+            border-top: 1px solid #333;
+            position: relative;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #timeline-canvas {
+            flex: 1;
+            cursor: pointer;
+        }
+
+        #scrubber {
+            width: 100%;
+            margin: 0;
+            cursor: pointer;
+        }
+
+        #sidebar {
+            width: 250px;
+            background: #252526;
+            padding: 10px;
+            overflow-y: auto;
+            font-size: 12px;
+        }
+
+        .branch-item {
+            padding: 5px;
+            cursor: pointer;
+            color: #aaa;
+        }
+        
+        .branch-item:hover { color: #fff; background: #333; }
+        .branch-item.active { color: #fff; background: #0e639c; }
+
+        #status {
+            padding: 5px 10px;
+            background: #007acc;
+            color: white;
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="toolbar">
+        <h1>Time-Travel Editor</h1>
+        <button onclick="playHistory()">▶ Playback</button>
+        <button onclick="clearHistory()">🗑 Clear</button>
+    </div>
+
+    <div id="main">
+        <div id="editor-container">
+            <textarea id="editor" spellcheck="false" placeholder="// Start typing to create a timeline..."></textarea>
+            <div id="timeline-container">
+                <canvas id="timeline-canvas"></canvas>
+                <input type="range" id="scrubber" min="0" max="0" value="0">
+            </div>
+        </div>
+        <div id="sidebar">
+            <div style="font-weight: bold; margin-bottom: 10px;">TIMELINES</div>
+            <div id="branch-list"></div>
+        </div>
+    </div>
+    
+    <div id="status">Ready</div>
+
+    <script>
+        const editor = document.getElementById('editor');
+        const scrubber = document.getElementById('scrubber');
+        const canvas = document.getElementById('timeline-canvas');
+        const ctx = canvas.getContext('2d');
+        const branchList = document.getElementById('branch-list');
+        const statusEl = document.getElementById('status');
+
+        // Data Structure
+        // A Node represents a state at a specific time
+        // It has a parent (unless root) and children (branches)
+        
+        let nodes = []; // Flat list for easy access by ID
+        let rootNode = null;
+        let currentNode = null;
+        let headNode = null; // The "latest" node of the current branch
+        
+        let isScrubbing = false;
+        let isPlaying = false;
+
+        class Node {
+            constructor(text, parent = null) {
+                this.id = nodes.length;
+                this.text = text;
+                this.timestamp = Date.now();
+                this.parent = parent;
+                this.children = [];
+                this.branchId = parent ? parent.branchId : 0;
+                
+                if (parent) {
+                    parent.children.push(this);
+                    // If parent already has children, this is a new branch
+                    if (parent.children.length > 1) {
+                        this.branchId = this.id; // New branch ID is the start node ID
+                    }
+                }
+                
+                nodes.push(this);
+            }
+        }
+
+        // Init
+        function init() {
+            rootNode = new Node("// Start typing to create a timeline...");
+            currentNode = rootNode;
+            headNode = rootNode;
+            editor.value = rootNode.text;
+            updateUI();
+        }
+
+        // Editor Input
+        editor.addEventListener('input', (e) => {
+            if (isScrubbing) return; // Should not happen if we disable input during scrub
+            
+            // Create new node
+            const newNode = new Node(editor.value, currentNode);
+            currentNode = newNode;
+            headNode = newNode;
+            
+            updateUI();
+        });
+
+        // Scrubber
+        scrubber.addEventListener('input', (e) => {
+            const index = parseInt(e.target.value);
+            // Find the node in the current branch at this depth
+            // This is tricky because scrubber is linear, but tree is branching.
+            // We map the scrubber to the "path from root to headNode".
+            
+            const path = getPathToRoot(headNode).reverse();
+            if (path[index]) {
+                currentNode = path[index];
+                editor.value = currentNode.text;
+                isScrubbing = true;
+                statusEl.textContent = `Time Travel: ${new Date(currentNode.timestamp).toLocaleTimeString()}`;
+                drawTimeline();
+            }
+        });
+
+        scrubber.addEventListener('change', () => {
+            isScrubbing = false;
+            // If we edit now, we branch.
+            statusEl.textContent = "Ready";
+        });
+
+        // Helpers
+        function getPathToRoot(node) {
+            const path = [];
+            let curr = node;
+            while (curr) {
+                path.push(curr);
+                curr = curr.parent;
+            }
+            return path;
+        }
+
+        function updateUI() {
+            // Update Scrubber
+            const path = getPathToRoot(headNode).reverse();
+            scrubber.max = path.length - 1;
+            
+            // Find index of current node in path
+            const currentIndex = path.indexOf(currentNode);
+            scrubber.value = currentIndex !== -1 ? currentIndex : path.length - 1;
+
+            drawTimeline();
+            updateBranchList();
+        }
+
+        function drawTimeline() {
+            // Resize
+            canvas.width = canvas.offsetWidth;
+            canvas.height = canvas.offsetHeight;
+            
+            ctx.fillStyle = '#252526';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw Tree
+            // We need to layout the tree.
+            // Simple layout: Y = depth (time), X = branch index
+            
+            // Get all branches
+            const branches = getBranches();
+            
+            // Draw connections
+            ctx.strokeStyle = '#555';
+            ctx.lineWidth = 2;
+            
+            const nodeRadius = 3;
+            const xSpacing = 20;
+            const ySpacing = canvas.width / (nodes.length + 10); // Dynamic spacing? No, let's scroll horizontally if needed.
+            // Actually, let's map X to time (node index/depth) and Y to branch.
+            
+            const path = getPathToRoot(headNode).reverse();
+            const totalNodes = path.length;
+            const stepX = canvas.width / (totalNodes + 1);
+            
+            // Draw current active path
+            ctx.beginPath();
+            ctx.strokeStyle = '#007acc';
+            ctx.lineWidth = 3;
+            
+            for (let i = 0; i < path.length - 1; i++) {
+                const x1 = i * stepX + 10;
+                const y1 = canvas.height / 2;
+                const x2 = (i + 1) * stepX + 10;
+                const y2 = canvas.height / 2;
+                ctx.moveTo(x1, y1);
+                ctx.lineTo(x2, y2);
+            }
+            ctx.stroke();
+            
+            // Draw nodes
+            path.forEach((node, i) => {
+                const x = i * stepX + 10;
+                const y = canvas.height / 2;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, node === currentNode ? 6 : 3, 0, Math.PI * 2);
+                ctx.fillStyle = node === currentNode ? '#fff' : '#007acc';
+                ctx.fill();
+                
+                // Draw branch points
+                if (node.children.length > 1) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, 8, 0, Math.PI * 2);
+                    ctx.strokeStyle = '#ffaa00';
+                    ctx.stroke();
+                }
+            });
+        }
+
+        function getBranches() {
+            // Identify leaf nodes
+            const leaves = nodes.filter(n => n.children.length === 0);
+            return leaves;
+        }
+
+        function updateBranchList() {
+            branchList.innerHTML = '';
+            const leaves = getBranches();
+            
+            leaves.forEach((leaf, i) => {
+                const div = document.createElement('div');
+                div.className = 'branch-item';
+                
+                // Check if this leaf is the head of the current branch
+                const isCurrent = leaf === headNode;
+                if (isCurrent) div.classList.add('active');
+                
+                div.textContent = `Timeline ${i + 1} (${new Date(leaf.timestamp).toLocaleTimeString()})`;
+                div.onclick = () => switchBranch(leaf);
+                branchList.appendChild(div);
+            });
+        }
+
+        function switchBranch(leaf) {
+            headNode = leaf;
+            currentNode = leaf;
+            editor.value = leaf.text;
+            updateUI();
+        }
+
+        function playHistory() {
+            if (isPlaying) return;
+            isPlaying = true;
+            
+            const path = getPathToRoot(headNode).reverse();
+            let i = 0;
+            
+            const interval = setInterval(() => {
+                if (i >= path.length) {
+                    clearInterval(interval);
+                    isPlaying = false;
+                    return;
+                }
+                
+                currentNode = path[i];
+                editor.value = currentNode.text;
+                updateUI();
+                i++;
+            }, 50); // Speed
+        }
+
+        function clearHistory() {
+            if(confirm("Clear all history?")) {
+                nodes = [];
+                init();
+            }
+        }
+
+        // Resize canvas on window resize
+        window.addEventListener('resize', drawTimeline);
+
+        init();
+
+    </script>
+</body>
+</html>
