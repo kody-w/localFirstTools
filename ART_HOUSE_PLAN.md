@@ -107,6 +107,38 @@ We need an automated curator to maintain order as the repo scales to 1000+ tools
 
 ---
 
+### 🔗 Phase 5: The "Ghost" Protocol (Preserving Links)
+
+**The Problem:** Moving files breaks external links and bookmarks.
+**The Solution:** We will leave behind "Ghost" files (Redirect Stubs) in the root directory.
+
+When `organize_museum.py` moves `game.html` to `Exhibition_Halls/The_Arcade/game.html`, it will immediately create a new `game.html` in the root with this content:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="0; url=Exhibition_Halls/The_Arcade/game.html">
+    <script>window.location.replace("Exhibition_Halls/The_Arcade/game.html");</script>
+    <title>Redirecting...</title>
+</head>
+<body>
+    <p>This artwork has been moved to the <a href="Exhibition_Halls/The_Arcade/game.html">Arcade Wing</a>.</p>
+</body>
+</html>
+```
+
+**Why this works:**
+1.  **Zero Broken Links:** Any API or user accessing the old path gets instantly redirected.
+2.  **Clean "Source":** The *real* code lives in the clean subdirectories. The root files are just disposable signposts.
+3.  **Git History:** Git handles renames well. The new root file is a "new" file, the moved file preserves history if done with `git mv`.
+
+**Optional Cleanup:**
+To keep the root directory visually clean for *you* (the developer), we can write a script to toggle the visibility of these ghost files (e.g., move them to a `_redirects/` folder and symlink them back, or just accept them as necessary infrastructure).
+
+---
+
 ### 🚀 Execution Strategy (How to do this safely)
 
 1.  **Freeze:** Stop adding new tools for 1 hour.

@@ -179,6 +179,60 @@ def scan_directories_for_apps(base_path):
     }
 
     # Scan ALL directories for HTML files
+    # First scan Exhibition_Halls
+    halls_path = Path(base_path) / "Exhibition_Halls"
+    if halls_path.exists():
+        for html_file in halls_path.rglob("*.html"):
+            if html_file.name.startswith('.'):
+                continue
+
+            print(f"Processing: {html_file}")
+            metadata = extract_metadata_from_html(html_file)
+
+            if metadata:
+                # Determine category from directory name if possible
+                parent_dir = html_file.parent.name
+                category = None
+                
+                # Reverse mapping from directory to category key
+                dir_to_cat = {
+                    "Visual_Arts": "visual_art",
+                    "Simulation_Lab": "particle_physics", # Defaulting to particle_physics but could be 3d_immersive
+                    "The_Arcade": "games_puzzles",
+                    "Sound_Studio": "audio_music",
+                    "Productivity_Suite": "creative_tools",
+                    "AI_Research": "experimental_ai",
+                    "Educational_Center": "educational_tools"
+                }
+                
+                # Special handling for Simulation_Lab which maps to multiple
+                if parent_dir == "Simulation_Lab":
+                    if "3d" in metadata.get("tags", []):
+                        category = "3d_immersive"
+                    else:
+                        category = "particle_physics"
+                else:
+                    category = dir_to_cat.get(parent_dir)
+                
+                if not category:
+                    category = categorize_app(html_file, metadata)
+
+                relative_path = html_file.relative_to(base_path)
+
+                app_entry = {
+                    "title": metadata["title"],
+                    "filename": html_file.name,
+                    "path": str(relative_path),
+                    "description": metadata["description"],
+                    "tags": metadata["tags"],
+                    "category": category,
+                    "featured": len(metadata["tags"]) >= 3,
+                    "complexity": metadata["complexity"],
+                    "interactionType": metadata["interactionType"]
+                }
+
+                apps_by_category[category].append(app_entry)
+
     # First scan apps directory and its subdirectories
     apps_path = Path(base_path) / "apps"
     if apps_path.exists():
