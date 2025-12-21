@@ -5747,7 +5747,7 @@
         //          - Pause/Resume and Exit buttons
 
         const APP_NAME = 'leviathan-omniverse';
-        const VERSION = '6.4.3'; // FIX: worldState.scene was undefined - now uses global scene variable
+        const VERSION = '6.2.0'; // Added day/night UI, keyboard shortcuts (F1), FPS counter (F3), loading tips
 
         // ============================================
         // THREE.js Extensions: FontLoader & TextGeometry
@@ -12631,7 +12631,7 @@
                     addToInventory(result.item, result.amount);
                 }
                 if (result.xp) {
-                    if (typeof addXp === 'function') addXp('combat', result.xp);
+                    gainSkillXP('combat', result.xp);
                 }
                 if (result.gold) {
                     gameData.gold = (gameData.gold || 0) + result.gold;
@@ -13679,23 +13679,19 @@
                 }
             }
 
-            // v6.3.0: Agent now spawns immediately ready to work
             const agent = {
                 id: Date.now().toString(36) + Math.random().toString(36).substr(2, 9),
                 name: availableName,
                 type: agentType,
                 typeConfig: typeConfig,
-                status: 'working',  // v6.3.0: Start as working, not initializing
-                statusMessage: 'Systems online!',  // v6.3.0: Immediate feedback
+                status: 'initializing',
+                statusMessage: 'Preparing to deploy...',
                 progress: 0,
                 conversationHistory: transcript,
                 results: [],
                 lastDecisionTime: 0,
                 mesh: null,
-                // v6.4.1: Better initial position - use player, ship, or random (never origin)
-                position: worldState.player ? worldState.player.position.clone() :
-                          (SHIP_STATE?.position ? SHIP_STATE.position.clone() :
-                           new THREE.Vector3((Math.random() - 0.5) * 20, 0, (Math.random() - 0.5) * 20)),
+                position: worldState.player ? worldState.player.position.clone() : new THREE.Vector3(0, 0, 0),
                 targetPosition: null,
                 totalEarnings: { xp: 0, gold: 0, items: [] },
                 spawnTime: performance.now(),
@@ -13716,32 +13712,10 @@
                 lastActionSuccess: false,
                 actionsPerformed: 0,
                 successfulActions: 0,
-                lastHealthRegen: performance.now(),
-                // v6.3.0: Initialize taskState immediately (was in createAgentMesh)
-                // v6.4.0: Added inventory system for resource hauling
-                taskState: {
-                    currentTask: null,
-                    targetObject: null,
-                    targetPosition: null,
-                    state: 'working',  // idle, moving, working, combat, returning, depositing, stuck, alert
-                    stuckCounter: 0,
-                    lastPosition: null,
-                    lastTaskTime: 0,
-                    alert: null,
-                    actionCooldown: 0,
-                    hp: 50,
-                    maxHp: 50,
-                    taskLog: [],
-                    // v6.4.0: Agent inventory for hauling resources
-                    inventory: [],              // Items the agent is carrying
-                    carryingCapacity: 6,        // Max items agent can carry (upgrades with level)
-                    totalHauled: 0,             // Lifetime resources delivered to ship
-                    tripsCompleted: 0           // Number of round trips to ship
-                },
-                meshPending: false  // Will be set true if mesh creation fails
+                lastHealthRegen: performance.now()
             };
 
-            // Create 3D mesh for the agent (may fail if scene not ready)
+            // Create 3D mesh for the agent
             createAgentMesh(agent);
 
             // Add to fleet
@@ -13761,15 +13735,8 @@
         }
 
         // v5.16: Create distinct 3D mesh for each agent type (mini-robots)
-        // v6.3.0: Now retries if scene isn't ready yet
         function createAgentMesh(agent) {
-            if (!scene) {
-                // v6.3.0: Scene not ready - schedule retry
-                agent.meshPending = true;
-                console.log(`Agent ${agent.name}: Scene not ready, will retry mesh creation`);
-                return;
-            }
-            agent.meshPending = false;
+            if (!worldState.scene) return;
 
             const color = agent.typeConfig.color;
             const agentGroup = new THREE.Group();
@@ -13941,114 +13908,64 @@
             agentGroup.add(glow);
             agent.glow = glow;
 
-            // v6.5.2: MUCH larger scale so agents are clearly visible on the map
-            agentGroup.scale.setScalar(4.0);
+            // Scale down the whole agent
+            agentGroup.scale.setScalar(0.7);
 
-            // v6.4.1: Position agents with proper spread - NEVER at origin
-            // Use agent index in fleet for deterministic spread
-            const agentIndex = agentFleet.indexOf(agent);
-            const spreadAngle = (agentIndex * 0.7) + Math.random() * 0.5;  // Unique angle per agent
-            const spreadDist = 5 + Math.random() * 8;  // 5-13 units from center
-
-            let baseX = 0, baseZ = 0;
-
-            // Get base position from player, ship, or default
-            if (worldState.player && worldState.player.position) {
-                baseX = worldState.player.position.x;
-                baseZ = worldState.player.position.z;
-            } else if (SHIP_STATE && SHIP_STATE.position) {
-                baseX = SHIP_STATE.position.x;
-                baseZ = SHIP_STATE.position.z;
-            } else {
-                // Default to center-ish of map with spread
-                baseX = (Math.random() - 0.5) * 20;
-                baseZ = (Math.random() - 0.5) * 20;
+            // Position near player
+            const offset = new THREE.Vector3(
+                (Math.random() - 0.5) * 10,
+                0,
+                (Math.random() - 0.5) * 10
+            );
+            if (worldState.player) {
+                agentGroup.position.copy(worldState.player.position).add(offset);
+                agentGroup.position.y = 0; // Ground level
             }
-
-            // Apply spread offset based on agent index
-            const finalX = baseX + Math.cos(spreadAngle) * spreadDist;
-            const finalZ = baseZ + Math.sin(spreadAngle) * spreadDist;
-
-            // v6.5.1: Get terrain height BEFORE positioning - agents were spawning underground!
-            let terrainY = 0;
-            if (typeof getTerrainHeight === 'function') {
-                terrainY = getTerrainHeight(finalX, finalZ);
-            }
-            agentGroup.position.set(finalX, terrainY, finalZ);
-
-            console.log(`Agent ${agent.name}: Spawned at (${finalX.toFixed(1)}, ${terrainY.toFixed(1)}, ${finalZ.toFixed(1)}) - index ${agentIndex}`);
 
             agent.mesh = agentGroup;
             agent.position = agentGroup.position.clone();
 
-            // v6.3.0: taskState is now initialized in spawnAgent - just update position reference
-            if (agent.taskState) {
-                agent.taskState.lastPosition = agent.position.clone();
-            }
+            // v5.16: Initialize autonomous task state
+            agent.taskState = {
+                currentTask: null,       // Current task type
+                targetObject: null,      // Target resource/enemy
+                targetPosition: null,    // Movement target
+                state: 'idle',          // idle, moving, working, combat, stuck, alert
+                stuckCounter: 0,
+                lastPosition: null,
+                lastTaskTime: 0,
+                alert: null,            // Alert message if needs help
+                actionCooldown: 0,
+                hp: 50,                 // Agent HP
+                maxHp: 50,
+                taskLog: []             // Recent task actions for troubleshooting
+            };
 
-            scene.add(agentGroup);
-
-            // v6.5.1: Ensure snapped to ground after scene add
-            if (typeof snapToGround === 'function') {
-                snapToGround(agentGroup);
-            }
-
-            // v6.4.1: Visual spawn effect
-            if (particles) {
-                particles.emit(agentGroup.position, 8, agent.typeConfig.color, { spread: 1.5, lifetime: 600, size: 0.12 });
-            }
+            worldState.scene.add(agentGroup);
         }
 
         // Start autonomous decision loop for an agent
-        // v6.3.1: SIMPLIFIED - Always deterministic, no API complexity
         function startAgentLoop(agent) {
-            // IMMEDIATELY set agent to working status
-            agent.status = 'working';
-            agent.statusMessage = 'Systems online!';
-            updateAgentCardUI(agent);
-
-            // Run first deterministic action IMMEDIATELY
-            const gameContext = buildGameContextForAgent(agent);
-            simulateAgentDecision(agent, gameContext);
-            agent.lastDecisionTime = performance.now();
-
-            // Mesh retry counter
-            let meshRetryCount = 0;
-            const MAX_MESH_RETRIES = 50;  // Try for ~25 seconds
-
-            const loop = () => {
+            const loop = async () => {
                 if (!agent || !agentFleet.includes(agent)) return;
-
-                // v6.4.1: ROBUST mesh creation retry - createAgentMesh now handles positioning
-                if (!agent.mesh && scene && meshRetryCount < MAX_MESH_RETRIES) {
-                    meshRetryCount++;
-                    console.log(`Agent ${agent.name}: Attempting mesh creation (attempt ${meshRetryCount})`);
-                    createAgentMesh(agent);
-                    if (agent.mesh) {
-                        console.log(`Agent ${agent.name}: Mesh created successfully at (${agent.mesh.position.x.toFixed(1)}, ${agent.mesh.position.z.toFixed(1)})`);
-                        updateAgentCardUI(agent);
-                    }
-                }
 
                 const now = performance.now();
                 if (now - agent.lastDecisionTime >= agent.typeConfig.decisionInterval) {
                     agent.lastDecisionTime = now;
-
-                    // v6.4.1: Wrapped in try-catch to prevent errors from breaking the loop
-                    try {
-                        const gameContext = buildGameContextForAgent(agent);
-                        simulateAgentDecision(agent, gameContext);
-                    } catch (err) {
-                        console.error(`Agent ${agent.name} decision error:`, err);
-                    }
+                    await makeAgentDecision(agent);
                 }
 
                 // Continue loop
                 agentUpdateTimers[agent.id] = setTimeout(loop, 500);
             };
 
-            // Start loop immediately
-            loop();
+            // Initial delay before first decision
+            setTimeout(() => {
+                agent.status = 'working';
+                agent.statusMessage = 'Starting task...';
+                updateAgentCardUI(agent);
+                loop();
+            }, 1500);
         }
 
         // v5.12.1: Make an autonomous decision for an agent via configurable API endpoint
@@ -14235,7 +14152,7 @@
                         agent.results.push({ item: result.item, amount: result.amount });
                     }
                     if (result.xp) {
-                        if (typeof addXp === 'function') addXp('combat', result.xp);
+                        gainSkillXP('combat', result.xp);
                         agent.totalEarnings.xp += result.xp;
                     }
                     if (result.gold) {
@@ -14327,7 +14244,7 @@
                         // v5.17: XP and gold scale with agent level
                         result.xp = Math.floor(Math.random() * 20) + 10 + agent.agentLevel * 2;
                         result.gold = Math.floor(Math.random() * 10) + 3 + agent.agentLevel;
-                        if (typeof addXp === 'function') addXp('combat', result.xp);
+                        gainSkillXP('combat', result.xp);
                         gameData.gold = (gameData.gold || 0) + result.gold;
                         agent.totalEarnings.xp += result.xp;
                         agent.totalEarnings.gold += result.gold;
@@ -14675,7 +14592,7 @@
 
         // v5.17: Particle effects for agent actions
         function spawnAgentParticleEffect(agent, effectType) {
-            if (!agent.mesh || !scene) return;
+            if (!agent.mesh || !worldState.scene) return;
 
             const particleCount = effectType === 'levelup' ? 20 : (effectType === 'combo' ? 12 : 8);
             const particleGroup = new THREE.Group();
@@ -14728,7 +14645,7 @@
             }
 
             particleGroup.position.copy(agent.mesh.position);
-            scene.add(particleGroup);
+            worldState.scene.add(particleGroup);
 
             // Animate and remove
             let elapsed = 0;
@@ -14739,7 +14656,7 @@
                 const progress = elapsed / duration;
 
                 if (progress >= 1) {
-                    scene.remove(particleGroup);
+                    worldState.scene.remove(particleGroup);
                     particleGroup.children.forEach(p => {
                         p.geometry.dispose();
                         p.material.dispose();
@@ -14798,8 +14715,8 @@
             }
 
             // Remove mesh from scene
-            if (agent.mesh && scene) {
-                scene.remove(agent.mesh);
+            if (agent.mesh && worldState.scene) {
+                worldState.scene.remove(agent.mesh);
             }
 
             // Generate summary
@@ -14944,33 +14861,24 @@
                 if (agent.status === 'idle') statusDot.classList.add('idle');
             }
 
-            // v6.3.1: Show actual task state - always local/deterministic mode
+            // v5.16.3: Show actual task state from autonomous system
             let displayStatus = agent.statusMessage;
-            const modeIndicator = '⚡';  // Always local mode now
-
             if (agent.mesh && agent.taskState) {
                 const task = agent.taskState;
-                // v6.4.0: Added returning/depositing states for hauling
-                const invCount = task.inventory?.length || 0;
-                const invCap = task.carryingCapacity || 6;
                 const stateDescriptions = {
                     'idle': 'Scanning for targets...',
                     'moving': `Moving to target`,
-                    'working': 'Harvesting...',
+                    'working': 'Working...',
                     'combat': 'In combat!',
                     'alert': task.alert || 'Alert!',
                     'manual_control': 'Manual control',
-                    'stuck': 'Repositioning...',
-                    'returning': `Returning to ship [${invCount}/${invCap}]`,
-                    'depositing': `Depositing resources...`
+                    'stuck': 'Repositioning...'
                 };
                 const stateMsg = stateDescriptions[task.state] || task.state;
                 const pos = agent.mesh.position;
-                displayStatus = `${modeIndicator} ${stateMsg} (${Math.floor(pos.x)}, ${Math.floor(pos.z)})`;
+                displayStatus = `${stateMsg} (${Math.floor(pos.x)}, ${Math.floor(pos.z)})`;
             } else if (!agent.mesh) {
-                // v6.3.0: Changed from "Waiting to spawn..." - agent is working even before mesh
-                // Show that work is happening even without visual representation
-                displayStatus = `${modeIndicator} ${agent.statusMessage || 'Working (no visual yet)'}`;
+                displayStatus = 'Waiting to spawn...';
             }
             if (statusText) statusText.textContent = displayStatus;
             if (progressBar) progressBar.style.width = `${agent.progress}%`;
@@ -14994,44 +14902,6 @@
                 ${agent.combo > 0 ? `<span style="color: ${comboColor}; font-weight: bold;">🔥 ${agent.combo}x</span>` : ''}
                 <span style="color: #888; margin-left: auto;">⚡${Math.round(agent.efficiency * 100)}%</span>
             `;
-
-            // v6.4.0: Add inventory display for gatherer/miner agents
-            const task = agent.taskState;
-            if (task && task.inventory !== undefined && (agent.type === 'gatherer' || agent.type === 'miner')) {
-                let invDiv = card.querySelector('.agent-inventory-display');
-                if (!invDiv) {
-                    invDiv = document.createElement('div');
-                    invDiv.className = 'agent-inventory-display';
-                    invDiv.style.cssText = 'display: flex; align-items: center; gap: 4px; margin: 4px 0; font-size: 10px; flex-wrap: wrap;';
-                    levelComboDiv.after(invDiv);
-                }
-
-                const invCount = task.inventory?.length || 0;
-                const invCap = task.carryingCapacity || 6;
-                const invPercent = Math.round((invCount / invCap) * 100);
-                const invColor = invCount >= invCap ? '#ff8800' : (invCount > invCap / 2 ? '#ffcc00' : '#0ff');
-                const trips = task.tripsCompleted || 0;
-                const hauled = task.totalHauled || 0;
-
-                // Group inventory items
-                const itemCounts = {};
-                (task.inventory || []).forEach(item => {
-                    itemCounts[item] = (itemCounts[item] || 0) + 1;
-                });
-                const itemSummary = Object.entries(itemCounts).map(([item, count]) =>
-                    `<span style="background: rgba(0,255,255,0.1); padding: 1px 4px; border-radius: 3px; margin: 1px;">${count}x ${item.substring(0,8)}</span>`
-                ).join('');
-
-                invDiv.innerHTML = `
-                    <span style="color: ${invColor};">📦 ${invCount}/${invCap}</span>
-                    <span style="background: rgba(0,0,0,0.3); height: 4px; flex: 1; min-width: 30px; border-radius: 2px; overflow: hidden;">
-                        <span style="display: block; height: 100%; width: ${invPercent}%; background: ${invColor}; transition: width 0.3s;"></span>
-                    </span>
-                    ${trips > 0 ? `<span style="color: #888;">🚀${trips}</span>` : ''}
-                    ${hauled > 0 ? `<span style="color: #0f8; font-size: 9px;">📊${hauled}</span>` : ''}
-                    ${itemSummary ? `<div style="width: 100%; margin-top: 2px;">${itemSummary}</div>` : ''}
-                `;
-            }
 
             // Update results
             const recentResults = agent.results.slice(-3).map(r => {
@@ -15458,7 +15328,7 @@
         // Initialize body cam rendering system (streaming pattern)
         function initAgentBodyCamSystem() {
             if (bodyCamInitialized) return true;
-            if (!scene) {
+            if (!worldState.scene) {
                 console.log('Body cam init: waiting for scene...');
                 return false;
             }
@@ -15495,7 +15365,7 @@
                 return;
             }
 
-            if (!scene) {
+            if (!worldState.scene) {
                 renderBodyCamPlaceholder(agent, 'Waiting for world...');
                 return;
             }
@@ -15535,7 +15405,7 @@
                 agentBodyCamCamera.lookAt(lookTarget);
 
                 // Render the scene from agent's perspective
-                agentBodyCamRenderer.render(scene, agentBodyCamCamera);
+                agentBodyCamRenderer.render(worldState.scene, agentBodyCamCamera);
 
                 // Stream to the canvas element (AI Companion Hub pattern)
                 const ctx = canvas.getContext('2d');
@@ -15604,25 +15474,13 @@
         }
 
         // v5.16.3: Render placeholder when body cam can't display real view
-        // v6.3.0: Enhanced to show agent is working even without visual
-        function renderBodyCamPlaceholder(agent, message = null) {
+        function renderBodyCamPlaceholder(agent, message = 'No signal') {
             if (!agent) return;
             const canvas = document.getElementById(`bodycam-${agent.id}`);
             if (!canvas) return;
 
             const ctx = canvas.getContext('2d');
             if (!ctx) return;
-
-            // v6.3.0: Auto-generate message based on agent state
-            if (!message) {
-                if (agent.meshPending) {
-                    message = 'Loading 3D view...';
-                } else if (!scene) {
-                    message = 'World loading...';
-                } else {
-                    message = 'No signal';
-                }
-            }
 
             // Dark background with noise effect
             ctx.fillStyle = '#0a0a0f';
@@ -15645,29 +15503,14 @@
             ctx.fillStyle = '#0af';
             ctx.font = 'bold 14px monospace';
             ctx.textAlign = 'center';
-            ctx.fillText(message, canvas.width/2, canvas.height/2 - 10);
-
-            // v6.3.1: Show that agent IS working even without visual
-            if (agent.status === 'working') {
-                ctx.font = '11px monospace';
-                ctx.fillStyle = '#0f8';
-                ctx.fillText('AGENT ACTIVE', canvas.width/2, canvas.height/2 + 10);
-
-                // Show current action
-                if (agent.statusMessage) {
-                    ctx.font = '9px monospace';
-                    ctx.fillStyle = '#888';
-                    const shortMsg = agent.statusMessage.substring(0, 30);
-                    ctx.fillText(shortMsg, canvas.width/2, canvas.height/2 + 25);
-                }
-            }
+            ctx.fillText(message, canvas.width/2, canvas.height/2);
 
             // Draw agent info if available
             if (agent.taskState) {
                 ctx.font = '10px monospace';
                 ctx.fillStyle = '#888';
                 const state = agent.taskState.state || 'initializing';
-                ctx.fillText(`State: ${state}`, canvas.width/2, canvas.height/2 + 40);
+                ctx.fillText(`State: ${state}`, canvas.width/2, canvas.height/2 + 20);
             }
 
             // Draw border
@@ -15676,301 +15519,56 @@
             ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
         }
 
-        // ============================================
-        // v6.5.0: AGENT OBSERVER MODE (StarCraft-style)
-        // Camera follows agent while they work autonomously
-        // Press ESC or click "Return to Robot" to exit
-        // ============================================
-        const agentObserverMode = {
-            active: false,
-            observedAgentId: null,
-            savedCameraOffset: null,
-            uiElement: null,
-            beacon: null  // v6.5.2: Glowing beacon pillar above observed agent
-        };
-
-        // v6.5.0: Enter observer mode - camera follows agent, agent keeps working
+        // v5.16.1: Focus camera on an agent (click to locate)
+        // v5.16.3: Enhanced - teleport player directly to agent location
         function focusOnAgent(agentId) {
             const agent = agentFleet.find(a => a.id === agentId);
-            if (!agent) {
-                addCopilotMessage(`Cannot locate agent - agent not found.`, 'ai');
-                return;
+            if (!agent || !agent.mesh) {
+                // v5.16.3: Try to create mesh if scene is ready
+                if (agent && !agent.mesh && worldState.scene) {
+                    createAgentMesh(agent);
+                }
+                if (!agent || !agent.mesh) {
+                    addCopilotMessage(`Cannot locate agent - agent may not be spawned yet. Wait for world to load.`, 'ai');
+                    return;
+                }
             }
 
-            // v6.5.1: Close takeover mode if active - observer and takeover are mutually exclusive
-            if (agentTakeoverState && agentTakeoverState.active) {
-                closeAgentTakeover();
+            const agentPos = agent.mesh.position;
+
+            // v5.16.3: Teleport player directly to agent location
+            if (worldState.player) {
+                // Calculate position near the agent (offset slightly so we don't overlap)
+                const offsetAngle = Math.random() * Math.PI * 2;
+                const offsetDist = 2 + Math.random();
+                const targetPos = new THREE.Vector3(
+                    agentPos.x + Math.cos(offsetAngle) * offsetDist,
+                    0,
+                    agentPos.z + Math.sin(offsetAngle) * offsetDist
+                );
+
+                // Teleport player directly
+                worldState.player.position.copy(targetPos);
+                if (typeof snapToGround === 'function') {
+                    snapToGround(worldState.player);
+                }
+
+                // Clear any navigation target
+                worldState.target = null;
+
+                // Visual feedback
+                spawnFloater(agentPos, `📍 ${agent.name}`, '#0af');
+                spawnFloater(worldState.player.position, '✨ Teleported!', '#fff');
+
+                // Announce
+                addCopilotMessage(`📍 Teleported to ${agent.typeConfig.icon} ${agent.name} at (${Math.floor(agentPos.x)}, ${Math.floor(agentPos.z)})`, 'ai');
             }
 
-            // Try to create mesh if scene is ready and no mesh yet
-            if (!agent.mesh && scene) {
-                console.log(`focusOnAgent: Creating mesh for ${agent.name}`);
-                createAgentMesh(agent);
-            }
-
-            // Get agent position
-            let agentPos;
-            if (agent.mesh) {
-                agentPos = agent.mesh.position;
-            } else if (agent.position && (agent.position.x !== 0 || agent.position.z !== 0)) {
-                agentPos = agent.position;
-            } else {
-                addCopilotMessage(`Cannot locate agent - no valid position. Try again after world loads.`, 'ai');
-                return;
-            }
-
-            // v6.5.0: ENTER OBSERVER MODE - don't teleport player!
-            agentObserverMode.active = true;
-            agentObserverMode.observedAgentId = agentId;
-
-            // v6.5.2: Create glowing beacon pillar above agent so it's visible
-            createObserverBeacon(agent);
-
-            // Show observer UI
-            showAgentObserverUI(agent);
-
-            // Visual feedback
-            spawnFloater(agentPos, `👁️ Observing ${agent.name}`, '#0af');
-
-            // Announce
-            addCopilotMessage(`👁️ Now observing ${agent.typeConfig.icon} ${agent.name} - Press ESC or click button to return`, 'ai');
-
-            // Highlight on minimap
+            // Option 2: Highlight agent on minimap
             highlightAgentOnMinimap(agent);
-        }
 
-        // v6.5.2: Create a tall glowing beacon above the observed agent
-        function createObserverBeacon(agent) {
-            // Remove existing beacon if any
-            if (agentObserverMode.beacon && scene) {
-                scene.remove(agentObserverMode.beacon);
-                agentObserverMode.beacon = null;
-            }
-
-            if (!agent.mesh || !scene) return;
-
-            const beaconGroup = new THREE.Group();
-            const color = agent.typeConfig.color || 0x00aaff;
-
-            // Tall glowing pillar
-            const pillarGeom = new THREE.CylinderGeometry(0.3, 0.8, 25, 8);
-            const pillarMat = new THREE.MeshBasicMaterial({
-                color: color,
-                transparent: true,
-                opacity: 0.4
-            });
-            const pillar = new THREE.Mesh(pillarGeom, pillarMat);
-            pillar.position.y = 12.5;
-            beaconGroup.add(pillar);
-
-            // Inner bright core
-            const coreGeom = new THREE.CylinderGeometry(0.1, 0.3, 25, 6);
-            const coreMat = new THREE.MeshBasicMaterial({
-                color: 0xffffff,
-                transparent: true,
-                opacity: 0.8
-            });
-            const core = new THREE.Mesh(coreGeom, coreMat);
-            core.position.y = 12.5;
-            beaconGroup.add(core);
-
-            // Glowing ring at base
-            const ringGeom = new THREE.TorusGeometry(2, 0.3, 8, 16);
-            const ringMat = new THREE.MeshBasicMaterial({
-                color: color,
-                transparent: true,
-                opacity: 0.6
-            });
-            const ring = new THREE.Mesh(ringGeom, ringMat);
-            ring.rotation.x = Math.PI / 2;
-            ring.position.y = 0.5;
-            beaconGroup.add(ring);
-
-            // Pulsing outer ring
-            const outerRingGeom = new THREE.TorusGeometry(3.5, 0.15, 8, 24);
-            const outerRingMat = new THREE.MeshBasicMaterial({
-                color: color,
-                transparent: true,
-                opacity: 0.3
-            });
-            const outerRing = new THREE.Mesh(outerRingGeom, outerRingMat);
-            outerRing.rotation.x = Math.PI / 2;
-            outerRing.position.y = 0.3;
-            beaconGroup.add(outerRing);
-
-            // Floating arrow pointing down
-            const arrowGeom = new THREE.ConeGeometry(1.5, 3, 4);
-            const arrowMat = new THREE.MeshBasicMaterial({
-                color: color,
-                transparent: true,
-                opacity: 0.8
-            });
-            const arrow = new THREE.Mesh(arrowGeom, arrowMat);
-            arrow.position.y = 8;
-            arrow.rotation.z = Math.PI; // Point downward
-            beaconGroup.add(arrow);
-
-            // Store reference for animation
-            beaconGroup.userData = { ring, outerRing, arrow, pillar };
-
-            scene.add(beaconGroup);
-            agentObserverMode.beacon = beaconGroup;
-
-            console.log(`Observer beacon created for ${agent.name}`);
-        }
-
-        // v6.5.2: Update beacon position to follow agent
-        function updateObserverBeacon() {
-            if (!agentObserverMode.active || !agentObserverMode.beacon) return;
-
-            const agent = agentFleet.find(a => a.id === agentObserverMode.observedAgentId);
-            if (!agent || !agent.mesh) return;
-
-            // Move beacon to agent position
-            agentObserverMode.beacon.position.copy(agent.mesh.position);
-
-            // Animate beacon
-            const time = Date.now() * 0.002;
-            const userData = agentObserverMode.beacon.userData;
-
-            if (userData.ring) {
-                userData.ring.rotation.z = time;
-            }
-            if (userData.outerRing) {
-                userData.outerRing.rotation.z = -time * 0.5;
-                userData.outerRing.scale.setScalar(1 + Math.sin(time * 2) * 0.1);
-            }
-            if (userData.arrow) {
-                userData.arrow.position.y = 8 + Math.sin(time * 3) * 1;
-            }
-            if (userData.pillar) {
-                userData.pillar.material.opacity = 0.3 + Math.sin(time * 2) * 0.15;
-            }
-        }
-
-        // v6.5.0: Exit observer mode - return camera to player
-        function exitAgentObserverMode() {
-            if (!agentObserverMode.active) return;
-
-            const agent = agentFleet.find(a => a.id === agentObserverMode.observedAgentId);
-
-            agentObserverMode.active = false;
-            agentObserverMode.observedAgentId = null;
-
-            // v6.5.2: Remove beacon
-            if (agentObserverMode.beacon && scene) {
-                scene.remove(agentObserverMode.beacon);
-                agentObserverMode.beacon = null;
-            }
-
-            // Hide observer UI
-            hideAgentObserverUI();
-
-            // Announce
-            if (agent) {
-                addCopilotMessage(`Stopped observing ${agent.typeConfig.icon} ${agent.name} - Back to your robot`, 'ai');
-            }
-        }
-
-        // v6.5.0: Show observer mode UI overlay
-        function showAgentObserverUI(agent) {
-            hideAgentObserverUI(); // Remove any existing
-
-            const ui = document.createElement('div');
-            ui.id = 'agent-observer-ui';
-            ui.style.cssText = `
-                position: fixed;
-                top: 50%;
-                left: 20px;
-                transform: translateY(-50%);
-                background: rgba(0, 20, 40, 0.95);
-                border: 2px solid ${agent.typeConfig.color ? '#' + agent.typeConfig.color.toString(16).padStart(6, '0') : '#0af'};
-                border-radius: 12px;
-                padding: 15px;
-                z-index: 2000;
-                color: #fff;
-                font-family: 'Segoe UI', sans-serif;
-                min-width: 200px;
-                backdrop-filter: blur(10px);
-                box-shadow: 0 0 30px rgba(0, 170, 255, 0.3);
-            `;
-
-            ui.innerHTML = `
-                <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 12px; border-bottom: 1px solid rgba(255,255,255,0.2); padding-bottom: 10px;">
-                    <span style="font-size: 24px;">${agent.typeConfig.icon}</span>
-                    <div>
-                        <div style="font-weight: bold; font-size: 16px; color: #0ff;">OBSERVING</div>
-                        <div style="font-size: 14px;">${agent.name}</div>
-                    </div>
-                </div>
-                <div id="observer-agent-status" style="font-size: 12px; color: #aaa; margin-bottom: 10px;">
-                    ${agent.statusMessage || 'Working...'}
-                </div>
-                <div id="observer-agent-stats" style="font-size: 11px; color: #888; margin-bottom: 12px;">
-                    Lv.${agent.agentLevel} | ${agent.taskState?.state || 'active'}
-                </div>
-                <div style="display: flex; gap: 8px;">
-                    <button onclick="exitAgentObserverMode()" style="
-                        flex: 1;
-                        padding: 10px;
-                        background: linear-gradient(180deg, #0066aa, #004488);
-                        border: 1px solid #0088cc;
-                        border-radius: 6px;
-                        color: #fff;
-                        cursor: pointer;
-                        font-weight: bold;
-                        font-size: 12px;
-                    ">
-                        🤖 Return to Robot
-                    </button>
-                </div>
-                <div style="font-size: 10px; color: #666; margin-top: 8px; text-align: center;">
-                    Press ESC to exit
-                </div>
-            `;
-
-            document.body.appendChild(ui);
-            agentObserverMode.uiElement = ui;
-
-            // Update status periodically
-            agentObserverMode.statusInterval = setInterval(() => {
-                const statusEl = document.getElementById('observer-agent-status');
-                const statsEl = document.getElementById('observer-agent-stats');
-                if (statusEl && agent) {
-                    statusEl.textContent = agent.statusMessage || 'Working...';
-                }
-                if (statsEl && agent) {
-                    const inv = agent.taskState?.inventory?.length || 0;
-                    const cap = agent.taskState?.carryingCapacity || 6;
-                    statsEl.textContent = `Lv.${agent.agentLevel} | ${agent.taskState?.state || 'active'} | 📦 ${inv}/${cap}`;
-                }
-            }, 500);
-        }
-
-        // v6.5.0: Hide observer mode UI
-        function hideAgentObserverUI() {
-            if (agentObserverMode.uiElement) {
-                agentObserverMode.uiElement.remove();
-                agentObserverMode.uiElement = null;
-            }
-            if (agentObserverMode.statusInterval) {
-                clearInterval(agentObserverMode.statusInterval);
-                agentObserverMode.statusInterval = null;
-            }
-        }
-
-        // v6.5.0: Get the position the camera should follow (agent or player)
-        function getObserverTargetPosition() {
-            if (agentObserverMode.active) {
-                const agent = agentFleet.find(a => a.id === agentObserverMode.observedAgentId);
-                if (agent) {
-                    if (agent.mesh) return agent.mesh.position;
-                    if (agent.position) return agent.position;
-                }
-                // Agent lost, exit observer mode
-                exitAgentObserverMode();
-            }
-            return worldState.player ? worldState.player.position : null;
+            // Option 3: Draw a beacon/path to agent
+            createAgentBeacon(agent);
         }
 
         // v5.16.1: Highlight agent on minimap
@@ -15983,13 +15581,8 @@
         }
 
         // v5.16.1: Create a beacon to guide player to agent
-        // v6.3.1: Updated to work without mesh using agent.position
         function createAgentBeacon(agent) {
-            if (!scene) return;
-
-            // v6.3.1: Get position from mesh or agent.position
-            const pos = agent.mesh ? agent.mesh.position : agent.position;
-            if (!pos) return;
+            if (!worldState.scene || !agent.mesh) return;
 
             // Create a vertical beam of light at agent's position
             const beaconGeom = new THREE.CylinderGeometry(0.1, 0.5, 15, 8, 1, true);
@@ -16000,17 +15593,17 @@
                 side: THREE.DoubleSide
             });
             const beacon = new THREE.Mesh(beaconGeom, beaconMat);
-            beacon.position.copy(pos);
+            beacon.position.copy(agent.mesh.position);
             beacon.position.y = 7.5;
 
-            scene.add(beacon);
+            worldState.scene.add(beacon);
 
             // Animate and remove after 5 seconds
             let elapsed = 0;
             const animateBeacon = () => {
                 elapsed += 16;
                 if (elapsed > 5000) {
-                    scene.remove(beacon);
+                    worldState.scene.remove(beacon);
                     return;
                 }
 
@@ -16019,12 +15612,9 @@
                 beacon.scale.set(pulse, 1, pulse);
                 beaconMat.opacity = 0.3 * (1 - elapsed / 5000);
 
-                // Follow agent if they move (prefer mesh position if available)
-                const currentPos = agent.mesh ? agent.mesh.position : agent.position;
-                if (currentPos) {
-                    beacon.position.x = currentPos.x;
-                    beacon.position.z = currentPos.z;
-                }
+                // Follow agent if they move
+                beacon.position.x = agent.mesh.position.x;
+                beacon.position.z = agent.mesh.position.z;
 
                 requestAnimationFrame(animateBeacon);
             };
@@ -16077,11 +15667,6 @@
             if (!agent || !agent.mesh) {
                 addCopilotMessage('Cannot takeover - agent not found or has no physical presence.', 'ai');
                 return;
-            }
-
-            // v6.5.1: Close observer mode if active - observer and takeover are mutually exclusive
-            if (agentObserverMode && agentObserverMode.active) {
-                exitAgentObserverMode();
             }
 
             // Initialize renderer if needed
@@ -16277,7 +15862,7 @@
             if (!agentTakeoverState.active || !agentTakeoverState.flyoutOpen) return;
 
             const agent = agentFleet.find(a => a.id === agentTakeoverState.controlledAgentId);
-            if (!agent || !agent.mesh || !scene) {
+            if (!agent || !agent.mesh || !worldState.scene) {
                 closeAgentTakeover();
                 return;
             }
@@ -16326,7 +15911,7 @@
                     agentTakeoverState.takeoverRenderer.setSize(width, height);
                 }
 
-                agentTakeoverState.takeoverRenderer.render(scene, agentTakeoverState.takeoverCamera);
+                agentTakeoverState.takeoverRenderer.render(worldState.scene, agentTakeoverState.takeoverCamera);
 
                 // Copy to visible canvas
                 const ctx = canvas.getContext('2d');
@@ -16606,49 +16191,37 @@
             // Get the HTML components from generateAgentPopOutHTML
             const htmlParts = generateAgentPopOutHTML(agent);
 
-            // v6.5.2: Build DOM directly to avoid document.write parsing issues
-            // Wait for about:blank to be ready
+            // Build complete HTML document using blob URL approach to avoid script tag parsing issues
+            // Use unicode escape for the script tag to avoid HTML parser issues
+            const htmlContent = '<!DOCTYPE html>\n<html lang="en">\n<head>\n' +
+                '<meta charset="UTF-8">\n' +
+                '<meta name="viewport" content="width=device-width, initial-scale=1.0">\n' +
+                '<title>' + htmlParts.title + '<\/title>\n' +
+                '<style>\n' + htmlParts.css + '\n<\/style>\n' +
+                '<\/head>\n<body>\n' +
+                htmlParts.body + '\n' +
+                '<scr' + 'ipt>\n' + htmlParts.js + '\n<\/scr' + 'ipt>\n' +
+                '<\/body>\n<\/html>';
+
+            // Create blob URL and navigate to it
+            const blob = new Blob([htmlContent], { type: 'text/html' });
+            const blobUrl = URL.createObjectURL(blob);
+            popOutWindow.location.href = blobUrl;
+
+            // Set up communication bridge after a small delay to ensure page loads
             setTimeout(() => {
-                if (!popOutWindow || popOutWindow.closed) return;
+                if (popOutWindow && !popOutWindow.closed) {
+                    popOutWindow.agentId = agentId;
+                    popOutWindow.parentGame = window;
+                }
+            }, 100);
 
-                const doc = popOutWindow.document;
-
-                // Set title
-                doc.title = htmlParts.title;
-
-                // Add meta tags
-                const meta1 = doc.createElement('meta');
-                meta1.charset = 'UTF-8';
-                doc.head.appendChild(meta1);
-
-                const meta2 = doc.createElement('meta');
-                meta2.name = 'viewport';
-                meta2.content = 'width=device-width, initial-scale=1.0';
-                doc.head.appendChild(meta2);
-
-                // Add styles
-                const style = doc.createElement('style');
-                style.textContent = htmlParts.css;
-                doc.head.appendChild(style);
-
-                // Add body content
-                doc.body.innerHTML = htmlParts.body;
-
-                // Set up communication bridge
-                popOutWindow.agentId = agentId;
-                popOutWindow.parentGame = window;
-
-                // Inject script
-                const scriptEl = doc.createElement('script');
-                scriptEl.textContent = htmlParts.js;
-                doc.body.appendChild(scriptEl);
-            }, 50);
-
-            // Handle window close
+            // Handle window close and cleanup blob URL
             const checkClosed = setInterval(() => {
                 if (popOutWindow.closed) {
                     clearInterval(checkClosed);
                     agentPopOutWindows.delete(agentId);
+                    URL.revokeObjectURL(blobUrl);
                 }
             }, 1000);
 
@@ -16925,7 +16498,7 @@
         // Render function called by pop-out windows to get agent view
         function renderPopOutAgentView(agentId, targetCanvas) {
             const agent = agentFleet.find(a => a.id === agentId);
-            if (!agent || !agent.mesh || !scene) return;
+            if (!agent || !agent.mesh || !worldState.scene) return;
 
             const ctx = targetCanvas.getContext('2d');
 
@@ -16960,7 +16533,7 @@
                 const origHeight = agentBodyCamRenderer.domElement.height;
                 agentBodyCamRenderer.setSize(targetCanvas.width, targetCanvas.height);
 
-                agentBodyCamRenderer.render(scene, agentBodyCamCamera);
+                agentBodyCamRenderer.render(worldState.scene, agentBodyCamCamera);
 
                 // Copy to target canvas
                 ctx.drawImage(agentBodyCamRenderer.domElement, 0, 0);
@@ -17025,7 +16598,7 @@
 
             agentFleet.forEach(agent => {
                 // v5.16.3: If agent has no mesh but scene is now ready, create it
-                if (!agent.mesh && scene) {
+                if (!agent.mesh && worldState.scene) {
                     createAgentMesh(agent);
                     if (agent.mesh) {
                         logAgentTask(agent, 'Spawned into world');
@@ -17061,8 +16634,7 @@
                 // Check if stuck
                 if (task.lastPosition) {
                     const moved = agent.mesh.position.distanceTo(task.lastPosition);
-                    // v6.4.0: Also check stuck when returning to ship
-                    if (moved < 0.01 && (task.state === 'moving' || task.state === 'returning')) {
+                    if (moved < 0.01 && task.state === 'moving') {
                         task.stuckCounter++;
                         if (task.stuckCounter > 50) {
                             logAgentTask(agent, 'Got stuck, picking new target');
@@ -17162,90 +16734,36 @@
             }
 
             // Move towards target if we have one
-            // v6.4.0: Also move when returning to ship
-            if (task.targetPosition && (task.state === 'moving' || task.state === 'returning')) {
+            if (task.targetPosition && task.state === 'moving') {
                 moveAgentTowards(agent, task.targetPosition, deltaTime);
             }
         }
 
-        // v6.4.0: Gatherer/Miner task - FULL HAULING CYCLE
-        // 1. Gather resources until inventory full
-        // 2. Return to ship to deposit
-        // 3. Repeat
+        // v5.16: Gatherer/Miner task - find and harvest resources
         function runGathererTask(agent) {
             const task = agent.taskState;
             const agentPos = agent.mesh.position;
             const isMiner = agent.type === 'miner';
 
-            // Initialize inventory if missing (backwards compatibility)
-            if (!task.inventory) task.inventory = [];
-            if (!task.carryingCapacity) task.carryingCapacity = 6 + Math.floor(agent.agentLevel / 2);
-
-            // Update capacity based on level
-            task.carryingCapacity = 6 + Math.floor(agent.agentLevel / 2);
-
-            // ===== STATE: DEPOSITING =====
-            // At ship, depositing resources
-            if (task.state === 'depositing') {
-                depositAgentInventory(agent);
-                return;
-            }
-
-            // ===== STATE: RETURNING =====
-            // Inventory full or returning - head to ship
-            if (task.state === 'returning' || task.inventory.length >= task.carryingCapacity) {
-                if (task.inventory.length === 0) {
-                    // Nothing to deposit, go back to gathering
-                    task.state = 'idle';
-                    task.targetObject = null;
-                    task.targetPosition = null;
-                    return;
-                }
-
-                // Check if we're at the ship
-                const shipPos = SHIP_STATE.position;
-                const distToShip = agentPos.distanceTo(shipPos);
-
-                if (distToShip < 5) {
-                    // At ship - deposit!
-                    task.state = 'depositing';
-                    task.targetPosition = null;
-                    logAgentTask(agent, `Arrived at ship with ${task.inventory.length} items!`);
-                    agent.statusMessage = `📦 Depositing ${task.inventory.length} items...`;
-                    updateAgentCardUI(agent);
-                    return;
-                }
-
-                // Not at ship yet - move towards it
-                task.state = 'returning';
-                task.targetPosition = shipPos.clone();
-                task.targetObject = null;
-                agent.statusMessage = `🚀 Returning to ship (${task.inventory.length}/${task.carryingCapacity})`;
-                updateAgentCardUI(agent);
-                return;
-            }
-
-            // ===== STATE: WORKING =====
-            // If we have a resource target, check if close enough to harvest
+            // If we have a target, check if we're close enough to interact
             if (task.targetObject && task.targetObject.parent) {
                 const dist = agentPos.distanceTo(task.targetObject.position);
                 if (dist < 2) {
                     // Close enough to interact
                     task.state = 'working';
-                    performAgentHarvest(agent, task.targetObject);
+                    performAgentAction(agent, task.targetObject);
                     return;
                 } else {
                     // Move towards target
                     task.state = 'moving';
                     task.targetPosition = task.targetObject.position.clone();
-                    agent.statusMessage = `🎯 Moving to ${task.targetObject.userData?.name || 'resource'}`;
                     return;
                 }
             }
 
-            // ===== STATE: IDLE - Find new resource =====
+            // Find a new resource target
             let bestTarget = null;
-            let bestDist = 40; // Increased search range
+            let bestDist = 30; // Max search range
 
             worldState.interactables.forEach(obj => {
                 if (!obj.parent) return;
@@ -17254,8 +16772,8 @@
 
                 // Filter by agent type
                 const isValidTarget = isMiner
-                    ? (type === 'rock' || name.includes('Ore') || name.includes('Crystal') || name.includes('Stone'))
-                    : (type === 'tree' || name.includes('Tree') || name.includes('Bush') || name.includes('Plant') || name.includes('Herb'));
+                    ? (type === 'rock' || name.includes('Ore') || name.includes('Crystal'))
+                    : (type === 'tree' || name.includes('Tree') || name.includes('Bush') || name.includes('Plant'));
 
                 if (!isValidTarget) return;
 
@@ -17270,177 +16788,13 @@
                 task.targetObject = bestTarget;
                 task.targetPosition = bestTarget.position.clone();
                 task.state = 'moving';
-                const invStatus = task.inventory.length > 0 ? ` [${task.inventory.length}/${task.carryingCapacity}]` : '';
-                agent.statusMessage = `🔍 Found ${bestTarget.userData?.name || 'resource'}${invStatus}`;
                 logAgentTask(agent, `Found ${bestTarget.userData?.name || 'resource'} at distance ${Math.floor(bestDist)}`);
             } else {
                 // No resources found, wander
                 if (!task.targetPosition || agentPos.distanceTo(task.targetPosition) < 2) {
                     task.targetPosition = getRandomWanderPosition(agentPos);
                     task.state = 'moving';
-                    agent.statusMessage = `🔎 Searching for resources...`;
                     logAgentTask(agent, 'No resources nearby, wandering...');
-                }
-            }
-        }
-
-        // v6.4.0: Agent harvests resource and adds to AGENT inventory (not player)
-        function performAgentHarvest(agent, target) {
-            const task = agent.taskState;
-            const data = target.userData;
-
-            if (!data || data.hp === undefined) return;
-
-            // Deal "damage" to resource
-            const damage = 2 + Math.floor(agent.agentLevel / 3);
-            data.hp -= damage;
-
-            // Visual feedback
-            target.scale.setScalar(0.9);
-            setTimeout(() => { if (target.parent) target.scale.setScalar(1); }, 100);
-
-            // Particles
-            if (particles) {
-                const particleColor = data.type === 'tree' ? 0x885522 : 0x888888;
-                particles.emit(target.position, 3, particleColor, { spread: 1.5, lifetime: 400, size: 0.1 });
-            }
-
-            // Swing animation for agent
-            if (agent.mesh) {
-                agent.mesh.rotation.y += 0.3;
-                setTimeout(() => { if (agent.mesh) agent.mesh.rotation.y -= 0.3; }, 150);
-            }
-
-            // Check if destroyed
-            if (data.hp <= 0) {
-                let itemName = 'Resource';
-                let itemCount = 1 + Math.floor(agent.agentLevel / 4);
-
-                if (data.type === 'tree') {
-                    itemName = Math.random() < 0.3 ? 'Fiber' : 'Log';
-                    itemCount = 2 + Math.floor(agent.agentLevel / 3);
-                } else if (data.type === 'rock') {
-                    const ores = ['Stone', 'Iron Ore', 'Copper Ore'];
-                    if (agent.agentLevel >= 3) ores.push('Silver Ore');
-                    if (agent.agentLevel >= 5) ores.push('Gold Ore');
-                    itemName = ores[Math.floor(Math.random() * ores.length)];
-                    itemCount = 2 + Math.floor(agent.agentLevel / 3);
-                } else if (data.name?.includes('Herb') || data.name?.includes('Plant')) {
-                    itemName = 'Herbs';
-                    itemCount = 1 + Math.floor(agent.agentLevel / 4);
-                }
-
-                // Add to AGENT inventory (not player!)
-                for (let i = 0; i < itemCount; i++) {
-                    if (task.inventory.length < task.carryingCapacity) {
-                        task.inventory.push(itemName);
-                    }
-                }
-
-                // Track earnings
-                agent.totalEarnings.items.push({ item: itemName, amount: itemCount });
-
-                // Visual/audio feedback
-                spawnFloater(target.position, `+${itemCount} ${itemName}`, '#ffdd00');
-                spawnFloater(agent.mesh.position, `📦 ${task.inventory.length}/${task.carryingCapacity}`, '#0ff');
-                AudioSystem.collect();
-
-                // Update agent status
-                const invFull = task.inventory.length >= task.carryingCapacity;
-                agent.statusMessage = invFull
-                    ? `📦 Inventory FULL! Returning to ship...`
-                    : `Got ${itemCount} ${itemName}! [${task.inventory.length}/${task.carryingCapacity}]`;
-                agent.progress = Math.min(100, agent.progress + 5);
-
-                logAgentTask(agent, `Harvested ${itemCount} ${itemName} (carrying ${task.inventory.length}/${task.carryingCapacity})`);
-                trackAgentAction(agent, true, itemCount * 2);
-                updateAgentCardUI(agent);
-
-                // Remove from world
-                scene.remove(target);
-                worldState.interactables = worldState.interactables.filter(x => x !== target);
-
-                // Clear target
-                task.targetObject = null;
-                task.targetPosition = null;
-                task.state = 'idle';
-
-                // If full, trigger return
-                if (invFull) {
-                    task.state = 'returning';
-                }
-            }
-
-            task.actionCooldown = 400; // Slightly faster than before
-        }
-
-        // v6.4.0: Agent deposits inventory at ship
-        function depositAgentInventory(agent) {
-            const task = agent.taskState;
-
-            if (task.inventory.length === 0) {
-                task.state = 'idle';
-                agent.statusMessage = 'Inventory empty, returning to work!';
-                updateAgentCardUI(agent);
-                return;
-            }
-
-            // Deposit one item per tick (animated feel)
-            const item = task.inventory.shift();
-
-            // Add to player inventory
-            addToInventory(item, 1);
-
-            // Track stats
-            task.totalHauled = (task.totalHauled || 0) + 1;
-
-            // Visual feedback at ship
-            if (SHIP_STATE.mesh) {
-                const shipPos = SHIP_STATE.position;
-                spawnFloater(new THREE.Vector3(shipPos.x, shipPos.y + 2, shipPos.z), `+1 ${item}`, '#00ff88');
-            }
-
-            // Update status
-            if (task.inventory.length > 0) {
-                agent.statusMessage = `📦 Depositing... (${task.inventory.length} left)`;
-            } else {
-                // All deposited!
-                task.tripsCompleted = (task.tripsCompleted || 0) + 1;
-                const totalItems = task.totalHauled || 0;
-
-                agent.statusMessage = `✅ Delivery complete! Trip #${task.tripsCompleted}`;
-                logAgentTask(agent, `Completed delivery #${task.tripsCompleted} (${totalItems} total items hauled)`);
-
-                // Bonus XP for completing a trip
-                const tripXP = 10 + task.tripsCompleted * 2;
-                grantAgentXP(agent, tripXP);
-
-                // Celebrate!
-                if (particles && agent.mesh) {
-                    particles.emit(agent.mesh.position, 10, 0x00ff88, { spread: 2, lifetime: 800, size: 0.15 });
-                }
-                spawnFloater(agent.mesh.position, `🎉 Trip #${task.tripsCompleted}!`, '#ffd700');
-
-                // Return to gathering after short delay
-                task.state = 'idle';
-                task.actionCooldown = 500;
-            }
-
-            updateAgentCardUI(agent);
-            task.actionCooldown = 200; // Fast deposit animation
-        }
-
-        // v6.4.0: Grant XP to agent (for trip completion bonuses etc)
-        function grantAgentXP(agent, xp) {
-            if (typeof trackAgentAction === 'function') {
-                // Use existing XP system
-                agent.agentXP = (agent.agentXP || 0) + xp;
-                const xpNeeded = getAgentXPForLevel(agent.agentLevel);
-                if (agent.agentXP >= xpNeeded) {
-                    agent.agentLevel++;
-                    agent.agentXP -= xpNeeded;
-                    spawnFloater(agent.mesh?.position || agent.position, `⬆️ Level ${agent.agentLevel}!`, '#ffd700');
-                    logAgentTask(agent, `Leveled up to ${agent.agentLevel}!`);
                 }
             }
         }
@@ -17673,12 +17027,6 @@
                 const speed = agent.type === 'scout' || agent.type === 'explorer' ? 4 : 3;
                 agent.mesh.position.x += direction.x * deltaTime * speed;
                 agent.mesh.position.z += direction.z * deltaTime * speed;
-
-                // v6.5.1: Snap agent to terrain height as they move
-                if (typeof getTerrainHeight === 'function') {
-                    agent.mesh.position.y = getTerrainHeight(agent.mesh.position.x, agent.mesh.position.z);
-                }
-
                 agent.position.copy(agent.mesh.position);
             }
         }
@@ -17742,7 +17090,7 @@
                 updateAgentCardUI(agent);
 
                 // Remove from world
-                scene.remove(target);
+                worldState.scene.remove(target);
                 worldState.interactables = worldState.interactables.filter(x => x !== target);
 
                 // Clear target
@@ -17809,7 +17157,7 @@
                 updateAgentCardUI(agent);
 
                 // Remove mob
-                scene.remove(targetMesh);
+                worldState.scene.remove(targetMesh);
                 worldState.mobs = worldState.mobs.filter(m => m.mesh !== targetMesh);
 
                 task.targetObject = null;
@@ -23682,7 +23030,7 @@
 
         // v5.18: Create Battery Charger structure
         function createBatteryCharger(x, y, z, efficiency = 100) {
-            if (!scene) return null;
+            if (!worldState.scene) return null;
 
             const group = new THREE.Group();
             group.position.set(x, y + 0.1, z);
@@ -23770,7 +23118,7 @@
                 chargerData: chargerData
             };
 
-            scene.add(group);
+            worldState.scene.add(group);
             worldState.structures.push(chargerData);
             worldState.interactables.push(group);
 
@@ -23788,16 +23136,11 @@
 
             // Clamp to world bounds
             const halfWorld = (CONFIG.WORLD_SIZE / 2) * CONFIG.TILE_SIZE;
-            const clampedX = Math.max(-halfWorld + 5, Math.min(halfWorld - 5, newX));
-            const clampedZ = Math.max(-halfWorld + 5, Math.min(halfWorld - 5, newZ));
-
-            // v6.5.1: Get terrain height at target position
-            let targetY = agent.mesh.position.y;
-            if (typeof getTerrainHeight === 'function') {
-                targetY = getTerrainHeight(clampedX, clampedZ);
-            }
-
-            agent.targetPosition = new THREE.Vector3(clampedX, targetY, clampedZ);
+            agent.targetPosition = new THREE.Vector3(
+                Math.max(-halfWorld + 5, Math.min(halfWorld - 5, newX)),
+                agent.mesh.position.y,
+                Math.max(-halfWorld + 5, Math.min(halfWorld - 5, newZ))
+            );
 
             agent.taskState.state = 'moving';
             agent.taskState.targetPosition = agent.targetPosition.clone();
@@ -26696,9 +26039,8 @@
             const isViewerIndependentMode = multiplayerState.enabled && !multiplayerState.isHost && !multiplayerState.followMode;
 
             // Gated input for normal player control
-            // v6.5.0: Also block input in observer mode (watching agent, not controlling player)
-            const hasKeyInput = viewerCanControl && !isViewerIndependentMode && !agentObserverMode.active && rawKeyInput;
-            const hasJoystickInput = viewerCanControl && !isViewerIndependentMode && !agentObserverMode.active && rawJoystickInput;
+            const hasKeyInput = viewerCanControl && !isViewerIndependentMode && rawKeyInput;
+            const hasJoystickInput = viewerCanControl && !isViewerIndependentMode && rawJoystickInput;
 
             // v5.5: Disable autopilot if player takes manual control
             if ((hasKeyInput || hasJoystickInput) && !isViewerIndependentMode) {
@@ -26767,8 +26109,7 @@
 
             // Click-to-move (using pre-allocated vector)
             // v6.0: Gated by follow mode - viewers can't click-to-move when following
-            // v6.5.0: Also blocked in observer mode
-            if(worldState.target && viewerCanControl && !agentObserverMode.active) {
+            if(worldState.target && viewerCanControl) {
                 _tempVec3A.subVectors(worldState.target, p.position);
                 _tempVec3A.y = 0;
                 const dist = _tempVec3A.length();
@@ -26805,30 +26146,9 @@
                 }
             }
 
-            // v6.5.0: Camera follows player OR observed agent
-            if (agentObserverMode.active) {
-                // OBSERVER MODE: Follow the agent
-                const observedAgent = agentFleet.find(a => a.id === agentObserverMode.observedAgentId);
-                if (observedAgent && observedAgent.mesh) {
-                    const agentPos = observedAgent.mesh.position;
-                    camera.position.lerp(agentPos.clone().add(_camOffset), 0.08);
-                    camera.lookAt(agentPos.clone().add(_camLookOffset));
-                } else if (observedAgent && observedAgent.position) {
-                    // Fallback to stored position
-                    const agentPos = new THREE.Vector3(observedAgent.position.x, observedAgent.position.y || 0, observedAgent.position.z);
-                    camera.position.lerp(agentPos.clone().add(_camOffset), 0.08);
-                    camera.lookAt(agentPos.clone().add(_camLookOffset));
-                } else {
-                    // Agent lost, exit observer mode
-                    exitAgentObserverMode();
-                    camera.position.lerp(p.position.clone().add(_camOffset), 0.08);
-                    camera.lookAt(p.position.clone().add(_camLookOffset));
-                }
-            } else {
-                // Normal mode: Follow player
-                camera.position.lerp(p.position.clone().add(_camOffset), 0.08);
-                camera.lookAt(p.position.clone().add(_camLookOffset));
-            }
+            // Camera follows player
+            camera.position.lerp(p.position.clone().add(_camOffset), 0.08);
+            camera.lookAt(p.position.clone().add(_camLookOffset));
 
             // v5.15: COMPREHENSIVE ROBOT ANIMATION SYSTEM
             if (p.userData.isRobot && p.userData.bones && p.userData.animation) {
@@ -27082,9 +26402,6 @@
 
             // v4.0: Update particles
             if (particles) particles.update(dt);
-
-            // v6.5.2: Update observer beacon (follows agent, animates)
-            updateObserverBeacon();
 
             // v4.4: Update environmental particles
             if (envParticles && worldState.player) {
@@ -28213,13 +27530,6 @@
                     }
                     return;
                 }
-            }
-
-            // v6.5.0: Escape: Exit Agent Observer Mode first
-            if (e.key === 'Escape' && agentObserverMode.active) {
-                exitAgentObserverMode();
-                e.preventDefault();
-                return;
             }
 
             // Escape: Close Copilot chat if open

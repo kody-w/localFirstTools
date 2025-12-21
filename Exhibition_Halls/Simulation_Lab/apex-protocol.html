@@ -42,6 +42,7 @@
             pointer-events: none;
             font-weight: 600;
             text-shadow: 0 2px 8px rgba(0,0,0,0.8), 0 0 20px rgba(0,0,0,0.5);
+            display: none; /* Hiding DOM HUD for Holographic Mode */
         }
 
         /* Health Bar - Bottom Left */
@@ -157,6 +158,7 @@
             left: 50%;
             transform: translate(-50%, -50%);
             pointer-events: none;
+            /* display: none; Hiding DOM Crosshair */
         }
 
         #crosshair svg {
@@ -612,6 +614,7 @@
             border: 3px solid rgba(255,255,255,0.2);
             border-radius: 12px;
             overflow: hidden;
+            display: none; /* Hiding DOM Minimap */
         }
 
         #minimap-canvas {
@@ -1079,12 +1082,47 @@
         import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
         import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
         import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { OBJLoader } from 'three/addons/loaders/OBJLoader.js';
+
+        // Texture Loading
+        const textureLoader = new THREE.TextureLoader();
+        const textures = {
+            floor: textureLoader.load('../../assets/textures/apex/floor_grid.png'),
+            wall: textureLoader.load('../../assets/textures/apex/wall_hex.png'),
+            metal: textureLoader.load('../../assets/textures/apex/metal_plate.png'),
+            enemy: textureLoader.load('../../assets/textures/apex/enemy_hex.png'),
+            holo: textureLoader.load('../../assets/textures/apex/holo_atlas.png')
+        };
+
+        // Configure textures
+        textures.floor.wrapS = THREE.RepeatWrapping;
+        textures.floor.wrapT = THREE.RepeatWrapping;
+        textures.floor.repeat.set(16, 16);
+
+        textures.wall.wrapS = THREE.RepeatWrapping;
+        textures.wall.wrapT = THREE.RepeatWrapping;
+        textures.wall.repeat.set(32, 4);
+
+        textures.metal.wrapS = THREE.RepeatWrapping;
+        textures.metal.wrapT = THREE.RepeatWrapping;
+        textures.metal.repeat.set(1, 4);
+
+        textures.enemy.wrapS = THREE.RepeatWrapping;
+        textures.enemy.wrapT = THREE.RepeatWrapping;
+        textures.enemy.repeat.set(2, 2);
 
         // ═══════════════════════════════════════════════════════════════
         // ASSET MANIFEST SYSTEM
         // ═══════════════════════════════════════════════════════════════
         const MANIFEST_PATH = '../../data/games/apex-protocol/manifest.json';
         const ENEMY_BASE_PATH = '../../data/games/apex-protocol/';
+        
+        // Mech Parts Cache
+        const MechParts = {
+            torso: {},
+            leg: {},
+            head: {}
+        };
 
         const gameAssets = {
             manifest: null,
@@ -1100,6 +1138,29 @@
         async function loadManifest() {
             try {
                 updateLoadingText('LOADING ASSET MANIFEST...');
+                
+                // Pre-load Mech Parts (OBJ)
+                const objLoader = new OBJLoader();
+                const parts = ['light', 'standard', 'heavy'];
+                const types = ['torso', 'leg', 'head'];
+                
+                updateLoadingText('ASSEMBLING MECH PARTS...');
+                
+                for (const type of types) {
+                    for (const part of parts) {
+                        const url = `../../assets/models/apex/parts/${type}_${part}.obj`;
+                        try {
+                            const object = await new Promise((resolve, reject) => {
+                                objLoader.load(url, resolve, undefined, reject);
+                            });
+                            MechParts[type][part] = object.children[0].geometry; // Store geometry
+                            console.log(`[APEX] Loaded mech part: ${type}_${part}`);
+                        } catch (e) {
+                            console.warn(`[APEX] Failed to load mech part: ${type}_${part}`, e);
+                        }
+                    }
+                }
+
                 const response = await fetch(MANIFEST_PATH);
                 if (!response.ok) throw new Error('Failed to load manifest');
                 gameAssets.manifest = await response.json();
@@ -1894,6 +1955,175 @@
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // HOLOGRAPHIC HUD SYSTEM
+        // ═══════════════════════════════════════════════════════════════
+        class HoloHUD {
+            constructor(camera) {
+                this.camera = camera;
+                this.group = new THREE.Group();
+                this.camera.add(this.group);
+                
+                // Position the HUD in front of the camera
+                this.group.position.set(0, 0, -1);
+                
+                this.initElements();
+            }
+            
+            initElements() {
+                const atlas = textures.holo;
+                
+                // Helper to create a sprite from the atlas
+                const createHoloElement = (u, v, w, h, scale, x, y, z) => {
+                    const geometry = new THREE.PlaneGeometry(scale, scale);
+                    
+                    // Clone texture to allow independent UV mapping if needed, 
+                    // but for static atlas we can just set UVs on geometry
+                    const material = new THREE.MeshBasicMaterial({
+                        map: atlas,
+                        transparent: true,
+                        opacity: 0.8,
+                        blending: THREE.AdditiveBlending,
+                        depthTest: false,
+                        depthWrite: false
+                    });
+                    
+                    // Calculate UVs
+                    // Atlas is 1024x1024. 
+                    // u,v are top-left coordinates in pixels
+                    // w,h are width/height in pixels
+                    const u0 = u / 1024;
+                    const v1 = 1 - (v / 1024); // Flip Y
+                    const u1 = (u + w) / 1024;
+                    const v0 = 1 - ((v + h) / 1024);
+                    
+                    const uvs = new Float32Array([
+                        u0, v1,
+                        u1, v1,
+                        u0, v0,
+                        u1, v0
+                    ]);
+                    geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+                    
+                    const mesh = new THREE.Mesh(geometry, material);
+                    mesh.position.set(x, y, z);
+                    return mesh;
+                };
+                
+                // 1. Health Ring (Top-Left quadrant: 0,0 to 512,512)
+                // Center of ring in atlas is 256,256. Radius 200.
+                // Let's grab the whole quadrant.
+                this.healthRing = createHoloElement(0, 0, 512, 512, 0.3, -0.4, -0.25, 0);
+                this.group.add(this.healthRing);
+                
+                // 2. Ammo Counter (Top-Right quadrant: 512,0 to 1024,512)
+                this.ammoRing = createHoloElement(512, 0, 512, 512, 0.25, 0.4, -0.25, 0);
+                this.group.add(this.ammoRing);
+                
+                // 3. Radar (Bottom-Left quadrant: 0,512 to 512,1024)
+                this.radar = createHoloElement(0, 512, 512, 512, 0.2, -0.5, 0.3, 0);
+                // Tilt radar slightly
+                this.radar.rotation.x = -0.2;
+                this.group.add(this.radar);
+                
+                // 4. Crosshair (Bottom-Right quadrant: 512,512 to 1024,1024)
+                // But we want just the center part for the crosshair
+                // Center is 768, 768. Size ~200x200.
+                this.crosshair = createHoloElement(512, 512, 512, 512, 0.05, 0, 0, -0.5);
+                // this.group.add(this.crosshair); // Disable holographic crosshair to use DOM one
+
+                // 5. Radar Blips Pool
+                this.blips = [];
+                const blipGeom = new THREE.CircleGeometry(0.008, 8);
+                const blipMat = new THREE.MeshBasicMaterial({ color: 0xff0000, depthTest: false, depthWrite: false });
+                
+                for (let i = 0; i < 20; i++) {
+                    const blip = new THREE.Mesh(blipGeom, blipMat);
+                    blip.visible = false;
+                    // Add to radar mesh so they move/rotate with it
+                    // Radar is 0.2 scale. Blip needs to be positioned relative to that.
+                    // But radar is a PlaneGeometry(0.2, 0.2).
+                    // So local coordinates are roughly -0.1 to 0.1.
+                    // We need to offset Z slightly to be in front of radar plane.
+                    blip.position.z = 0.01; 
+                    this.radar.add(blip);
+                    this.blips.push(blip);
+                }
+            }
+            
+            update(dt) {
+                // Animate HUD elements
+                // Pulse effect
+                const pulse = 1 + Math.sin(Date.now() * 0.005) * 0.02;
+                this.healthRing.scale.set(pulse, pulse, 1);
+                
+                // Rotate ammo ring slowly
+                this.ammoRing.rotation.z -= 0.001;
+                
+                // Update Health Ring based on player health
+                if (state.player.health < 30) {
+                    this.healthRing.material.color.setHex(0xff0000);
+                } else {
+                    this.healthRing.material.color.setHex(0xffffff);
+                }
+
+                // Update Radar Blips
+                // Reset all blips
+                this.blips.forEach(b => b.visible = false);
+
+                if (state.enemies) {
+                    let blipIndex = 0;
+                    const radarRange = 40; // 40 meters range
+                    const radarRadius = 0.08; // Visual radius on the radar mesh (mesh is 0.2 wide, so 0.1 is edge)
+
+                    // Player rotation (yaw)
+                    // Camera rotation Y is the yaw.
+                    // We want to rotate enemy relative pos by -camera.rotation.y
+                    const yaw = camera.rotation.y;
+                    const cos = Math.cos(yaw);
+                    const sin = Math.sin(yaw);
+
+                    for (const enemy of state.enemies) {
+                        if (blipIndex >= this.blips.length) break;
+                        if (!enemy.mesh || enemy.health <= 0) continue;
+
+                        // Relative position
+                        const dx = enemy.mesh.position.x - state.player.position.x;
+                        const dz = enemy.mesh.position.z - state.player.position.z;
+
+                        // Rotate into player's local space
+                        // Standard 2D rotation:
+                        // x' = x cos - z sin
+                        // z' = x sin + z cos
+                        // But we want to align with camera forward (-Z).
+                        // If camera rot is 0, forward is -Z.
+                        // If enemy is at (0, -10), dx=0, dz=-10.
+                        // We want this to be "up" on radar (positive Y).
+                        
+                        const localX = dx * cos - dz * sin;
+                        const localZ = dx * sin + dz * cos;
+
+                        // Map to radar
+                        // localX -> Radar X (Right is +X)
+                        // localZ -> Radar Y (Forward is -Z in world, but +Y on radar plane)
+                        // So radarY = -localZ
+                        
+                        const radarX = localX * (radarRadius / radarRange);
+                        const radarY = -localZ * (radarRadius / radarRange);
+
+                        // Check if within range (circular)
+                        if (radarX*radarX + radarY*radarY < radarRadius*radarRadius) {
+                            const blip = this.blips[blipIndex];
+                            blip.position.x = radarX;
+                            blip.position.y = radarY;
+                            blip.visible = true;
+                            blipIndex++;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // GAME STATE
         // ═══════════════════════════════════════════════════════════════
         const GameState = {
@@ -2062,12 +2292,15 @@
         // THREE.JS SETUP
         // ═══════════════════════════════════════════════════════════════
         let scene, camera, renderer, composer;
+        let holoHUD;
         let clock = new THREE.Clock();
+        let mainLight; // Global reference for light syncing
+        let cubeCamera, cubeRenderTarget; // For real-time reflections
 
         // ═══════════════════════════════════════════════════════════════
         // WEAPON VIEWMODEL SYSTEM (Halo-style)
         // ═══════════════════════════════════════════════════════════════
-        let viewmodelScene, viewmodelCamera;
+        let viewmodelScene, viewmodelCamera, vmLight;
         let currentViewmodel = null;
         const viewmodelState = {
             bobTime: 0,
@@ -2585,7 +2818,7 @@
             const vmAmbient = new THREE.AmbientLight(0xffffff, 0.6);
             viewmodelScene.add(vmAmbient);
 
-            const vmLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            vmLight = new THREE.DirectionalLight(0xffffff, 0.8);
             vmLight.position.set(1, 1, 1);
             viewmodelScene.add(vmLight);
 
@@ -2598,14 +2831,29 @@
         }
 
         function switchViewmodel(weaponName) {
+            console.log('[APEX] Switching viewmodel to:', weaponName);
+
             // Remove current viewmodel
             if (currentViewmodel) {
                 viewmodelScene.remove(currentViewmodel);
             }
 
+            // Safety: Remove any other meshes/groups that might be lingering (ghost models)
+            // We iterate backwards to safely remove items
+            for (let i = viewmodelScene.children.length - 1; i >= 0; i--) {
+                const child = viewmodelScene.children[i];
+                // Keep lights and camera, remove everything else (meshes, groups)
+                if (!child.isLight && !child.isCamera) {
+                    viewmodelScene.remove(child);
+                }
+            }
+
             // Get viewmodel definition
             const vmDef = WeaponViewmodels[weaponName];
-            if (!vmDef) return;
+            if (!vmDef) {
+                console.error('[APEX] No viewmodel definition for:', weaponName);
+                return;
+            }
 
             // Build new viewmodel
             currentViewmodel = vmDef.build();
@@ -2629,6 +2877,35 @@
 
         function updateViewmodel(deltaTime) {
             if (!currentViewmodel) return;
+
+            // 1. Sync Lighting Direction
+            // Calculate main light direction relative to camera view
+            if (mainLight && vmLight) {
+                // Get light position in world space
+                const lightPos = mainLight.position.clone();
+                
+                // Convert to camera space (viewmodel scene is effectively camera space)
+                // We only care about direction for directional light
+                // Transform direction by camera's view matrix (inverse world matrix)
+                const lightDir = lightPos.sub(camera.position).normalize();
+                lightDir.transformDirection(camera.matrixWorldInverse);
+                
+                // Update viewmodel light
+                vmLight.position.copy(lightDir);
+            }
+
+            // 2. Update Reflection Probe (every 5 frames to save perf)
+            if (cubeCamera && state.frameCount % 5 === 0) {
+                // Hide viewmodel so it doesn't reflect itself
+                const vmVisible = currentViewmodel.visible;
+                currentViewmodel.visible = false;
+                
+                // Move probe to camera position
+                cubeCamera.position.copy(camera.position);
+                cubeCamera.update(renderer, scene);
+                
+                currentViewmodel.visible = vmVisible;
+            }
 
             const weapon = state.weapons[state.currentWeapon];
             const vmDef = WeaponViewmodels[weapon.name];
@@ -2772,6 +3049,10 @@
 
             camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
             camera.position.copy(state.player.position);
+            
+            // Initialize HoloHUD
+            holoHUD = new HoloHUD(camera);
+            scene.add(camera); // Ensure camera is in scene so HUD renders
 
             renderer = new THREE.WebGLRenderer({
                 canvas: canvas,
@@ -2799,7 +3080,7 @@
             const ambientLight = new THREE.AmbientLight(0x404060, 0.4);
             scene.add(ambientLight);
 
-            const mainLight = new THREE.DirectionalLight(0xffffff, 1);
+            mainLight = new THREE.DirectionalLight(0xffffff, 1);
             mainLight.position.set(20, 40, 20);
             mainLight.castShadow = true;
             mainLight.shadow.mapSize.width = 2048;
@@ -2811,6 +3092,12 @@
             mainLight.shadow.camera.top = 60;
             mainLight.shadow.camera.bottom = -60;
             scene.add(mainLight);
+
+            // Real-time Reflection Probe (CubeCamera)
+            // Low resolution for performance, but enough for scope reflections
+            cubeRenderTarget = new THREE.WebGLCubeRenderTarget(128);
+            cubeCamera = new THREE.CubeCamera(0.1, 100, cubeRenderTarget);
+            scene.add(cubeCamera);
 
             const rimLight1 = new THREE.DirectionalLight(0x00ffff, 0.5);
             rimLight1.position.set(-30, 20, -30);
@@ -2847,7 +3134,8 @@
         function createArena() {
             const groundGeometry = new THREE.CircleGeometry(state.arenaRadius, 64);
             const groundMaterial = new THREE.MeshStandardMaterial({
-                color: 0x3a3a5e,
+                color: 0xffffff,
+                map: textures.floor,
                 metalness: 0.6,
                 roughness: 0.5,
                 emissive: 0x101020,
@@ -2866,7 +3154,8 @@
                 state.arenaRadius, state.arenaRadius, 20, 64, 1, true
             );
             const wallMaterial = new THREE.MeshStandardMaterial({
-                color: 0x2a2a4a,
+                color: 0xffffff,
+                map: textures.wall,
                 metalness: 0.7,
                 roughness: 0.3,
                 side: THREE.BackSide,
@@ -2924,7 +3213,8 @@
 
             const pillarGeometry = new THREE.CylinderGeometry(1.5, 2, 15, 8);
             const pillarMaterial = new THREE.MeshStandardMaterial({
-                color: 0x4a4a7e,
+                color: 0xffffff,
+                map: textures.metal,
                 metalness: 0.7,
                 roughness: 0.3,
                 emissive: 0x101030,
@@ -3071,6 +3361,7 @@
 
             const bodyMat = new THREE.MeshStandardMaterial({
                 color: config.color,
+                map: textures.enemy,
                 metalness: isTank ? 0.8 : 0.6,
                 roughness: isTank ? 0.2 : 0.3,
                 emissive: config.color,
@@ -3203,6 +3494,54 @@
             eyeGroup.position.y = bodyHeight + s * 1.2;
             group.add(eyeGroup);
             group.userData.animParts.eyeGroup = eyeGroup;
+
+            // === LAYER 5: LIMBS (Animated) ===
+            // Legs
+            const legGroup = new THREE.Group();
+            legGroup.name = 'legs';
+            
+            const legWidth = s * (isTank ? 0.4 : 0.2);
+            const legHeight = s * 1.2;
+            const legGeom = new THREE.BoxGeometry(legWidth, legHeight, legWidth);
+            const legMat = new THREE.MeshStandardMaterial({ color: 0x333333, metalness: 0.8, roughness: 0.2 });
+            
+            const leftLeg = new THREE.Mesh(legGeom, legMat);
+            leftLeg.position.set(-s * 0.4, s * 0.6, 0);
+            leftLeg.name = 'leftLeg';
+            legGroup.add(leftLeg);
+            
+            const rightLeg = new THREE.Mesh(legGeom, legMat);
+            rightLeg.position.set(s * 0.4, s * 0.6, 0);
+            rightLeg.name = 'rightLeg';
+            legGroup.add(rightLeg);
+            
+            group.add(legGroup);
+            group.userData.animParts.legs = { left: leftLeg, right: rightLeg };
+
+            // Arms (if not Rusher)
+            if (!isRusher) {
+                const armGroup = new THREE.Group();
+                armGroup.name = 'arms';
+                
+                const armWidth = s * (isTank ? 0.35 : 0.18);
+                const armLength = s * 1.0;
+                const armGeom = new THREE.BoxGeometry(armWidth, armLength, armWidth);
+                
+                const leftArm = new THREE.Mesh(armGeom, legMat);
+                leftArm.position.set(-s * 0.7, bodyHeight, 0);
+                leftArm.rotation.z = 0.2;
+                leftArm.name = 'leftArm';
+                armGroup.add(leftArm);
+                
+                const rightArm = new THREE.Mesh(armGeom, legMat);
+                rightArm.position.set(s * 0.7, bodyHeight, 0);
+                rightArm.rotation.z = -0.2;
+                rightArm.name = 'rightArm';
+                armGroup.add(rightArm);
+                
+                group.add(armGroup);
+                group.userData.animParts.arms = { left: leftArm, right: rightArm };
+            }
 
             // === LAYER 6: CABLES/CONDUITS (animated secondary motion) ===
             const cablesGroup = new THREE.Group();
@@ -4507,7 +4846,8 @@
         }
 
         function switchWeapon(index) {
-            if (index === state.currentWeapon) return;
+            // Allow switching to the same index if we want to force a refresh (e.g. on pickup)
+            // if (index === state.currentWeapon) return; 
             if (index < 0 || index >= state.weapons.length) return;
 
             // Descope when switching weapons
@@ -6768,6 +7108,7 @@
                 GrenadeSystem.update(deltaTime);
                 updateWeaponPickups(deltaTime);
                 AnimationQueue.update(deltaTime);
+                if (holoHUD) holoHUD.update(deltaTime);
 
                 if (state.combo > 0) {
                     state.comboTimer -= deltaTime;
