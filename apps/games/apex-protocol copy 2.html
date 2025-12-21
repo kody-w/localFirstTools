@@ -208,6 +208,85 @@
             100% { opacity: 0; transform: translateX(50px); }
         }
 
+        /* Streamer Mode UI */
+        #chat-overlay {
+            position: absolute;
+            top: 150px;
+            left: 20px;
+            width: 300px;
+            height: 400px;
+            overflow: hidden;
+            pointer-events: none;
+            font-family: 'Segoe UI', sans-serif;
+            text-shadow: 1px 1px 2px black;
+            display: none;
+        }
+
+        .chat-message {
+            margin-bottom: 8px;
+            font-size: 14px;
+            animation: chatFadeIn 0.3s ease-out;
+        }
+
+        .chat-user {
+            font-weight: bold;
+            color: #aaffaa;
+        }
+
+        .chat-text {
+            color: #ffffff;
+        }
+
+        @keyframes chatFadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+
+        #vote-overlay {
+            position: absolute;
+            top: 100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 20px;
+            border-radius: 10px;
+            border: 2px solid #aaffaa;
+            text-align: center;
+            display: none;
+            min-width: 300px;
+        }
+
+        #vote-title {
+            color: #aaffaa;
+            font-size: 24px;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+
+        .vote-option {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+            font-size: 18px;
+            color: white;
+        }
+
+        .vote-bar-bg {
+            width: 100%;
+            height: 10px;
+            background: #333;
+            margin-top: 5px;
+            border-radius: 5px;
+        }
+
+        .vote-bar-fill {
+            height: 100%;
+            background: #aaffaa;
+            width: 0%;
+            transition: width 0.5s;
+            border-radius: 5px;
+        }
+
         /* Controls Hint - Bottom Center */
         #controls-hint {
             position: absolute;
@@ -857,14 +936,29 @@
             <canvas id="minimap-canvas"></canvas>
         </div>
 
+        <div id="chat-overlay"></div>
+        <div id="vote-overlay">
+            <div id="vote-title">CHAT VOTE</div>
+            <div id="vote-options"></div>
+            <div id="vote-timer" style="margin-top: 10px; color: #ffff00;">Time left: 10s</div>
+        </div>
+
         <div id="controls-hint" class="hud">
             <!-- Keyboard hints -->
-            <span class="kb-only"><span class="key-hint">WASD</span> Move</span>
-            <span class="kb-only"><span class="key-hint">MOUSE</span> Aim</span>
-            <span class="kb-only"><span class="key-hint">LMB</span> Fire</span>
-            <span class="kb-only"><span class="key-hint">R</span> Reload</span>
-            <span class="kb-only"><span class="key-hint">1-4</span> Weapons</span>
-            <span class="kb-only"><span class="key-hint">ESC</span> Pause</span>
+            <span class="kb-prompt"><span class="key-hint">WASD</span> Move</span>
+            <span class="kb-prompt"><span class="key-hint">SPACE</span> Jump</span>
+            <span class="kb-prompt"><span class="key-hint">MOUSE</span> Aim</span>
+            <span class="kb-prompt"><span class="key-hint">LMB</span> Fire</span>
+            <span class="kb-prompt"><span class="key-hint">R</span> Reload</span>
+            <span class="kb-prompt"><span class="key-hint">1-4</span> Weapons</span>
+            <span class="kb-prompt"><span class="key-hint">ESC</span> Pause</span>
+
+            <!-- Gamepad hints -->
+            <span class="gp-prompt">L-STICK Move</span>
+            <span class="gp-prompt"><span class="xbox-button xbox-a">A</span> Jump</span>
+            <span class="gp-prompt">RT Fire</span>
+            <span class="gp-prompt"><span class="xbox-button xbox-x">X</span> Reload</span>
+            <span class="gp-prompt"><span class="xbox-button xbox-lb">LB</span>/<span class="xbox-button xbox-rb">RB</span> Weapon</span>
         </div>
 
         <div id="wave-announce">
@@ -936,6 +1030,13 @@
                     <span>Auto-switch on input:</span>
                     <label class="switch">
                         <input type="checkbox" id="auto-switch-input" checked>
+                        <span class="slider"></span>
+                    </label>
+                </div>
+                <div class="auto-switch-toggle">
+                    <span>Streamer Mode:</span>
+                    <label class="switch">
+                        <input type="checkbox" id="streamer-mode-toggle">
                         <span class="slider"></span>
                     </label>
                 </div>
@@ -1319,8 +1420,337 @@
             frameCount: 0,
             lastFpsUpdate: 0,
 
-            pointerLocked: false
+            pointerLocked: false,
+            
+            // Streamer Mode State
+            streamerMode: false,
+            chatTimer: 0,
+            voteTimer: 0,
+            isVoting: false,
+            voteOptions: [],
+            voteCounts: {},
+            activeModifiers: [],
+
+            // Ghost Replay System
+            ghostRecording: [],
+            ghostPlayback: null,
+            ghostMesh: null,
+            isRecording: false
         };
+
+        // ═══════════════════════════════════════════════════════════════
+        // GHOST REPLAY SYSTEM
+        // ═══════════════════════════════════════════════════════════════
+        const GhostSystem = {
+            maxFrames: 3600, // ~1 minute at 60fps (circular buffer or cap)
+            recordRate: 0.05, // Record every 50ms
+            timer: 0,
+            
+            init: () => {
+                // Check for saved run
+                const savedRun = localStorage.getItem('apex_ghost_run');
+                if (savedRun) {
+                    try {
+                        state.ghostPlayback = JSON.parse(savedRun);
+                        console.log('[GHOST] Loaded previous run:', state.ghostPlayback.length, 'frames');
+                    } catch (e) {
+                        console.error('[GHOST] Failed to load run', e);
+                    }
+                }
+            },
+
+            startRecording: () => {
+                state.ghostRecording = [];
+                state.isRecording = true;
+                GhostSystem.timer = 0;
+            },
+
+            stopRecording: () => {
+                state.isRecording = false;
+                if (state.ghostRecording.length > 100) { // Only save substantial runs
+                    localStorage.setItem('apex_ghost_run', JSON.stringify(state.ghostRecording));
+                    console.log('[GHOST] Run saved!');
+                }
+            },
+
+            update: (deltaTime) => {
+                // RECORDING
+                if (state.isRecording && state.current === GameState.PLAYING) {
+                    GhostSystem.timer += deltaTime;
+                    if (GhostSystem.timer >= GhostSystem.recordRate) {
+                        GhostSystem.timer = 0;
+                        
+                        // Record frame
+                        const frame = {
+                            t: Math.round(state.time * 100) / 100,
+                            p: [
+                                Math.round(state.player.position.x * 100) / 100,
+                                Math.round(state.player.position.y * 100) / 100,
+                                Math.round(state.player.position.z * 100) / 100
+                            ],
+                            r: Math.round(state.player.rotation.y * 100) / 100,
+                            f: state.input.fire // Is firing?
+                        };
+                        state.ghostRecording.push(frame);
+                    }
+                }
+
+                // PLAYBACK
+                if (state.ghostPlayback && state.ghostMesh) {
+                    const playbackTime = state.time;
+                    
+                    // Find current frame (simple linear search for now, optimization: keep index)
+                    // Since time is monotonic, we can just track the index
+                    if (!state.ghostIndex) state.ghostIndex = 0;
+                    
+                    while (state.ghostIndex < state.ghostPlayback.length - 1 && 
+                           state.ghostPlayback[state.ghostIndex + 1].t < playbackTime) {
+                        state.ghostIndex++;
+                    }
+
+                    const currentFrame = state.ghostPlayback[state.ghostIndex];
+                    const nextFrame = state.ghostPlayback[state.ghostIndex + 1];
+
+                    if (currentFrame && nextFrame) {
+                        // Interpolate
+                        const duration = nextFrame.t - currentFrame.t;
+                        const progress = (playbackTime - currentFrame.t) / duration;
+                        const clampedProgress = Math.max(0, Math.min(1, progress));
+
+                        state.ghostMesh.position.set(
+                            currentFrame.p[0] + (nextFrame.p[0] - currentFrame.p[0]) * clampedProgress,
+                            currentFrame.p[1] + (nextFrame.p[1] - currentFrame.p[1]) * clampedProgress,
+                            currentFrame.p[2] + (nextFrame.p[2] - currentFrame.p[2]) * clampedProgress
+                        );
+                        
+                        // Rotation interpolation (shortest path)
+                        let rotDiff = nextFrame.r - currentFrame.r;
+                        if (rotDiff > Math.PI) rotDiff -= Math.PI * 2;
+                        if (rotDiff < -Math.PI) rotDiff += Math.PI * 2;
+                        state.ghostMesh.rotation.y = currentFrame.r + rotDiff * clampedProgress;
+
+                        // Firing logic
+                        if (currentFrame.f && Math.random() < 0.1) { // Chance to fire visual projectile
+                            createGhostProjectile(state.ghostMesh.position, state.ghostMesh.rotation.y);
+                        }
+                    } else {
+                        // End of playback
+                        state.ghostMesh.visible = false;
+                    }
+                }
+            },
+
+            createMesh: () => {
+                const group = new THREE.Group();
+                
+                // Holographic body
+                const bodyGeom = new THREE.CapsuleGeometry(0.4, 1, 4, 8);
+                const bodyMat = new THREE.MeshBasicMaterial({ 
+                    color: 0x00ffff, 
+                    transparent: true, 
+                    opacity: 0.3,
+                    wireframe: true
+                });
+                const body = new THREE.Mesh(bodyGeom, bodyMat);
+                body.position.y = 0.9;
+                group.add(body);
+
+                // Head
+                const headGeom = new THREE.BoxGeometry(0.5, 0.3, 0.4);
+                const headMat = new THREE.MeshBasicMaterial({ color: 0x00ffff, wireframe: true });
+                const head = new THREE.Mesh(headGeom, headMat);
+                head.position.y = 1.6;
+                group.add(head);
+
+                // Weapon
+                const gunGeom = new THREE.BoxGeometry(0.1, 0.1, 0.6);
+                const gun = new THREE.Mesh(gunGeom, headMat);
+                gun.position.set(0.3, 1.4, -0.4);
+                group.add(gun);
+
+                scene.add(group);
+                return group;
+            }
+        };
+
+        function createGhostProjectile(position, rotationY) {
+            const direction = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), rotationY);
+            const startPos = position.clone().add(new THREE.Vector3(0, 1.4, 0)).addScaledVector(direction, 0.5);
+            
+            // Visual only projectile
+            const geom = new THREE.SphereGeometry(0.1);
+            const mat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+            const mesh = new THREE.Mesh(geom, mat);
+            mesh.position.copy(startPos);
+            scene.add(mesh);
+            
+            state.projectiles.push({
+                mesh: mesh,
+                velocity: direction.multiplyScalar(40),
+                damage: 10, // Ghost deals reduced damage
+                color: 0x00ffff,
+                isPlayer: true, // Hurts enemies
+                lifetime: 2,
+                origin: startPos
+            });
+        }
+
+        // ═══════════════════════════════════════════════════════════════
+        // STREAMER MODE SYSTEM
+        // ═══════════════════════════════════════════════════════════════
+        const ChatUsers = ['xX_Slayer_Xx', 'RetroGamer99', 'NeonNinja', 'PixelQueen', 'CyberPunk2077', 'GlitchMaster', 'SpeedRunner01', 'LootGoblin', 'NoScopeGod', 'CampingCarl'];
+        const ChatMessages = ['PogChamp', 'LUL', 'Nice shot!', 'RIP', 'GG', 'HYPE', 'MonkaS', 'Kappa', 'Clip it!', 'What a play!'];
+        
+        const VoteModifiers = [
+            { name: 'Low Gravity', duration: 15, apply: () => { state.gravity = 10; }, remove: () => { state.gravity = 40; } },
+            { name: 'Double Damage', duration: 15, apply: () => { state.player.damage *= 2; }, remove: () => { state.player.damage /= 2; } },
+            { name: 'Super Speed', duration: 15, apply: () => { state.player.speed *= 2; }, remove: () => { state.player.speed /= 2; } },
+            { name: 'Tiny Enemies', duration: 20, apply: () => { state.enemies.forEach(e => e.mesh.scale.multiplyScalar(0.5)); }, remove: () => { state.enemies.forEach(e => e.mesh.scale.multiplyScalar(2)); } },
+            { name: 'Spawn Boss', duration: 0, apply: () => { 
+                const angle = Math.random() * Math.PI * 2;
+                const pos = new THREE.Vector3(Math.cos(angle) * 30, 0, Math.sin(angle) * 30);
+                createEnemy(EnemyTypes.BOSS, pos);
+            }, remove: () => {} }
+        ];
+
+        // Initialize gravity in state
+        state.gravity = 40;
+
+        function updateStreamerMode(deltaTime) {
+            if (!state.streamerMode || state.current !== GameState.PLAYING) return;
+
+            // Simulate Chat
+            state.chatTimer -= deltaTime;
+            if (state.chatTimer <= 0) {
+                addChatMessage();
+                state.chatTimer = Math.random() * 2 + 0.5;
+            }
+
+            // Handle Voting Cycle
+            if (!state.isVoting) {
+                state.voteTimer -= deltaTime;
+                if (state.voteTimer <= 0) {
+                    startVote();
+                }
+            } else {
+                state.voteTimer -= deltaTime;
+                updateVoteUI();
+                
+                // Simulate votes coming in
+                if (Math.random() < 0.1) {
+                    const randomOption = Math.floor(Math.random() * state.voteOptions.length);
+                    state.voteCounts[randomOption]++;
+                }
+
+                if (state.voteTimer <= 0) {
+                    endVote();
+                }
+            }
+
+            // Update Active Modifiers
+            for (let i = state.activeModifiers.length - 1; i >= 0; i--) {
+                const mod = state.activeModifiers[i];
+                mod.timeLeft -= deltaTime;
+                if (mod.timeLeft <= 0) {
+                    mod.def.remove();
+                    state.activeModifiers.splice(i, 1);
+                    addSystemMessage(`Modifier expired: ${mod.def.name}`);
+                }
+            }
+        }
+
+        function addChatMessage() {
+            const user = ChatUsers[Math.floor(Math.random() * ChatUsers.length)];
+            const msg = ChatMessages[Math.floor(Math.random() * ChatMessages.length)];
+            const color = `hsl(${Math.random() * 360}, 70%, 70%)`;
+            
+            const chatOverlay = document.getElementById('chat-overlay');
+            const div = document.createElement('div');
+            div.className = 'chat-message';
+            div.innerHTML = `<span class="chat-user" style="color:${color}">${user}:</span> <span class="chat-text">${msg}</span>`;
+            chatOverlay.appendChild(div);
+            
+            if (chatOverlay.children.length > 10) {
+                chatOverlay.removeChild(chatOverlay.firstChild);
+            }
+        }
+
+        function addSystemMessage(text) {
+            const chatOverlay = document.getElementById('chat-overlay');
+            const div = document.createElement('div');
+            div.className = 'chat-message';
+            div.innerHTML = `<span class="chat-text" style="color:#ffff00; font-weight:bold;">[SYSTEM] ${text}</span>`;
+            chatOverlay.appendChild(div);
+             if (chatOverlay.children.length > 10) {
+                chatOverlay.removeChild(chatOverlay.firstChild);
+            }
+        }
+
+        function startVote() {
+            state.isVoting = true;
+            state.voteTimer = 10; // 10 seconds to vote
+            
+            // Pick 3 random options
+            const options = [...VoteModifiers].sort(() => 0.5 - Math.random()).slice(0, 3);
+            state.voteOptions = options;
+            state.voteCounts = { 0: 0, 1: 0, 2: 0 };
+            
+            document.getElementById('vote-overlay').style.display = 'block';
+            addSystemMessage("CHAT VOTE STARTED! Type 1, 2, or 3!");
+        }
+
+        function updateVoteUI() {
+            const container = document.getElementById('vote-options');
+            const timer = document.getElementById('vote-timer');
+            
+            let totalVotes = Object.values(state.voteCounts).reduce((a, b) => a + b, 0);
+            if (totalVotes === 0) totalVotes = 1; // Avoid div by zero
+
+            let html = '';
+            state.voteOptions.forEach((opt, idx) => {
+                const count = state.voteCounts[idx];
+                const percent = (count / totalVotes) * 100;
+                html += `
+                    <div class="vote-option-container">
+                        <div class="vote-option">
+                            <span>${idx + 1}. ${opt.name}</span>
+                            <span>${Math.round(percent)}%</span>
+                        </div>
+                        <div class="vote-bar-bg">
+                            <div class="vote-bar-fill" style="width: ${percent}%"></div>
+                        </div>
+                    </div>
+                `;
+            });
+            
+            container.innerHTML = html;
+            timer.textContent = `Time left: ${Math.ceil(state.voteTimer)}s`;
+        }
+
+        function endVote() {
+            state.isVoting = false;
+            state.voteTimer = 30; // Next vote in 30 seconds
+            document.getElementById('vote-overlay').style.display = 'none';
+            
+            // Determine winner
+            let winnerIdx = 0;
+            let maxVotes = -1;
+            for (const [idx, count] of Object.entries(state.voteCounts)) {
+                if (count > maxVotes) {
+                    maxVotes = count;
+                    winnerIdx = parseInt(idx);
+                }
+            }
+            
+            const winner = state.voteOptions[winnerIdx];
+            addSystemMessage(`VOTE WINNER: ${winner.name}`);
+            
+            // Apply modifier
+            winner.apply();
+            if (winner.duration > 0) {
+                state.activeModifiers.push({ def: winner, timeLeft: winner.duration });
+            }
+        }
 
         // ═══════════════════════════════════════════════════════════════
         // THREE.JS SETUP
@@ -2025,7 +2455,8 @@
             RUSHER: { name: 'Rusher', health: 30, damage: 15, speed: 12, score: 150, color: 0xff8800, size: 0.8, attackRange: 2, attackRate: 0.5 },
             TANK: { name: 'Tank', health: 200, damage: 25, speed: 3, score: 300, color: 0x8844ff, size: 1.5, attackRange: 4, attackRate: 2 },
             SNIPER: { name: 'Sniper', health: 40, damage: 30, speed: 4, score: 200, color: 0x44ff44, size: 1, attackRange: 40, attackRate: 2.5, ranged: true },
-            BOSS: { name: 'OVERLORD', health: 1000, damage: 40, speed: 5, score: 2000, color: 0xff00ff, size: 3, attackRange: 6, attackRate: 1.5, isBoss: true }
+            BOSS: { name: 'OVERLORD', health: 1000, damage: 40, speed: 5, score: 2000, color: 0xff00ff, size: 3, attackRange: 6, attackRate: 1.5, isBoss: true },
+            CYBER_WORM: { name: 'CYBER-WORM', health: 5000, damage: 40, speed: 8, score: 5000, color: 0xff00ff, size: 2, attackRange: 15, attackRate: 2, isBoss: true, isWorm: true }
         };
 
         // Maps manifest enemy keys to game enemy types
@@ -2234,7 +2665,7 @@
             }
 
             // BOSS: Horns, shoulders, and aura
-            if (isBoss) {
+            if (isBoss && !config.isWorm) {
                 for (let i = 0; i < 3; i++) {
                     const hornGeom = new THREE.ConeGeometry(0.3, 1.5, 4);
                     const hornMat = new THREE.MeshStandardMaterial({
@@ -2267,6 +2698,63 @@
                 const aura = new THREE.Mesh(auraGeom, auraMat);
                 aura.position.y = bodyHeight;
                 group.add(aura);
+            }
+
+            // CYBER-WORM: Segmented body
+            if (config.isWorm) {
+                // Clear previous geometry
+                group.clear();
+                
+                // Head segment
+                const headGeom = new THREE.SphereGeometry(s * 0.8, 16, 16);
+                const headMat = new THREE.MeshStandardMaterial({
+                    color: 0xff00ff, metalness: 0.8, roughness: 0.2,
+                    emissive: 0xff00ff, emissiveIntensity: 0.5
+                });
+                const head = new THREE.Mesh(headGeom, headMat);
+                group.add(head);
+
+                // Eyes
+                const eyeGeom = new THREE.SphereGeometry(s * 0.2, 8, 8);
+                const eyeMat = new THREE.MeshBasicMaterial({ color: 0x00ffff });
+                
+                const leftEye = new THREE.Mesh(eyeGeom, eyeMat);
+                leftEye.position.set(-s * 0.3, s * 0.3, s * 0.6);
+                group.add(leftEye);
+                
+                const rightEye = new THREE.Mesh(eyeGeom, eyeMat);
+                rightEye.position.set(s * 0.3, s * 0.3, s * 0.6);
+                group.add(rightEye);
+
+                // Mandibles
+                const mandibleGeom = new THREE.ConeGeometry(s * 0.15, s * 0.8, 8);
+                const mandibleMat = new THREE.MeshStandardMaterial({ color: 0xcccccc, metalness: 0.9 });
+                
+                const leftMandible = new THREE.Mesh(mandibleGeom, mandibleMat);
+                leftMandible.position.set(-s * 0.4, -s * 0.3, s * 0.7);
+                leftMandible.rotation.x = Math.PI / 2;
+                leftMandible.rotation.z = -0.5;
+                group.add(leftMandible);
+
+                const rightMandible = new THREE.Mesh(mandibleGeom, mandibleMat);
+                rightMandible.position.set(s * 0.4, -s * 0.3, s * 0.7);
+                rightMandible.rotation.x = Math.PI / 2;
+                rightMandible.rotation.z = 0.5;
+                group.add(rightMandible);
+
+                // Body segments will be handled in update loop
+                group.userData.segments = [];
+                for(let i=0; i<10; i++) {
+                    const segGeom = new THREE.SphereGeometry(s * (0.7 - i*0.04), 12, 12);
+                    const segMat = new THREE.MeshStandardMaterial({
+                        color: i % 2 === 0 ? 0xaa00aa : 0x440044,
+                        metalness: 0.7, roughness: 0.3
+                    });
+                    const segment = new THREE.Mesh(segGeom, segMat);
+                    segment.position.set(0, 0, -s * (i+1));
+                    scene.add(segment); // Add to scene, not group, for independent movement
+                    group.userData.segments.push(segment);
+                }
             }
 
             return group;
@@ -2509,10 +2997,15 @@
                         Math.sin(bossAngle) * 30
                     );
 
-                    const bossType = { ...EnemyTypes.BOSS };
-                    bossType.health = EnemyTypes.BOSS.health * (1 + (waveNumber / 5 - 1) * 0.5);
-                    if (EnemyTypes.BOSS.modelData) {
-                        bossType.modelData = EnemyTypes.BOSS.modelData;
+                    let bossType;
+                    if (waveNumber === 10) {
+                        bossType = { ...EnemyTypes.CYBER_WORM };
+                    } else {
+                        bossType = { ...EnemyTypes.BOSS };
+                        bossType.health = EnemyTypes.BOSS.health * (1 + (waveNumber / 5 - 1) * 0.5);
+                        if (EnemyTypes.BOSS.modelData) {
+                            bossType.modelData = EnemyTypes.BOSS.modelData;
+                        }
                     }
 
                     createEnemy(bossType, bossPos);
@@ -3171,7 +3664,24 @@
             state.player.velocity.x = moveVec.x;
             state.player.velocity.z = moveVec.z;
 
+            // Jump & Gravity
+            if (state.input.jump && state.player.isGrounded) {
+                state.player.velocity.y = 15;
+                state.player.isGrounded = false;
+            }
+
+            if (!state.player.isGrounded) {
+                state.player.velocity.y -= state.gravity * deltaTime;
+            }
+
             state.player.position.addScaledVector(state.player.velocity, deltaTime);
+
+            // Ground collision
+            if (state.player.position.y <= 1.8) {
+                state.player.position.y = 1.8;
+                state.player.velocity.y = 0;
+                state.player.isGrounded = true;
+            }
 
             const distFromCenter = Math.sqrt(state.player.position.x ** 2 + state.player.position.z ** 2);
             if (distFromCenter > state.arenaRadius - 2) {
@@ -3448,6 +3958,9 @@
             state.input.move.x = (keys['KeyD'] ? 1 : 0) - (keys['KeyA'] ? 1 : 0);
             state.input.move.y = (keys['KeyW'] ? 1 : 0) - (keys['KeyS'] ? 1 : 0);
 
+            // Jump
+            state.input.jump = keys['Space'] || false;
+
             // Look - apply mouse movement with sensitivity
             state.input.look.x = mouseMovement.x * state.mouseSensitivity * 50;
             state.input.look.y = mouseMovement.y * state.mouseSensitivity * 50;
@@ -3594,6 +4107,19 @@
         document.getElementById('auto-switch-input').addEventListener('change', (e) => {
             state.autoSwitchInput = e.target.checked;
             localStorage.setItem('apex_auto_switch', state.autoSwitchInput.toString());
+        });
+
+        // Streamer Mode toggle
+        document.getElementById('streamer-mode-toggle').addEventListener('change', (e) => {
+            state.streamerMode = e.target.checked;
+            document.getElementById('chat-overlay').style.display = state.streamerMode ? 'block' : 'none';
+            if (state.streamerMode) {
+                state.voteTimer = 10; // Start first vote soon
+                addSystemMessage("Streamer Mode ENABLED");
+            } else {
+                document.getElementById('vote-overlay').style.display = 'none';
+                state.isVoting = false;
+            }
         });
 
         // Mouse sensitivity slider
@@ -4016,6 +4542,14 @@
 
             spawnWave(1);
 
+            // Ghost System
+            GhostSystem.startRecording();
+            if (state.ghostPlayback) {
+                if (state.ghostMesh) scene.remove(state.ghostMesh);
+                state.ghostMesh = GhostSystem.createMesh();
+                state.ghostIndex = 0;
+            }
+
             // Request pointer lock for keyboard/mouse users
             if (state.inputMode === InputMode.KEYBOARD) {
                 canvas.requestPointerLock();
@@ -4071,6 +4605,7 @@
         function gameOver() {
             state.current = GameState.GAMEOVER;
             setCursorMode(false);
+            GhostSystem.stopRecording();
 
             if (state.score > state.highScore) {
                 state.highScore = state.score;
@@ -4116,6 +4651,8 @@
                 updateReload(deltaTime);
                 updateViewmodel(deltaTime);
                 updateMinimap();
+                updateStreamerMode(deltaTime);
+                GhostSystem.update(deltaTime);
 
                 if (state.combo > 0) {
                     state.comboTimer -= deltaTime;
@@ -4144,6 +4681,7 @@
             initThreeJS();
             initAudio();
             initViewmodelSystem();
+            GhostSystem.init();
 
             // Set initial input mode based on saved preference (defaults to gamepad)
             const preferredMode = state.preferredInputMode === 'keyboard' ? InputMode.KEYBOARD : InputMode.GAMEPAD;
