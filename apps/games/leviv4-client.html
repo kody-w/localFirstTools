@@ -143,7 +143,8 @@
     <header>
         <h1>LEVIATHAN: MULTIVERSE CLIENT</h1>
         <div class="controls">
-            <button id="add-reality-btn" onclick="addReality()">Initialize Reality (+)</button>
+            <button id="add-reality-btn" onclick="showVersionSelector()">Initialize Reality (+)</button>
+            <button onclick="addReality('apps/games/leviv4-client.html', 'NESTED MULTIVERSE')" style="border-color: #00ff88; color: #00ff88;">Spawn Nested Client</button>
             <button onclick="resetMultiverse()" style="border-color: #ff4444; color: #ff4444;">Collapse All</button>
         </div>
     </header>
@@ -156,49 +157,161 @@
         System Ready. 0/5 Realities Active.
     </div>
 
+    <!-- Version Selector Modal -->
+    <div id="version-modal" style="display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.9); z-index: 200; justify-content: center; align-items: center;">
+        <div style="background: #111; border: 2px solid var(--accent-color); padding: 20px; width: 500px; max-height: 80vh; display: flex; flex-direction: column; border-radius: 10px;">
+            <h2 style="margin-top: 0; color: var(--accent-color);">Select Reality Version</h2>
+            <input type="text" id="version-search" placeholder="Search versions..." style="background: #222; border: 1px solid #444; color: #fff; padding: 8px; margin-bottom: 10px; width: 100%; box-sizing: border-box;">
+            <div id="version-list" style="flex: 1; overflow-y: auto; border: 1px solid #333; margin-bottom: 10px;">
+                <!-- Versions injected here -->
+            </div>
+            <div style="display: flex; justify-content: flex-end; gap: 10px;">
+                <button onclick="closeVersionModal()" style="border-color: #888; color: #888;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         const MAX_REALITIES = 5;
         let realityCount = 0;
-        let gameCode = null;
+        let manifest = null;
         
-        // URL to fetch the game code from
-        const GITHUB_RAW_URL = 'https://raw.githubusercontent.com/kody-w/localFirstTools/main/apps/games/leviv4.html';
-        const LOCAL_URL = 'leviv4.html';
+        // Configuration
+        const MANIFEST_URL = '../../vibe_gallery_config.json';
+        const GITHUB_BASE = 'https://raw.githubusercontent.com/kody-w/localFirstTools/main/';
 
-        async function fetchGameCode() {
-            if (gameCode) return gameCode;
+        async function loadManifest() {
+            if (manifest) return manifest;
+            try {
+                const response = await fetch(MANIFEST_URL);
+                const data = await response.json();
+                
+                // Flatten categories into a single list of apps
+                let apps = [];
+                if (data.vibeGallery && data.vibeGallery.categories) {
+                    Object.values(data.vibeGallery.categories).forEach(cat => {
+                        if (cat.apps) apps = apps.concat(cat.apps);
+                    });
+                }
+                
+                // Filter for Leviathan versions (and others if needed)
+                // We look for 'levi' in filename or title
+                manifest = apps.filter(app => 
+                    (app.filename && app.filename.toLowerCase().includes('levi')) || 
+                    (app.title && app.title.toLowerCase().includes('leviathan'))
+                ).sort((a, b) => a.title.localeCompare(b.title));
+                
+                return manifest;
+            } catch (e) {
+                console.error('Failed to load manifest:', e);
+                return [];
+            }
+        }
 
+        async function showVersionSelector() {
+            if (realityCount >= MAX_REALITIES) {
+                alert('Multiverse stability limit reached (5/5). Collapse a reality to create a new one.');
+                return;
+            }
+
+            const versions = await loadManifest();
+            const list = document.getElementById('version-list');
+            list.innerHTML = '';
+
+            if (versions.length === 0) {
+                list.innerHTML = '<div style="padding: 10px; color: #f00;">No versions found in manifest.</div>';
+            } else {
+                versions.forEach(app => {
+                    const item = document.createElement('div');
+                    item.style.cssText = 'padding: 8px; border-bottom: 1px solid #222; cursor: pointer; display: flex; justify-content: space-between; align-items: center;';
+                    item.innerHTML = `
+                        <div>
+                            <div style="font-weight: bold; color: #fff;">${app.title || app.filename}</div>
+                            <div style="font-size: 10px; color: #888;">${app.filename}</div>
+                        </div>
+                        <button style="font-size: 10px; padding: 4px 8px;" onclick="selectVersion('${app.path}', '${app.filename}')">SELECT</button>
+                    `;
+                    item.onmouseover = () => item.style.background = '#222';
+                    item.onmouseout = () => item.style.background = 'transparent';
+                    item.onclick = (e) => {
+                        if (e.target.tagName !== 'BUTTON') selectVersion(app.path, app.filename);
+                    };
+                    list.appendChild(item);
+                });
+            }
+
+            // Search functionality
+            const search = document.getElementById('version-search');
+            search.oninput = (e) => {
+                const term = e.target.value.toLowerCase();
+                Array.from(list.children).forEach(child => {
+                    const text = child.innerText.toLowerCase();
+                    child.style.display = text.includes(term) ? 'flex' : 'none';
+                });
+            };
+
+            document.getElementById('version-modal').style.display = 'flex';
+        }
+
+        function closeVersionModal() {
+            document.getElementById('version-modal').style.display = 'none';
+        }
+
+        function selectVersion(path, filename) {
+            closeVersionModal();
+            addReality(path, filename);
+        }
+
+        async function fetchGameCode(path) {
             const status = document.getElementById('status-bar');
-            status.textContent = 'Fetching quantum data from GitHub...';
+            status.textContent = `Fetching quantum data for ${path}...`;
+
+            // Determine local path (relative to this file)
+            // This file is in apps/games/
+            // Paths in manifest are like "apps/games/leviv4.html" or just "leviv4.html"
+            // We need to handle both.
+            
+            let localUrl = path;
+            if (path.startsWith('apps/games/')) {
+                localUrl = path.replace('apps/games/', '');
+            } else if (path.startsWith('/')) {
+                localUrl = '../..' + path; // Go up to root then path
+            } else {
+                // Assume it's in the same directory if no prefix, or try to find it
+                // If it's just "leviv4.html", it works.
+            }
 
             try {
-                // Try GitHub first
-                console.log('Fetching from GitHub...');
-                let response = await fetch(GITHUB_RAW_URL);
-                if (!response.ok) throw new Error('GitHub fetch failed');
-                gameCode = await response.text();
-                console.log('Loaded from GitHub');
-                status.textContent = 'Quantum data loaded from GitHub source.';
-            } catch (e) {
-                console.warn('GitHub fetch failed, trying local fallback...', e);
-                try {
-                    // Fallback to local
-                    let response = await fetch(LOCAL_URL);
-                    if (!response.ok) throw new Error('Local fetch failed');
-                    gameCode = await response.text();
-                    console.log('Loaded from Local');
+                // Try Local first (Local First philosophy!)
+                console.log(`Fetching local: ${localUrl}`);
+                let response = await fetch(localUrl);
+                if (response.ok) {
+                    const code = await response.text();
                     status.textContent = 'Quantum data loaded from local source.';
+                    return code;
+                }
+                throw new Error('Local fetch failed');
+            } catch (e) {
+                console.warn('Local fetch failed, trying GitHub...', e);
+                try {
+                    // Fallback to GitHub
+                    const githubUrl = GITHUB_BASE + path;
+                    console.log(`Fetching GitHub: ${githubUrl}`);
+                    let response = await fetch(githubUrl);
+                    if (!response.ok) throw new Error('GitHub fetch failed');
+                    const code = await response.text();
+                    status.textContent = 'Quantum data loaded from GitHub source.';
+                    return code;
                 } catch (err) {
                     console.error('All fetch attempts failed', err);
                     status.textContent = 'CRITICAL ERROR: Could not load game code.';
-                    alert('Failed to load game code. Check console.');
+                    alert(`Failed to load game code for ${path}. Check console.`);
                     return null;
                 }
             }
-            return gameCode;
         }
 
-        async function addReality() {
+        async function addReality(path = 'apps/games/leviv4.html', filename = 'leviv4.html') {
             if (realityCount >= MAX_REALITIES) {
                 alert('Multiverse stability limit reached (5/5). Collapse a reality to create a new one.');
                 return;
@@ -207,7 +320,7 @@
             const btn = document.getElementById('add-reality-btn');
             btn.disabled = true;
 
-            const code = await fetchGameCode();
+            const code = await fetchGameCode(path);
             if (!code) {
                 btn.disabled = false;
                 return;
@@ -222,9 +335,10 @@
             const frame = document.createElement('div');
             frame.className = 'reality-frame';
             frame.id = id;
+            frame.dataset.path = path; // Store path for reload
             frame.innerHTML = `
                 <div class="reality-header">
-                    <span class="reality-id">REALITY #${realityCount} [${id.slice(-6)}]</span>
+                    <span class="reality-id">REALITY #${realityCount} [${filename}]</span>
                     <div class="reality-controls">
                         <button onclick="reloadReality('${id}')">↻</button>
                         <button onclick="closeReality('${id}')">✕</button>
@@ -236,25 +350,23 @@
 
             container.appendChild(frame);
 
-            // Create Blob URL for independent origin (opaque origin due to sandbox)
-            // We inject a small script to ensure it knows it's in a multiverse container if needed, 
-            // but leviv4 should handle itself.
-            const blob = new Blob([code], { type: 'text/html' });
+            // Inject <base> tag to fix relative paths in Blob URL
+            // This ensures fetch calls like '../../vibe_gallery_config.json' work relative to the original file location
+            const baseUrl = new URL(path, window.location.href).href;
+            const codeWithBase = code.replace('<head>', `<head><base href="${baseUrl}">`);
+
+            const blob = new Blob([codeWithBase], { type: 'text/html' });
             const url = URL.createObjectURL(blob);
             
             const iframe = frame.querySelector('iframe');
             iframe.onload = () => {
                 const loader = frame.querySelector('.loading-overlay');
                 if (loader) loader.style.display = 'none';
-                URL.revokeObjectURL(url); // Clean up memory
+                URL.revokeObjectURL(url);
             };
             iframe.src = url;
 
-            if (realityCount >= MAX_REALITIES) {
-                btn.disabled = true;
-            } else {
-                btn.disabled = false;
-            }
+            btn.disabled = false;
         }
 
         function closeReality(id) {
@@ -263,27 +375,29 @@
                 frame.remove();
                 realityCount--;
                 updateStatus();
-                document.getElementById('add-reality-btn').disabled = false;
             }
         }
 
-        function reloadReality(id) {
+        async function reloadReality(id) {
             const frame = document.getElementById(id);
             if (frame) {
-                // Re-add the reality (simplest way to reload with blob)
-                // Or just re-fetch code and set src again
+                const path = frame.dataset.path;
                 const iframe = frame.querySelector('iframe');
                 const loader = frame.querySelector('.loading-overlay');
                 loader.style.display = 'flex';
                 
-                // Re-create blob
-                const blob = new Blob([gameCode], { type: 'text/html' });
-                const url = URL.createObjectURL(blob);
-                iframe.src = url;
-                iframe.onload = () => {
-                    loader.style.display = 'none';
-                    URL.revokeObjectURL(url);
-                };
+                const code = await fetchGameCode(path);
+                if (code) {
+                    const blob = new Blob([code], { type: 'text/html' });
+                    const url = URL.createObjectURL(blob);
+                    iframe.src = url;
+                    iframe.onload = () => {
+                        loader.style.display = 'none';
+                        URL.revokeObjectURL(url);
+                    };
+                } else {
+                    loader.textContent = "Reload Failed";
+                }
             }
         }
 
@@ -292,7 +406,6 @@
             container.innerHTML = '';
             realityCount = 0;
             updateStatus();
-            document.getElementById('add-reality-btn').disabled = false;
         }
 
         function updateStatus() {
@@ -300,9 +413,9 @@
             status.textContent = `Multiverse Stability: ${realityCount}/${MAX_REALITIES} Realities Active.`;
         }
 
-        // Auto-initialize one reality
+        // Auto-initialize default reality
         window.onload = () => {
-            setTimeout(addReality, 500);
+            setTimeout(() => addReality('apps/games/leviv4.html', 'leviv4.html'), 500);
         };
     </script>
 </body>
