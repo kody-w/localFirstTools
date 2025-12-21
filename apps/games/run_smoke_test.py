@@ -4,7 +4,7 @@ import webbrowser
 import os
 import sys
 
-PORT = 8000
+PORT = 8001
 DIRECTORY = os.path.dirname(os.path.abspath(__file__))
 
 class Handler(http.server.SimpleHTTPRequestHandler):
