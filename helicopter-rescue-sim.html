@@ -1,0 +1,1082 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Retro Copter Rescue Sim</title>
+    <meta name="description" content="Classic helicopter simulation. Fight fires, rescue civilians, and chase criminals in a 3D open world.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; }
+        #canvas { width: 100vw; height: 100vh; display: block; }
+        
+        /* HUD */
+        #hud {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        
+        .hud-row { display: flex; justify-content: space-between; align-items: flex-start; }
+        
+        .panel {
+            background: rgba(0, 20, 0, 0.7);
+            border: 2px solid #0f0;
+            color: #0f0;
+            padding: 10px;
+            border-radius: 4px;
+            text-shadow: 0 0 5px #0f0;
+        }
+        
+        .gauge {
+            width: 150px;
+            height: 20px;
+            border: 1px solid #0f0;
+            margin-top: 5px;
+            position: relative;
+        }
+        
+        .gauge-fill {
+            height: 100%;
+            background: #0f0;
+            width: 0%;
+            transition: width 0.1s;
+        }
+        
+        #minimap {
+            width: 200px;
+            height: 200px;
+            border: 2px solid #0f0;
+            background: rgba(0, 10, 0, 0.8);
+            position: relative;
+            border-radius: 50%;
+            overflow: hidden;
+        }
+        
+        .map-dot {
+            width: 6px;
+            height: 6px;
+            position: absolute;
+            transform: translate(-50%, -50%);
+            border-radius: 50%;
+        }
+        
+        #messages {
+            position: absolute;
+            top: 20%;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            color: #0f0;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 0 10px #0f0;
+            pointer-events: none;
+        }
+        
+        #mission-log {
+            max-width: 300px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        
+        .mission-item { margin-bottom: 5px; }
+        .mission-active { color: #ff0; animation: blink 1s infinite; }
+        .mission-complete { color: #0f0; text-decoration: line-through; }
+        
+        @keyframes blink { 50% { opacity: 0.5; } }
+        
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(0, 255, 0, 0.5);
+            font-size: 12px;
+            text-align: center;
+        }
+
+        /* Shop UI */
+        #shop-ui {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 20, 0, 0.95);
+            border: 4px solid #0f0;
+            padding: 20px;
+            color: #0f0;
+            display: none;
+            pointer-events: auto;
+            text-align: center;
+            min-width: 400px;
+        }
+        
+        .shop-item {
+            border: 1px solid #0f0;
+            margin: 10px 0;
+            padding: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+        }
+        
+        .shop-item:hover { background: rgba(0, 255, 0, 0.2); }
+        .shop-btn {
+            background: #0f0; color: #000; border: none; padding: 5px 10px; font-weight: bold; cursor: pointer;
+        }
+        .shop-btn:disabled { background: #333; color: #555; cursor: not-allowed; }
+
+        /* CRT Effect */
+        .scanline {
+            width: 100%;
+            height: 100px;
+            z-index: 10;
+            background: linear-gradient(0deg, rgba(0,0,0,0) 0%, rgba(32, 255, 32, 0.04) 50%, rgba(0,0,0,0) 100%);
+            opacity: 0.1;
+            position: absolute;
+            bottom: 100%;
+            animation: scanline 10s linear infinite;
+            pointer-events: none;
+        }
+        @keyframes scanline {
+            0% { bottom: 100%; }
+            100% { bottom: -100%; }
+        }
+        
+        body::after {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+            background: rgba(18, 16, 16, 0.1);
+            opacity: 0;
+            z-index: 2;
+            pointer-events: none;
+            animation: flicker 0.15s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="scanline"></div>
+    <div id="hud">
+        <div class="hud-row">
+            <div class="panel">
+                <div>ALTITUDE</div>
+                <div class="gauge"><div id="alt-gauge" class="gauge-fill"></div></div>
+                <div id="alt-text">0 ft</div>
+                <br>
+                <div>SPEED</div>
+                <div class="gauge"><div id="speed-gauge" class="gauge-fill"></div></div>
+                <div id="speed-text">0 kts</div>
+            </div>
+            
+            <div class="panel" style="text-align: center;">
+                <div style="font-size: 20px; font-weight: bold;">COPTER COMMAND</div>
+                <div id="score">SCORE: 0</div>
+                <div id="money">FUNDS: $1000</div>
+                <div id="mode-text" style="color: #ff0; margin-top: 5px;">MODE: FLIGHT</div>
+            </div>
+            
+            <div class="panel">
+                <div>WATER TANK</div>
+                <div class="gauge"><div id="water-gauge" class="gauge-fill" style="background: #0ff;"></div></div>
+                <div id="water-text">100%</div>
+                <br>
+                <div>PASSENGERS</div>
+                <div id="passenger-text">0 / 4</div>
+            </div>
+        </div>
+        
+        <div id="messages"></div>
+        
+        <!-- Shop UI -->
+        <div id="shop-ui">
+            <h2>HANGAR UPGRADES</h2>
+            <div class="shop-item">
+                <div>
+                    <strong>Engine Upgrade</strong><br>
+                    <small>Increase max speed</small>
+                </div>
+                <button class="shop-btn" onclick="buyUpgrade('speed', 2000)">$2000</button>
+            </div>
+            <div class="shop-item">
+                <div>
+                    <strong>Larger Water Tank</strong><br>
+                    <small>+50% Capacity</small>
+                </div>
+                <button class="shop-btn" onclick="buyUpgrade('water', 1500)">$1500</button>
+            </div>
+            <div class="shop-item">
+                <div>
+                    <strong>Extra Seat</strong><br>
+                    <small>+1 Passenger Slot</small>
+                </div>
+                <button class="shop-btn" onclick="buyUpgrade('seat', 3000)">$3000</button>
+            </div>
+            <button class="shop-btn" style="width: 100%; margin-top: 10px;" onclick="closeShop()">CLOSE</button>
+        </div>
+        
+        <div class="hud-row" style="align-items: flex-end;">
+            <div class="panel" id="mission-log">
+                <div style="border-bottom: 1px solid #0f0; margin-bottom: 5px;">DISPATCH LOG</div>
+                <div id="log-content"></div>
+            </div>
+            
+            <div id="controls-hint">
+                FLIGHT: W/S: Collective | A/D: Yaw | Arrows: Cyclic | SPACE: Water | E: Winch<br>
+                FOOT: Arrows: Move | F: Enter/Exit Copter | E: Interact
+            </div>
+            
+            <div id="minimap">
+                <!-- Dots added via JS -->
+                <div class="map-dot" style="top: 50%; left: 50%; background: #0f0; width: 8px; height: 8px; border: 1px solid #fff;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- Game Constants & State ---
+        const WORLD_SIZE = 2000;
+        const CHUNK_SIZE = 100;
+        
+        const STATE = {
+            score: 0,
+            money: 1000,
+            water: 100,
+            maxWater: 100,
+            passengers: 0,
+            maxPassengers: 4,
+            missions: [],
+            messages: [],
+            onFoot: false,
+            shopOpen: false,
+            upgrades: {
+                speed: 1,
+                water: 1,
+                seats: 1
+            }
+        };
+
+        const HELI = {
+            pos: new THREE.Vector3(0, 0, 0),
+            vel: new THREE.Vector3(0, 0, 0),
+            rot: new THREE.Euler(0, 0, 0),
+            tilt: new THREE.Vector2(0, 0), // Pitch/Roll
+            rotorSpeed: 0,
+            engineOn: true,
+            spotlightOn: false
+        };
+
+        const PLAYER = {
+            pos: new THREE.Vector3(10, 0, 10),
+            rot: 0,
+            vel: new THREE.Vector3(0, 0, 0)
+        };
+
+        const INPUT = {
+            w: false, s: false, a: false, d: false,
+            up: false, down: false, left: false, right: false,
+            space: false, e: false, f: false
+        };
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000510);
+        scene.fog = new THREE.FogExp2(0x000510, 0.0015);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // --- Audio Context (Synthesized Sound) ---
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        const audioCtx = new AudioContext();
+        
+        // Rotor Sound
+        const rotorOsc = audioCtx.createOscillator();
+        const rotorGain = audioCtx.createGain();
+        rotorOsc.type = 'sawtooth';
+        rotorOsc.frequency.value = 50;
+        rotorGain.gain.value = 0;
+        rotorOsc.connect(rotorGain);
+        rotorGain.connect(audioCtx.destination);
+        rotorOsc.start();
+
+        // Speech Synthesis
+        const speech = window.speechSynthesis;
+
+        function speak(text) {
+            if (speech.speaking) speech.cancel();
+            const utterance = new SpeechSynthesisUtterance(text);
+            utterance.rate = 1.2;
+            utterance.pitch = 0.8;
+            // Try to find a "radio" like voice
+            const voices = speech.getVoices();
+            const radioVoice = voices.find(v => v.name.includes('Google US English') || v.name.includes('Daniel'));
+            if (radioVoice) utterance.voice = radioVoice;
+            speech.speak(utterance);
+        }
+
+        // --- Game Objects ---
+        let helicopter, rotorBlade, tailRotor;
+        let playerMesh;
+        let spotlight;
+        let waterParticles = [];
+        let fireParticles = [];
+        let worldObjects = []; // Buildings, trees
+        let missionObjects = []; // Fires, people, cars
+
+        // --- Initialization ---
+        function init() {
+            createLights();
+            createGround();
+            createCity();
+            createHelicopter();
+            createPlayer();
+            
+            // Event Listeners
+            window.addEventListener('resize', onWindowResize, false);
+            document.addEventListener('keydown', (e) => handleKey(e, true));
+            document.addEventListener('keyup', (e) => handleKey(e, false));
+            
+            // Start Loop
+            requestAnimationFrame(animate);
+            
+            // Start Mission Generator
+            setInterval(generateMission, 15000);
+            setTimeout(generateMission, 2000); // First mission delay
+            
+            showMessage("SYSTEMS ONLINE. WAITING FOR DISPATCH.");
+            speak("Copter One, systems online. Standing by.");
+            
+            // Resume audio on interaction
+            document.body.addEventListener('click', () => {
+                if (audioCtx.state === 'suspended') audioCtx.resume();
+            }, { once: true });
+        }
+
+        function createLights() {
+            const ambient = new THREE.AmbientLight(0x404040);
+            scene.add(ambient);
+            
+            const moon = new THREE.DirectionalLight(0xaaccff, 0.5);
+            moon.position.set(100, 200, 100);
+            moon.castShadow = true;
+            moon.shadow.camera.left = -500;
+            moon.shadow.camera.right = 500;
+            moon.shadow.camera.top = 500;
+            moon.shadow.camera.bottom = -500;
+            moon.shadow.mapSize.width = 2048;
+            moon.shadow.mapSize.height = 2048;
+            scene.add(moon);
+        }
+
+        function createGround() {
+            const geo = new THREE.PlaneGeometry(WORLD_SIZE * 2, WORLD_SIZE * 2, 64, 64);
+            
+            // Simple terrain height
+            const pos = geo.attributes.position;
+            for (let i = 0; i < pos.count; i++) {
+                const x = pos.getX(i);
+                const y = pos.getY(i);
+                // Flat city center, hilly outskirts
+                const dist = Math.sqrt(x*x + y*y);
+                if (dist > 400) {
+                    pos.setZ(i, (Math.sin(x/100) + Math.cos(y/100)) * 20 + Math.random() * 5);
+                }
+            }
+            geo.computeVertexNormals();
+            
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: 0x1a2b1a, 
+                roughness: 0.8,
+                flatShading: true
+            });
+            const ground = new THREE.Mesh(geo, mat);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+            
+            // Grid
+            const grid = new THREE.GridHelper(WORLD_SIZE * 2, 100, 0x004400, 0x002200);
+            scene.add(grid);
+        }
+
+        function createCity() {
+            // Simple grid city
+            for (let x = -5; x <= 5; x++) {
+                for (let z = -5; z <= 5; z++) {
+                    if (Math.random() > 0.7) continue; // Gaps
+                    if (x === 0 && z === 0) continue; // Spawn clear
+                    
+                    const height = 10 + Math.random() * 50;
+                    const geo = new THREE.BoxGeometry(15, height, 15);
+                    const mat = new THREE.MeshPhongMaterial({ 
+                        color: Math.random() * 0x444444 + 0x222222,
+                        emissive: 0x111111,
+                        emissiveIntensity: 0.2
+                    });
+                    const building = new THREE.Mesh(geo, mat);
+                    building.position.set(x * 40, height/2, z * 40);
+                    building.castShadow = true;
+                    building.receiveShadow = true;
+                    scene.add(building);
+                    
+                    // Windows
+                    if (Math.random() > 0.5) {
+                        const winGeo = new THREE.BoxGeometry(15.2, height * 0.8, 15.2);
+                        const winMat = new THREE.MeshBasicMaterial({ 
+                            color: 0xffff00, 
+                            wireframe: true,
+                            transparent: true, 
+                            opacity: 0.1 
+                        });
+                        const win = new THREE.Mesh(winGeo, winMat);
+                        win.position.y = height/2;
+                        scene.add(win);
+                    }
+                    
+                    worldObjects.push({ type: 'building', pos: building.position, size: new THREE.Vector3(15, height, 15) });
+                }
+            }
+            
+            // Helipad
+            const padGeo = new THREE.CylinderGeometry(10, 10, 0.5, 32);
+            const padMat = new THREE.MeshBasicMaterial({ color: 0x444444 });
+            const pad = new THREE.Mesh(padGeo, padMat);
+            pad.position.y = 0.25;
+            scene.add(pad);
+            
+            const HGeo = new THREE.PlaneGeometry(8, 8);
+            // Draw H on canvas texture
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            ctx.fillStyle = 'yellow';
+            ctx.font = 'bold 60px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('H', 32, 32);
+            const tex = new THREE.CanvasTexture(canvas);
+            const HMat = new THREE.MeshBasicMaterial({ map: tex, transparent: true });
+            const H = new THREE.Mesh(HGeo, HMat);
+            H.rotation.x = -Math.PI/2;
+            H.position.y = 0.6;
+            scene.add(H);
+            
+            // Water refill station (Blue pad)
+            const waterPad = new THREE.Mesh(padGeo, new THREE.MeshBasicMaterial({ color: 0x0000aa }));
+            waterPad.position.set(40, 0.25, 40);
+            scene.add(waterPad);
+            worldObjects.push({ type: 'water_station', pos: new THREE.Vector3(40, 0, 40), radius: 15 });
+            
+            // Hospital (Red Cross)
+            const hospGeo = new THREE.BoxGeometry(30, 15, 30);
+            const hosp = new THREE.Mesh(hospGeo, new THREE.MeshPhongMaterial({ color: 0xffffff }));
+            hosp.position.set(-60, 7.5, -60);
+            scene.add(hosp);
+            
+            const cross1 = new THREE.Mesh(new THREE.BoxGeometry(10, 2, 4), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+            cross1.position.set(-60, 16, -60);
+            scene.add(cross1);
+            const cross2 = new THREE.Mesh(new THREE.BoxGeometry(4, 2, 10), new THREE.MeshBasicMaterial({ color: 0xff0000 }));
+            cross2.position.set(-60, 16, -60);
+            scene.add(cross2);
+            
+            worldObjects.push({ type: 'hospital', pos: new THREE.Vector3(-60, 0, -60), radius: 25 });
+
+            // Shop (Green Zone)
+            const shopGeo = new THREE.BoxGeometry(20, 10, 20);
+            const shop = new THREE.Mesh(shopGeo, new THREE.MeshPhongMaterial({ color: 0x00ff00 }));
+            shop.position.set(60, 5, -60);
+            scene.add(shop);
+            
+            const shopSign = new THREE.Mesh(new THREE.BoxGeometry(18, 2, 2), new THREE.MeshBasicMaterial({ color: 0x000000 }));
+            shopSign.position.set(60, 11, -50);
+            scene.add(shopSign);
+            
+            worldObjects.push({ type: 'shop', pos: new THREE.Vector3(60, 0, -60), radius: 20 });
+        }
+
+        function createHelicopter() {
+            helicopter = new THREE.Group();
+            
+            // Body
+            const bodyGeo = new THREE.BoxGeometry(2, 2, 4);
+            const bodyMat = new THREE.MeshPhongMaterial({ color: 0x228822 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.position.y = 1;
+            helicopter.add(body);
+            
+            // Tail
+            const tailGeo = new THREE.BoxGeometry(0.5, 0.5, 4);
+            const tail = new THREE.Mesh(tailGeo, bodyMat);
+            tail.position.set(0, 1, -3);
+            helicopter.add(tail);
+            
+            // Skids
+            const skidGeo = new THREE.BoxGeometry(0.2, 0.2, 4);
+            const skidMat = new THREE.MeshPhongMaterial({ color: 0x111111 });
+            const skidL = new THREE.Mesh(skidGeo, skidMat);
+            skidL.position.set(1, 0.1, 0);
+            helicopter.add(skidL);
+            const skidR = new THREE.Mesh(skidGeo, skidMat);
+            skidR.position.set(-1, 0.1, 0);
+            helicopter.add(skidR);
+            
+            // Main Rotor
+            rotorBlade = new THREE.Group();
+            const bladeGeo = new THREE.BoxGeometry(8, 0.1, 0.5);
+            const bladeMat = new THREE.MeshPhongMaterial({ color: 0x111111 });
+            const blade1 = new THREE.Mesh(bladeGeo, bladeMat);
+            const blade2 = new THREE.Mesh(bladeGeo, bladeMat);
+            blade2.rotation.y = Math.PI / 2;
+            rotorBlade.add(blade1);
+            rotorBlade.add(blade2);
+            rotorBlade.position.y = 2.2;
+            helicopter.add(rotorBlade);
+            
+            // Tail Rotor
+            tailRotor = new THREE.Mesh(new THREE.BoxGeometry(2, 0.1, 0.2), bladeMat);
+            tailRotor.position.set(0.3, 1, -4.8);
+            helicopter.add(tailRotor);
+            
+            // Spotlight
+            spotlight = new THREE.SpotLight(0xffffff, 1);
+            spotlight.position.set(0, 0, 1);
+            spotlight.angle = 0.5;
+            spotlight.penumbra = 0.5;
+            spotlight.decay = 2;
+            spotlight.distance = 100;
+            spotlight.castShadow = true;
+            spotlight.target.position.set(0, -10, 10);
+            helicopter.add(spotlight);
+            helicopter.add(spotlight.target);
+            
+            scene.add(helicopter);
+        }
+
+        function createPlayer() {
+            const geo = new THREE.CylinderGeometry(0.5, 0.5, 1.8, 8);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x00ff00 });
+            playerMesh = new THREE.Mesh(geo, mat);
+            playerMesh.visible = false;
+            scene.add(playerMesh);
+        }
+
+        // --- Mission System ---
+        function generateMission() {
+            if (STATE.missions.length >= 3) return;
+            
+            const types = ['fire', 'rescue', 'chase'];
+            const type = types[Math.floor(Math.random() * types.length)];
+            
+            // Random position away from center
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 100 + Math.random() * 300;
+            const x = Math.cos(angle) * dist;
+            const z = Math.sin(angle) * dist;
+            
+            const mission = {
+                id: Date.now(),
+                type: type,
+                pos: new THREE.Vector3(x, 0, z),
+                active: true
+            };
+            
+            if (type === 'fire') {
+                mission.title = "FIRE REPORTED";
+                mission.hp = 100; // Fire intensity
+                createFireEffect(mission);
+            } else if (type === 'rescue') {
+                mission.title = "MEDEVAC REQUESTED";
+                mission.pickedUp = false;
+                createPerson(mission);
+            } else if (type === 'chase') {
+                mission.title = "SUSPECT FLEEING";
+                mission.caught = false;
+                mission.vel = new THREE.Vector3(Math.random()-0.5, 0, Math.random()-0.5).normalize().multiplyScalar(0.3);
+                createCar(mission);
+            }
+            
+            STATE.missions.push(mission);
+            addLog(`NEW: ${mission.title}`);
+            showMessage(mission.title);
+            speak(`Dispatch to Copter One. ${mission.title}. Respond immediately.`);
+        }
+
+        function createFireEffect(mission) {
+            const group = new THREE.Group();
+            group.position.copy(mission.pos);
+            
+            // Base fire glow
+            const light = new THREE.PointLight(0xff6600, 1, 50);
+            light.position.y = 2;
+            group.add(light);
+            
+            mission.obj = group;
+            scene.add(group);
+            missionObjects.push(mission);
+        }
+
+        function createPerson(mission) {
+            const geo = new THREE.CylinderGeometry(0.5, 0.5, 1.8);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x0000ff });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(mission.pos);
+            mesh.position.y = 0.9;
+            
+            // Waving animation helper
+            mesh.userData = { time: Math.random() * 100 };
+            
+            mission.obj = mesh;
+            scene.add(mesh);
+            missionObjects.push(mission);
+        }
+
+        function createCar(mission) {
+            const geo = new THREE.BoxGeometry(2, 1, 4);
+            const mat = new THREE.MeshPhongMaterial({ color: 0xff0000 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(mission.pos);
+            mesh.position.y = 0.5;
+            
+            mission.obj = mesh;
+            scene.add(mesh);
+            missionObjects.push(mission);
+        }
+
+        // --- Physics & Logic ---
+        function updatePhysics() {
+            if (STATE.shopOpen) return;
+
+            if (STATE.onFoot) {
+                // Walking Physics
+                const speed = 0.3;
+                const rotSpeed = 0.05;
+                
+                if (INPUT.left) PLAYER.rot += rotSpeed;
+                if (INPUT.right) PLAYER.rot -= rotSpeed;
+                
+                const forward = new THREE.Vector3(Math.sin(PLAYER.rot), 0, Math.cos(PLAYER.rot));
+                
+                if (INPUT.up) PLAYER.pos.add(forward.multiplyScalar(speed));
+                if (INPUT.down) PLAYER.pos.add(forward.multiplyScalar(-speed));
+                
+                // Keep on ground
+                PLAYER.pos.y = 0.9;
+                
+                playerMesh.position.copy(PLAYER.pos);
+                playerMesh.rotation.y = PLAYER.rot;
+                
+                // Check distance to heli for entry
+                const dist = PLAYER.pos.distanceTo(HELI.pos);
+                if (dist < 5 && INPUT.f) {
+                    STATE.onFoot = false;
+                    playerMesh.visible = false;
+                    INPUT.f = false; // Debounce
+                    showMessage("ENTERED HELICOPTER");
+                    speak("Systems engaged.");
+                }
+                
+                // Rotor spin down
+                HELI.rotorSpeed *= 0.99;
+                
+            } else {
+                // Helicopter Physics
+                
+                // Toggle Foot Mode
+                if (INPUT.f && HELI.pos.y < 1 && new THREE.Vector2(HELI.vel.x, HELI.vel.z).length() < 0.1) {
+                    STATE.onFoot = true;
+                    PLAYER.pos.copy(HELI.pos).add(new THREE.Vector3(2, 0, 0));
+                    playerMesh.visible = true;
+                    INPUT.f = false;
+                    showMessage("EXITED HELICOPTER");
+                }
+
+                // Input handling
+                // Collective (Up/Down)
+                if (INPUT.w) HELI.vel.y += 0.02;
+                if (INPUT.s) HELI.vel.y -= 0.02;
+                
+                // Yaw (Rotate)
+                if (INPUT.a) HELI.rot.y += 0.03;
+                if (INPUT.d) HELI.rot.y -= 0.03;
+                
+                // Cyclic (Tilt -> Move)
+                const tiltSpeed = 0.02;
+                const maxTilt = 0.5;
+                if (INPUT.up) HELI.tilt.x = Math.max(HELI.tilt.x - tiltSpeed, -maxTilt);
+                if (INPUT.down) HELI.tilt.x = Math.min(HELI.tilt.x + tiltSpeed, maxTilt);
+                if (INPUT.left) HELI.tilt.y = Math.max(HELI.tilt.y - tiltSpeed, -maxTilt);
+                if (INPUT.right) HELI.tilt.y = Math.min(HELI.tilt.y + tiltSpeed, maxTilt);
+                
+                // Auto-level
+                if (!INPUT.up && !INPUT.down) HELI.tilt.x *= 0.95;
+                if (!INPUT.left && !INPUT.right) HELI.tilt.y *= 0.95;
+                
+                // Apply tilt to velocity
+                const forward = new THREE.Vector3(0, 0, -1).applyAxisAngle(new THREE.Vector3(0, 1, 0), HELI.rot.y);
+                const right = new THREE.Vector3(1, 0, 0).applyAxisAngle(new THREE.Vector3(0, 1, 0), HELI.rot.y);
+                
+                const moveSpeed = 0.05 * STATE.upgrades.speed;
+                HELI.vel.add(forward.multiplyScalar(-HELI.tilt.x * moveSpeed));
+                HELI.vel.add(right.multiplyScalar(HELI.tilt.y * moveSpeed));
+                
+                // Gravity & Drag
+                HELI.vel.y -= 0.01; // Gravity
+                HELI.vel.multiplyScalar(0.98); // Drag
+                
+                // Apply Velocity
+                HELI.pos.add(HELI.vel);
+                
+                // Ground Collision
+                if (HELI.pos.y < 0) {
+                    HELI.pos.y = 0;
+                    HELI.vel.y = Math.max(0, HELI.vel.y);
+                    // Friction
+                    HELI.vel.x *= 0.9;
+                    HELI.vel.z *= 0.9;
+                }
+                
+                // Update Mesh
+                helicopter.position.copy(HELI.pos);
+                helicopter.rotation.y = HELI.rot.y;
+                helicopter.rotation.x = HELI.tilt.x;
+                helicopter.rotation.z = -HELI.tilt.y; // Roll into turn
+                
+                // Rotor Animation
+                HELI.rotorSpeed = 0.5 + HELI.pos.y * 0.01; // Faster when higher/working hard
+            }
+            
+            rotorBlade.rotation.y += HELI.rotorSpeed;
+            tailRotor.rotation.x += HELI.rotorSpeed * 2;
+            
+            // Audio
+            rotorGain.gain.value = Math.min(0.2, HELI.rotorSpeed * 0.1);
+            rotorOsc.frequency.value = 50 + HELI.rotorSpeed * 50;
+            
+            // Water Drop
+            if (INPUT.space && STATE.water > 0 && !STATE.onFoot) {
+                STATE.water -= 0.5;
+                // Create particles
+                for(let i=0; i<5; i++) {
+                    const p = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.2, 0.2), new THREE.MeshBasicMaterial({ color: 0x00ffff }));
+                    p.position.copy(HELI.pos).add(new THREE.Vector3((Math.random()-0.5)*2, -1, (Math.random()-0.5)*2));
+                    p.userData = { vel: new THREE.Vector3((Math.random()-0.5)*0.2, -0.5, (Math.random()-0.5)*0.2) };
+                    scene.add(p);
+                    waterParticles.push(p);
+                }
+            }
+            
+            // Update Particles
+            for (let i = waterParticles.length - 1; i >= 0; i--) {
+                const p = waterParticles[i];
+                p.position.add(p.userData.vel);
+                p.userData.vel.y -= 0.02; // Gravity
+                
+                // Hit ground/fire
+                if (p.position.y <= 0) {
+                    scene.remove(p);
+                    waterParticles.splice(i, 1);
+                    checkWaterHit(p.position);
+                }
+            }
+            
+            // Fire visuals
+            STATE.missions.forEach(m => {
+                if (m.type === 'fire' && m.active) {
+                    // Flicker light
+                    m.obj.children[0].intensity = 1 + Math.random();
+                    // Add smoke particles (simplified)
+                    if (Math.random() > 0.8) {
+                        // In a real engine we'd use a particle system, here just simple scaling
+                        m.obj.scale.setScalar(1 + Math.sin(Date.now() * 0.01) * 0.2);
+                    }
+                }
+            });
+            
+            // Check Shop
+            const shop = worldObjects.find(o => o.type === 'shop');
+            if (shop && HELI.pos.distanceTo(shop.pos) < shop.radius && HELI.pos.y < 2) {
+                if (!STATE.shopOpen && INPUT.e) {
+                    openShop();
+                }
+            }
+        }
+
+        function checkWaterHit(pos) {
+            STATE.missions.forEach(m => {
+                if (m.type === 'fire' && m.active) {
+                    const dist = pos.distanceTo(m.pos);
+                    if (dist < 10) {
+                        m.hp -= 5;
+                        if (m.hp <= 0) completeMission(m);
+                    }
+                }
+            });
+        }
+
+        function updateMissions() {
+            const heliPos = HELI.pos;
+            
+            STATE.missions.forEach(m => {
+                if (!m.active) return;
+                
+                const dist = heliPos.distanceTo(m.pos);
+                
+                if (m.type === 'rescue') {
+                    // Pick up
+                    if (dist < 10 && heliPos.y < 2 && STATE.passengers < STATE.maxPassengers && !m.pickedUp) {
+                        m.pickedUp = true;
+                        STATE.passengers++;
+                        scene.remove(m.obj);
+                        showMessage("PASSENGER ACQUIRED. FLY TO HOSPITAL.");
+                        addLog("Transporting patient...");
+                        speak("Patient secured. Transporting to hospital.");
+                    }
+                }
+                
+                if (m.type === 'chase') {
+                    // Move car
+                    m.pos.add(m.vel);
+                    m.obj.position.copy(m.pos);
+                    m.obj.lookAt(m.pos.clone().add(m.vel));
+                    
+                    // Keep within bounds
+                    if (Math.abs(m.pos.x) > WORLD_SIZE || Math.abs(m.pos.z) > WORLD_SIZE) {
+                        m.vel.multiplyScalar(-1);
+                    }
+                    
+                    // Spotlight capture
+                    if (HELI.spotlightOn && dist < 30 && heliPos.y > 10) {
+                        // Check if spotlight is actually hitting (simplified: just distance + light on)
+                        m.caughtTime = (m.caughtTime || 0) + 1;
+                        if (m.caughtTime > 100) completeMission(m);
+                    } else {
+                        m.caughtTime = Math.max(0, (m.caughtTime || 0) - 1);
+                    }
+                }
+            });
+            
+            // Check Hospital Dropoff
+            const hospital = worldObjects.find(o => o.type === 'hospital');
+            if (hospital && heliPos.distanceTo(hospital.pos) < hospital.radius && heliPos.y < 2) {
+                if (STATE.passengers > 0) {
+                    const earned = STATE.passengers * 500;
+                    STATE.money += earned;
+                    STATE.score += earned;
+                    STATE.passengers = 0;
+                    showMessage(`PATIENTS DELIVERED. +$${earned}`);
+                    speak("Patients delivered. Good work.");
+                    
+                    // Clear completed rescue missions
+                    STATE.missions.forEach(m => {
+                        if (m.type === 'rescue' && m.pickedUp && m.active) {
+                            completeMission(m, true); // Silent complete
+                        }
+                    });
+                }
+            }
+            
+            // Check Water Refill
+            const waterStation = worldObjects.find(o => o.type === 'water_station');
+            if (waterStation && heliPos.distanceTo(waterStation.pos) < waterStation.radius && heliPos.y < 2) {
+                if (STATE.water < STATE.maxWater) {
+                    STATE.water = Math.min(STATE.maxWater, STATE.water + 0.5);
+                }
+            }
+        }
+
+        function openShop() {
+            STATE.shopOpen = true;
+            document.getElementById('shop-ui').style.display = 'block';
+            INPUT.e = false;
+        }
+
+        function closeShop() {
+            STATE.shopOpen = false;
+            document.getElementById('shop-ui').style.display = 'none';
+        }
+
+        function buyUpgrade(type, cost) {
+            if (STATE.money >= cost) {
+                STATE.money -= cost;
+                if (type === 'speed') {
+                    STATE.upgrades.speed += 0.2;
+                    showMessage("SPEED UPGRADED");
+                } else if (type === 'water') {
+                    STATE.maxWater += 50;
+                    STATE.water = STATE.maxWater;
+                    showMessage("TANK UPGRADED");
+                } else if (type === 'seat') {
+                    STATE.maxPassengers++;
+                    showMessage("SEAT ADDED");
+                }
+                speak("Upgrade installed.");
+            } else {
+                showMessage("INSUFFICIENT FUNDS");
+                speak("Insufficient funds.");
+            }
+        }
+
+        function completeMission(m, silent = false) {
+            m.active = false;
+            if (m.obj && m.obj.parent) scene.remove(m.obj);
+            
+            if (!silent) {
+                STATE.score += 1000;
+                STATE.money += 1000;
+                showMessage(`MISSION COMPLETE: ${m.title}`);
+                addLog(`COMPLETED: ${m.title}`);
+                speak(`Mission complete. Good job.`);
+            }
+            
+            // Remove from array after delay
+            setTimeout(() => {
+                const idx = STATE.missions.indexOf(m);
+                if (idx > -1) STATE.missions.splice(idx, 1);
+            }, 2000);
+        }
+
+        // --- UI & Input ---
+        function updateHUD() {
+            // Gauges
+            document.getElementById('alt-gauge').style.width = Math.min(100, HELI.pos.y / 2) + '%';
+            document.getElementById('alt-text').innerText = Math.round(HELI.pos.y * 3.28) + ' ft';
+            
+            const speed = new THREE.Vector2(HELI.vel.x, HELI.vel.z).length() * 50;
+            document.getElementById('speed-gauge').style.width = Math.min(100, speed) + '%';
+            document.getElementById('speed-text').innerText = Math.round(speed) + ' kts';
+            
+            document.getElementById('water-gauge').style.width = (STATE.water / STATE.maxWater * 100) + '%';
+            document.getElementById('water-text').innerText = Math.round(STATE.water) + '%';
+            
+            document.getElementById('passenger-text').innerText = `${STATE.passengers} / ${STATE.maxPassengers}`;
+            document.getElementById('score').innerText = `SCORE: ${STATE.score}`;
+            document.getElementById('money').innerText = `FUNDS: $${STATE.money}`;
+            document.getElementById('mode-text').innerText = STATE.onFoot ? "MODE: ON FOOT" : "MODE: FLIGHT";
+            
+            // Minimap
+            const map = document.getElementById('minimap');
+            // Clear old dots (except center)
+            while(map.children.length > 1) map.removeChild(map.lastChild);
+            
+            STATE.missions.forEach(m => {
+                if (!m.active) return;
+                const dot = document.createElement('div');
+                dot.className = 'map-dot';
+                
+                // Relative to player
+                const centerPos = STATE.onFoot ? PLAYER.pos : HELI.pos;
+                const relX = (m.pos.x - centerPos.x) / 10 + 100;
+                const relY = (m.pos.z - centerPos.z) / 10 + 100;
+                
+                if (relX >= 0 && relX <= 200 && relY >= 0 && relY <= 200) {
+                    dot.style.left = relX + 'px';
+                    dot.style.top = relY + 'px';
+                    dot.style.backgroundColor = m.type === 'fire' ? '#f00' : (m.type === 'rescue' ? '#00f' : '#fa0');
+                    map.appendChild(dot);
+                }
+            });
+            
+            // Hospital blip
+            const hosp = worldObjects.find(o => o.type === 'hospital');
+            if (hosp) {
+                const dot = document.createElement('div');
+                dot.className = 'map-dot';
+                const centerPos = STATE.onFoot ? PLAYER.pos : HELI.pos;
+                const relX = (hosp.pos.x - centerPos.x) / 10 + 100;
+                const relY = (hosp.pos.z - centerPos.z) / 10 + 100;
+                if (relX >= 0 && relX <= 200 && relY >= 0 && relY <= 200) {
+                    dot.style.left = relX + 'px';
+                    dot.style.top = relY + 'px';
+                    dot.style.backgroundColor = '#fff';
+                    dot.style.borderRadius = '0'; // Square for buildings
+                    map.appendChild(dot);
+                }
+            }
+        }
+
+        function showMessage(text) {
+            const el = document.getElementById('messages');
+            el.innerText = text;
+            el.style.opacity = 1;
+            setTimeout(() => el.style.opacity = 0, 3000);
+        }
+
+        function addLog(text) {
+            const log = document.getElementById('log-content');
+            const item = document.createElement('div');
+            item.className = 'mission-item';
+            item.innerText = `> ${text}`;
+            log.prepend(item);
+        }
+
+        function handleKey(e, isDown) {
+            const key = e.key.toLowerCase();
+            if (key === 'w') INPUT.w = isDown;
+            if (key === 's') INPUT.s = isDown;
+            if (key === 'a') INPUT.a = isDown;
+            if (key === 'd') INPUT.d = isDown;
+            if (key === 'arrowup') INPUT.up = isDown;
+            if (key === 'arrowdown') INPUT.down = isDown;
+            if (key === 'arrowleft') INPUT.left = isDown;
+            if (key === 'arrowright') INPUT.right = isDown;
+            if (key === ' ') INPUT.space = isDown;
+            if (key === 'e') INPUT.e = isDown;
+            if (key === 'f') INPUT.f = isDown;
+            
+            if (isDown && key === 'h') {
+                HELI.spotlightOn = !HELI.spotlightOn;
+                showMessage(`SPOTLIGHT ${HELI.spotlightOn ? 'ON' : 'OFF'}`);
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            updatePhysics();
+            updateMissions();
+            updateHUD();
+            
+            // Camera Follow
+            if (STATE.onFoot) {
+                // Follow player
+                const offset = new THREE.Vector3(0, 2, 5).applyAxisAngle(new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 1, 0).setY(PLAYER.rot));
+                camera.position.copy(PLAYER.pos).add(offset);
+                camera.lookAt(PLAYER.pos);
+            } else {
+                // Follow heli
+                const offset = new THREE.Vector3(0, 5, 15).applyAxisAngle(new THREE.Vector3(0, 1, 0), HELI.rot.y);
+                camera.position.copy(HELI.pos).add(offset);
+                camera.lookAt(HELI.pos);
+            }
+            
+            renderer.render(scene, camera);
+        }
+
+        init();
+    </script>
+</body>
+</html>
