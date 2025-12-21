@@ -214,6 +214,50 @@
             font-weight: bold;
             color: var(--accent-color);
         }
+        .timeline-container {
+            height: 150px;
+            background-color: var(--panel-bg);
+            border-top: 1px solid #333;
+            padding: 10px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .timeline-canvas {
+            width: 100%;
+            height: 100%;
+        }
+
+        .telemetry-controls {
+            display: flex;
+            gap: 5px;
+            margin-top: 10px;
+        }
+
+        .telemetry-controls button {
+            font-size: 0.8rem;
+            padding: 5px 10px;
+        }
+
+        .event-marker {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background-color: #fff;
+            pointer-events: none;
+        }
+
+        .event-label {
+            position: absolute;
+            top: 5px;
+            background: rgba(0,0,0,0.8);
+            padding: 2px 5px;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            color: #fff;
+            transform: translateX(-50%);
+        }
     </style>
 </head>
 <body>
@@ -227,6 +271,39 @@
 
     <div class="container">
         <div class="sidebar">
+            <div class="control-group">
+                <h3>Telemetry & Analysis</h3>
+                <div class="status-panel" style="margin-bottom:10px;">
+                    <div class="metric">
+                        <div style="font-size:0.7rem; color:#888;">REC TIME</div>
+                        <div id="rec-time" class="metric-value">00:00</div>
+                    </div>
+                    <div class="metric">
+                        <div style="font-size:0.7rem; color:#888;">EVENTS</div>
+                        <div id="event-count" class="metric-value">0</div>
+                    </div>
+                </div>
+                <div class="telemetry-controls">
+                    <button id="recordBtn" style="background-color:#ff4757;">● Rec</button>
+                    <button id="markBtn" class="secondary" disabled>⚑ Mark</button>
+                </div>
+                <div style="margin-top:10px;">
+                    <label style="font-size:0.8rem; color:#888;">Session Context</label>
+                    <select id="session-context" style="width:100%; padding: 5px; background:#333; color:#fff; border:none; margin-top:5px;">
+                        <option value="normal">Normal Day</option>
+                        <option value="high_stress">High Stress</option>
+                        <option value="trauma_trigger">Trauma Trigger</option>
+                        <option value="recovery">Recovery / Healing</option>
+                        <option value="peak">Peak Performance</option>
+                    </select>
+                </div>
+                <div class="telemetry-controls">
+                    <button id="exportBtn" class="secondary" disabled>⬇ Save</button>
+                    <button id="importBtn" class="secondary">⬆ Load</button>
+                    <input type="file" id="fileInput" style="display:none" accept=".json">
+                </div>
+            </div>
+
             <div class="control-group">
                 <h3>Global State</h3>
                 <div class="slider-container">
@@ -328,6 +405,11 @@
             </div>
         </div>
     </div>
+    
+    <div class="timeline-container">
+        <div style="position:absolute; top:5px; left:10px; font-size:0.8rem; color:#888;">COHERENCE / AROUSAL TIMELINE</div>
+        <canvas id="timelineCanvas" class="timeline-canvas"></canvas>
+    </div>
 
     <script>
         // Configuration
@@ -343,6 +425,8 @@
         // State
         let state = {
             running: false,
+            recording: false,
+            startTime: 0,
             arousal: 50,
             coherence: 80,
             regions: {
@@ -355,12 +439,40 @@
             lastThoughtTime: 0
         };
 
+        let telemetrySession = {
+            id: null,
+            startTime: null,
+            context: 'normal',
+            samples: [], // {t: timestamp, a: arousal, c: coherence, r: regions}
+            events: []   // {t: timestamp, label: string}
+        };
+
         // DOM Elements
         const brainViz = document.getElementById('brain-viz');
         const thoughtLog = document.getElementById('thought-log');
         const toggleBtn = document.getElementById('toggleSimBtn');
         const resetBtn = document.getElementById('resetBtn');
         const presetSelector = document.getElementById('preset-selector');
+        const sessionContext = document.getElementById('session-context');
+        
+        // Telemetry Elements
+        const recordBtn = document.getElementById('recordBtn');
+        const markBtn = document.getElementById('markBtn');
+        const exportBtn = document.getElementById('exportBtn');
+        const importBtn = document.getElementById('importBtn');
+        const fileInput = document.getElementById('fileInput');
+        const recTimeDisplay = document.getElementById('rec-time');
+        const eventCountDisplay = document.getElementById('event-count');
+        const timelineCanvas = document.getElementById('timelineCanvas');
+        const ctx = timelineCanvas.getContext('2d');
+
+        // Resize canvas
+        function resizeCanvas() {
+            timelineCanvas.width = timelineCanvas.parentElement.clientWidth;
+            timelineCanvas.height = timelineCanvas.parentElement.clientHeight;
+        }
+        window.addEventListener('resize', resizeCanvas);
+        setTimeout(resizeCanvas, 100);
 
         // Thought Database
         const thoughts = {
@@ -425,6 +537,7 @@
             setupListeners();
             updateVisuals();
             requestAnimationFrame(loop);
+            renderTimeline();
         }
 
         function setupListeners() {
@@ -459,11 +572,187 @@
             resetBtn.addEventListener('click', () => {
                 applyPreset('idle');
                 presetSelector.value = 'idle';
+                telemetrySession.samples = [];
+                telemetrySession.events = [];
+                updateTelemetryUI();
             });
+
+            // Telemetry Buttons
+            recordBtn.addEventListener('click', toggleRecording);
+            markBtn.addEventListener('click', () => {
+                if (state.recording) {
+                    const label = prompt("Event Label:", "Significant Event");
+                    if (label) {
+                        telemetrySession.events.push({
+                            t: Date.now() - state.startTime,
+                            label: label
+                        });
+                        updateTelemetryUI();
+                    }
+                }
+            });
+
+            sessionContext.addEventListener('change', (e) => {
+                telemetrySession.context = e.target.value;
+                if (state.recording) {
+                    telemetrySession.events.push({
+                        t: Date.now() - state.startTime,
+                        label: `Context: ${e.target.options[e.target.selectedIndex].text}`
+                    });
+                }
+            });
+
+            exportBtn.addEventListener('click', exportData);
+            importBtn.addEventListener('click', () => fileInput.click());
+            fileInput.addEventListener('change', importData);
 
             // Presets
             presetSelector.addEventListener('change', (e) => {
                 applyPreset(e.target.value);
+                if (state.recording) {
+                    telemetrySession.events.push({
+                        t: Date.now() - state.startTime,
+                        label: `Preset: ${e.target.value}`
+                    });
+                }
+            });
+        }
+
+        function toggleRecording() {
+            state.recording = !state.recording;
+            if (state.recording) {
+                // Start
+                state.startTime = Date.now();
+                telemetrySession = {
+                    id: crypto.randomUUID(),
+                    startTime: new Date().toISOString(),
+                    context: sessionContext.value,
+                    samples: [],
+                    events: []
+                };
+                recordBtn.textContent = "■ Stop";
+                recordBtn.style.backgroundColor = "#ff4757";
+                markBtn.disabled = false;
+                exportBtn.disabled = true;
+                sessionContext.disabled = true;
+                
+                // Auto-start simulation if not running
+                if (!state.running) toggleBtn.click();
+            } else {
+                // Stop
+                recordBtn.textContent = "● Rec";
+                recordBtn.style.backgroundColor = "#ff4757"; // Keep red but maybe dimmer?
+                markBtn.disabled = true;
+                exportBtn.disabled = false;
+                sessionContext.disabled = false;
+            }
+        }
+
+        function exportData() {
+            const dateStr = new Date().toISOString().split('T')[0];
+            const filename = `brain_telemetry_${dateStr}_${telemetrySession.context}.json`;
+            const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(telemetrySession, null, 2));
+            const downloadAnchorNode = document.createElement('a');
+            downloadAnchorNode.setAttribute("href", dataStr);
+            downloadAnchorNode.setAttribute("download", filename);
+            document.body.appendChild(downloadAnchorNode);
+            downloadAnchorNode.click();
+            downloadAnchorNode.remove();
+        }
+
+        function importData(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+            
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const data = JSON.parse(e.target.result);
+                    telemetrySession = data;
+                    if (data.context) sessionContext.value = data.context;
+                    alert(`Telemetry loaded!\nDate: ${new Date(data.startTime).toLocaleString()}\nContext: ${data.context}`);
+                    updateTelemetryUI();
+                    renderTimeline();
+                } catch (err) {
+                    alert("Error parsing JSON");
+                }
+            };
+            reader.readAsText(file);
+        }
+
+        function updateTelemetryUI() {
+            eventCountDisplay.textContent = telemetrySession.events.length;
+            if (state.recording) {
+                const elapsed = Math.floor((Date.now() - state.startTime) / 1000);
+                const mins = Math.floor(elapsed / 60).toString().padStart(2, '0');
+                const secs = (elapsed % 60).toString().padStart(2, '0');
+                recTimeDisplay.textContent = `${mins}:${secs}`;
+            }
+        }
+
+        function renderTimeline() {
+            const w = timelineCanvas.width;
+            const h = timelineCanvas.height;
+            ctx.clearRect(0, 0, w, h);
+
+            if (telemetrySession.samples.length < 2) return;
+
+            const duration = telemetrySession.samples[telemetrySession.samples.length - 1].t;
+            const startTime = new Date(telemetrySession.startTime).getTime();
+            const padding = 20;
+            
+            // Draw Time Grid
+            ctx.strokeStyle = '#333';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            const numGridLines = 5;
+            for (let i = 0; i <= numGridLines; i++) {
+                const x = (i / numGridLines) * w;
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, h);
+                
+                // Time Label
+                const timeAtPoint = new Date(startTime + (duration * (i / numGridLines)));
+                const timeStr = timeAtPoint.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit', second:'2-digit'});
+                ctx.fillStyle = '#666';
+                ctx.font = '10px monospace';
+                ctx.fillText(timeStr, x + 2, h - 2);
+            }
+            ctx.stroke();
+
+            // Draw Coherence (Green)
+            ctx.beginPath();
+            ctx.strokeStyle = '#00ff9d';
+            ctx.lineWidth = 2;
+            telemetrySession.samples.forEach((s, i) => {
+                const x = (s.t / duration) * w;
+                const y = h - (s.c / 100) * (h - padding) - padding/2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Draw Arousal (Red)
+            ctx.beginPath();
+            ctx.strokeStyle = '#ff6b6b';
+            ctx.lineWidth = 2;
+            telemetrySession.samples.forEach((s, i) => {
+                const x = (s.t / duration) * w;
+                const y = h - (s.a / 100) * (h - padding) - padding/2;
+                if (i === 0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+
+            // Draw Events
+            telemetrySession.events.forEach(e => {
+                const x = (e.t / duration) * w;
+                ctx.fillStyle = '#fff';
+                ctx.fillRect(x, 0, 1, h);
+                
+                ctx.fillStyle = 'rgba(255,255,255,0.8)';
+                ctx.font = '10px Arial';
+                ctx.fillText(e.label, x + 2, 12);
             });
         }
 
@@ -633,6 +922,26 @@
                     
                     addLogEntry(thought, source);
                     state.lastThoughtTime = timestamp;
+
+                    // Record thought event if recording
+                    if (state.recording) {
+                        telemetrySession.events.push({
+                            t: Date.now() - state.startTime,
+                            label: "💭 " + thought.substring(0, 15) + "..."
+                        });
+                    }
+                }
+
+                // Record Telemetry Sample
+                if (state.recording && timestamp % 10 < 1) { // Approx every frame or throttle
+                    telemetrySession.samples.push({
+                        t: Date.now() - state.startTime,
+                        a: state.arousal,
+                        c: state.coherence,
+                        r: {...state.regions}
+                    });
+                    updateTelemetryUI();
+                    if (telemetrySession.samples.length % 30 === 0) renderTimeline(); // Update viz occasionally
                 }
             }
             
