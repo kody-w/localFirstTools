@@ -5,7 +5,7 @@ def check_braces(filename):
         content = f.read()
 
     # Find all script tags with their positions
-    matches = list(re.finditer(r'<script>(.*?)</script>', content, re.DOTALL))
+    matches = list(re.finditer(r'<script[^>]*>(.*?)</script>', content, re.DOTALL))
     
     if not matches:
         print("No script tags found")
@@ -42,4 +42,8 @@ def check_braces(filename):
     else:
         print("Braces are balanced")
 
-check_braces('apps/games/leviv4.html')
+import sys
+if len(sys.argv) > 1:
+    check_braces(sys.argv[1])
+else:
+    print("Usage: python3 check_braces.py <filename>")
