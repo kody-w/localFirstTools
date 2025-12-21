@@ -1460,6 +1460,34 @@
                         if (parts.leftArm) parts.leftArm.rotation.x = originals.leftArm.rotation.x + Math.sin(t + Math.PI) * amp;
                         if (parts.rightArm) parts.rightArm.rotation.x = originals.rightArm.rotation.x + Math.sin(t) * amp;
                     }
+
+                    // Generic Part Animation for Walk (New System)
+                    if (anims.walk.parts) {
+                        for (const [partName, config] of Object.entries(anims.walk.parts)) {
+                            const part = parts[partName];
+                            const orig = originals[partName];
+                            if (!part) continue;
+
+                            if (config.rotateX) {
+                                const amp = config.rotateX.amplitude || 0;
+                                const speed = config.rotateX.speed || 1;
+                                const phase = config.rotateX.phase || 0;
+                                part.rotation.x = orig.rotation.x + Math.sin(state.time * speed + phase) * amp;
+                            }
+                            if (config.rotateY) {
+                                const amp = config.rotateY.amplitude || 0;
+                                const speed = config.rotateY.speed || 1;
+                                const phase = config.rotateY.phase || 0;
+                                part.rotation.y = orig.rotation.y + Math.sin(state.time * speed + phase) * amp;
+                            }
+                            if (config.rotateZ) {
+                                const amp = config.rotateZ.amplitude || 0;
+                                const speed = config.rotateZ.speed || 1;
+                                const phase = config.rotateZ.phase || 0;
+                                part.rotation.z = orig.rotation.z + Math.sin(state.time * speed + phase) * amp;
+                            }
+                        }
+                    }
                 }
 
                 // ATTACK ANIMATION (Overlay)
@@ -2979,6 +3007,7 @@
             const isTank = config.health >= 150 && !config.isBoss;
             const isSniper = config.ranged;
             const isBoss = config.isBoss;
+            const isGrunt = !isRusher && !isTank && !isSniper && !isBoss;
 
             // === BODY ===
             let bodyGeom, bodyHeight;
@@ -3010,6 +3039,7 @@
             const body = new THREE.Mesh(bodyGeom, bodyMat);
             body.position.y = bodyHeight;
             body.castShadow = true;
+            body.name = 'torso';
             group.add(body);
 
             // === HEAD ===
@@ -3034,6 +3064,7 @@
             const head = new THREE.Mesh(headGeom, headMat);
             head.position.y = bodyHeight + s * 1.2;
             if (isRusher) head.rotation.x = Math.PI; // Point cone forward
+            head.name = 'head';
             group.add(head);
 
             // === EYES ===
@@ -3066,10 +3097,12 @@
 
             const leftLeg = new THREE.Mesh(legGeom, legMat);
             leftLeg.position.set(-s * 0.35, -legHeight * 0.5, 0);
+            leftLeg.name = 'leftLeg';
             group.add(leftLeg);
 
             const rightLeg = new THREE.Mesh(legGeom, legMat);
             rightLeg.position.set(s * 0.35, -legHeight * 0.5, 0);
+            rightLeg.name = 'rightLeg';
             group.add(rightLeg);
 
             // === TYPE-SPECIFIC FEATURES ===
@@ -3084,6 +3117,7 @@
                     const blade = new THREE.Mesh(bladeGeom, bladeMat);
                     blade.position.set(side * s * 0.6, bodyHeight * 0.5, s * 0.2);
                     blade.rotation.z = side * 0.3;
+                    blade.name = 'blade' + (side < 0 ? 'L' : 'R');
                     group.add(blade);
                 }
             }
@@ -3097,6 +3131,7 @@
                     });
                     const shoulder = new THREE.Mesh(shoulderGeom, shoulderMat);
                     shoulder.position.set(side * s * 0.9, bodyHeight + s * 0.5, 0);
+                    shoulder.name = 'shoulder' + (side < 0 ? 'L' : 'R');
                     group.add(shoulder);
                 }
 
@@ -3109,6 +3144,32 @@
                 group.add(cannon);
             }
 
+            // GRUNT: Articulated Arms & Weapon
+            if (isGrunt) {
+                const armMat = new THREE.MeshStandardMaterial({ color: 0x444444, metalness: 0.7, roughness: 0.3 });
+                
+                // Left Arm
+                const leftArm = new THREE.Mesh(new THREE.BoxGeometry(s * 0.25, s * 0.8, s * 0.25), armMat);
+                leftArm.position.set(-s * 0.7, bodyHeight * 0.8, 0);
+                leftArm.name = 'leftArm';
+                group.add(leftArm);
+
+                // Right Arm (Holding Weapon)
+                const rightArm = new THREE.Mesh(new THREE.BoxGeometry(s * 0.25, s * 0.8, s * 0.25), armMat);
+                rightArm.position.set(s * 0.7, bodyHeight * 0.8, 0);
+                rightArm.rotation.x = -0.5; // Slight forward angle
+                rightArm.name = 'rightArm';
+                group.add(rightArm);
+
+                // Weapon
+                const weaponGeom = new THREE.BoxGeometry(s * 0.15, s * 0.15, s * 1.2);
+                const weaponMat = new THREE.MeshStandardMaterial({ color: 0x222222, emissive: 0xff0000, emissiveIntensity: 0.5 });
+                const weapon = new THREE.Mesh(weaponGeom, weaponMat);
+                weapon.position.set(0, -s * 0.4, s * 0.4); // Attached to hand
+                weapon.name = 'weapon';
+                rightArm.add(weapon); // Child of right arm
+            }
+
             // SNIPER: Scope visor and antenna
             if (isSniper) {
                 // Scope visor
@@ -3118,6 +3179,7 @@
                 });
                 const scope = new THREE.Mesh(scopeGeom, scopeMat);
                 scope.position.set(0, bodyHeight + s * 1.4, s * 0.25);
+                scope.name = 'scope';
                 group.add(scope);
 
                 // Antenna
@@ -3228,9 +3290,43 @@
                 }
             }
 
+            // Populate parts and originals for AnimationSystem
             group.userData.parts = {};
             group.userData.partOriginals = {};
-            group.userData.animations = {};
+            
+            group.traverse((child) => {
+                if (child.isMesh && child.name) {
+                    group.userData.parts[child.name] = child;
+                    group.userData.partOriginals[child.name] = {
+                        position: child.position.clone(),
+                        rotation: child.rotation.clone(),
+                        scale: child.scale.clone()
+                    };
+                }
+            });
+
+            // Define default animations based on available parts
+            group.userData.animations = {
+                idle: {
+                    swaySpeed: 2,
+                    parts: {
+                        head: { rotateY: { amplitude: 0.1, speed: 1 } },
+                        leftArm: { rotateX: { amplitude: 0.1, speed: 2, phase: 0 } },
+                        rightArm: { rotateX: { amplitude: 0.1, speed: 2, phase: Math.PI } }
+                    }
+                },
+                walk: {
+                    bob: true,
+                    bobSpeed: 10,
+                    bobAmount: 0.1,
+                    parts: {
+                        leftLeg: { rotateX: { amplitude: 0.6, speed: 10, phase: 0 } },
+                        rightLeg: { rotateX: { amplitude: 0.6, speed: 10, phase: Math.PI } },
+                        leftArm: { rotateX: { amplitude: 0.4, speed: 10, phase: Math.PI } },
+                        rightArm: { rotateX: { amplitude: 0.4, speed: 10, phase: 0 } }
+                    }
+                }
+            };
 
             return group;
         }
