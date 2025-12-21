@@ -411,6 +411,34 @@
         <button class="menu-btn" onclick="closeMissionScreen()">RETURN TO BUILDER</button>
     </div>
 
+    <!-- Mission Summary Screen -->
+    <div id="mission-summary" style="display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,5,10,0.98); z-index:4000; flex-direction:column; align-items:center; justify-content:center;">
+        <h1 class="title-glitch" style="font-size:40px; color:#00ff00; text-shadow: 0 0 10px #00ff00;">MISSION ACCOMPLISHED</h1>
+        <div class="subtitle" id="summary-subtitle">ARRIVAL CONFIRMED</div>
+        
+        <div style="display:flex; gap:40px; margin:30px 0;">
+            <div style="text-align:center;">
+                <div class="stat-label">TOTAL FLIGHT TIME</div>
+                <div class="stat-value" id="summary-time" style="font-size:24px;">00:00:00</div>
+            </div>
+            <div style="text-align:center;">
+                <div class="stat-label">DISTANCE TRAVELED</div>
+                <div class="stat-value" id="summary-dist" style="font-size:24px;">0 KM</div>
+            </div>
+            <div style="text-align:center;">
+                <div class="stat-label">MAX VELOCITY</div>
+                <div class="stat-value" id="summary-vel" style="font-size:24px;">0 KM/S</div>
+            </div>
+        </div>
+        
+        <div style="width:600px; height:200px; border:1px solid #333; margin-bottom:30px; position:relative; background:rgba(0,0,0,0.5);">
+            <div style="position:absolute; top:10px; left:10px; color:#aaa; font-size:10px;">FLIGHT PROFILE REPLAY</div>
+            <canvas id="flight-graph" width="600" height="200"></canvas>
+        </div>
+        
+        <button class="menu-btn" onclick="closeMissionSummary()">RETURN TO BASE</button>
+    </div>
+
     <!-- Flight UI -->
     <div id="flight-ui" style="display:none;">
         <div class="hud" style="top:20px; left:50%; transform:translateX(-50%); display:flex; gap:20px;">
@@ -418,6 +446,25 @@
             <div class="stat-value" id="mission-vel">VEL: 0 m/s</div>
             <div class="stat-value" id="mission-alt">ALT: 0 km</div>
             <div class="stat-value" id="mission-fuel">FUEL: 100%</div>
+            <div class="stat-value" id="mission-eta" style="color:var(--accent)">ETA: N/A</div>
+            <div class="stat-value" id="mission-delta" style="color:#ff3300; display:none;">ΔV COST: +0 m/s</div>
+        </div>
+        
+        <!-- Autopilot Controls -->
+        <div style="position:fixed; bottom:80px; left:50%; transform:translateX(-50%); text-align:center;">
+            <button id="autopilot-btn" class="menu-btn" style="font-size:12px; padding:5px 20px; border-color:#00ff00; color:#00ff00;" onclick="toggleAutopilot()">AUTOPILOT: ON</button>
+        </div>
+        
+        <!-- Progress Bar -->
+        <div id="mission-progress-container" style="position:fixed; top:60px; left:50%; transform:translateX(-50%); width:400px; height:4px; background:rgba(255,255,255,0.1); border-radius:2px; overflow:hidden;">
+            <div id="mission-progress-bar" style="width:0%; height:100%; background:var(--accent); box-shadow:0 0 10px var(--accent);"></div>
+        </div>
+
+        <!-- Camera Controls -->
+        <div class="hud" style="top:20px; right:20px; text-align:right;">
+            <div class="hud-header">VISUAL FEED</div>
+            <div class="stat-value" id="cam-mode-display">CHASE CAM</div>
+            <button class="menu-btn" style="font-size:12px; padding:5px 10px; margin:5px 0;" onclick="cycleCamera()">SWITCH VIEW [C]</button>
         </div>
 
         <!-- Comms Panel -->
@@ -1206,6 +1253,7 @@
             if(k === 'b') toggleBuildMode();
             if(k === 'delete') removeModule();
             if(k === 'r' && ghostModule) ghostModule.rotation.y += Math.PI/2;
+            if(k === 'c' && missionMode) cycleCamera();
         }
 
         function onKeyUp(e) {
@@ -1244,6 +1292,11 @@
         let ghostShip = null;
         let orbitLine = null;
         let ghostOrbitLine = null;
+        let spaceDust = null;
+        let historyLine = null;
+        let predictedLine = null;
+        const MAX_TRAIL_POINTS = 1000;
+        const PREDICTION_STEPS = 500;
         
         const G = 6.67430e-11;
         const C = 299792.458; // km/s (Speed of Light)
@@ -1281,7 +1334,10 @@
                 startVel: 30, // km/s
                 targetOrbit: null,
                 ghostColor: 0x00ffff,
-                desc: "Escape velocity burn. Target: 0.1c"
+                desc: "Escape velocity burn. Target: 0.1c",
+                destName: "Alpha Centauri",
+                destDist: 4.37 * 9.461e12, // km (4.37 LY)
+                destColor: 0xffddaa
             },
             hail_mary: {
                 name: "Project Hail Mary",
@@ -1293,11 +1349,18 @@
                 targetOrbit: null,
                 ghostColor: 0xff3300, // Astrophage Red
                 desc: "Tau Ceti Run. 12 Light Years. 1.5g Burn.",
-                special: "astrophage"
+                special: "astrophage",
+                destName: "Tau Ceti",
+                destDist: 11.9 * 9.461e12, // km (12 LY)
+                destColor: 0xffaa88
             }
         };
 
         let currentMission = null;
+        let cameraMode = 'CHASE'; // CHASE, COCKPIT, ORBIT, TARGET, CINEMATIC
+        let camIndex = 0;
+        const CAM_MODES = ['CHASE', 'COCKPIT', 'ORBIT', 'TARGET', 'CINEMATIC'];
+        let destinationBody = null;
 
         function showMissionScreen() {
             document.getElementById('title-screen').style.display = 'none';
@@ -1309,17 +1372,27 @@
             document.getElementById('title-screen').style.display = 'flex';
         }
 
+        let autopilotEngaged = true;
+        let deviationAlert = false;
+
+        let maxVelocity = 0;
+        let flightHistory = []; // Store [time, distance] for graph
+
         function startMission(missionId) {
             document.getElementById('mission-screen').style.display = 'none';
             document.getElementById('flight-ui').style.display = 'block';
             document.getElementById('stats').style.display = 'none'; // Hide builder HUD
             document.getElementById('controls-info').style.display = 'none';
             document.getElementById('build-menu').style.display = 'none';
-            document.getElementById('mode-indicator').textContent = "MISSION ACTIVE";
-            document.getElementById('mode-indicator').style.color = "#ff3300";
+            document.getElementById('mode-indicator').textContent = "AUTOPILOT ENGAGED";
+            document.getElementById('mode-indicator').style.color = "#00ff00";
             
             missionMode = true;
+            autopilotEngaged = true;
             currentMission = MISSIONS[missionId];
+            physicsTime = 0;
+            maxVelocity = 0;
+            flightHistory = [];
             
             // Setup Physics World
             setupMissionScene(currentMission);
@@ -1333,6 +1406,9 @@
             setupGhostShip(currentMission);
             
             showNotification("MISSION START: " + currentMission.name);
+            
+            // Force HUD update immediately
+            updatePhysics(0.016);
         }
 
         function setupMissionScene(mission) {
@@ -1340,8 +1416,9 @@
             if(planet) scene.remove(planet);
             if(sun) scene.remove(sun);
             if(rings) scene.remove(rings);
+            if(destinationBody) scene.remove(destinationBody);
             
-            // Create Celestial Body
+            // Create Celestial Body (Origin)
             const geo = new THREE.SphereGeometry(mission.bodyRadius * SCALE_FACTOR, 64, 64);
             const mat = new THREE.MeshStandardMaterial({
                 color: mission.bodyColor,
@@ -1350,6 +1427,19 @@
             });
             celestialBody = new THREE.Mesh(geo, mat);
             scene.add(celestialBody);
+
+            // Create Destination Body (if any)
+            if(mission.destDist) {
+                const dGeo = new THREE.SphereGeometry(1000, 32, 32); // Visual representation
+                const dMat = new THREE.MeshBasicMaterial({
+                    color: mission.destColor,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                destinationBody = new THREE.Mesh(dGeo, dMat);
+                // Position will be updated in physics loop relative to ship
+                scene.add(destinationBody);
+            }
             
             // Lighting
             const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
@@ -1371,9 +1461,258 @@
                 buildFromData(PRESETS['hail_mary']);
             }
             
-            // Center camera on ship initially
-            camera.position.set(20, 10, 20);
-            camera.lookAt(0, 0, 0);
+            // Reset Camera
+            cameraMode = 'CHASE';
+            camIndex = 0;
+            updateCameraModeDisplay();
+            
+            // Setup Visual Effects
+            createSpaceDust();
+            setupTrajectoryLines();
+        }
+
+        function createSpaceDust() {
+            if(spaceDust) scene.remove(spaceDust);
+            const geo = new THREE.BufferGeometry();
+            const pos = [];
+            for(let i=0; i<2000; i++) {
+                pos.push(
+                    (Math.random()-0.5)*1000,
+                    (Math.random()-0.5)*1000,
+                    (Math.random()-0.5)*1000
+                );
+            }
+            geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+            const mat = new THREE.PointsMaterial({
+                color: 0x88ccff,
+                size: 0.5,
+                transparent: true,
+                opacity: 0.6
+            });
+            spaceDust = new THREE.Points(geo, mat);
+            scene.add(spaceDust);
+        }
+
+        function setupTrajectoryLines() {
+            if(historyLine) scene.remove(historyLine);
+            if(predictedLine) scene.remove(predictedLine);
+            
+            // History (Green)
+            const hGeo = new THREE.BufferGeometry();
+            // Pre-allocate buffer
+            hGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(MAX_TRAIL_POINTS * 3), 3));
+            hGeo.setDrawRange(0, 0);
+            const hMat = new THREE.LineBasicMaterial({ color: 0x00ff00, opacity: 0.5, transparent: true });
+            historyLine = new THREE.Line(hGeo, hMat);
+            historyLine.userData.points = [];
+            scene.add(historyLine);
+            
+            // Prediction (Blue Dotted)
+            const pGeo = new THREE.BufferGeometry();
+            pGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(PREDICTION_STEPS * 3), 3));
+            const pMat = new THREE.LineBasicMaterial({ color: 0x00ffff, opacity: 0.3, transparent: true });
+            predictedLine = new THREE.Line(pGeo, pMat);
+            scene.add(predictedLine);
+        }
+
+        function updateSpaceDust(dt) {
+            if(!spaceDust || !missionMode) return;
+            
+            // Move dust opposite to ship velocity
+            // We use a scaled velocity for visual effect, clamped so it doesn't look crazy at warp
+            // Actually, we want to feel the speed.
+            
+            const positions = spaceDust.geometry.attributes.position.array;
+            const vel = shipVelocity.clone().multiplyScalar(SCALE_FACTOR * 0.1); // Visual scale
+            
+            // If velocity is huge (interstellar), we need to fake it or it blurs out
+            // Let's just move them along Z if speed is high to simulate "warp stars"
+            
+            for(let i=0; i<2000; i++) {
+                let ix = i*3;
+                let iy = i*3+1;
+                let iz = i*3+2;
+                
+                // Move relative to camera (which is effectively 0,0,0 in chase mode)
+                // But we want them to stream past.
+                
+                // Simple: Move dust by -velocity
+                positions[ix] -= vel.x;
+                positions[iy] -= vel.y;
+                positions[iz] -= vel.z;
+                
+                // Wrap around box 1000x1000x1000
+                if(positions[ix] < -500) positions[ix] += 1000;
+                if(positions[ix] > 500) positions[ix] -= 1000;
+                if(positions[iy] < -500) positions[iy] += 1000;
+                if(positions[iy] > 500) positions[iy] -= 1000;
+                if(positions[iz] < -500) positions[iz] += 1000;
+                if(positions[iz] > 500) positions[iz] -= 1000;
+            }
+            spaceDust.geometry.attributes.position.needsUpdate = true;
+        }
+
+        function updateTrajectoryVisuals() {
+            if(!historyLine || !predictedLine) return;
+            
+            // 1. Update History
+            // We store positions relative to the Celestial Body (Origin)
+            // But visually, the Celestial Body moves.
+            // So we need to draw lines in the "World Space" where Ship is (0,0,0).
+            // This means the history points need to shift every frame? That's expensive.
+            
+            // Better approach:
+            // The Scene is "Ship-Centric". Ship is at 0,0,0.
+            // Everything else moves.
+            // So a point in history at (x,y,z) relative to ship *at that time* 
+            // is now at (x-dx, y-dy, z-dz) relative to ship.
+            
+            // Actually, let's define points in "Solar System Space" (Origin = Sun/Earth).
+            // Then transform them to "Ship Space" for rendering.
+            
+            // Add current pos to history (Solar System Space)
+            // Only add if far enough from last point
+            const lastPoint = historyLine.userData.points[historyLine.userData.points.length-1];
+            const currentPos = shipPosition.clone();
+            
+            if(!lastPoint || currentPos.distanceTo(lastPoint) > (currentMission.bodyRadius * 0.05)) {
+                historyLine.userData.points.push(currentPos);
+                if(historyLine.userData.points.length > MAX_TRAIL_POINTS) {
+                    historyLine.userData.points.shift();
+                }
+            }
+            
+            // Render History
+            // Transform points to Visual Space (relative to ship)
+            const hPos = historyLine.geometry.attributes.position.array;
+            const visualShipPos = shipPosition.clone().multiplyScalar(SCALE_FACTOR);
+            
+            let count = 0;
+            for(let i=0; i<historyLine.userData.points.length; i++) {
+                const pt = historyLine.userData.points[i].clone().multiplyScalar(SCALE_FACTOR);
+                // Vector from Ship to Point
+                const rel = pt.sub(visualShipPos);
+                
+                hPos[count*3] = rel.x;
+                hPos[count*3+1] = rel.y;
+                hPos[count*3+2] = rel.z;
+                count++;
+            }
+            historyLine.geometry.setDrawRange(0, count);
+            historyLine.geometry.attributes.position.needsUpdate = true;
+            
+            // 2. Update Prediction
+            // Simulate N steps ahead
+            const pPos = predictedLine.geometry.attributes.position.array;
+            let simPos = shipPosition.clone();
+            let simVel = shipVelocity.clone();
+            // Step size depends on mission scale
+            let simDt = 10; // seconds
+            if(currentMission.name.includes("Longshot") || currentMission.name.includes("Hail")) simDt = 10000;
+            
+            for(let i=0; i<PREDICTION_STEPS; i++) {
+                // Simple gravity step
+                const r = simPos.length();
+                const G_km = 6.67430e-20;
+                const acc = (G_km * currentMission.bodyMass) / (r*r);
+                const gravityDir = simPos.clone().normalize().negate();
+                
+                simVel.add(gravityDir.multiplyScalar(acc * simDt));
+                simPos.add(simVel.clone().multiplyScalar(simDt));
+                
+                // Transform to visual space
+                const vis = simPos.clone().multiplyScalar(SCALE_FACTOR).sub(visualShipPos);
+                
+                pPos[i*3] = vis.x;
+                pPos[i*3+1] = vis.y;
+                pPos[i*3+2] = vis.z;
+            }
+            predictedLine.geometry.attributes.position.needsUpdate = true;
+        }
+
+        function endMission(success) {
+            missionMode = false;
+            document.getElementById('flight-ui').style.display = 'none';
+            const summary = document.getElementById('mission-summary');
+            summary.style.display = 'flex';
+            
+            document.getElementById('summary-subtitle').textContent = success ? "ARRIVAL CONFIRMED" : "MISSION ABORTED";
+            document.getElementById('summary-time').textContent = formatTime(physicsTime);
+            document.getElementById('summary-dist').textContent = formatDistance(shipPosition.length());
+            document.getElementById('summary-vel').textContent = maxVelocity.toFixed(2) + " KM/S";
+            
+            drawFlightGraph();
+        }
+
+        function closeMissionSummary() {
+            document.getElementById('mission-summary').style.display = 'none';
+            document.getElementById('title-screen').style.display = 'flex';
+            
+            // Reset scene to builder mode
+            station.forEach(m => scene.remove(m));
+            station = [];
+            loadStation(); // Reload saved station or default
+            
+            // Restore builder UI
+            document.getElementById('stats').style.display = 'block';
+            document.getElementById('controls-info').style.display = 'block';
+            document.getElementById('mode-indicator').textContent = "FLIGHT MODE";
+            document.getElementById('mode-indicator').style.color = "rgba(255, 255, 255, 0.5)";
+        }
+
+        function drawFlightGraph() {
+            const canvas = document.getElementById('flight-graph');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            if(flightHistory.length < 2) return;
+            
+            // Draw Velocity Curve
+            ctx.beginPath();
+            ctx.strokeStyle = '#00ffff';
+            ctx.lineWidth = 2;
+            
+            const maxT = flightHistory[flightHistory.length-1].t;
+            const maxV = maxVelocity;
+            
+            flightHistory.forEach((pt, i) => {
+                const x = (pt.t / maxT) * canvas.width;
+                const y = canvas.height - ((pt.v / maxV) * (canvas.height - 20)) - 10;
+                if(i===0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            
+            // Draw Distance Curve
+            ctx.beginPath();
+            ctx.strokeStyle = '#00ff00';
+            ctx.lineWidth = 2;
+            const maxD = currentMission.destDist || flightHistory[flightHistory.length-1].d;
+            
+            flightHistory.forEach((pt, i) => {
+                const x = (pt.t / maxT) * canvas.width;
+                const y = canvas.height - ((pt.d / maxD) * (canvas.height - 20)) - 10;
+                if(i===0) ctx.moveTo(x, y);
+                else ctx.lineTo(x, y);
+            });
+            ctx.stroke();
+            
+            // Legend
+            ctx.fillStyle = '#00ffff';
+            ctx.fillText("VELOCITY", 10, 180);
+            ctx.fillStyle = '#00ff00';
+            ctx.fillText("DISTANCE", 80, 180);
+        }
+
+        function cycleCamera() {
+            camIndex = (camIndex + 1) % CAM_MODES.length;
+            cameraMode = CAM_MODES[camIndex];
+            updateCameraModeDisplay();
+            playSound('hover');
+        }
+
+        function updateCameraModeDisplay() {
+            document.getElementById('cam-mode-display').textContent = cameraMode + " CAM";
         }
 
         function setupGhostShip(mission) {
@@ -1434,6 +1773,30 @@
             log.scrollTop = log.scrollHeight;
         }
 
+        function toggleAutopilot() {
+            autopilotEngaged = !autopilotEngaged;
+            const btn = document.getElementById('autopilot-btn');
+            const ind = document.getElementById('mode-indicator');
+            
+            if(autopilotEngaged) {
+                btn.textContent = "AUTOPILOT: ON";
+                btn.style.borderColor = "#00ff00";
+                btn.style.color = "#00ff00";
+                ind.textContent = "AUTOPILOT ENGAGED";
+                ind.style.color = "#00ff00";
+                showNotification("COURSE CORRECTION INITIATED");
+                // Reset delta display
+                document.getElementById('mission-delta').style.display = 'none';
+            } else {
+                btn.textContent = "AUTOPILOT: OFF";
+                btn.style.borderColor = "#ff3300";
+                btn.style.color = "#ff3300";
+                ind.textContent = "MANUAL CONTROL";
+                ind.style.color = "#ff3300";
+                showNotification("MANUAL OVERRIDE");
+            }
+        }
+
         function updatePhysics(dt) {
             if(!missionMode || !currentMission) return;
             
@@ -1445,6 +1808,24 @@
             for(let i=0; i<steps; i++) {
                 // Ship Gravity
                 applyGravity(shipPosition, shipVelocity, dtStep);
+                
+                // Autopilot Logic
+                if(autopilotEngaged && ghostShip) {
+                    // Simple P-Controller to match Ghost Velocity vector direction
+                    // We don't snap position, we just try to align velocity to target
+                    const targetVel = ghostShip.userData.vel.clone();
+                    const currentVel = shipVelocity.clone();
+                    
+                    // Correction vector
+                    const correction = targetVel.sub(currentVel);
+                    const maxThrust = 0.005 * dtStep; // Autopilot authority
+                    
+                    if(correction.length() > maxThrust) {
+                        correction.normalize().multiplyScalar(maxThrust);
+                    }
+                    
+                    shipVelocity.add(correction);
+                }
                 
                 // Ghost Gravity (Gold Standard)
                 if(ghostShip) {
@@ -1462,30 +1843,29 @@
             }
             
             // Update Visuals
-            // We keep the ship at (0,0,0) and move the universe around it? 
-            // Or move ship relative to planet?
-            // Let's move ship relative to planet (planet at 0,0,0)
-            
-            // Update Ship Visuals (Station modules)
-            // We need to move the whole station group. 
-            // Currently station is array of meshes.
-            // Let's move them all by delta.
-            
-            // Actually, better to put station in a Group.
-            // For now, let's just update camera to follow shipPosition (scaled)
-            // And move the planet to -shipPosition?
-            // No, let's move the ship meshes.
-            
             const visualPos = shipPosition.clone().multiplyScalar(SCALE_FACTOR);
             
-            // Move all station modules to be relative to the center of mass (which is at visualPos)
-            // This is tricky with the current architecture.
-            // Hack: Move the planet instead to simulate movement relative to ship
+            // Move celestial body (Origin) relative to ship
             celestialBody.position.copy(visualPos.clone().negate());
+            
+            // Move Destination Body relative to ship
+            if(destinationBody && currentMission.destDist) {
+                // Destination is at (0,0, -destDist) in physics space? 
+                // Let's assume destination is along -Z axis for simplicity
+                const destPos = new THREE.Vector3(0, 0, -currentMission.destDist);
+                const relDest = destPos.sub(shipPosition).multiplyScalar(SCALE_FACTOR);
+                
+                // If too far, clamp visual distance so it's visible but small
+                const maxVisDist = 5000;
+                if(relDest.length() > maxVisDist) {
+                    relDest.normalize().multiplyScalar(maxVisDist);
+                }
+                destinationBody.position.copy(relDest);
+                destinationBody.lookAt(camera.position); // Billboard effect if needed
+            }
             
             if(ghostShip) {
                 const ghostVisual = ghostShip.userData.pos.clone().multiplyScalar(SCALE_FACTOR);
-                // Ghost position relative to ship (since ship is at 0,0,0 visually)
                 ghostShip.position.copy(ghostVisual.sub(visualPos));
                 ghostShip.lookAt(ghostShip.position.clone().add(ghostShip.userData.vel));
             }
@@ -1496,6 +1876,79 @@
             
             document.getElementById('mission-alt').textContent = "ALT: " + formatDistance(alt);
             document.getElementById('mission-vel').textContent = "VEL: " + vel.toFixed(2) + " km/s";
+            
+            // ETA Calculation & Deviation
+            if(currentMission.destDist) {
+                const distToDest = currentMission.destDist - shipPosition.length(); 
+                const vel = shipVelocity.length();
+                
+                // Calculate Deviation from Ideal Path (Ghost)
+                if(ghostShip) {
+                    const idealPos = ghostShip.userData.pos;
+                    const deviation = shipPosition.distanceTo(idealPos);
+                    
+                    // Calculate Delta-V required to fix (rough approx)
+                    // Energy difference + Plane change cost
+                    const deltaV = deviation * 0.0001; // Fake metric for gameplay
+                    
+                    if(!autopilotEngaged && deviation > 1000) {
+                        const dEl = document.getElementById('mission-delta');
+                        dEl.style.display = 'block';
+                        dEl.textContent = "ΔV COST: +" + deltaV.toFixed(0) + " m/s";
+                        
+                        // Update ETA based on current bad trajectory
+                        // If we are off course, ETA increases
+                        // Angle between velocity and target
+                        const toTarget = new THREE.Vector3(0,0,-1); // Simplified target direction
+                        const angle = shipVelocity.angleTo(toTarget);
+                        const efficiency = Math.cos(angle);
+                        
+                        if(efficiency > 0) {
+                            const eta = (distToDest / (vel * efficiency));
+                            document.getElementById('mission-eta').textContent = "ETA: " + formatTime(eta) + " (DRIFTING)";
+                            document.getElementById('mission-eta').style.color = "#ffaa00";
+                        } else {
+                            document.getElementById('mission-eta').textContent = "ETA: OFF COURSE";
+                            document.getElementById('mission-eta').style.color = "#ff0000";
+                        }
+                    } else {
+                        // Nominal
+                        if(vel > 0.1) {
+                            const eta = distToDest / vel;
+                            document.getElementById('mission-eta').textContent = "ETA: " + formatTime(eta);
+                            document.getElementById('mission-eta').style.color = "var(--accent)";
+                        } else {
+                            document.getElementById('mission-eta').textContent = "ETA: --";
+                        }
+                    }
+                }
+                
+                // Update Progress Bar
+                const totalDist = currentMission.destDist;
+                const currentDist = shipPosition.length();
+                const progress = Math.min(100, Math.max(0, (currentDist / totalDist) * 100));
+                document.getElementById('mission-progress-bar').style.width = progress + "%";
+                document.getElementById('mission-progress-container').style.display = 'block';
+                
+                // Track Max Velocity
+                if(vel > maxVelocity) maxVelocity = vel;
+                
+                // Record History (every ~100 physics seconds)
+                if(flightHistory.length === 0 || (physicsTime - flightHistory[flightHistory.length-1].t) > 100) {
+                    flightHistory.push({t: physicsTime, d: currentDist, v: vel});
+                }
+
+                // Check for Arrival
+                if(currentDist >= totalDist * 0.999) {
+                    endMission(true);
+                }
+                
+            } else {
+                document.getElementById('mission-eta').textContent = "ETA: N/A";
+                document.getElementById('mission-progress-container').style.display = 'none';
+            }
+            
+            // Relativistic Calcs
             
             // Relativistic Calcs
             const dist = shipPosition.length();
@@ -1514,6 +1967,10 @@
             const pitch = Math.asin(camDir.dot(up));
             const horizon = document.getElementById('navball-horizon');
             horizon.style.transform = `translateY(${pitch * 50}%)`;
+            
+            // Update Visual Effects
+            updateSpaceDust(dt);
+            updateTrajectoryVisuals();
         }
 
         function formatDistance(km) {
@@ -1559,24 +2016,73 @@
                 
                 // Flight Controls (Thrust)
                 if(keys.shift) {
-                    // Apply thrust in camera direction
+                    // Disengage autopilot on manual input
+                    if(autopilotEngaged) toggleAutopilot();
+                    
                     const thrust = 0.01 * timeWarp * dt; // km/s^2
                     const dir = new THREE.Vector3();
                     camera.getWorldDirection(dir);
                     shipVelocity.add(dir.multiplyScalar(thrust));
-                    
-                    // Visual effect
-                    createParticles(new THREE.Vector3(0,0,5)); // Engine exhaust
+                    createParticles(new THREE.Vector3(0,0,5)); 
                 }
                 
-                // Rotate camera (Ship orientation)
-                const rotSpeed = 0.02;
-                if(keys.w) camera.rotation.x += rotSpeed;
-                if(keys.s) camera.rotation.x -= rotSpeed;
-                if(keys.a) camera.rotation.y += rotSpeed;
-                if(keys.d) camera.rotation.y -= rotSpeed;
-                if(keys.q) camera.rotation.z += rotSpeed;
-                if(keys.e) camera.rotation.z -= rotSpeed;
+                // Camera System
+                const time = Date.now() * 0.0005;
+                
+                if(cameraMode === 'CHASE') {
+                    // Standard Chase Cam
+                    const offset = new THREE.Vector3(0, 10, 30);
+                    camera.position.lerp(offset, 0.1);
+                    camera.lookAt(0, 0, 0);
+                    
+                    // Manual rotation override
+                    const rotSpeed = 0.02;
+                    if(keys.a) camera.position.x -= rotSpeed * 100;
+                    if(keys.d) camera.position.x += rotSpeed * 100;
+                    
+                } else if(cameraMode === 'COCKPIT') {
+                    // Inside view
+                    camera.position.set(0, 0, 0);
+                    // Allow looking around
+                    if(keys.w) camera.rotation.x += 0.02;
+                    if(keys.s) camera.rotation.x -= 0.02;
+                    if(keys.a) camera.rotation.y += 0.02;
+                    if(keys.d) camera.rotation.y -= 0.02;
+                    
+                } else if(cameraMode === 'ORBIT') {
+                    // Rotating around ship
+                    camera.position.x = Math.cos(time) * 40;
+                    camera.position.z = Math.sin(time) * 40;
+                    camera.position.y = 10;
+                    camera.lookAt(0, 0, 0);
+                    
+                } else if(cameraMode === 'TARGET') {
+                    // Look at destination
+                    camera.position.set(0, 5, 5);
+                    if(destinationBody) {
+                        camera.lookAt(destinationBody.position);
+                    } else {
+                        // Look forward
+                        camera.lookAt(0, 0, -100);
+                    }
+                    
+                } else if(cameraMode === 'CINEMATIC') {
+                    // Auto-switching cinematic angles
+                    const cycle = Math.floor(time / 5) % 3;
+                    if(cycle === 0) {
+                        // Flyby
+                        camera.position.set(Math.cos(time)*50, Math.sin(time)*20, Math.sin(time)*50);
+                        camera.lookAt(0, 0, 0);
+                    } else if(cycle === 1) {
+                        // Rear view looking at origin
+                        camera.position.set(0, 5, 20);
+                        camera.lookAt(celestialBody.position);
+                    } else {
+                        // Top down
+                        camera.position.set(0, 50, 0);
+                        camera.lookAt(0, 0, 0);
+                    }
+                }
                 
             } else if (tutorialActive && window.tutorialTargetPos) {
                 // Tutorial Camera Mode
