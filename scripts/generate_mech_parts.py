@@ -72,22 +72,27 @@ def generate_torso(type_name):
         writer.add_cube(0, 0.2, -0.25, 0.3, 0.4, 0.1) # Backpack
     return writer
 
-def generate_leg(type_name):
+def generate_leg_upper(type_name):
     writer = OBJWriter()
     if type_name == 'light':
-        # Thin, reverse-joint leg
-        writer.add_cube(0, 0.4, 0, 0.1, 0.4, 0.1) # Thigh
-        writer.add_cube(0, 0, -0.1, 0.08, 0.4, 0.08) # Shin (angled back)
-        writer.add_cube(0, -0.2, 0.05, 0.12, 0.05, 0.2) # Foot
+        writer.add_cube(0, -0.2, 0, 0.1, 0.4, 0.1) # Thigh
     elif type_name == 'heavy':
-        # Thick, stompy leg
-        writer.add_cube(0, 0.3, 0, 0.25, 0.5, 0.25) # Thigh
-        writer.add_cube(0, -0.1, 0, 0.3, 0.4, 0.3) # Shin
-        writer.add_cube(0, -0.35, 0, 0.4, 0.1, 0.5) # Foot
+        writer.add_cube(0, -0.25, 0, 0.25, 0.5, 0.25) # Thigh
     else: # Standard
-        writer.add_cube(0, 0.3, 0, 0.15, 0.4, 0.15)
-        writer.add_cube(0, -0.1, 0, 0.12, 0.4, 0.12)
-        writer.add_cube(0, -0.3, 0.05, 0.15, 0.08, 0.25)
+        writer.add_cube(0, -0.2, 0, 0.15, 0.4, 0.15)
+    return writer
+
+def generate_leg_lower(type_name):
+    writer = OBJWriter()
+    if type_name == 'light':
+        writer.add_cube(0, -0.2, -0.1, 0.08, 0.4, 0.08) # Shin
+        writer.add_cube(0, -0.4, 0.05, 0.12, 0.05, 0.2) # Foot
+    elif type_name == 'heavy':
+        writer.add_cube(0, -0.2, 0, 0.3, 0.4, 0.3) # Shin
+        writer.add_cube(0, -0.45, 0, 0.4, 0.1, 0.5) # Foot
+    else: # Standard
+        writer.add_cube(0, -0.2, 0, 0.12, 0.4, 0.12)
+        writer.add_cube(0, -0.4, 0.05, 0.15, 0.08, 0.25) # Foot
     return writer
 
 def generate_head(type_name):
@@ -117,7 +122,8 @@ def main():
     for t in types:
         print(f"Generating {t} set...")
         generate_torso(t).save(os.path.join(output_dir, f'torso_{t}.obj'))
-        generate_leg(t).save(os.path.join(output_dir, f'leg_{t}.obj'))
+        generate_leg_upper(t).save(os.path.join(output_dir, f'leg_upper_{t}.obj'))
+        generate_leg_lower(t).save(os.path.join(output_dir, f'leg_lower_{t}.obj'))
         generate_head(t).save(os.path.join(output_dir, f'head_{t}.obj'))
 
     print("Done!")
