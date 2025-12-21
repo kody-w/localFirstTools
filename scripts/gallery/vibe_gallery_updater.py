@@ -38,6 +38,10 @@ def extract_metadata_from_html(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()[:5000]  # Read first 5000 chars for metadata
 
+        # Check for redirect files
+        if "Redirecting..." in content and "http-equiv=\"refresh\"" in content:
+            return None
+
         parser = HTMLMetadataExtractor()
         parser.feed(content)
 
