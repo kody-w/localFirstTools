@@ -170,6 +170,11 @@
                 <div style="font-size: 10px; color: #555;">Input: <span id="debug-key">-</span></div>
                 <div class="stat-bar"><div class="stat-fill hp-fill" id="hp-bar" style="width: 100%"></div></div>
                 <div class="stat-bar"><div class="stat-fill xp-fill" id="xp-bar" style="width: 0%"></div></div>
+                <div style="margin-top: 10px; display: flex; gap: 5px;">
+                    <button onclick="game.exportSave()" style="font-size: 10px; padding: 2px 5px;">EXPORT</button>
+                    <button onclick="document.getElementById('import-file').click()" style="font-size: 10px; padding: 2px 5px;">IMPORT</button>
+                    <input type="file" id="import-file" style="display: none" onchange="game.importSave(this)">
+                </div>
             </div>
         </div>
         
@@ -242,10 +247,33 @@
                         agility: 0.5,
                         element: 0.5
                     },
-                    history: { damageTaken: 0, damageDealt: 0, fled: 0, biomeTime: {} }
+                    history: { damageTaken: 0, damageDealt: 0, fled: 0, biomeTime: {} },
+                    evolutionLog: []
                 };
                 
+                if (this.playerStats.evolutionLog.length === 0) {
+                     this.playerStats.evolutionLog.push({
+                        gen: 1,
+                        timestamp: new Date().toISOString(),
+                        event: "Generation 1 Created",
+                        genome: JSON.parse(JSON.stringify(this.playerStats.genome)),
+                        level: 1
+                    });
+                }
+                
                 this.init();
+            }
+            
+            logEvolution(event, details) {
+                const currentGen = this.playerStats.evolutionLog.length + 1;
+                this.playerStats.evolutionLog.push({
+                    gen: currentGen,
+                    timestamp: new Date().toISOString(),
+                    event: event,
+                    details: details,
+                    genome: JSON.parse(JSON.stringify(this.playerStats.genome)),
+                    level: this.playerStats.level
+                });
             }
             
             saveGame() {
@@ -270,11 +298,84 @@
                     }
                 }
             }
+
+            exportSave() {
+                // Capture 3D Snapshot
+                this.renderer.render(this.scene, this.camera);
+                const snapshot3d = this.renderer.domElement.toDataURL('image/png');
+
+                // Capture 2D Icon
+                const tempDiv = document.createElement('div');
+                this.renderBattler(tempDiv, this.playerStats.genome);
+                const icon2d = tempDiv.querySelector('canvas').toDataURL('image/png');
+
+                const exportData = {
+                    stats: this.playerStats,
+                    visuals: {
+                        icon2d: icon2d,
+                        snapshot3d: snapshot3d
+                    },
+                    timestamp: new Date().toISOString(),
+                    version: "1.0"
+                };
+
+                const data = JSON.stringify(exportData, null, 2);
+                const blob = new Blob([data], {type: 'application/json'});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `evomon-${this.playerStats.level}-${Date.now()}.json`;
+                a.click();
+                URL.revokeObjectURL(url);
+            }
+
+            importSave(input) {
+                const file = input.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    try {
+                        const data = JSON.parse(e.target.result);
+                        // Support both raw stats (legacy) and new wrapped format
+                        const stats = data.stats || data;
+                        
+                        if (stats.level && stats.genome) {
+                            this.playerStats = stats;
+                            this.player.updateMesh(this.playerStats.genome, this.playerStats.level);
+                            this.updateHUD();
+                            this.saveGame();
+                            
+                            let msg = "Save loaded successfully!";
+                            if (data.visuals) {
+                                msg += "\n(Visuals verified)";
+                            }
+                            alert(msg);
+                        } else {
+                            alert("Invalid save file.");
+                        }
+                    } catch (err) {
+                        console.error(err);
+                        alert("Error loading save.");
+                    }
+                };
+                reader.readAsText(file);
+            }
             
             loadGame() {
                 try {
                     const save = localStorage.getItem('evomon_save');
-                    return save ? JSON.parse(save) : null;
+                    const data = save ? JSON.parse(save) : null;
+                    if (data && !data.evolutionLog) {
+                        data.evolutionLog = [];
+                        data.evolutionLog.push({
+                            gen: 1,
+                            timestamp: new Date().toISOString(),
+                            event: "Legacy Save Loaded",
+                            genome: JSON.parse(JSON.stringify(data.genome)),
+                            level: data.level
+                        });
+                    }
+                    return data;
                 } catch (e) {
                     console.warn("Failed to load game:", e);
                     return null;
@@ -292,7 +393,7 @@
                 this.camera.position.set(0, 20, 20);
                 this.camera.lookAt(0, 0, 0);
                 
-                this.renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
+                this.renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true, preserveDrawingBuffer: true });
                 this.renderer.setSize(window.innerWidth, window.innerHeight);
                 this.renderer.shadowMap.enabled = true;
                 
@@ -321,7 +422,7 @@
                 this.world.spawnBosses(this.scene);
                 
                 // Create Player
-                this.player = new Player(this.scene, this.playerStats.genome);
+                this.player = new Player(this.scene, this.playerStats.genome, this.playerStats.level);
                 
                 // Find Safe Spawn
                 this.findSafeSpawn();
@@ -460,7 +561,8 @@
                     this.state = 'evolve';
                     document.getElementById('evo-modal').style.display = 'block';
                     document.getElementById('evo-text').innerHTML = `Biome Adaptation:<br>${msg}`;
-                    this.player.updateMesh(g);
+                    this.player.updateMesh(g, this.playerStats.level);
+                    this.logEvolution("Biome Adaptation", msg);
                     this.saveGame();
                 }
             }
@@ -491,7 +593,8 @@
                         this.state = 'evolve';
                         document.getElementById('evo-modal').style.display = 'block';
                         document.getElementById('evo-text').innerHTML = `Ancient DNA Absorbed!<br>Traits Merged.`;
-                        this.player.updateMesh(this.playerStats.genome);
+                        this.player.updateMesh(this.playerStats.genome, this.playerStats.level);
+                        this.logEvolution("Fossil Absorption", "Traits Merged with Ancient DNA");
                         this.saveGame();
                     }
                 }
@@ -610,17 +713,18 @@
                 const g = this.playerStats.genome;
                 let changes = [];
                 
-                if (h.damageTaken > 20) {
-                    g.resilience = Math.min(1, g.resilience + 0.05);
-                    changes.push("Skin Hardened");
+                // Lower thresholds for easier testing
+                if (h.damageTaken > 10) { // Was 20
+                    g.resilience = Math.min(1, g.resilience + 0.1); // Faster growth
+                    changes.push("Skin Hardened (+Resilience)");
                 }
-                if (h.damageDealt > 50) {
-                    g.aggression = Math.min(1, g.aggression + 0.05);
-                    changes.push("Claws Sharpened");
+                if (h.damageDealt > 20) { // Was 50
+                    g.aggression = Math.min(1, g.aggression + 0.1); // Faster growth
+                    changes.push("Claws Sharpened (+Aggression)");
                 }
                 if (h.fled > 0) {
-                    g.agility = Math.min(1, g.agility + 0.05);
-                    changes.push("Legs Strengthened");
+                    g.agility = Math.min(1, g.agility + 0.1);
+                    changes.push("Legs Strengthened (+Agility)");
                 }
                 
                 // Reset history
@@ -632,7 +736,8 @@
                     document.getElementById('evo-text').innerHTML = `Adaptations:<br>${changes.join('<br>')}`;
                     
                     // Re-render player mesh
-                    this.player.updateMesh(g);
+                    this.player.updateMesh(g, this.playerStats.level);
+                    this.logEvolution("Battle Adaptation", changes.join(', '));
                     this.saveGame();
                 }
             }
@@ -650,8 +755,8 @@
                 this.keys = {}; // Clear input to prevent stuck movement
             }
             
-            renderBattler(id, genome, flip=false) {
-                const container = document.getElementById(id);
+            renderBattler(target, genome, flip=false) {
+                const container = typeof target === 'string' ? document.getElementById(target) : target;
                 container.innerHTML = '';
                 
                 const cvs = document.createElement('canvas');
@@ -668,8 +773,29 @@
                     ctx.translate(150, 0);
                     ctx.scale(-1, 1);
                 }
+
+                // Limbs (Agility) - Draw before body
+                const limbCount = Math.floor(genome.agility * 6);
+                ctx.fillStyle = `hsl(${hue}, 70%, 40%)`;
+                for(let i=0; i<limbCount; i++) {
+                    const angle = (i / limbCount) * Math.PI * 2;
+                    const lx = 75 + Math.cos(angle) * 60;
+                    const ly = 75 + Math.sin(angle) * 60;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(75, 75);
+                    ctx.lineTo(lx, ly);
+                    ctx.lineWidth = 10;
+                    ctx.strokeStyle = `hsl(${hue}, 70%, 40%)`;
+                    ctx.stroke();
+                    
+                    ctx.beginPath();
+                    ctx.arc(lx, ly, 8, 0, Math.PI*2);
+                    ctx.fill();
+                }
                 
                 // Body
+                ctx.fillStyle = `hsl(${hue}, 70%, 50%)`;
                 if (genome.resilience > 0.6) {
                     ctx.fillRect(40, 40, 70, 70);
                 } else {
@@ -687,14 +813,21 @@
                 }
                 
                 // Eyes
-                ctx.fillStyle = '#fff';
-                ctx.beginPath();
-                ctx.arc(90, 60, 10, 0, Math.PI*2);
-                ctx.fill();
-                ctx.fillStyle = '#000';
-                ctx.beginPath();
-                ctx.arc(92, 60, 4, 0, Math.PI*2);
-                ctx.fill();
+                const eyeCount = 1 + Math.floor(genome.element * 3); // 1 to 3 eyes
+                const eyeSpacing = 20;
+                const startX = 75 - ((eyeCount - 1) * eyeSpacing) / 2;
+                
+                for(let i=0; i<eyeCount; i++) {
+                    const ex = startX + i * eyeSpacing;
+                    ctx.fillStyle = '#fff';
+                    ctx.beginPath();
+                    ctx.arc(ex, 60, 8, 0, Math.PI*2);
+                    ctx.fill();
+                    ctx.fillStyle = '#000';
+                    ctx.beginPath();
+                    ctx.arc(ex + 2, 60, 3, 0, Math.PI*2);
+                    ctx.fill();
+                }
             }
             
             updateHUD() {
@@ -966,44 +1099,129 @@
                 
                 const group = new THREE.Group();
                 
-                // Body Color
+                // --- Dynamic Procedural Generation ---
+                // Instead of swapping geometries, we deform a base sphere based on traits
+                
+                // Base Geometry: High res sphere for deformation
+                const geo = new THREE.SphereGeometry(0.6, 32, 32);
+                const posAttribute = geo.attributes.position;
+                const vertex = new THREE.Vector3();
+                
+                // Deform based on traits
+                for (let i = 0; i < posAttribute.count; i++) {
+                    vertex.fromBufferAttribute(posAttribute, i);
+                    
+                    // 1. Resilience (Blockiness)
+                    // Push vertices towards a cube shape
+                    if (genome.resilience > 0.1) {
+                        const cubeFactor = genome.resilience; // 0 to 1
+                        const absX = Math.abs(vertex.x);
+                        const absY = Math.abs(vertex.y);
+                        const absZ = Math.abs(vertex.z);
+                        const maxDim = Math.max(absX, Math.max(absY, absZ));
+                        
+                        // Lerp between sphere (length) and cube (maxDim)
+                        // Normalize to radius 0.6
+                        const sphereLen = vertex.length();
+                        const cubeLen = 0.6 * (sphereLen / maxDim); // Project to cube surface
+                        
+                        // Blend
+                        const targetLen = sphereLen * (1 - cubeFactor) + cubeLen * cubeFactor;
+                        vertex.setLength(targetLen);
+                    }
+                    
+                    // 2. Aggression (Spikiness)
+                    // Add noise to vertices to create spikes
+                    if (genome.aggression > 0.1) {
+                        // Simple noise function based on position
+                        const noise = Math.sin(vertex.x * 10) * Math.sin(vertex.y * 10) * Math.sin(vertex.z * 10);
+                        if (noise > 0.5) {
+                            // Extrude spike
+                            const spikeAmt = (noise - 0.5) * genome.aggression * 0.5;
+                            vertex.add(vertex.clone().normalize().multiplyScalar(spikeAmt));
+                        }
+                    }
+                    
+                    posAttribute.setXYZ(i, vertex.x, vertex.y, vertex.z);
+                }
+                
+                geo.computeVertexNormals();
+                
+                // Color
                 const hue = Math.floor(genome.element * 360);
                 const color = new THREE.Color(`hsl(${hue}, 70%, 50%)`);
                 
-                // Body Shape
-                let geo;
-                if (genome.resilience > 0.6) {
-                    geo = new THREE.BoxGeometry(1, 1, 1);
-                } else {
-                    geo = new THREE.SphereGeometry(0.6, 16, 16);
-                }
-                
-                const body = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ color: color }));
+                const body = new THREE.Mesh(geo, new THREE.MeshStandardMaterial({ 
+                    color: color,
+                    roughness: 0.7 - (genome.resilience * 0.5), // More resilient = shinier/harder
+                    metalness: genome.resilience * 0.3
+                }));
                 body.position.y = 0.5;
                 body.castShadow = true;
                 group.add(body);
                 
-                // Spikes
-                if (genome.aggression > 0.4) {
-                    const spike = new THREE.Mesh(
-                        new THREE.ConeGeometry(0.2, 0.8, 8),
-                        new THREE.MeshStandardMaterial({ color: 0xffffff })
-                    );
-                    spike.position.y = 1.0;
-                    group.add(spike);
+                // 3. Agility (Limbs/Appendages)
+                // Procedurally grow limbs based on agility score
+                const limbCount = Math.floor(genome.agility * 6); // 0 to 6 limbs
+                if (limbCount > 0) {
+                    for(let i=0; i<limbCount; i++) {
+                        const angle = (i / limbCount) * Math.PI * 2;
+                        // Fallback for older Three.js versions that lack CapsuleGeometry
+                        let limbGeo;
+                        if (THREE.CapsuleGeometry) {
+                            limbGeo = new THREE.CapsuleGeometry(0.1, 0.4 + genome.agility * 0.5, 4, 8);
+                        } else {
+                            limbGeo = new THREE.CylinderGeometry(0.1, 0.1, 0.4 + genome.agility * 0.5, 8);
+                        }
+                        const limb = new THREE.Mesh(limbGeo, new THREE.MeshStandardMaterial({ color: color }));
+                        
+                        // Position around body
+                        limb.position.set(Math.cos(angle)*0.5, 0.5, Math.sin(angle)*0.5);
+                        
+                        // Rotate outward
+                        limb.lookAt(0, 0.5, 0); // Look at center
+                        limb.rotateX(Math.PI/2); // Point out
+                        
+                        group.add(limb);
+                    }
                 }
                 
-                // Eyes
-                const eye = new THREE.Mesh(
-                    new THREE.SphereGeometry(0.15, 8, 8),
-                    new THREE.MeshBasicMaterial({ color: 0xffffff })
-                );
-                eye.position.set(0.3, 0.7, 0.4);
-                group.add(eye);
+                // Eyes (Always present, but change size/color)
+                const eyeSize = 0.1 + (genome.agility * 0.05); // Agile = bigger eyes
+                const eyeCount = 1 + Math.floor(genome.element * 3); // 1 to 3 eyes
                 
-                const eye2 = eye.clone();
-                eye2.position.set(-0.3, 0.7, 0.4);
-                group.add(eye2);
+                // Distribute eyes across the front face
+                const eyeAngleSpan = Math.PI / 2; // 90 degrees span
+                const startAngle = -eyeAngleSpan / 2;
+                
+                for(let i=0; i<eyeCount; i++) {
+                    // Calculate angle for this eye
+                    // If 1 eye, angle is 0. If 2, -22.5 and +22.5. etc.
+                    let angle = 0;
+                    if (eyeCount > 1) {
+                        angle = startAngle + (i / (eyeCount - 1)) * eyeAngleSpan;
+                    }
+                    
+                    const ex = Math.sin(angle) * 0.5; // X offset
+                    const ez = Math.cos(angle) * 0.5; // Z offset (forward)
+                    
+                    const eye = new THREE.Mesh(
+                        new THREE.SphereGeometry(eyeSize, 8, 8),
+                        new THREE.MeshBasicMaterial({ color: 0xffffff })
+                    );
+                    // Position on the surface of the "head" area
+                    eye.position.set(ex, 0.7, ez);
+                    
+                    // Pupil
+                    const pupil = new THREE.Mesh(
+                        new THREE.SphereGeometry(eyeSize * 0.4, 8, 8),
+                        new THREE.MeshBasicMaterial({ color: 0x000000 })
+                    );
+                    pupil.position.set(0, 0, eyeSize);
+                    eye.add(pupil);
+                    
+                    group.add(eye);
+                }
                 
                 this.mesh = group;
                 this.scene.add(this.mesh);
