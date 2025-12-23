@@ -1,3 +1,3 @@
 fn main() {
-    tauri::build::build()
+    tauri_build::build()
 }
