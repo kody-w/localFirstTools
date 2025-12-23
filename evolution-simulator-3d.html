@@ -25,6 +25,11 @@
         }
         button:hover { background: #005500; box-shadow: 0 0 10px #0f0; }
         .highlight { color: #fff; font-weight: bold; }
+        #countdown {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 100px; color: #fff; font-weight: bold; text-shadow: 0 0 20px #0f0;
+            pointer-events: none; display: none;
+        }
     </style>
     <!-- Cannon.js for Physics -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
@@ -32,12 +37,23 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 </head>
 <body>
+    <div id="error-display" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:red; background:rgba(0,0,0,0.9); padding:20px; display:none; z-index:999;"></div>
+    <script>
+        window.onerror = function(msg, url, line, col, error) {
+            const div = document.getElementById('error-display');
+            div.style.display = 'block';
+            div.innerHTML = `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small>`;
+            return false;
+        };
+    </script>
     <div id="ui">
         <div class="stat">Generation: <span id="gen" class="highlight">1</span></div>
         <div class="stat">Alive: <span id="alive" class="highlight">20</span>/20</div>
         <div class="stat">Best Distance: <span id="best-dist" class="highlight">0</span>m</div>
         <div class="stat">Time: <span id="time">0.0</span>s</div>
     </div>
+
+    <div id="countdown">3</div>
 
     <div id="controls">
         <button onclick="toggleSpeed()">Toggle Fast Forward</button>
@@ -49,7 +65,8 @@
         // --- Configuration ---
         const POPULATION_SIZE = 20;
         const MUTATION_RATE = 0.1;
-        const ROUND_TIME = 20;
+        const ROUND_TIME = 10;
+        const FINISH_LINE_Z = -400;
         
         // --- Three.js Setup ---
         const scene = new THREE.Scene();
@@ -101,6 +118,7 @@
         let bestDistance = 0;
         let isFastForward = false;
         let frameId;
+        let raceActive = false;
 
         // --- Car Class ---
         class Car {
@@ -143,6 +161,10 @@
                 const chassisBody = new CANNON.Body({ mass: 150, material: chassisMaterial });
                 chassisBody.addShape(chassisShape);
                 chassisBody.position.set(x, y, z);
+                // Rotate to face -Z (Finish Line)
+                const quaternion = new CANNON.Quaternion();
+                quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.PI); // 180 degrees
+                chassisBody.quaternion.copy(quaternion);
                 chassisBody.angularVelocity.set(0, 0, 0); // Initial stability
                 
                 // Visual Chassis
@@ -219,21 +241,33 @@
             update() {
                 if (!this.alive) return;
 
+                if (!raceActive) {
+                    // Brakes ON
+                    this.vehicle.setBrake(10, 0);
+                    this.vehicle.setBrake(10, 1);
+                    this.vehicle.setBrake(10, 2);
+                    this.vehicle.setBrake(10, 3);
+                    this.vehicle.applyEngineForce(0, 2);
+                    this.vehicle.applyEngineForce(0, 3);
+                    
+                    // Sync Visuals
+                    this.syncVisuals();
+                    return;
+                }
+
+                // Brakes OFF
+                this.vehicle.setBrake(0, 0);
+                this.vehicle.setBrake(0, 1);
+                this.vehicle.setBrake(0, 2);
+                this.vehicle.setBrake(0, 3);
+
                 // Apply Engine Force (4WD)
-                this.vehicle.applyEngineForce(-this.dna.enginePower * 10, 2);
-                this.vehicle.applyEngineForce(-this.dna.enginePower * 10, 3);
+                // Positive force moves forward when rotated 180 deg (facing -Z)
+                this.vehicle.applyEngineForce(this.dna.enginePower * 10, 2);
+                this.vehicle.applyEngineForce(this.dna.enginePower * 10, 3);
                 
                 // Sync Visuals
-                this.chassisMesh.position.copy(this.chassisBody.position);
-                this.chassisMesh.quaternion.copy(this.chassisBody.quaternion);
-
-                for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
-                    this.vehicle.updateWheelTransform(i);
-                    const t = this.vehicle.wheelInfos[i].worldTransform;
-                    const wheelMesh = this.meshes[i+1]; // +1 because 0 is chassis
-                    wheelMesh.position.copy(t.position);
-                    wheelMesh.quaternion.copy(t.quaternion);
-                }
+                this.syncVisuals();
 
                 // Fitness Check (Distance Z)
                 // We move in -Z direction
@@ -250,9 +284,19 @@
                     this.vehicle.applyEngineForce(0, 2);
                     this.vehicle.applyEngineForce(0, 3);
                 }
-                
-                // Kill if fell off world
-                if (this.chassisBody.position.y < -10) this.alive = false;
+            }
+
+            syncVisuals() {
+                this.chassisMesh.position.copy(this.chassisBody.position);
+                this.chassisMesh.quaternion.copy(this.chassisBody.quaternion);
+
+                for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
+                    this.vehicle.updateWheelTransform(i);
+                    const t = this.vehicle.wheelInfos[i].worldTransform;
+                    const wheelMesh = this.meshes[i+1]; // +1 because 0 is chassis
+                    wheelMesh.position.copy(t.position);
+                    wheelMesh.quaternion.copy(t.quaternion);
+                }
             }
         }
 
@@ -264,39 +308,76 @@
             terrainBodies = [];
             terrainMeshes = [];
 
-            // Ground Plane (Start)
-            createBox(0, -1, 0, 20, 1, 20, 0x222222);
+            // Ground Plane (Start Area)
+            createBox(0, -1, 10, 60, 1, 60, 0x222222);
 
-            // Procedural Track
-            let z = -10;
-            for (let i = 0; i < 50; i++) {
-                const length = 10 + Math.random() * 20;
-                const height = (Math.random() - 0.3) * 2; // Hills
-                const angle = (Math.random() - 0.5) * 0.5; // Slopes
+            // Long Flat Track
+            // Create one massive flat strip to ensure smoothness
+            const trackLength = 1000;
+            const trackWidth = 40;
+            
+            const shape = new CANNON.Box(new CANNON.Vec3(trackWidth/2, 1, trackLength/2));
+            const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+            body.addShape(shape);
+            body.position.set(0, -1, -trackLength/2 + 10); // Start connecting to start area
+            world.addBody(body);
+            terrainBodies.push(body);
 
-                // Create physics body
-                const shape = new CANNON.Box(new CANNON.Vec3(10, 1, length/2));
-                const body = new CANNON.Body({ mass: 0, material: groundMaterial });
-                body.addShape(shape);
-                body.position.set(0, height - 2, z - length/2);
-                body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), angle);
-                
-                world.addBody(body);
-                terrainBodies.push(body);
+            const geo = new THREE.BoxGeometry(trackWidth, 2, trackLength);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x444444 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(body.position);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
 
-                // Create visual mesh
-                const geo = new THREE.BoxGeometry(20, 2, length);
-                const mat = new THREE.MeshPhongMaterial({ color: (i%2===0)?0x444444:0x555555 });
-                const mesh = new THREE.Mesh(geo, mat);
-                mesh.position.copy(body.position);
-                mesh.quaternion.copy(body.quaternion);
-                mesh.receiveShadow = true;
-                
-                scene.add(mesh);
-                terrainMeshes.push(mesh);
+            // Finish Line
+            const finishGeo = new THREE.BoxGeometry(trackWidth, 0.1, 2);
+            const finishMat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // White line
+            const finishMesh = new THREE.Mesh(finishGeo, finishMat);
+            finishMesh.position.set(0, 0.1, FINISH_LINE_Z);
+            scene.add(finishMesh);
+            terrainMeshes.push(finishMesh);
+            
+            // Checkered flag posts
+            createPost(-trackWidth/2, 0, FINISH_LINE_Z);
+            createPost(trackWidth/2, 0, FINISH_LINE_Z);
+        }
 
-                z -= length;
-            }
+        function createPost(x, y, z) {
+            const geo = new THREE.CylinderGeometry(0.5, 0.5, 10);
+            const mat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y+5, z);
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
+        }
+
+        function createSegment(z, y, length, angle, color) {
+            // Calculate center position based on start point (z, y) and angle
+            // The box is positioned at its center, so we need to offset from the start point
+            const halfLen = length / 2;
+            const centerY = y - Math.sin(angle) * halfLen;
+            const centerZ = z - Math.cos(angle) * halfLen;
+
+            const shape = new CANNON.Box(new CANNON.Vec3(15, 1, length/2));
+            const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+            body.addShape(shape);
+            body.position.set(0, centerY, centerZ);
+            body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), angle);
+            
+            world.addBody(body);
+            terrainBodies.push(body);
+
+            const geo = new THREE.BoxGeometry(30, 2, length);
+            const mat = new THREE.MeshPhongMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(body.position);
+            mesh.quaternion.copy(body.quaternion);
+            mesh.receiveShadow = true;
+            
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
         }
 
         function createBox(x, y, z, w, h, d, color) {
@@ -344,13 +425,26 @@
             cars.forEach(c => c.destroy());
             cars = [];
             
-            nextGenDNA.forEach(dna => {
-                cars.push(new Car(dna, 0, 2, 0));
-            });
+            spawnCars(nextGenDNA);
 
             generation++;
-            timer = 0;
-            updateUI();
+            startRaceSequence();
+        }
+
+        function spawnCars(dnaList) {
+            const cols = 5;
+            const spacingX = 8;
+            const spacingZ = 8;
+            
+            dnaList.forEach((dna, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                // Center the grid
+                const x = (col - (cols-1)/2) * spacingX;
+                const z = 30 - (row * spacingZ); // Start back at z=30, facing -Z
+                
+                cars.push(new Car(dna, x, 2, z));
+            });
         }
 
         function crossover(dna1, dna2) {
@@ -385,11 +479,39 @@
         function init() {
             generateTerrain();
             
-            for(let i=0; i<POPULATION_SIZE; i++) {
-                cars.push(new Car(null, 0, 2, 0));
-            }
+            const initialDNA = [];
+            for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
+            spawnCars(initialDNA);
 
             animate();
+            startRaceSequence();
+        }
+
+        function startRaceSequence() {
+            raceActive = false;
+            timer = 0;
+            updateUI();
+            
+            const cd = document.getElementById('countdown');
+            cd.style.display = 'block';
+            
+            let count = 3;
+            cd.innerText = count;
+            
+            const interval = setInterval(() => {
+                count--;
+                if (count > 0) {
+                    cd.innerText = count;
+                } else if (count === 0) {
+                    cd.innerText = "GO!";
+                    cd.style.color = "#0f0";
+                } else {
+                    clearInterval(interval);
+                    cd.style.display = 'none';
+                    cd.style.color = "#fff";
+                    raceActive = true;
+                }
+            }, 1000);
         }
 
         function animate() {
@@ -401,7 +523,7 @@
             for(let i=0; i<steps; i++) {
                 world.step(dt);
                 cars.forEach(c => c.update());
-                timer += dt;
+                if (raceActive) timer += dt;
             }
 
             // Camera Follow Leader
@@ -412,9 +534,9 @@
 
             if (leader) {
                 const targetPos = leader.chassisMesh.position.clone();
-                targetPos.y += 5;
-                targetPos.z += 10;
-                targetPos.x += 5;
+                targetPos.y += 10;
+                targetPos.z += 20; // Look from behind
+                targetPos.x += 0;
                 camera.position.lerp(targetPos, 0.1);
                 camera.lookAt(leader.chassisMesh.position);
             }
@@ -422,7 +544,7 @@
             document.getElementById('time').innerText = timer.toFixed(1);
             document.getElementById('alive').innerText = cars.filter(c => c.alive).length;
 
-            if (timer > ROUND_TIME || cars.every(c => !c.alive)) {
+            if (raceActive && (timer > ROUND_TIME || cars.every(c => !c.alive))) {
                 nextGen();
             }
 
@@ -445,10 +567,13 @@
             bestDistance = 0;
             timer = 0;
             generateTerrain();
-            for(let i=0; i<POPULATION_SIZE; i++) {
-                cars.push(new Car(null, 0, 2, 0));
-            }
+            
+            const initialDNA = [];
+            for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
+            spawnCars(initialDNA);
+            
             updateUI();
+            startRaceSequence();
         }
 
         window.addEventListener('resize', () => {
