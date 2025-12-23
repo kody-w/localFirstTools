@@ -270,22 +270,42 @@ const Car = {
         this.vz = this.vz * (1 - grip) + targetVz * grip;
         
         // 3. Apply position
-        const nextX = this.x + this.vx;
-        const nextZ = this.z + this.vz;
+        // Physics
+        this.vy += 0.8; // Gravity
+        
+        this.x += this.vx;
+        this.z += this.vz;
+        this.y += this.vy;
+        
+        // Ground Collision
+        if (this.y > 0) {
+            this.y = 0;
+            this.vy = 0;
+            // Friction
+            // this.vx *= 0.95; // Already handled by grip logic above?
+            // Actually, grip logic assumes we are on ground.
+        } else {
+            // Air resistance
+            this.vx *= 0.995;
+            this.vz *= 0.995;
+        }
         
         // Collision Detection
-        if (this.checkCollision(nextX, nextZ)) {
+        if (this.checkCollision(this.x, this.z, this.y)) {
             // Bounce / Slide
             this.speed *= -0.5;
-            this.vx *= -0.5;
-            this.vz *= -0.5;
+            this.vx *= -0.8; // More bounce
+            this.vz *= -0.8;
+            
+            // Launch up if hitting fast
+            const impactSpeed = Math.sqrt(this.vx*this.vx + this.vz*this.vz);
+            if (impactSpeed > 5) {
+                this.vy -= impactSpeed * 0.5;
+            }
             
             // Push out slightly to prevent sticking
             this.x -= this.vx * 2;
             this.z -= this.vz * 2;
-        } else {
-            this.x = nextX;
-            this.z = nextZ;
         }
         
         // Update HUD
@@ -294,7 +314,7 @@ const Car = {
         document.getElementById('speed').innerText = Math.floor(actualSpeed * 3) + " KM/H";
     },
     
-    checkCollision: function(x, z) {
+    checkCollision: function(x, z, y) {
         // Simple point collision with building rectangles
         // Find which block we are in
         const gx = Math.floor(x / CONFIG.blockSize);
@@ -312,6 +332,12 @@ const Car = {
         // Also check if building exists (parks)
         const val = rng.at(gx, gz);
         if (val <= 0.1) return false; // Park
+        
+        // Height check!
+        // Building height
+        const h = CONFIG.buildingHeight * (0.5 + val);
+        // y is negative up. If y < -h, we are above the building.
+        if (y !== undefined && y < -h) return false;
         
         // Car size buffer (approx 20 units)
         const buffer = 20;
@@ -347,23 +373,34 @@ const TrafficManager = {
             car.y += car.vy;
             
             // Gravity (Y is negative UP)
-            if (car.y < 0) {
-                car.vy += 0.8; // Stronger Gravity
-            } else if (car.y > 0) {
+            car.vy += 0.8; // Always apply gravity
+            
+            if (car.y > 0) { // Hit ground
                 car.y = 0;
                 car.vy = -car.vy * 0.5; // Bouncy ground
                 if (Math.abs(car.vy) < 1) car.vy = 0;
                 
-                // Ground friction
-                car.vx *= 0.95;
-                car.vz *= 0.95;
-                car.rotVel *= 0.9;
+                // Ground friction only when ON GROUND
+                if (car.crashed > 0) {
+                    car.vx *= 0.99; 
+                    car.vz *= 0.99;
+                    car.rotVel *= 0.98;
+                } else {
+                    car.vx *= 0.95;
+                    car.vz *= 0.95;
+                    car.rotVel *= 0.9;
+                }
+            } else {
+                // Air resistance
+                car.vx *= 0.995;
+                car.vz *= 0.995;
+                car.rotVel *= 0.995;
             }
             
             car.angle += car.rotVel;
             
             // Building Collision for Traffic
-            if (Car.checkCollision(car.x, car.z)) {
+            if (Car.checkCollision(car.x, car.z, car.y)) {
                  // Bounce off building
                  car.vx *= -1.2; // Super bounce
                  car.vz *= -1.2;
@@ -371,7 +408,7 @@ const TrafficManager = {
                  car.z += car.vz * 2;
                  car.rotVel += (Math.random() - 0.5) * 0.5; // Spin
                  car.vy -= 5 + Math.random() * 10; // Launch UP!
-                 car.crashed = 60;
+                 car.crashed = 500;
             }
 
             // Despawn if too far
@@ -384,58 +421,115 @@ const TrafficManager = {
             // Collision with other traffic
             for (let j = i + 1; j < this.cars.length; j++) {
                 const other = this.cars[j];
-                const dOther = dist(car.x, car.z, other.x, other.z);
                 
-                if (dOther < 40) { // Collision
-                    const dx = car.x - other.x;
-                    const dz = car.z - other.z;
-                    const dist = Math.sqrt(dx*dx + dz*dz);
+                // 3D Collision Check
+                const dx = car.x - other.x;
+                const dz = car.z - other.z;
+                const dy = car.y - other.y;
+                
+                const distXZ = Math.sqrt(dx*dx + dz*dz);
+                const distY = Math.abs(dy);
+                
+                // Car dimensions approx: width/depth ~40, height ~12
+                if (distXZ < 40 && distY < 12) { // 3D Collision
                     
-                    if (dist > 0) {
+                    if (distXZ > 0) {
                         // Normal
-                        const nx = dx / dist;
-                        const nz = dz / dist;
+                        const nx = dx / distXZ;
+                        const nz = dz / distXZ;
                         
                         // Relative velocity
                         const rvx = car.vx - other.vx;
                         const rvz = car.vz - other.vz;
+                        const rvy = car.vy - other.vy;
+                        
                         const velAlongNormal = rvx * nx + rvz * nz;
                         
-                        if (velAlongNormal < 0) { // Only resolve if moving towards each other
-                            const restitution = 1.5; // SUPER BOUNCY
-                            let j = -(1 + restitution) * velAlongNormal;
-                            j /= 2; // Equal mass
+                        // Vertical Collision (Stacking)
+                        if (distY < 10 && Math.abs(dy) > 2) {
+                            // One is on top of the other
+                            if (car.y < other.y) { // Car is above Other (y is negative up)
+                                if (car.vy > 0) { // Falling down onto other
+                                    car.vy = -car.vy * 0.3; // Small bounce
+                                    car.y = other.y - 12; // Sit on top
+                                    // Friction from car below
+                                    car.vx = car.vx * 0.9 + other.vx * 0.1;
+                                    car.vz = car.vz * 0.9 + other.vz * 0.1;
+                                }
+                            } else { // Other is above Car
+                                if (other.vy > 0) {
+                                    other.vy = -other.vy * 0.3;
+                                    other.y = car.y - 12;
+                                    other.vx = other.vx * 0.9 + car.vx * 0.1;
+                                    other.vz = other.vz * 0.9 + car.vz * 0.1;
+                                }
+                            }
+                        }
+                        
+                        if (velAlongNormal < 0) { // Only resolve if moving towards each other horizontally
+                            // REAL PHYSICS: Momentum Transfer
+                            // m1 = m2 (equal mass)
+                            // v1' = v1 - (1+e)(v1-v2).n * n / 2
                             
-                            const ix = j * nx;
-                            const iz = j * nz;
+                            const restitution = 0.5; // Less bouncy, more "crunchy"
+                            const j = -(1 + restitution) * velAlongNormal;
+                            const impulse = j / 2; // Equal mass assumption
                             
+                            const ix = impulse * nx;
+                            const iz = impulse * nz;
+                            
+                            // Apply impulse directly to velocity
                             car.vx += ix;
                             car.vz += iz;
                             other.vx -= ix;
                             other.vz -= iz;
                             
-                            // CHAOS: Launch them!
-                            car.rotVel += (Math.random() - 0.5) * 0.8;
-                            other.rotVel += (Math.random() - 0.5) * 0.8;
+                            // ROTATIONAL PHYSICS (Approximated)
+                            // Impact point relative to center
+                            // We don't have exact impact point, assume edge
+                            // Add spin based on how off-center the hit is (tangential velocity)
                             
-                            // Pop up into the air
-                            const launchForce = Math.abs(velAlongNormal) * 0.5;
-                            car.vy -= 5 + launchForce;
-                            other.vy -= 5 + launchForce;
+                            const tx = -nz; // Tangent vector
+                            const tz = nx;
+                            const rvt = (car.vx - other.vx) * tx + (car.vz - other.vz) * tz;
                             
-                            // Disable AI
-                            car.crashed = 100;
-                            other.crashed = 100;
+                            // Transfer linear momentum to angular momentum
+                            car.rotVel += rvt * 0.01;
+                            other.rotVel -= rvt * 0.01;
+                            
+                            // Friction/Grip loss on impact
+                            // Reduce velocity slightly to simulate energy loss (crunch)
+                            car.vx *= 0.9;
+                            car.vz *= 0.9;
+                            other.vx *= 0.9;
+                            other.vz *= 0.9;
+                            
+                            // Vertical pop only on high speed impacts
+                            if (Math.abs(velAlongNormal) > 20) {
+                                const lift = Math.abs(velAlongNormal) * 0.2;
+                                car.vy -= lift;
+                                other.vy -= lift;
+                                
+                                // Add random tumble
+                                car.rotVel += (Math.random() - 0.5) * 0.2;
+                                other.rotVel += (Math.random() - 0.5) * 0.2;
+                            }
+                            
+                            // Disable AI for a bit
+                            car.crashed = 200;
+                            other.crashed = 200;
                         }
                         
-                        // Separation
-                        const overlap = 40 - dist;
-                        const sx = nx * overlap * 0.5;
-                        const sz = nz * overlap * 0.5;
-                        car.x += sx;
-                        car.z += sz;
-                        other.x -= sx;
-                        other.z -= sz;
+                        // Separation (Horizontal only)
+                        if (distY < 5) { // Only separate horizontally if they are roughly at same level
+                            const overlap = 40 - distXZ;
+                            const sx = nx * overlap * 0.5;
+                            const sz = nz * overlap * 0.5;
+                            car.x += sx;
+                            car.z += sz;
+                            other.x -= sx;
+                            other.z -= sz;
+                        }
                     }
                 }
             }
@@ -456,24 +550,39 @@ const TrafficManager = {
                     const velAlongNormal = rvx * nx + rvz * nz;
                     
                     if (velAlongNormal < 0) {
-                        const restitution = 2.0; // MEGA BOUNCY vs player
-                        let j = -(1 + restitution) * velAlongNormal;
-                        j /= 2;
+                        // Player vs Car Physics
+                        // Player is heavier? Let's say equal mass for now for maximum chaos
+                        const restitution = 0.4; // Crunchy
+                        const j = -(1 + restitution) * velAlongNormal;
+                        const impulse = j / 2;
                         
-                        const ix = j * nx;
-                        const iz = j * nz;
+                        const ix = impulse * nx;
+                        const iz = impulse * nz;
                         
                         car.vx += ix;
                         car.vz += iz;
                         Car.vx -= ix;
                         Car.vz -= iz;
                         
-                        car.rotVel += (Math.random() - 0.5) * 1.0;
-                        car.vy -= 15 + Math.random() * 20; // LAUNCH TO STRATOSPHERE
-                        car.crashed = 120;
+                        // Spin
+                        const tx = -nz;
+                        const tz = nx;
+                        const rvt = (car.vx - Car.vx) * tx + (car.vz - Car.vz) * tz;
+                        car.rotVel += rvt * 0.015;
                         
-                        // Player shake/impact?
-                        Car.speed *= 0.5;
+                        // Vertical
+                        if (Math.abs(velAlongNormal) > 30) {
+                            car.vy -= Math.abs(velAlongNormal) * 0.3;
+                            // Player doesn't fly as easily, but maybe a bit
+                        }
+                        
+                        car.crashed = 200;
+                        
+                        // Energy loss
+                        car.vx *= 0.8;
+                        car.vz *= 0.8;
+                        Car.vx *= 0.9; // Player loses less speed
+                        Car.vz *= 0.9;
                     }
                     
                     const overlap = 40 - dist;
