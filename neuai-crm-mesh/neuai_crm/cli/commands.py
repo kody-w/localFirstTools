@@ -297,6 +297,28 @@ def cmd_export(args):
         print(json.dumps(output, indent=2))
 
 
+def cmd_schema(args):
+    """Schema Brain commands."""
+    from neuai_crm.services.schema_brain import schema_brain
+
+    if args.action == "status":
+        print(schema_brain.generate_report())
+
+    elif args.action == "review":
+        # Launch interactive review
+        from neuai_crm.cli.schema_cli import cmd_review
+        cmd_review(args)
+
+    elif args.action == "teach":
+        # Launch interactive teach
+        from neuai_crm.cli.schema_cli import cmd_teach
+        cmd_teach(args)
+
+    elif args.action == "export":
+        output = schema_brain.export_mappings(args.format)
+        print(output)
+
+
 def main():
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -385,6 +407,13 @@ Examples:
     export_parser.add_argument("--source-file", help="Source data file to load first")
     export_parser.add_argument("-o", "--output", help="Output file")
 
+    # Schema Brain command
+    schema_parser = subparsers.add_parser("schema", help="Schema Brain - Self-improving translator")
+    schema_parser.add_argument("action", nargs="?", default="status",
+                               choices=["status", "review", "teach", "export"],
+                               help="Schema Brain action")
+    schema_parser.add_argument("--format", choices=["json", "markdown"], default="markdown")
+
     args = parser.parse_args()
 
     if args.command == "serve":
@@ -403,6 +432,8 @@ Examples:
         cmd_stats(args)
     elif args.command == "export":
         cmd_export(args)
+    elif args.command == "schema":
+        cmd_schema(args)
     else:
         parser.print_help()
 
