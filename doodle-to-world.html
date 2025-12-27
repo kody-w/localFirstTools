@@ -350,6 +350,50 @@
         body.exploring #previewCanvas {
             display: none;
         }
+
+        .share-btn {
+            padding: 12px 20px;
+            background: rgba(102, 126, 234, 0.3);
+            border: 1px solid rgba(102, 126, 234, 0.5);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            cursor: pointer;
+            backdrop-filter: blur(10px);
+            transition: all 0.2s;
+            margin-left: 10px;
+        }
+
+        .share-btn:hover {
+            background: rgba(102, 126, 234, 0.5);
+            transform: scale(1.05);
+        }
+
+        .share-toast {
+            position: fixed;
+            bottom: 100px;
+            left: 50%;
+            transform: translateX(-50%) translateY(10px);
+            padding: 12px 24px;
+            background: rgba(38, 222, 129, 0.9);
+            border-radius: 8px;
+            color: #fff;
+            font-size: 14px;
+            opacity: 0;
+            transition: all 0.3s;
+            z-index: 1000;
+            pointer-events: none;
+        }
+
+        .share-toast.visible {
+            opacity: 1;
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .explore-ui {
+            display: flex;
+            gap: 10px;
+        }
     </style>
 </head>
 <body>
@@ -408,7 +452,9 @@
         <div id="worldContainer"></div>
         <div class="explore-ui">
             <button class="back-btn" id="backBtn">← Back to Drawing</button>
+            <button class="share-btn" id="shareWorldBtn">📸 Share World</button>
         </div>
+        <div class="share-toast" id="shareToast">Screenshot copied!</div>
         <div class="controls-hint">
             <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> to move &nbsp;|&nbsp;
             <kbd>Mouse</kbd> to look &nbsp;|&nbsp;
@@ -429,6 +475,262 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
     <script>
+        // ========== AUDIO SYSTEM (Web Audio API) ==========
+        let audioCtx = null;
+        let masterGain = null;
+        let ambientGain = null;
+        let creatureGains = { butterfly: null, firefly: null, bird: null };
+        let ambientNoise = null;
+        let audioInitialized = false;
+
+        function initAudio() {
+            if (audioInitialized) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
+            // Master gain
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = 0.4;
+            masterGain.connect(audioCtx.destination);
+
+            // Ambient gain (for wind)
+            ambientGain = audioCtx.createGain();
+            ambientGain.gain.value = 0;
+            ambientGain.connect(masterGain);
+
+            // Creature type gains
+            Object.keys(creatureGains).forEach(type => {
+                creatureGains[type] = audioCtx.createGain();
+                creatureGains[type].gain.value = 0.3;
+                creatureGains[type].connect(masterGain);
+            });
+
+            audioInitialized = true;
+        }
+
+        // Brush stroke sound
+        function playBrushSound(size) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+
+            // Larger brush = lower frequency
+            const baseFreq = 3500 - (size * 100);
+            osc.type = 'sawtooth';
+            osc.frequency.value = baseFreq + Math.random() * 500;
+
+            filter.type = 'bandpass';
+            filter.frequency.value = baseFreq;
+            filter.Q.value = 2;
+
+            gain.gain.setValueAtTime(0.03, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.05);
+
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(masterGain);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.06);
+        }
+
+        // Color selection sound
+        const colorTones = {
+            '#4A90D9': 261.63, '#7B68EE': 293.66, '#48D1CC': 329.63, '#98D8C8': 349.23,
+            '#F7DC6F': 392.00, '#E74C3C': 440.00, '#2C3E50': 246.94, '#ECF0F1': 523.25
+        };
+
+        function playColorSound(color) {
+            if (!audioCtx) return;
+            const freq = colorTones[color] || 392;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+
+            gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.15);
+
+            osc.connect(gain);
+            gain.connect(masterGain);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        // Ambient wind noise
+        function startAmbientWind() {
+            if (!audioCtx || ambientNoise) return;
+
+            const bufferSize = audioCtx.sampleRate * 2;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+
+            // Brown noise
+            let lastOut = 0;
+            for (let i = 0; i < bufferSize; i++) {
+                const white = Math.random() * 2 - 1;
+                data[i] = (lastOut + (0.02 * white)) / 1.02;
+                lastOut = data[i];
+                data[i] *= 3.5;
+            }
+
+            ambientNoise = audioCtx.createBufferSource();
+            ambientNoise.buffer = buffer;
+            ambientNoise.loop = true;
+
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.value = 400;
+
+            ambientNoise.connect(filter);
+            filter.connect(ambientGain);
+            ambientNoise.start();
+
+            // Fade in
+            ambientGain.gain.setValueAtTime(0, audioCtx.currentTime);
+            ambientGain.gain.linearRampToValueAtTime(0.15, audioCtx.currentTime + 2);
+        }
+
+        // Creature sound generators
+        const creatureSounds = new Map();
+
+        function createButterflySound(creature) {
+            if (!audioCtx) return;
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+
+            filter.type = 'bandpass';
+            filter.frequency.value = 3000;
+            filter.Q.value = 5;
+
+            gain.gain.value = 0;
+            filter.connect(gain);
+            gain.connect(creatureGains.butterfly);
+
+            creatureSounds.set(creature.uuid, { type: 'butterfly', gain, filter });
+        }
+
+        function createFireflySound(creature) {
+            if (!audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+
+            osc.type = 'sine';
+            osc.frequency.value = 800 + Math.random() * 400;
+            gain.gain.value = 0;
+
+            osc.connect(gain);
+            gain.connect(creatureGains.firefly);
+            osc.start();
+
+            creatureSounds.set(creature.uuid, { type: 'firefly', osc, gain });
+        }
+
+        function createBirdSound(creature) {
+            if (!audioCtx) return;
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0;
+            gain.connect(creatureGains.bird);
+
+            creatureSounds.set(creature.uuid, { type: 'bird', gain, lastChirp: 0 });
+        }
+
+        function playBirdChirp(soundData) {
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+            const notes = [523.25, 659.25, 783.99]; // C5, E5, G5
+
+            notes.forEach((freq, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+
+                osc.type = 'sine';
+                osc.frequency.setValueAtTime(freq, now + i * 0.08);
+                osc.frequency.exponentialRampToValueAtTime(freq * 1.1, now + i * 0.08 + 0.05);
+
+                gain.gain.setValueAtTime(0, now + i * 0.08);
+                gain.gain.linearRampToValueAtTime(0.08, now + i * 0.08 + 0.02);
+                gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.08 + 0.1);
+
+                osc.connect(gain);
+                gain.connect(soundData.gain);
+                osc.start(now + i * 0.08);
+                osc.stop(now + i * 0.08 + 0.15);
+            });
+        }
+
+        function updateCreatureSounds(creatures, camera) {
+            if (!audioCtx) return;
+
+            creatures.forEach(creature => {
+                const soundData = creatureSounds.get(creature.uuid);
+                if (!soundData) return;
+
+                const distance = camera.position.distanceTo(creature.position);
+                const maxDist = 50;
+                const volume = Math.max(0, 1 - distance / maxDist);
+
+                if (soundData.type === 'firefly') {
+                    // Pulse with the firefly's glow
+                    const pulse = creature.children[1]?.intensity || 0.5;
+                    soundData.gain.gain.setTargetAtTime(volume * pulse * 0.15, audioCtx.currentTime, 0.1);
+                } else if (soundData.type === 'bird') {
+                    // Occasional chirp
+                    const now = performance.now();
+                    if (now - soundData.lastChirp > 3000 + Math.random() * 4000) {
+                        if (volume > 0.1) {
+                            playBirdChirp(soundData);
+                            soundData.lastChirp = now;
+                        }
+                    }
+                }
+            });
+        }
+
+        // Transformation crescendo
+        function playTransformationSound() {
+            if (!audioCtx) return;
+            const now = audioCtx.currentTime;
+
+            // Rising tone
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(100, now);
+            osc.frequency.exponentialRampToValueAtTime(400, now + 2);
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.15, now + 1);
+            gain.gain.linearRampToValueAtTime(0.2, now + 2);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 2.5);
+            osc.connect(gain);
+            gain.connect(masterGain);
+            osc.start(now);
+            osc.stop(now + 2.6);
+
+            // Shimmer layer
+            for (let i = 0; i < 5; i++) {
+                const shimmer = audioCtx.createOscillator();
+                const sGain = audioCtx.createGain();
+                shimmer.type = 'sine';
+                shimmer.frequency.value = 800 + i * 200;
+                sGain.gain.setValueAtTime(0, now + 1);
+                sGain.gain.linearRampToValueAtTime(0.05, now + 1.5);
+                sGain.gain.exponentialRampToValueAtTime(0.001, now + 2.5);
+                shimmer.connect(sGain);
+                sGain.connect(masterGain);
+                shimmer.start(now + 1);
+                shimmer.stop(now + 2.6);
+            }
+        }
+
+        // Initialize on first interaction
+        document.addEventListener('click', () => {
+            initAudio();
+            if (audioCtx && audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+        }, { once: true });
+
         // ========== Drawing State ==========
         const canvas = document.getElementById('drawCanvas');
         const ctx = canvas.getContext('2d');
@@ -463,6 +765,7 @@
                 document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
                 btn.classList.add('active');
                 currentColor = c.color;
+                playColorSound(c.color);
             };
             paletteEl.appendChild(btn);
         });
@@ -518,6 +821,7 @@
             lastY = e.offsetY;
         }
 
+        let lastBrushSoundTime = 0;
         function draw(e) {
             if (!isDrawing) return;
 
@@ -527,6 +831,13 @@
             ctx.moveTo(lastX, lastY);
             ctx.lineTo(e.offsetX, e.offsetY);
             ctx.stroke();
+
+            // Play brush sound (throttled)
+            const now = performance.now();
+            if (now - lastBrushSoundTime > 50) {
+                playBrushSound(brushSize);
+                lastBrushSoundTime = now;
+            }
 
             lastX = e.offsetX;
             lastY = e.offsetY;
@@ -635,7 +946,7 @@
             camera.position.set(0, 5, 50);
 
             // Renderer
-            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
             renderer.setSize(window.innerWidth, window.innerHeight);
             renderer.shadowMap.enabled = true;
             renderer.shadowMap.type = THREE.PCFSoftShadowMap;
@@ -777,6 +1088,9 @@
             // Add some ambient particles
             addParticles();
 
+            // Add living creatures
+            createCreatures();
+
             // Start animation
             animate();
         }
@@ -803,6 +1117,249 @@
 
             const particles = new THREE.Points(geometry, material);
             scene.add(particles);
+        }
+
+        // ========== LIVING CREATURES ==========
+        const creatures = [];
+        const creatureTypes = {
+            butterfly: {
+                color: 0xf093fb,
+                wingSpan: 0.8,
+                speed: 0.02,
+                flutterSpeed: 12
+            },
+            firefly: {
+                color: 0x55efc4,
+                size: 0.15,
+                speed: 0.01,
+                pulseSpeed: 3
+            },
+            bird: {
+                color: 0x74b9ff,
+                size: 0.4,
+                speed: 0.04,
+                circleRadius: 20
+            }
+        };
+
+        function createCreatures() {
+            // Create 15 butterflies
+            for (let i = 0; i < 15; i++) {
+                const butterfly = createButterfly();
+                butterfly.position.set(
+                    (Math.random() - 0.5) * 150,
+                    5 + Math.random() * 15,
+                    (Math.random() - 0.5) * 150
+                );
+                butterfly.userData = {
+                    type: 'butterfly',
+                    targetPos: butterfly.position.clone(),
+                    phase: Math.random() * Math.PI * 2,
+                    speed: 0.015 + Math.random() * 0.015
+                };
+                scene.add(butterfly);
+                creatures.push(butterfly);
+            }
+
+            // Create 30 fireflies
+            for (let i = 0; i < 30; i++) {
+                const firefly = createFirefly();
+                firefly.position.set(
+                    (Math.random() - 0.5) * 150,
+                    2 + Math.random() * 20,
+                    (Math.random() - 0.5) * 150
+                );
+                firefly.userData = {
+                    type: 'firefly',
+                    phase: Math.random() * Math.PI * 2,
+                    originalY: firefly.position.y,
+                    targetPos: firefly.position.clone()
+                };
+                scene.add(firefly);
+                creatures.push(firefly);
+            }
+
+            // Create 5 birds circling high above
+            for (let i = 0; i < 5; i++) {
+                const bird = createBird();
+                const angle = (i / 5) * Math.PI * 2;
+                bird.position.set(
+                    Math.cos(angle) * 40,
+                    30 + Math.random() * 10,
+                    Math.sin(angle) * 40
+                );
+                bird.userData = {
+                    type: 'bird',
+                    angle: angle,
+                    radius: 40 + Math.random() * 20,
+                    height: bird.position.y,
+                    speed: 0.003 + Math.random() * 0.002
+                };
+                scene.add(bird);
+                creatures.push(bird);
+            }
+        }
+
+        function createButterfly() {
+            const group = new THREE.Group();
+
+            // Body
+            const bodyGeo = new THREE.CylinderGeometry(0.05, 0.03, 0.4, 6);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x222222 });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.rotation.z = Math.PI / 2;
+            group.add(body);
+
+            // Wings
+            const wingShape = new THREE.Shape();
+            wingShape.moveTo(0, 0);
+            wingShape.bezierCurveTo(0.3, 0.1, 0.5, 0.4, 0.3, 0.6);
+            wingShape.bezierCurveTo(0.1, 0.5, 0, 0.2, 0, 0);
+
+            const wingGeo = new THREE.ShapeGeometry(wingShape);
+            const wingColors = [0xf093fb, 0xf5576c, 0x4facfe, 0xa29bfe, 0xfd79a8];
+            const wingMat = new THREE.MeshBasicMaterial({
+                color: wingColors[Math.floor(Math.random() * wingColors.length)],
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.8
+            });
+
+            const leftWing = new THREE.Mesh(wingGeo, wingMat);
+            leftWing.position.set(0, 0, 0.02);
+            leftWing.rotation.y = Math.PI / 2;
+            leftWing.name = 'leftWing';
+            group.add(leftWing);
+
+            const rightWing = new THREE.Mesh(wingGeo, wingMat);
+            rightWing.position.set(0, 0, -0.02);
+            rightWing.rotation.y = -Math.PI / 2;
+            rightWing.scale.z = -1;
+            rightWing.name = 'rightWing';
+            group.add(rightWing);
+
+            return group;
+        }
+
+        function createFirefly() {
+            const group = new THREE.Group();
+
+            // Glowing sphere
+            const geo = new THREE.SphereGeometry(0.08, 8, 8);
+            const mat = new THREE.MeshBasicMaterial({
+                color: 0x55efc4,
+                transparent: true,
+                opacity: 0.9
+            });
+            const sphere = new THREE.Mesh(geo, mat);
+            group.add(sphere);
+
+            // Add point light
+            const light = new THREE.PointLight(0x55efc4, 0.5, 5);
+            group.add(light);
+
+            return group;
+        }
+
+        function createBird() {
+            const group = new THREE.Group();
+
+            // Body
+            const bodyGeo = new THREE.ConeGeometry(0.15, 0.5, 4);
+            const bodyMat = new THREE.MeshStandardMaterial({ color: 0x74b9ff });
+            const body = new THREE.Mesh(bodyGeo, bodyMat);
+            body.rotation.x = Math.PI / 2;
+            group.add(body);
+
+            // Wings
+            const wingGeo = new THREE.BoxGeometry(0.8, 0.02, 0.2);
+            const wingMat = new THREE.MeshStandardMaterial({ color: 0x5dade2 });
+            const wings = new THREE.Mesh(wingGeo, wingMat);
+            wings.name = 'wings';
+            group.add(wings);
+
+            return group;
+        }
+
+        function updateCreatures(time) {
+            creatures.forEach(creature => {
+                const data = creature.userData;
+
+                if (data.type === 'butterfly') {
+                    // Fluttering wings
+                    const leftWing = creature.getObjectByName('leftWing');
+                    const rightWing = creature.getObjectByName('rightWing');
+                    if (leftWing && rightWing) {
+                        const flutter = Math.sin(time * 12 + data.phase) * 0.5;
+                        leftWing.rotation.z = flutter;
+                        rightWing.rotation.z = -flutter;
+                    }
+
+                    // Random wandering
+                    if (Math.random() < 0.01) {
+                        data.targetPos.set(
+                            (Math.random() - 0.5) * 150,
+                            5 + Math.random() * 15,
+                            (Math.random() - 0.5) * 150
+                        );
+                    }
+
+                    // Move toward target with bobbing
+                    const dir = data.targetPos.clone().sub(creature.position);
+                    if (dir.length() > 1) {
+                        dir.normalize().multiplyScalar(data.speed);
+                        creature.position.add(dir);
+                        creature.lookAt(data.targetPos);
+                    }
+
+                    // Gentle bob
+                    creature.position.y += Math.sin(time * 2 + data.phase) * 0.01;
+
+                } else if (data.type === 'firefly') {
+                    // Pulsing glow
+                    const pulse = (Math.sin(time * 3 + data.phase) + 1) / 2;
+                    const light = creature.children[1];
+                    if (light) {
+                        light.intensity = 0.3 + pulse * 0.7;
+                    }
+                    creature.children[0].material.opacity = 0.5 + pulse * 0.5;
+
+                    // Gentle floating
+                    creature.position.y = data.originalY + Math.sin(time * 0.5 + data.phase) * 1;
+
+                    // Slow drift
+                    if (Math.random() < 0.005) {
+                        data.targetPos.set(
+                            creature.position.x + (Math.random() - 0.5) * 10,
+                            data.originalY,
+                            creature.position.z + (Math.random() - 0.5) * 10
+                        );
+                    }
+
+                    const drift = data.targetPos.clone().sub(creature.position);
+                    drift.y = 0;
+                    if (drift.length() > 0.5) {
+                        drift.normalize().multiplyScalar(0.01);
+                        creature.position.add(drift);
+                    }
+
+                } else if (data.type === 'bird') {
+                    // Circular flight
+                    data.angle += data.speed;
+                    creature.position.x = Math.cos(data.angle) * data.radius;
+                    creature.position.z = Math.sin(data.angle) * data.radius;
+                    creature.position.y = data.height + Math.sin(time * 0.5 + data.angle) * 2;
+
+                    // Face direction of movement
+                    creature.rotation.y = -data.angle + Math.PI / 2;
+
+                    // Wing flapping
+                    const wings = creature.getObjectByName('wings');
+                    if (wings) {
+                        wings.rotation.z = Math.sin(time * 8) * 0.3;
+                    }
+                }
+            });
         }
 
         // ========== First Person Controls ==========
@@ -904,6 +1461,12 @@
             camera.position.x = Math.max(-95, Math.min(95, camera.position.x));
             camera.position.z = Math.max(-95, Math.min(95, camera.position.z));
 
+            // Update living creatures
+            updateCreatures(time / 1000);
+
+            // Update spatial creature sounds based on camera position
+            updateCreatureSounds(creatures, camera);
+
             prevTime = time;
             renderer.render(scene, camera);
         }
@@ -913,10 +1476,24 @@
             const overlay = document.getElementById('transformOverlay');
             overlay.classList.add('active');
 
+            // Play transformation sound
+            playTransformationSound();
+
             setTimeout(() => {
                 const structures = analyzeDrawing();
                 createWorld(structures);
                 initControls();
+
+                // Start ambient wind
+                startAmbientWind();
+
+                // Initialize creature sounds
+                creatures.forEach(c => {
+                    const type = c.userData.type;
+                    if (type === 'butterfly') createButterflySound(c);
+                    else if (type === 'firefly') createFireflySound(c);
+                    else if (type === 'bird') createBirdSound(c);
+                });
 
                 overlay.classList.remove('active');
                 document.body.classList.add('exploring');
@@ -937,6 +1514,59 @@
                 renderer.setSize(window.innerWidth, window.innerHeight);
             }
         });
+
+        // ========== SCREENSHOT/SHARE FUNCTIONALITY ==========
+        const shareWorldBtn = document.getElementById('shareWorldBtn');
+        const shareToast = document.getElementById('shareToast');
+
+        async function captureWorldScreenshot() {
+            if (!renderer) return null;
+
+            // Render the current frame
+            renderer.render(scene, camera);
+
+            // Get the canvas data
+            const canvas = renderer.domElement;
+            return canvas;
+        }
+
+        function showToast(msg) {
+            shareToast.textContent = msg;
+            shareToast.classList.add('visible');
+            setTimeout(() => shareToast.classList.remove('visible'), 2500);
+        }
+
+        shareWorldBtn.addEventListener('click', async () => {
+            const canvas = await captureWorldScreenshot();
+            if (!canvas) {
+                showToast('Unable to capture screenshot');
+                return;
+            }
+
+            try {
+                canvas.toBlob(async (blob) => {
+                    try {
+                        await navigator.clipboard.write([
+                            new ClipboardItem({ 'image/png': blob })
+                        ]);
+                        showToast('World screenshot copied to clipboard!');
+                    } catch (err) {
+                        // Fallback to download
+                        downloadScreenshot(canvas);
+                    }
+                }, 'image/png');
+            } catch (err) {
+                downloadScreenshot(canvas);
+            }
+        });
+
+        function downloadScreenshot(canvas) {
+            const link = document.createElement('a');
+            link.download = `doodle-world-${Date.now()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+            showToast('Screenshot downloaded!');
+        }
     </script>
 </body>
 </html>

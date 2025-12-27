@@ -1,0 +1,685 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Colony Mind</title>
+    <meta name="description" content="Watch ants collectively excavate tunnel networks through soil using simple rules that create emergent complexity">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1510; min-height: 100vh; font-family: 'Georgia', serif; color: #a09070; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(26,21,16,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(160,120,80,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #c0a070; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0b080; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,50,0.4); border: 1px solid rgba(160,120,80,0.4);
+            color: #a09060; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        button:hover { background: rgba(120,100,70,0.5); }
+        .btn-group { display: flex; gap: 6px; }
+        .btn-group button { flex: 1; }
+        .btn-export { background: rgba(80,100,60,0.4); border-color: rgba(120,160,80,0.4); }
+        .btn-import { background: rgba(60,80,100,0.4); border-color: rgba(80,120,160,0.4); }
+        #file-input { display: none; }
+        .save-info { font-size: 10px; opacity: 0.6; text-align: center; margin-top: 8px; }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #806050; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Colony Mind</h3>
+        <div class="control-row">
+            <label>Colony Size <span class="value" id="size-val">100</span></label>
+            <input type="range" id="size" min="50" max="300" value="100">
+        </div>
+        <div class="control-row">
+            <label>Dig Speed <span class="value" id="speed-val">50</span></label>
+            <input type="range" id="speed" min="20" max="100" value="50">
+        </div>
+        <button id="food-btn">Place Food Source</button>
+        <button id="reset-btn">New Colony</button>
+        <div class="btn-group">
+            <button id="export-btn" class="btn-export">Export</button>
+            <button id="import-btn" class="btn-import">Import</button>
+        </div>
+        <input type="file" id="file-input" accept=".json">
+        <div class="save-info">Save your ant farm as JSON</div>
+    </div>
+    <div id="stats">
+        <div>Ants: <span id="ant-count">0</span></div>
+        <div>Tunnels: <span id="tunnel-length">0</span>m</div>
+        <div>Chambers: <span id="chamber-count">0</span></div>
+    </div>
+    <div id="info">Click to place food | Export/Import to save your colony | Watch emergent tunnel networks form</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+
+        // Constants must be declared before resize() which uses them
+        const SOIL_RESOLUTION = 4;
+        let soilGrid = [];
+        let pheromoneGrid = [];
+        const ants = [];
+        const foodSources = [];
+        const chambers = [];
+
+        let colonySize = 100;
+        let digSpeed = 0.5;
+        let time = 0;
+        let placingFood = false;
+
+        const SOIL_COLORS = [
+            { depth: 0, color: [60, 45, 30] },
+            { depth: 0.3, color: [80, 55, 35] },
+            { depth: 0.6, color: [100, 70, 45] },
+            { depth: 1, color: [70, 50, 35] }
+        ];
+
+        function resize() {
+            W = canvas.width = innerWidth;
+            H = canvas.height = innerHeight;
+            initSoil();
+        }
+        window.onresize = resize;
+
+        function initSoil() {
+            const cols = Math.ceil(W / SOIL_RESOLUTION);
+            const rows = Math.ceil(H / SOIL_RESOLUTION);
+            soilGrid = [];
+            pheromoneGrid = [];
+            
+            for (let y = 0; y < rows; y++) {
+                soilGrid[y] = [];
+                pheromoneGrid[y] = [];
+                for (let x = 0; x < cols; x++) {
+                    const surfaceY = H * 0.15;
+                    const worldY = y * SOIL_RESOLUTION;
+                    soilGrid[y][x] = worldY > surfaceY ? 1 : 0;
+                    pheromoneGrid[y][x] = 0;
+                }
+            }
+            
+            const nestX = Math.floor(W / 2 / SOIL_RESOLUTION);
+            const nestY = Math.floor(H * 0.2 / SOIL_RESOLUTION);
+            for (let dy = -3; dy <= 3; dy++) {
+                for (let dx = -4; dx <= 4; dx++) {
+                    const gx = nestX + dx;
+                    const gy = nestY + dy;
+                    if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                        if (Math.sqrt(dx*dx + dy*dy) < 4) {
+                            soilGrid[gy][gx] = 0;
+                        }
+                    }
+                }
+            }
+            
+            chambers.push({ x: W/2, y: H * 0.2, radius: 15 });
+        }
+        
+        class Ant {
+            constructor() {
+                this.x = W / 2 + (Math.random() - 0.5) * 20;
+                this.y = H * 0.2;
+                this.angle = Math.random() * Math.PI * 2;
+                this.speed = 1 + Math.random() * 0.5;
+                this.hasFood = false;
+                this.digging = false;
+                this.wanderPhase = Math.random() * Math.PI * 2;
+            }
+            
+            update() {
+                this.wanderPhase += 0.1;
+                
+                const cols = Math.ceil(W / SOIL_RESOLUTION);
+                const rows = Math.ceil(H / SOIL_RESOLUTION);
+                
+                if (this.hasFood) {
+                    const nestX = W / 2;
+                    const nestY = H * 0.2;
+                    const toNest = Math.atan2(nestY - this.y, nestX - this.x);
+                    this.angle = this.angle * 0.9 + toNest * 0.1;
+                    
+                    const dist = Math.hypot(nestX - this.x, nestY - this.y);
+                    if (dist < 20) {
+                        this.hasFood = false;
+                    }
+                    
+                    const gx = Math.floor(this.x / SOIL_RESOLUTION);
+                    const gy = Math.floor(this.y / SOIL_RESOLUTION);
+                    if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                        pheromoneGrid[gy][gx] = Math.min(1, pheromoneGrid[gy][gx] + 0.1);
+                    }
+                } else {
+                    let bestPheromone = 0;
+                    let bestAngle = this.angle;
+                    
+                    for (let i = 0; i < 5; i++) {
+                        const testAngle = this.angle + (i - 2) * 0.4;
+                        const testX = this.x + Math.cos(testAngle) * 10;
+                        const testY = this.y + Math.sin(testAngle) * 10;
+                        const gx = Math.floor(testX / SOIL_RESOLUTION);
+                        const gy = Math.floor(testY / SOIL_RESOLUTION);
+                        
+                        if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                            const pheromone = pheromoneGrid[gy][gx];
+                            if (pheromone > bestPheromone) {
+                                bestPheromone = pheromone;
+                                bestAngle = testAngle;
+                            }
+                        }
+                    }
+                    
+                    if (bestPheromone > 0.1) {
+                        this.angle = this.angle * 0.7 + bestAngle * 0.3;
+                    } else {
+                        this.angle += Math.sin(this.wanderPhase) * 0.3;
+                    }
+                    
+                    for (const food of foodSources) {
+                        const dist = Math.hypot(food.x - this.x, food.y - this.y);
+                        if (dist < 15 && food.amount > 0) {
+                            this.hasFood = true;
+                            food.amount -= 1;
+                            break;
+                        }
+                    }
+                }
+                
+                const nextX = this.x + Math.cos(this.angle) * this.speed;
+                const nextY = this.y + Math.sin(this.angle) * this.speed;
+                const gx = Math.floor(nextX / SOIL_RESOLUTION);
+                const gy = Math.floor(nextY / SOIL_RESOLUTION);
+                
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                    if (soilGrid[gy][gx] > 0) {
+                        this.digging = true;
+                        soilGrid[gy][gx] -= 0.02 * digSpeed;
+                        if (soilGrid[gy][gx] <= 0) {
+                            soilGrid[gy][gx] = 0;
+                        }
+                        this.speed = 0.3;
+                    } else {
+                        this.digging = false;
+                        this.speed = 1 + Math.random() * 0.5;
+                        this.x = nextX;
+                        this.y = nextY;
+                    }
+                }
+                
+                if (this.x < 10 || this.x > W - 10) this.angle = Math.PI - this.angle;
+                if (this.y < 10 || this.y > H - 10) this.angle = -this.angle;
+                
+                this.x = Math.max(10, Math.min(W - 10, this.x));
+                this.y = Math.max(10, Math.min(H - 10, this.y));
+            }
+            
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+                
+                ctx.beginPath();
+                ctx.ellipse(0, 0, 3, 2, 0, 0, Math.PI * 2);
+                ctx.fillStyle = this.hasFood ? '#d4a054' : '#3a2a1a';
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.ellipse(-4, 0, 2, 1.5, 0, 0, Math.PI * 2);
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.moveTo(-5, -1);
+                ctx.lineTo(-8, -3);
+                ctx.moveTo(-5, 1);
+                ctx.lineTo(-8, 3);
+                ctx.strokeStyle = '#3a2a1a';
+                ctx.lineWidth = 0.5;
+                ctx.stroke();
+                
+                ctx.restore();
+            }
+        }
+        
+        function getSoilColor(depth) {
+            for (let i = 1; i < SOIL_COLORS.length; i++) {
+                if (depth <= SOIL_COLORS[i].depth) {
+                    const t = (depth - SOIL_COLORS[i-1].depth) / (SOIL_COLORS[i].depth - SOIL_COLORS[i-1].depth);
+                    const c1 = SOIL_COLORS[i-1].color;
+                    const c2 = SOIL_COLORS[i].color;
+                    return [
+                        c1[0] + (c2[0] - c1[0]) * t,
+                        c1[1] + (c2[1] - c1[1]) * t,
+                        c1[2] + (c2[2] - c1[2]) * t
+                    ];
+                }
+            }
+            return SOIL_COLORS[SOIL_COLORS.length - 1].color;
+        }
+        
+        function drawSoil() {
+            const cols = Math.ceil(W / SOIL_RESOLUTION);
+            const rows = Math.ceil(H / SOIL_RESOLUTION);
+            const imageData = ctx.createImageData(W, H);
+            
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    const soil = soilGrid[y] ? soilGrid[y][x] || 0 : 0;
+                    const pheromone = pheromoneGrid[y] ? pheromoneGrid[y][x] || 0 : 0;
+                    
+                    let r, g, b;
+                    if (soil > 0) {
+                        const depth = y / rows;
+                        const color = getSoilColor(depth);
+                        r = color[0] * soil;
+                        g = color[1] * soil;
+                        b = color[2] * soil;
+                    } else {
+                        r = 15 + pheromone * 30;
+                        g = 12 + pheromone * 20;
+                        b = 10 + pheromone * 10;
+                    }
+                    
+                    for (let py = 0; py < SOIL_RESOLUTION; py++) {
+                        for (let px = 0; px < SOIL_RESOLUTION; px++) {
+                            const ix = x * SOIL_RESOLUTION + px;
+                            const iy = y * SOIL_RESOLUTION + py;
+                            if (ix < W && iy < H) {
+                                const i = (iy * W + ix) * 4;
+                                imageData.data[i] = r;
+                                imageData.data[i + 1] = g;
+                                imageData.data[i + 2] = b;
+                                imageData.data[i + 3] = 255;
+                            }
+                        }
+                    }
+                }
+            }
+            
+            ctx.putImageData(imageData, 0, 0);
+        }
+        
+        function drawSky() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H * 0.15);
+            gradient.addColorStop(0, '#4a6080');
+            gradient.addColorStop(1, '#7a9ab0');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H * 0.15);
+        }
+        
+        function drawFoodSources() {
+            for (let i = foodSources.length - 1; i >= 0; i--) {
+                const food = foodSources[i];
+                if (food.amount <= 0) {
+                    foodSources.splice(i, 1);
+                    continue;
+                }
+                
+                const size = 5 + (food.amount / food.maxAmount) * 10;
+                ctx.beginPath();
+                ctx.arc(food.x, food.y, size, 0, Math.PI * 2);
+                ctx.fillStyle = '#90c060';
+                ctx.fill();
+                ctx.strokeStyle = '#608040';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+        
+        function decayPheromones() {
+            const cols = Math.ceil(W / SOIL_RESOLUTION);
+            const rows = Math.ceil(H / SOIL_RESOLUTION);
+            
+            for (let y = 0; y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (pheromoneGrid[y] && pheromoneGrid[y][x]) {
+                        pheromoneGrid[y][x] *= 0.999;
+                    }
+                }
+            }
+        }
+        
+        function countTunnelLength() {
+            const cols = Math.ceil(W / SOIL_RESOLUTION);
+            const rows = Math.ceil(H / SOIL_RESOLUTION);
+            let dugCells = 0;
+            
+            for (let y = Math.floor(H * 0.15 / SOIL_RESOLUTION); y < rows; y++) {
+                for (let x = 0; x < cols; x++) {
+                    if (soilGrid[y] && soilGrid[y][x] === 0) {
+                        dugCells++;
+                    }
+                }
+            }
+            
+            return Math.floor(dugCells * SOIL_RESOLUTION / 10);
+        }
+        
+        function updateStats() {
+            document.getElementById('ant-count').textContent = ants.length;
+            document.getElementById('tunnel-length').textContent = countTunnelLength();
+            document.getElementById('chamber-count').textContent = chambers.length;
+        }
+        
+        function initAnts() {
+            ants.length = 0;
+            for (let i = 0; i < colonySize; i++) {
+                ants.push(new Ant());
+            }
+        }
+
+        // ============ SAVE/LOAD SYSTEM ============
+
+        function compressSoilGrid() {
+            // Store only dug cells (value < 1) with their positions
+            const dugCells = [];
+            const rows = soilGrid.length;
+            for (let y = 0; y < rows; y++) {
+                const cols = soilGrid[y]?.length || 0;
+                for (let x = 0; x < cols; x++) {
+                    const val = soilGrid[y][x];
+                    if (val < 1) {
+                        // Store as [y, x, value] - only non-solid cells
+                        dugCells.push([y, x, Math.round(val * 100) / 100]);
+                    }
+                }
+            }
+            return dugCells;
+        }
+
+        function compressPheromoneGrid() {
+            // Store only significant pheromone values (> 0.01)
+            const pheromones = [];
+            const rows = pheromoneGrid.length;
+            for (let y = 0; y < rows; y++) {
+                const cols = pheromoneGrid[y]?.length || 0;
+                for (let x = 0; x < cols; x++) {
+                    const val = pheromoneGrid[y][x];
+                    if (val > 0.01) {
+                        pheromones.push([y, x, Math.round(val * 1000) / 1000]);
+                    }
+                }
+            }
+            return pheromones;
+        }
+
+        function serializeAnts() {
+            return ants.map(ant => ({
+                x: ant.x / W,  // Normalize to 0-1 for screen size independence
+                y: ant.y / H,
+                angle: ant.angle,
+                speed: ant.speed,
+                hasFood: ant.hasFood,
+                digging: ant.digging,
+                wanderPhase: ant.wanderPhase
+            }));
+        }
+
+        function exportFarm() {
+            const cols = Math.ceil(W / SOIL_RESOLUTION);
+            const rows = Math.ceil(H / SOIL_RESOLUTION);
+
+            const saveData = {
+                version: "1.0",
+                timestamp: new Date().toISOString(),
+                name: "Ant Farm Save",
+
+                // Grid dimensions (for reconstruction)
+                grid: {
+                    cols: cols,
+                    rows: rows,
+                    resolution: SOIL_RESOLUTION
+                },
+
+                // Compressed grids (only store non-default values)
+                soilDugCells: compressSoilGrid(),
+                pheromones: compressPheromoneGrid(),
+
+                // Entities
+                ants: serializeAnts(),
+                foodSources: foodSources.map(f => ({
+                    x: f.x / W,
+                    y: f.y / H,
+                    amount: f.amount,
+                    maxAmount: f.maxAmount
+                })),
+                chambers: chambers.map(c => ({
+                    x: c.x / W,
+                    y: c.y / H,
+                    radius: c.radius
+                })),
+
+                // Settings
+                settings: {
+                    colonySize: colonySize,
+                    digSpeed: digSpeed
+                },
+
+                // Simulation state
+                time: time,
+
+                // Stats for display
+                stats: {
+                    tunnelLength: countTunnelLength(),
+                    antCount: ants.length,
+                    chamberCount: chambers.length
+                }
+            };
+
+            const json = JSON.stringify(saveData, null, 2);
+            const blob = new Blob([json], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `ant-farm-${new Date().toISOString().slice(0,10)}.json`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+
+            console.log(`Exported: ${ants.length} ants, ${saveData.soilDugCells.length} dug cells`);
+        }
+
+        function importFarm(saveData) {
+            try {
+                // Validate version
+                if (!saveData.version) {
+                    throw new Error("Invalid save file: missing version");
+                }
+
+                // Get current grid dimensions
+                const currentCols = Math.ceil(W / SOIL_RESOLUTION);
+                const currentRows = Math.ceil(H / SOIL_RESOLUTION);
+
+                // Calculate scale factors for different screen sizes
+                const scaleX = currentCols / saveData.grid.cols;
+                const scaleY = currentRows / saveData.grid.rows;
+
+                // Reinitialize grids (fills with solid soil)
+                initSoil();
+
+                // Clear the default nest chamber (initSoil adds one)
+                chambers.length = 0;
+
+                // Restore dug cells with scaling
+                for (const [y, x, val] of saveData.soilDugCells) {
+                    const newY = Math.floor(y * scaleY);
+                    const newX = Math.floor(x * scaleX);
+                    if (newY >= 0 && newY < currentRows && newX >= 0 && newX < currentCols) {
+                        if (!soilGrid[newY]) soilGrid[newY] = [];
+                        soilGrid[newY][newX] = val;
+                    }
+                }
+
+                // Restore pheromones with scaling
+                for (const [y, x, val] of saveData.pheromones) {
+                    const newY = Math.floor(y * scaleY);
+                    const newX = Math.floor(x * scaleX);
+                    if (newY >= 0 && newY < currentRows && newX >= 0 && newX < currentCols) {
+                        if (!pheromoneGrid[newY]) pheromoneGrid[newY] = [];
+                        pheromoneGrid[newY][newX] = val;
+                    }
+                }
+
+                // Restore ants
+                ants.length = 0;
+                for (const antData of saveData.ants) {
+                    const ant = new Ant();
+                    ant.x = antData.x * W;
+                    ant.y = antData.y * H;
+                    ant.angle = antData.angle;
+                    ant.speed = antData.speed;
+                    ant.hasFood = antData.hasFood;
+                    ant.digging = antData.digging;
+                    ant.wanderPhase = antData.wanderPhase;
+                    ants.push(ant);
+                }
+
+                // Restore food sources
+                foodSources.length = 0;
+                for (const f of saveData.foodSources) {
+                    foodSources.push({
+                        x: f.x * W,
+                        y: f.y * H,
+                        amount: f.amount,
+                        maxAmount: f.maxAmount
+                    });
+                }
+
+                // Restore chambers
+                for (const c of saveData.chambers) {
+                    chambers.push({
+                        x: c.x * W,
+                        y: c.y * H,
+                        radius: c.radius
+                    });
+                }
+
+                // Restore settings
+                colonySize = saveData.settings.colonySize;
+                digSpeed = saveData.settings.digSpeed;
+                time = saveData.time || 0;
+
+                // Update UI
+                document.getElementById('size').value = colonySize;
+                document.getElementById('size-val').textContent = colonySize;
+                document.getElementById('speed').value = Math.round(digSpeed * 100);
+                document.getElementById('speed-val').textContent = Math.round(digSpeed * 100);
+
+                console.log(`Imported: ${ants.length} ants, ${saveData.soilDugCells.length} dug cells`);
+                return true;
+            } catch (err) {
+                console.error("Import error:", err);
+                alert("Failed to import: " + err.message);
+                return false;
+            }
+        }
+
+        function handleFileImport(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                try {
+                    const saveData = JSON.parse(e.target.result);
+                    importFarm(saveData);
+                } catch (err) {
+                    alert("Invalid JSON file: " + err.message);
+                }
+            };
+            reader.readAsText(file);
+
+            // Reset file input so same file can be loaded again
+            event.target.value = '';
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            if (time % 0.1 < 0.02) decayPheromones();
+            
+            drawSoil();
+            drawSky();
+            drawFoodSources();
+            
+            ants.forEach(ant => {
+                ant.update();
+                ant.draw();
+            });
+            
+            ctx.beginPath();
+            ctx.arc(W/2, H * 0.2, 12, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(80, 60, 40, 0.5)';
+            ctx.fill();
+            ctx.font = '10px Georgia';
+            ctx.fillStyle = '#a08060';
+            ctx.textAlign = 'center';
+            ctx.fillText('NEST', W/2, H * 0.2 + 25);
+            
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 280) return;
+            
+            if (placingFood) {
+                foodSources.push({
+                    x: e.clientX,
+                    y: e.clientY,
+                    amount: 100,
+                    maxAmount: 100
+                });
+                placingFood = false;
+                document.getElementById('food-btn').textContent = 'Place Food Source';
+            }
+        };
+        
+        document.getElementById('size').oninput = e => {
+            colonySize = parseInt(e.target.value);
+            document.getElementById('size-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('speed').oninput = e => {
+            digSpeed = e.target.value / 100;
+            document.getElementById('speed-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('food-btn').onclick = () => {
+            placingFood = !placingFood;
+            document.getElementById('food-btn').textContent = placingFood ? 'Click to Place...' : 'Place Food Source';
+        };
+        
+        document.getElementById('reset-btn').onclick = () => {
+            initSoil();
+            initAnts();
+            foodSources.length = 0;
+            chambers.length = 1;
+        };
+
+        document.getElementById('export-btn').onclick = exportFarm;
+        document.getElementById('import-btn').onclick = () => {
+            document.getElementById('file-input').click();
+        };
+        document.getElementById('file-input').onchange = handleFileImport;
+
+        resize();  // Initialize W, H and soil
+        initAnts();
+        animate();
+    </script>
+</body>
+</html>

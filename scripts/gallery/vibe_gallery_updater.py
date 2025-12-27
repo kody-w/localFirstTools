@@ -7,6 +7,42 @@ from datetime import datetime
 import re
 from html.parser import HTMLParser
 
+# Global date registry - maps filename to createdOn date
+_date_registry = {}
+_date_registry_path = None
+
+def load_date_registry(base_path):
+    """Load the app dates registry, creating if needed"""
+    global _date_registry, _date_registry_path
+    _date_registry_path = Path(base_path) / "app_dates_registry.json"
+
+    if _date_registry_path.exists():
+        with open(_date_registry_path, 'r') as f:
+            _date_registry = json.load(f)
+    else:
+        _date_registry = {}
+
+    return _date_registry
+
+def get_app_created_date(filename):
+    """Get createdOn date for an app, adding to registry if new"""
+    global _date_registry
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    if filename not in _date_registry:
+        _date_registry[filename] = today
+        print(f"  📅 New app registered: {filename} (created: {today})")
+
+    return _date_registry[filename]
+
+def save_date_registry():
+    """Save the updated date registry"""
+    global _date_registry, _date_registry_path
+    if _date_registry_path:
+        with open(_date_registry_path, 'w') as f:
+            json.dump(_date_registry, f, indent=2, sort_keys=True)
+        print(f"📅 Date registry updated with {len(_date_registry)} apps")
+
 class HTMLMetadataExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -170,6 +206,9 @@ def categorize_app(filepath, metadata):
 
 def scan_directories_for_apps(base_path):
     """Scan directories for HTML files and extract their metadata"""
+    # Load date registry for tracking when apps were added
+    load_date_registry(base_path)
+
     apps_by_category = {
         "visual_art": [],
         "3d_immersive": [],
@@ -232,7 +271,8 @@ def scan_directories_for_apps(base_path):
                     "category": category,
                     "featured": len(metadata["tags"]) >= 3,
                     "complexity": metadata["complexity"],
-                    "interactionType": metadata["interactionType"]
+                    "interactionType": metadata["interactionType"],
+                    "createdOn": get_app_created_date(html_file.name)
                 }
 
                 apps_by_category[category].append(app_entry)
@@ -258,7 +298,8 @@ def scan_directories_for_apps(base_path):
                 "category": category,
                 "featured": len(metadata["tags"]) >= 3,
                 "complexity": metadata["complexity"],
-                "interactionType": metadata["interactionType"]
+                "interactionType": metadata["interactionType"],
+                "createdOn": get_app_created_date(html_file.name)
             }
 
             apps_by_category[category].append(app_entry)
@@ -297,7 +338,8 @@ def scan_directories_for_apps(base_path):
                         "category": category,
                         "featured": len(metadata["tags"]) >= 3,
                         "complexity": metadata["complexity"],
-                        "interactionType": metadata["interactionType"]
+                        "interactionType": metadata["interactionType"],
+                        "createdOn": get_app_created_date(html_file.name)
                     }
 
                     apps_by_category[category].append(app_entry)
@@ -447,7 +489,7 @@ def update_embedded_manifest(base_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # Build compact manifest: [[path, title, icon], ...]
+    # Build compact manifest: [[path, title, icon, createdOn], ...]
     compact = []
     seen = set()
 
@@ -467,8 +509,9 @@ def update_embedded_manifest(base_path):
                 seen.add(path)
                 title = app.get("title", "Untitled")
                 icon = app.get("icon", icons[icon_idx % len(icons)])
+                createdOn = app.get("createdOn", "")
                 icon_idx += 1
-                compact.append([path, title, icon])
+                compact.append([path, title, icon, createdOn])
 
     # Generate the JavaScript array
     manifest_js = json.dumps(compact, ensure_ascii=False, separators=(',', ':'))
@@ -500,6 +543,9 @@ if __name__ == "__main__":
     try:
         config_file = update_vibe_gallery_config(base_dir)
         print(f"\n📁 Config file updated: {config_file}")
+
+        # Save the date registry with any new apps
+        save_date_registry()
 
         # Update embedded manifest for file:// protocol support
         update_embedded_manifest(base_dir)

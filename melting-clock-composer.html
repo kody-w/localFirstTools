@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Melting Clock Composer</title>
+    <meta name="description" content="A surrealist musical instrument inspired by Dali - drag clocks to melt them and create haunting ambient drones">
+    <!-- surrealist, audio, generative, art, experimental, dali, ambient, music -->
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            background: linear-gradient(to bottom, #f4e4c8 0%, #d4a574 50%, #8b6914 100%);
+            min-height: 100vh;
+            font-family: 'Times New Roman', serif;
+            overflow: hidden;
+            cursor: crosshair;
+        }
+        
+        #canvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+        }
+        
+        #info {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            text-align: center;
+            color: #4a3520;
+            font-size: 14px;
+            opacity: 0.7;
+            z-index: 100;
+        }
+        
+        #controls {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+            z-index: 100;
+        }
+        
+        .btn {
+            padding: 10px 20px;
+            background: rgba(74, 53, 32, 0.2);
+            border: 1px solid rgba(74, 53, 32, 0.4);
+            color: #4a3520;
+            font-family: inherit;
+            font-size: 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        
+        .btn:hover {
+            background: rgba(74, 53, 32, 0.3);
+        }
+        
+        #title {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            font-size: 24px;
+            color: #4a3520;
+            font-style: italic;
+            z-index: 100;
+        }
+        
+        #drone-indicator {
+            position: fixed;
+            bottom: 60px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 5px;
+            z-index: 100;
+        }
+        
+        .drone-bar {
+            width: 4px;
+            height: 30px;
+            background: rgba(74, 53, 32, 0.2);
+            border-radius: 2px;
+            transition: height 0.1s ease;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div id="title">The Persistence of Sound</div>
+    
+    <div id="controls">
+        <button class="btn" id="add-clock">+ Clock</button>
+        <button class="btn" id="reset-btn">Reset</button>
+        <button class="btn" id="mute-btn">Sound: On</button>
+    </div>
+    
+    <div id="drone-indicator"></div>
+    
+    <div id="info">Click to add clocks • Drag down to melt • Drag up to solidify</div>
+    
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        let clocks = [];
+        let pools = [];
+        let audioCtx = null;
+        let masterGain = null;
+        let muted = false;
+        let time = 0;
+        
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+        
+        // Initialize audio
+        function initAudio() {
+            if (audioCtx) return;
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = 0.3;
+            masterGain.connect(audioCtx.destination);
+            
+            // Create drone indicator bars
+            const indicator = document.getElementById('drone-indicator');
+            for (let i = 0; i < 20; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'drone-bar';
+                indicator.appendChild(bar);
+            }
+        }
+        
+        // Clock class
+        class Clock {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 40 + Math.random() * 30;
+                this.melt = 0; // 0 = solid, 1 = fully melted
+                this.targetMelt = 0;
+                this.hourAngle = Math.random() * Math.PI * 2;
+                this.minuteAngle = Math.random() * Math.PI * 2;
+                this.rotation = (Math.random() - 0.5) * 0.3;
+                this.dripping = [];
+                this.baseFreq = 100 + Math.random() * 200;
+                
+                // Audio nodes
+                this.oscillators = [];
+                this.gainNode = null;
+                this.filterNode = null;
+                
+                if (audioCtx) {
+                    this.setupAudio();
+                }
+            }
+            
+            setupAudio() {
+                this.gainNode = audioCtx.createGain();
+                this.gainNode.gain.value = 0;
+                
+                this.filterNode = audioCtx.createBiquadFilter();
+                this.filterNode.type = 'lowpass';
+                this.filterNode.frequency.value = 500;
+                this.filterNode.Q.value = 2;
+                
+                // Create multiple oscillators for rich sound
+                const types = ['sine', 'triangle', 'sine'];
+                const detunes = [0, 5, -5];
+                
+                types.forEach((type, i) => {
+                    const osc = audioCtx.createOscillator();
+                    osc.type = type;
+                    osc.frequency.value = this.baseFreq;
+                    osc.detune.value = detunes[i];
+                    
+                    const oscGain = audioCtx.createGain();
+                    oscGain.gain.value = 0.3 / (i + 1);
+                    
+                    osc.connect(oscGain);
+                    oscGain.connect(this.filterNode);
+                    osc.start();
+                    
+                    this.oscillators.push({ osc, gain: oscGain });
+                });
+                
+                this.filterNode.connect(this.gainNode);
+                this.gainNode.connect(masterGain);
+            }
+            
+            updateSound() {
+                if (!audioCtx || muted) return;
+                
+                // Volume based on melt level
+                const targetVolume = this.melt * 0.15;
+                this.gainNode.gain.linearRampToValueAtTime(targetVolume, audioCtx.currentTime + 0.1);
+                
+                // Pitch drops as clock melts
+                const pitchMultiplier = 1 - this.melt * 0.7;
+                this.oscillators.forEach((o, i) => {
+                    o.osc.frequency.linearRampToValueAtTime(
+                        this.baseFreq * pitchMultiplier * (1 + i * 0.1),
+                        audioCtx.currentTime + 0.1
+                    );
+                });
+                
+                // Filter opens as clock melts
+                this.filterNode.frequency.linearRampToValueAtTime(
+                    200 + this.melt * 800,
+                    audioCtx.currentTime + 0.1
+                );
+            }
+            
+            update(dt) {
+                // Smooth melt transition
+                this.melt += (this.targetMelt - this.melt) * 0.05 * dt;
+                this.melt = Math.max(0, Math.min(1, this.melt));
+                
+                // Clock hands still move but slower when melted
+                const speed = 1 - this.melt * 0.8;
+                this.minuteAngle += 0.001 * dt * speed;
+                this.hourAngle += 0.0001 * dt * speed;
+                
+                // Create drips when melting
+                if (this.melt > 0.3 && Math.random() < 0.02 * this.melt * dt) {
+                    this.dripping.push({
+                        x: this.x + (Math.random() - 0.5) * this.radius * 2,
+                        y: this.y + this.radius * (0.5 + this.melt),
+                        vy: 0,
+                        size: 2 + Math.random() * 4,
+                        opacity: 1
+                    });
+                }
+                
+                // Update drips
+                this.dripping = this.dripping.filter(d => {
+                    d.vy += 0.1 * dt;
+                    d.y += d.vy * dt;
+                    d.opacity -= 0.005 * dt;
+                    
+                    // Create pool when drip hits bottom
+                    if (d.y > height - 50) {
+                        pools.push({
+                            x: d.x,
+                            radius: d.size * 2,
+                            opacity: 0.5,
+                            baseFreq: this.baseFreq
+                        });
+                        return false;
+                    }
+                    
+                    return d.opacity > 0;
+                });
+                
+                this.updateSound();
+            }
+            
+            draw(ctx) {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.rotation);
+                
+                // Calculate melting deformation
+                const meltOffset = this.melt * this.radius * 1.5;
+                
+                // Draw clock face with melting effect
+                ctx.beginPath();
+                
+                // Top of clock (less affected by melt)
+                for (let a = -Math.PI; a <= 0; a += 0.1) {
+                    const r = this.radius;
+                    const x = Math.cos(a) * r;
+                    const y = Math.sin(a) * r * (1 - this.melt * 0.3);
+                    if (a === -Math.PI) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                }
+                
+                // Bottom of clock (heavily affected by melt)
+                for (let a = 0; a <= Math.PI; a += 0.1) {
+                    const r = this.radius;
+                    const droopFactor = Math.sin(a) * meltOffset;
+                    const stretchFactor = 1 + this.melt * 0.5 * Math.sin(a);
+                    const x = Math.cos(a) * r * stretchFactor;
+                    const y = Math.sin(a) * r * (1 + this.melt) + droopFactor;
+                    ctx.lineTo(x, y);
+                }
+                
+                ctx.closePath();
+                
+                // Gradient fill
+                const gradient = ctx.createLinearGradient(0, -this.radius, 0, this.radius + meltOffset);
+                gradient.addColorStop(0, '#f5f0e6');
+                gradient.addColorStop(0.5, '#e8dcc8');
+                gradient.addColorStop(1, '#c4a775');
+                ctx.fillStyle = gradient;
+                ctx.fill();
+                
+                ctx.strokeStyle = '#4a3520';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Draw clock numbers (distorted by melt)
+                ctx.fillStyle = '#4a3520';
+                ctx.font = `${12 - this.melt * 4}px Times New Roman`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                
+                for (let i = 1; i <= 12; i++) {
+                    const angle = (i / 12) * Math.PI * 2 - Math.PI / 2;
+                    const numRadius = this.radius * 0.75;
+                    let x = Math.cos(angle) * numRadius;
+                    let y = Math.sin(angle) * numRadius;
+                    
+                    // Melt distortion for numbers
+                    if (y > 0) {
+                        y += this.melt * 20 * (y / this.radius);
+                        x *= 1 + this.melt * 0.3 * (y / this.radius);
+                    }
+                    
+                    ctx.globalAlpha = 1 - this.melt * 0.5;
+                    ctx.fillText(i.toString(), x, y);
+                }
+                
+                ctx.globalAlpha = 1;
+                
+                // Draw clock hands
+                const drawHand = (angle, length, width) => {
+                    ctx.save();
+                    ctx.rotate(angle);
+                    
+                    // Hands droop when melted
+                    const droop = this.melt * 0.5;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0);
+                    ctx.quadraticCurveTo(
+                        length * 0.5, droop * length * 0.3,
+                        length * (1 - this.melt * 0.3), droop * length
+                    );
+                    ctx.strokeStyle = '#2a1a10';
+                    ctx.lineWidth = width * (1 - this.melt * 0.5);
+                    ctx.lineCap = 'round';
+                    ctx.stroke();
+                    
+                    ctx.restore();
+                };
+                
+                drawHand(this.hourAngle, this.radius * 0.5, 4);
+                drawHand(this.minuteAngle, this.radius * 0.7, 2);
+                
+                // Center dot
+                ctx.beginPath();
+                ctx.arc(0, this.melt * 5, 4 - this.melt * 2, 0, Math.PI * 2);
+                ctx.fillStyle = '#2a1a10';
+                ctx.fill();
+                
+                ctx.restore();
+                
+                // Draw drips
+                this.dripping.forEach(d => {
+                    ctx.beginPath();
+                    ctx.arc(d.x, d.y, d.size, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(200, 180, 140, ${d.opacity})`;
+                    ctx.fill();
+                });
+            }
+            
+            destroy() {
+                this.oscillators.forEach(o => {
+                    o.osc.stop();
+                });
+            }
+            
+            contains(px, py) {
+                const dx = px - this.x;
+                const dy = py - this.y;
+                return Math.sqrt(dx * dx + dy * dy) < this.radius * 1.5;
+            }
+        }
+        
+        // Draw melted pools at bottom
+        function drawPools() {
+            pools.forEach(pool => {
+                pool.radius += 0.02;
+                pool.opacity -= 0.001;
+                
+                if (pool.opacity > 0) {
+                    ctx.beginPath();
+                    ctx.ellipse(pool.x, height - 20, pool.radius, pool.radius * 0.3, 0, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(180, 160, 120, ${pool.opacity})`;
+                    ctx.fill();
+                }
+            });
+            
+            pools = pools.filter(p => p.opacity > 0);
+        }
+        
+        // Create initial clocks
+        function createInitialClocks() {
+            clocks.push(new Clock(width * 0.3, height * 0.3));
+            clocks.push(new Clock(width * 0.6, height * 0.4));
+            clocks.push(new Clock(width * 0.5, height * 0.6));
+        }
+        
+        // Mouse interaction
+        let isDragging = false;
+        let dragClock = null;
+        let lastY = 0;
+        
+        canvas.addEventListener('mousedown', (e) => {
+            initAudio();
+            
+            const x = e.clientX;
+            const y = e.clientY;
+            
+            // Check if clicking on a clock
+            for (let clock of clocks) {
+                if (clock.contains(x, y)) {
+                    isDragging = true;
+                    dragClock = clock;
+                    lastY = y;
+                    return;
+                }
+            }
+            
+            // Otherwise create new clock
+            clocks.push(new Clock(x, y));
+        });
+        
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging && dragClock) {
+                const dy = e.clientY - lastY;
+                dragClock.targetMelt += dy * 0.005;
+                dragClock.targetMelt = Math.max(0, Math.min(1, dragClock.targetMelt));
+                lastY = e.clientY;
+            }
+        });
+        
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+            dragClock = null;
+        });
+        
+        canvas.addEventListener('mouseleave', () => {
+            isDragging = false;
+            dragClock = null;
+        });
+        
+        // Touch support
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            initAudio();
+            
+            const touch = e.touches[0];
+            const x = touch.clientX;
+            const y = touch.clientY;
+            
+            for (let clock of clocks) {
+                if (clock.contains(x, y)) {
+                    isDragging = true;
+                    dragClock = clock;
+                    lastY = y;
+                    return;
+                }
+            }
+            
+            clocks.push(new Clock(x, y));
+        });
+        
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            if (isDragging && dragClock) {
+                const touch = e.touches[0];
+                const dy = touch.clientY - lastY;
+                dragClock.targetMelt += dy * 0.005;
+                dragClock.targetMelt = Math.max(0, Math.min(1, dragClock.targetMelt));
+                lastY = touch.clientY;
+            }
+        });
+        
+        canvas.addEventListener('touchend', () => {
+            isDragging = false;
+            dragClock = null;
+        });
+        
+        // Controls
+        document.getElementById('add-clock').addEventListener('click', () => {
+            initAudio();
+            clocks.push(new Clock(
+                100 + Math.random() * (width - 200),
+                100 + Math.random() * (height - 200)
+            ));
+        });
+        
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            clocks.forEach(c => c.destroy());
+            clocks = [];
+            pools = [];
+            createInitialClocks();
+        });
+        
+        document.getElementById('mute-btn').addEventListener('click', () => {
+            muted = !muted;
+            document.getElementById('mute-btn').textContent = muted ? 'Sound: Off' : 'Sound: On';
+            if (masterGain) {
+                masterGain.gain.value = muted ? 0 : 0.3;
+            }
+        });
+        
+        // Update drone indicator
+        function updateDroneIndicator() {
+            const bars = document.querySelectorAll('.drone-bar');
+            let totalMelt = 0;
+            clocks.forEach(c => totalMelt += c.melt);
+            
+            bars.forEach((bar, i) => {
+                const phase = (time * 0.02 + i * 0.3) % (Math.PI * 2);
+                const height = 10 + Math.sin(phase) * 10 + totalMelt * 5;
+                bar.style.height = height + 'px';
+                bar.style.background = `rgba(74, 53, 32, ${0.2 + totalMelt * 0.3})`;
+            });
+        }
+        
+        // Animation loop
+        let lastTime = Date.now();
+        
+        function animate() {
+            const now = Date.now();
+            const dt = Math.min(50, now - lastTime) / 16;
+            lastTime = now;
+            time += dt;
+            
+            // Draw desert background
+            const bgGradient = ctx.createLinearGradient(0, 0, 0, height);
+            bgGradient.addColorStop(0, '#f4e4c8');
+            bgGradient.addColorStop(0.5, '#d4a574');
+            bgGradient.addColorStop(1, '#8b6914');
+            ctx.fillStyle = bgGradient;
+            ctx.fillRect(0, 0, width, height);
+            
+            // Draw distant mountains
+            ctx.fillStyle = '#a08050';
+            ctx.beginPath();
+            ctx.moveTo(0, height * 0.7);
+            for (let x = 0; x <= width; x += 50) {
+                const y = height * 0.7 - Math.sin(x * 0.01) * 30 - Math.sin(x * 0.005) * 50;
+                ctx.lineTo(x, y);
+            }
+            ctx.lineTo(width, height);
+            ctx.lineTo(0, height);
+            ctx.fill();
+            
+            // Draw horizon line
+            ctx.strokeStyle = '#4a352080';
+            ctx.lineWidth = 1;
+            ctx.beginPath();
+            ctx.moveTo(0, height * 0.75);
+            ctx.lineTo(width, height * 0.75);
+            ctx.stroke();
+            
+            // Draw pools
+            drawPools();
+            
+            // Update and draw clocks
+            clocks.forEach(clock => {
+                clock.update(dt);
+                clock.draw(ctx);
+            });
+            
+            updateDroneIndicator();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        createInitialClocks();
+        animate();
+    </script>
+</body>
+</html>

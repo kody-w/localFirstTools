@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hourglass Choice</title>
+    <meta name="description" content="Each falling grain represents a life choice - tap left for stability or right for adventure, watching your decisions accumulate">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f0a15; min-height: 100vh; font-family: 'Georgia', serif; color: #a090b0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: pointer; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(15,10,21,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(140,100,160,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #c0a0d0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0b0e0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(80,60,100,0.4); border: 1px solid rgba(140,100,160,0.4);
+            color: #a090b0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #806080; z-index: 100; text-align: right; }
+        #narrative {
+            position: fixed; bottom: 80px; left: 50%; transform: translateX(-50%);
+            font-size: 14px; color: #b0a0c0; text-align: center; opacity: 0.8;
+            max-width: 400px; z-index: 100;
+        }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Hourglass Choice</h3>
+        <div class="control-row">
+            <label>Flow Rate <span class="value" id="flow-val">50</span></label>
+            <input type="range" id="flow" min="20" max="100" value="50">
+        </div>
+        <button id="flip-btn">Flip Hourglass</button>
+        <button id="reset-btn">New Life</button>
+    </div>
+    <div id="stats">
+        <div>Stability: <span id="stability-count">0</span></div>
+        <div>Adventure: <span id="adventure-count">0</span></div>
+        <div>Balance: <span id="balance">50</span>%</div>
+    </div>
+    <div id="narrative">Your journey begins...</div>
+    <div id="info">Click LEFT for stability (blue) | Click RIGHT for adventure (orange)</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let flowRate = 0.5;
+        let time = 0;
+        
+        const grains = [];
+        const settledGrains = [];
+        let stabilityCount = 0;
+        let adventureCount = 0;
+        let pendingChoice = null;
+        let grainTimer = 0;
+        
+        const NARRATIVES = {
+            stability: [
+                'You chose the familiar path...',
+                'Security guides your steps...',
+                'Building foundations that last...',
+                'Finding comfort in routine...',
+                'Steady hands shape steady lives...'
+            ],
+            adventure: [
+                'The unknown calls to you...',
+                'Risk whispers of reward...',
+                'Embracing uncertainty...',
+                'Dancing with possibility...',
+                'Fortune favors the bold...'
+            ],
+            balanced: [
+                'Walking the middle way...',
+                'Wisdom in moderation...',
+                'Both roots and wings...'
+            ]
+        };
+        
+        class Grain {
+            constructor() {
+                this.x = W / 2;
+                this.y = H * 0.35;
+                this.vx = 0;
+                this.vy = 0;
+                this.size = 3;
+                this.isStability = null;
+                this.settled = false;
+                this.alpha = 1;
+            }
+            
+            update() {
+                if (this.settled) return;
+                
+                this.vy += 0.15;
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                const neckY = H * 0.48;
+                const neckWidth = 15;
+                
+                if (this.y > neckY - 10 && this.y < neckY + 10) {
+                    if (Math.abs(this.x - W/2) > neckWidth) {
+                        this.x = W/2 + (this.x > W/2 ? neckWidth : -neckWidth);
+                        this.vx *= -0.3;
+                    }
+                }
+                
+                if (this.y > neckY && this.isStability === null) {
+                    if (pendingChoice !== null) {
+                        this.isStability = pendingChoice;
+                        this.vx = pendingChoice ? -2 : 2;
+                        pendingChoice = null;
+                        
+                        if (this.isStability) {
+                            stabilityCount++;
+                            showNarrative('stability');
+                        } else {
+                            adventureCount++;
+                            showNarrative('adventure');
+                        }
+                    } else {
+                        this.isStability = Math.random() > 0.5;
+                        this.vx = this.isStability ? -1 : 1;
+                    }
+                }
+                
+                const bottomY = H * 0.85;
+                if (this.y > bottomY) {
+                    this.y = bottomY;
+                    this.vy = 0;
+                    this.vx *= 0.8;
+                    
+                    if (Math.abs(this.vx) < 0.1) {
+                        this.settled = true;
+                        settledGrains.push({
+                            x: this.x,
+                            y: this.y - settledGrains.filter(g => 
+                                Math.abs(g.x - this.x) < 10
+                            ).length * 2,
+                            isStability: this.isStability,
+                            size: this.size
+                        });
+                    }
+                }
+                
+                const leftWall = W/2 - 100;
+                const rightWall = W/2 + 100;
+                if (this.x < leftWall) { this.x = leftWall; this.vx *= -0.5; }
+                if (this.x > rightWall) { this.x = rightWall; this.vx *= -0.5; }
+            }
+            
+            draw() {
+                if (this.settled) return;
+                
+                let color;
+                if (this.isStability === null) {
+                    color = 'rgba(200, 180, 220, 0.8)';
+                } else if (this.isStability) {
+                    color = 'rgba(100, 150, 220, 0.9)';
+                } else {
+                    color = 'rgba(220, 150, 80, 0.9)';
+                }
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+            }
+        }
+        
+        function showNarrative(type) {
+            const total = stabilityCount + adventureCount;
+            const balance = total > 0 ? stabilityCount / total : 0.5;
+            
+            let narratives;
+            if (balance > 0.6) {
+                narratives = NARRATIVES.stability;
+            } else if (balance < 0.4) {
+                narratives = NARRATIVES.adventure;
+            } else {
+                narratives = NARRATIVES.balanced;
+            }
+            
+            const narrative = narratives[Math.floor(Math.random() * narratives.length)];
+            document.getElementById('narrative').textContent = narrative;
+        }
+        
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H);
+            gradient.addColorStop(0, '#0f0a15');
+            gradient.addColorStop(1, '#1a1020');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function drawHourglass() {
+            const cx = W / 2;
+            const topY = H * 0.15;
+            const neckY = H * 0.5;
+            const bottomY = H * 0.85;
+            const width = 100;
+            
+            ctx.beginPath();
+            ctx.moveTo(cx - width, topY);
+            ctx.lineTo(cx + width, topY);
+            ctx.lineTo(cx + 15, neckY);
+            ctx.lineTo(cx + width, bottomY);
+            ctx.lineTo(cx - width, bottomY);
+            ctx.lineTo(cx - 15, neckY);
+            ctx.closePath();
+            
+            ctx.strokeStyle = 'rgba(180, 160, 200, 0.4)';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            ctx.fillStyle = 'rgba(40, 30, 50, 0.3)';
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.arc(cx - width - 5, topY, 8, 0, Math.PI * 2);
+            ctx.arc(cx + width + 5, topY, 8, 0, Math.PI * 2);
+            ctx.arc(cx - width - 5, bottomY, 8, 0, Math.PI * 2);
+            ctx.arc(cx + width + 5, bottomY, 8, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(160, 140, 180, 0.5)';
+            ctx.fill();
+        }
+        
+        function drawSettledGrains() {
+            settledGrains.forEach(grain => {
+                ctx.beginPath();
+                ctx.arc(grain.x, grain.y, grain.size, 0, Math.PI * 2);
+                ctx.fillStyle = grain.isStability ? 
+                    'rgba(80, 130, 200, 0.7)' : 'rgba(200, 130, 60, 0.7)';
+                ctx.fill();
+            });
+        }
+        
+        function drawLabels() {
+            ctx.font = '14px Georgia';
+            ctx.textAlign = 'center';
+            ctx.fillStyle = 'rgba(100, 150, 220, 0.6)';
+            ctx.fillText('Stability', W/2 - 60, H * 0.92);
+            ctx.fillStyle = 'rgba(220, 150, 80, 0.6)';
+            ctx.fillText('Adventure', W/2 + 60, H * 0.92);
+        }
+        
+        function updateStats() {
+            document.getElementById('stability-count').textContent = stabilityCount;
+            document.getElementById('adventure-count').textContent = adventureCount;
+            
+            const total = stabilityCount + adventureCount;
+            const balance = total > 0 ? Math.round((stabilityCount / total) * 100) : 50;
+            document.getElementById('balance').textContent = balance;
+        }
+        
+        function animate() {
+            time += 0.016;
+            grainTimer += 0.016 * flowRate;
+            
+            if (grainTimer > 0.3 && grains.length < 50) {
+                grains.push(new Grain());
+                grainTimer = 0;
+            }
+            
+            drawBackground();
+            drawHourglass();
+            drawSettledGrains();
+            
+            for (let i = grains.length - 1; i >= 0; i--) {
+                grains[i].update();
+                grains[i].draw();
+                
+                if (grains[i].settled) {
+                    grains.splice(i, 1);
+                }
+            }
+            
+            drawLabels();
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 280) return;
+            
+            pendingChoice = e.clientX < W / 2;
+        };
+        
+        document.getElementById('flow').oninput = e => {
+            flowRate = e.target.value / 100;
+            document.getElementById('flow-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('flip-btn').onclick = () => {
+            settledGrains.length = 0;
+            grains.length = 0;
+        };
+        
+        document.getElementById('reset-btn').onclick = () => {
+            settledGrains.length = 0;
+            grains.length = 0;
+            stabilityCount = 0;
+            adventureCount = 0;
+            document.getElementById('narrative').textContent = 'Your journey begins anew...';
+        };
+        
+        animate();
+    </script>
+</body>
+</html>
