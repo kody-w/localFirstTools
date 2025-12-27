@@ -34,17 +34,41 @@
     <!-- Cannon.js for Physics -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
     <!-- Three.js for Rendering -->
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
 </head>
 <body>
-    <div id="error-display" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:red; background:rgba(0,0,0,0.9); padding:20px; display:none; z-index:999;"></div>
+    <div id="loading-screen" style="position:absolute; top:0; left:0; width:100%; height:100%; background:#000; display:flex; align-items:center; justify-content:center; z-index:1000;">
+        <div style="text-align:center; color:#0f0; font-family:'Courier New',monospace;">
+            <div style="font-size:24px; margin-bottom:20px;">Loading 3D Genetic Car Evolution...</div>
+            <div id="loading-status" style="font-size:14px; color:#666;">Initializing physics engine...</div>
+        </div>
+    </div>
+    <div id="error-display" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:red; background:rgba(0,0,0,0.9); padding:20px; display:none; z-index:999; max-width:80%; border:1px solid red; border-radius:5px;"></div>
     <script>
         window.onerror = function(msg, url, line, col, error) {
             const div = document.getElementById('error-display');
+            const loading = document.getElementById('loading-screen');
+            if (loading) loading.style.display = 'none';
             div.style.display = 'block';
-            div.innerHTML = `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small>`;
+            div.innerHTML = `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small><br><br><button onclick="location.reload()" style="background:#300;color:#f00;border:1px solid #f00;padding:10px 20px;cursor:pointer;">Reload Page</button>`;
             return false;
         };
+
+        // Check if libraries loaded
+        window.addEventListener('DOMContentLoaded', function() {
+            setTimeout(function() {
+                if (typeof THREE === 'undefined') {
+                    document.getElementById('error-display').style.display = 'block';
+                    document.getElementById('error-display').innerHTML = '<strong>Error:</strong> Three.js failed to load. Check your internet connection.';
+                    document.getElementById('loading-screen').style.display = 'none';
+                }
+                if (typeof CANNON === 'undefined') {
+                    document.getElementById('error-display').style.display = 'block';
+                    document.getElementById('error-display').innerHTML = '<strong>Error:</strong> Cannon.js physics engine failed to load. Check your internet connection.';
+                    document.getElementById('loading-screen').style.display = 'none';
+                }
+            }, 3000);
+        });
     </script>
     <div id="ui">
         <div class="stat">Generation: <span id="gen" class="highlight">1</span></div>
@@ -229,17 +253,36 @@
             }
 
             destroy() {
-                this.vehicle.removeFromWorld(world);
-                world.removeBody(this.chassisBody);
-                scene.remove(this.chassisMesh);
-                // Remove wheel meshes (indices 1 to 4)
-                for(let i=1; i<this.meshes.length; i++) {
-                    scene.remove(this.meshes[i]);
+                try {
+                    // Remove vehicle from physics world
+                    if (this.vehicle) {
+                        this.vehicle.removeFromWorld(world);
+                    }
+                    // Remove chassis body
+                    if (this.chassisBody) {
+                        world.removeBody(this.chassisBody);
+                    }
+                    // Remove all meshes from scene
+                    this.meshes.forEach(mesh => {
+                        if (mesh) {
+                            scene.remove(mesh);
+                            if (mesh.geometry) mesh.geometry.dispose();
+                            if (mesh.material) mesh.material.dispose();
+                        }
+                    });
+                    // Clear references
+                    this.meshes = [];
+                    this.bodies = [];
+                    this.vehicle = null;
+                    this.chassisBody = null;
+                    this.chassisMesh = null;
+                } catch(e) {
+                    console.warn('Error destroying car:', e);
                 }
             }
 
             update() {
-                if (!this.alive) return;
+                if (!this.alive || !this.vehicle || !this.chassisBody) return;
 
                 if (!raceActive) {
                     // Brakes ON
@@ -287,15 +330,28 @@
             }
 
             syncVisuals() {
-                this.chassisMesh.position.copy(this.chassisBody.position);
-                this.chassisMesh.quaternion.copy(this.chassisBody.quaternion);
+                // Sync chassis
+                this.chassisMesh.position.set(
+                    this.chassisBody.position.x,
+                    this.chassisBody.position.y,
+                    this.chassisBody.position.z
+                );
+                this.chassisMesh.quaternion.set(
+                    this.chassisBody.quaternion.x,
+                    this.chassisBody.quaternion.y,
+                    this.chassisBody.quaternion.z,
+                    this.chassisBody.quaternion.w
+                );
 
+                // Sync wheels
                 for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
                     this.vehicle.updateWheelTransform(i);
                     const t = this.vehicle.wheelInfos[i].worldTransform;
                     const wheelMesh = this.meshes[i+1]; // +1 because 0 is chassis
-                    wheelMesh.position.copy(t.position);
-                    wheelMesh.quaternion.copy(t.quaternion);
+                    if (wheelMesh && t) {
+                        wheelMesh.position.set(t.position.x, t.position.y, t.position.z);
+                        wheelMesh.quaternion.set(t.quaternion.x, t.quaternion.y, t.quaternion.z, t.quaternion.w);
+                    }
                 }
             }
         }
@@ -477,14 +533,31 @@
 
         // --- Main Loop ---
         function init() {
-            generateTerrain();
-            
-            const initialDNA = [];
-            for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
-            spawnCars(initialDNA);
+            try {
+                document.getElementById('loading-status').textContent = 'Generating terrain...';
+                generateTerrain();
 
-            animate();
-            startRaceSequence();
+                document.getElementById('loading-status').textContent = 'Spawning cars...';
+                const initialDNA = [];
+                for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
+                spawnCars(initialDNA);
+
+                document.getElementById('loading-status').textContent = 'Starting simulation...';
+
+                // Hide loading screen
+                setTimeout(() => {
+                    const loadingScreen = document.getElementById('loading-screen');
+                    if (loadingScreen) loadingScreen.style.display = 'none';
+                }, 500);
+
+                animate();
+                startRaceSequence();
+            } catch(e) {
+                console.error('Init error:', e);
+                document.getElementById('error-display').style.display = 'block';
+                document.getElementById('error-display').innerHTML = `<strong>Initialization Error:</strong> ${e.message}<br><br><button onclick="location.reload()" style="background:#300;color:#f00;border:1px solid #f00;padding:10px 20px;cursor:pointer;">Reload Page</button>`;
+                document.getElementById('loading-screen').style.display = 'none';
+            }
         }
 
         function startRaceSequence() {
@@ -526,13 +599,19 @@
                 if (raceActive) timer += dt;
             }
 
-            // Camera Follow Leader
-            let leader = cars[0];
+            // Camera Follow Leader - find the car that has traveled the furthest
+            let leader = null;
             cars.forEach(c => {
-                if (c.alive && (!leader.alive || c.maxDist > leader.maxDist)) leader = c;
+                if (c && c.alive) {
+                    if (!leader || c.maxDist > leader.maxDist) leader = c;
+                }
             });
+            // If no alive cars, follow the one with max distance
+            if (!leader && cars.length > 0) {
+                leader = cars.reduce((best, c) => (c && c.maxDist > (best?.maxDist || 0)) ? c : best, cars[0]);
+            }
 
-            if (leader) {
+            if (leader && leader.chassisMesh) {
                 const targetPos = leader.chassisMesh.position.clone();
                 targetPos.y += 10;
                 targetPos.z += 20; // Look from behind

@@ -237,35 +237,7 @@ def scan_directories_for_apps(base_path):
 
                 apps_by_category[category].append(app_entry)
 
-    # First scan apps directory and its subdirectories
-    apps_path = Path(base_path) / "apps"
-    if apps_path.exists():
-        for html_file in apps_path.rglob("*.html"):
-            if html_file.name.startswith('.'):
-                continue  # Skip hidden files
-
-            print(f"Processing: {html_file}")
-            metadata = extract_metadata_from_html(html_file)
-
-            if metadata:
-                category = categorize_app(html_file, metadata)
-                relative_path = html_file.relative_to(base_path)
-
-                app_entry = {
-                    "title": metadata["title"],
-                    "filename": html_file.name,
-                    "path": str(relative_path),
-                    "description": metadata["description"],
-                    "tags": metadata["tags"],
-                    "category": category,
-                    "featured": len(metadata["tags"]) >= 3,
-                    "complexity": metadata["complexity"],
-                    "interactionType": metadata["interactionType"]
-                }
-
-                apps_by_category[category].append(app_entry)
-
-    # Also scan root directory for HTML files
+    # Scan root directory for HTML files
     root_path = Path(base_path)
     for html_file in root_path.glob("*.html"):
         if html_file.name.startswith('.') or html_file.name == 'index.html':
@@ -291,38 +263,44 @@ def scan_directories_for_apps(base_path):
 
             apps_by_category[category].append(app_entry)
 
-    # Scan other directories at root level (artifacts, archive, etc.)
-    other_dirs = ["artifacts", "archive", "notes", "edgeAddons"]
-    for dir_name in other_dirs:
-        dir_path = Path(base_path) / dir_name
-        if not dir_path.exists():
-            continue
+    # Scan ALL other directories recursively for HTML files
+    # Skip known non-app directories
+    skip_dirs = {
+        '.git', 'node_modules', '__pycache__', '.vscode', '.idea',
+        'docs', 'scripts', 'data', '.DS_Store'
+    }
 
-        # Recursively scan for HTML files in these directories
-        for html_file in dir_path.rglob("*.html"):
-            if html_file.name.startswith('.'):
-                continue  # Skip hidden files
+    for item in root_path.iterdir():
+        if item.is_dir() and item.name not in skip_dirs and not item.name.startswith('.'):
+            # Skip if already scanned (Exhibition_Halls)
+            if item.name == 'Exhibition_Halls':
+                continue
 
-            print(f"Processing: {html_file}")
-            metadata = extract_metadata_from_html(html_file)
+            # Recursively scan this directory
+            for html_file in item.rglob("*.html"):
+                if html_file.name.startswith('.'):
+                    continue
 
-            if metadata:
-                category = categorize_app(html_file, metadata)
-                relative_path = html_file.relative_to(base_path)
+                print(f"Processing: {html_file}")
+                metadata = extract_metadata_from_html(html_file)
 
-                app_entry = {
-                    "title": metadata["title"],
-                    "filename": html_file.name,
-                    "path": str(relative_path),
-                    "description": metadata["description"],
-                    "tags": metadata["tags"],
-                    "category": category,
-                    "featured": len(metadata["tags"]) >= 3,
-                    "complexity": metadata["complexity"],
-                    "interactionType": metadata["interactionType"]
-                }
+                if metadata:
+                    category = categorize_app(html_file, metadata)
+                    relative_path = html_file.relative_to(base_path)
 
-                apps_by_category[category].append(app_entry)
+                    app_entry = {
+                        "title": metadata["title"],
+                        "filename": html_file.name,
+                        "path": str(relative_path),
+                        "description": metadata["description"],
+                        "tags": metadata["tags"],
+                        "category": category,
+                        "featured": len(metadata["tags"]) >= 3,
+                        "complexity": metadata["complexity"],
+                        "interactionType": metadata["interactionType"]
+                    }
+
+                    apps_by_category[category].append(app_entry)
 
     return apps_by_category
 
