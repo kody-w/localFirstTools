@@ -202,6 +202,16 @@
 
     <div class="tooltip" id="tooltip"></div>
 
+    <!-- SIMPLE DRAG ALIGN PANEL -->
+    <div id="debug-panel" style="display:none; position:absolute; top:210px; right:15px; background:rgba(0,0,0,0.9); padding:10px 12px; border-radius:10px; font-size:0.75em; border:1px solid #ff6600; z-index:999;">
+        <div style="color:#ff6600; margin-bottom:8px; font-weight:bold;">🔧 Align Mode</div>
+        <div style="color:#aaa; font-size:0.9em;">SHIFT + left drag = move</div>
+        <div style="color:#aaa; font-size:0.9em; margin-bottom:5px;">SHIFT + right drag = rotate</div>
+        <div style="color:#fff;">Pos: <span id="offset-display">X:0 Z:0</span></div>
+        <div style="color:#fff;">Rot: <span id="rotation-display">0°</span></div>
+        <button id="btn-copy-offset" style="margin-top:8px; width:100%;">Copy Values</button>
+    </div>
+
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script>
 // ============================================================
@@ -676,7 +686,14 @@ class CityEcosystem {
         this.mouse = new THREE.Vector2();
         this.selectedCreature = null;
 
+        // Content group for draggable alignment
+        this.contentGroup = null;
+        this.alignDragging = false;
+        this.lastAlignX = 0;
+        this.lastAlignY = 0;
+
         this.setupEventListeners();
+        this.setupAlignDrag();
     }
 
     setupEventListeners() {
@@ -701,6 +718,87 @@ class CityEcosystem {
 
         window.addEventListener('resize', () => this.onResize());
         window.addEventListener('keydown', e => this.onKeyDown(e));
+    }
+
+    setupAlignDrag() {
+        this.alignRotating = false;
+
+        // Shift + left drag to move, Shift + right drag to rotate
+        window.addEventListener('mousedown', (e) => {
+            if (e.shiftKey && this.contentGroup) {
+                if (e.button === 0) { // Left click = move
+                    this.alignDragging = true;
+                } else if (e.button === 2) { // Right click = rotate
+                    this.alignRotating = true;
+                }
+                this.lastAlignX = e.clientX;
+                this.lastAlignY = e.clientY;
+                e.preventDefault();
+            }
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            if (!this.contentGroup) return;
+
+            if (this.alignDragging) {
+                const dx = (e.clientX - this.lastAlignX) * 0.1;
+                const dz = (e.clientY - this.lastAlignY) * 0.1;
+                this.contentGroup.position.x += dx;
+                this.contentGroup.position.z += dz;
+                this.lastAlignX = e.clientX;
+                this.lastAlignY = e.clientY;
+                this.updateOffsetDisplay();
+            } else if (this.alignRotating) {
+                const dx = (e.clientX - this.lastAlignX) * 0.005;
+                this.contentGroup.rotation.y += dx;
+                this.lastAlignX = e.clientX;
+                this.lastAlignY = e.clientY;
+                this.updateOffsetDisplay();
+            }
+        });
+
+        window.addEventListener('mouseup', () => {
+            this.alignDragging = false;
+            this.alignRotating = false;
+        });
+
+        // Prevent context menu on right click
+        window.addEventListener('contextmenu', (e) => {
+            if (e.shiftKey) e.preventDefault();
+        });
+
+        // Copy values button
+        document.getElementById('btn-copy-offset')?.addEventListener('click', () => {
+            if (this.contentGroup) {
+                const offset = {
+                    city: this.currentCity?.name || 'unknown',
+                    x: this.contentGroup.position.x.toFixed(2),
+                    z: this.contentGroup.position.z.toFixed(2),
+                    rotationY: this.contentGroup.rotation.y.toFixed(4),
+                    rotationDeg: (this.contentGroup.rotation.y * 180 / Math.PI).toFixed(2)
+                };
+                const json = JSON.stringify(offset, null, 2);
+                navigator.clipboard.writeText(json).then(() => {
+                    alert('Copied!\n' + json);
+                }).catch(() => {
+                    prompt('Copy:', json);
+                });
+            }
+        });
+    }
+
+    updateOffsetDisplay() {
+        const posDisplay = document.getElementById('offset-display');
+        const rotDisplay = document.getElementById('rotation-display');
+        if (this.contentGroup) {
+            if (posDisplay) {
+                posDisplay.textContent = `X:${this.contentGroup.position.x.toFixed(1)} Z:${this.contentGroup.position.z.toFixed(1)}`;
+            }
+            if (rotDisplay) {
+                const deg = (this.contentGroup.rotation.y * 180 / Math.PI).toFixed(1);
+                rotDisplay.textContent = `${deg}°`;
+            }
+        }
     }
 
     promptCustomLocation() {
@@ -857,6 +955,7 @@ class CityEcosystem {
         };
 
         this.renderer.domElement.addEventListener('mousedown', e => {
+            if (e.shiftKey) return; // Let align drag handle shift+drag
             isDragging = true;
             lastX = e.clientX;
             lastY = e.clientY;
@@ -929,21 +1028,26 @@ class CityEcosystem {
         const ground = new THREE.Mesh(groundGeo, groundMat);
         ground.rotation.x = -Math.PI / 2;
         ground.receiveShadow = true;
+        ground.userData = { type: 'ground' };
         this.scene.add(ground);
 
-        // Build roads
+        // Build roads (stay fixed)
         const roadMat = new THREE.MeshStandardMaterial({ color: 0x333333, roughness: 0.9 });
         for (const road of roads) {
             this.buildRoad(road, roadMat);
         }
 
-        // Build parks
+        // Create content group for buildings and parks (can be dragged)
+        this.contentGroup = new THREE.Group();
+        this.scene.add(this.contentGroup);
+
+        // Build parks (in content group)
         const parkMat = new THREE.MeshStandardMaterial({ color: 0x3a5a3a, roughness: 0.8 });
         for (const park of parks) {
             this.buildPark(park, parkMat);
         }
 
-        // Build buildings
+        // Build buildings (in content group)
         const buildingMat = new THREE.MeshStandardMaterial({
             color: this.currentCity.buildingColor,
             roughness: 0.7,
@@ -1004,7 +1108,8 @@ class CityEcosystem {
         mesh.receiveShadow = true;
         mesh.userData = { type: 'building', data };
 
-        this.scene.add(mesh);
+        // Add to content group (draggable)
+        this.contentGroup.add(mesh);
         this.buildingMeshes.push(mesh);
 
         // Store building bounds for collision
@@ -1059,6 +1164,7 @@ class CityEcosystem {
 
         const mesh = new THREE.Mesh(tubeGeo, material);
         mesh.receiveShadow = true;
+        mesh.userData = { type: 'road', data };
         this.scene.add(mesh);
     }
 
@@ -1082,7 +1188,8 @@ class CityEcosystem {
         mesh.receiveShadow = true;
         mesh.userData = { type: 'park', data, points };
 
-        this.scene.add(mesh);
+        // Add to content group (draggable)
+        this.contentGroup.add(mesh);
 
         // Store park for plant spawning
         this.cityData.parkMeshes = this.cityData.parkMeshes || [];
@@ -1425,7 +1532,7 @@ class CityEcosystem {
     }
 
     showUI() {
-        ['hud', 'minimap', 'legend', 'data-stats', 'scale-indicator', 'graph-panel', 'controls', 'osm-credit']
+        ['hud', 'minimap', 'legend', 'data-stats', 'scale-indicator', 'graph-panel', 'controls', 'osm-credit', 'debug-panel']
             .forEach(id => document.getElementById(id).style.display = 'block');
     }
 
@@ -1438,7 +1545,7 @@ class CityEcosystem {
         this.scene = null;
         this.renderer = null;
 
-        ['hud', 'minimap', 'legend', 'data-stats', 'scale-indicator', 'graph-panel', 'controls', 'osm-credit']
+        ['hud', 'minimap', 'legend', 'data-stats', 'scale-indicator', 'graph-panel', 'controls', 'osm-credit', 'debug-panel']
             .forEach(id => document.getElementById(id).style.display = 'none');
 
         document.getElementById('city-select-container').classList.remove('hidden');

@@ -790,6 +790,42 @@
                 systems: ['paddle', 'ballPhysics', 'movement', 'render'],
                 hud: ['score', 'lives']
             },
+            {
+                type: 'ecs',
+                meta: { id: 'geometry-swarm', title: 'Geometry Swarm', genre: 'Shooter', description: 'Twin-stick survival shooter. Auto-aim at nearest enemy!' },
+                controls: { 'WASD': 'Move', 'Auto': 'Fire at nearest enemy' },
+                setup(world, state, canvas) {
+                    state.score = 0; state.lives = 3; state.spawnTimer = 0; state.fireTimer = 0;
+                    const p = world.createEntity();
+                    world.addComponent(p, 'Transform', { x: canvas.width/2, y: canvas.height/2, rot: 0 });
+                    world.addComponent(p, 'Velocity', { vx: 0, vy: 0 });
+                    world.addComponent(p, 'Sprite', { type: 'diamond', color: '#00ffcc', size: 12 });
+                    world.addComponent(p, 'Player', { speed: 250, fireRate: 0.1 });
+                    world.addComponent(p, 'Collider', { radius: 12, group: 'player' });
+                },
+                systems: ['twinStick', 'geometrySpawner', 'movement', 'collision', 'render'],
+                hud: ['score', 'lives']
+            },
+            {
+                type: 'ecs',
+                meta: { id: 'missile-defense', title: 'Missile Defense', genre: 'Strategy', description: 'Protect your cities from incoming missiles! Click to intercept.' },
+                controls: { 'Click': 'Launch interceptor' },
+                setup(world, state, canvas) {
+                    state.score = 0; state.cities = 6; state.wave = 1; state.missileTimer = 0;
+                    const cityPositions = [0.15, 0.3, 0.45, 0.55, 0.7, 0.85];
+                    for (const xp of cityPositions) {
+                        const city = world.createEntity();
+                        world.addComponent(city, 'Transform', { x: canvas.width * xp, y: canvas.height - 30 });
+                        world.addComponent(city, 'Sprite', { type: 'city', color: '#44ff88', size: 20 });
+                        world.addComponent(city, 'City', {});
+                    }
+                    const launcher = world.createEntity();
+                    world.addComponent(launcher, 'Transform', { x: canvas.width/2, y: canvas.height - 20 });
+                    world.addComponent(launcher, 'Sprite', { type: 'rect', color: '#4488ff', w: 30, h: 15 });
+                },
+                systems: ['missileDefense', 'movement', 'render'],
+                hud: ['score', 'cities', 'wave']
+            },
 
             // CHIP-8 ROMS
             {
@@ -1050,6 +1086,8 @@
             let html = '';
             if (hud.includes('score')) html += `<div class="stat-item"><span class="stat-label">Score:</span><span class="stat-value">${state.score || 0}</span></div>`;
             if (hud.includes('lives')) html += `<div class="stat-item"><span class="stat-label">Lives:</span><span class="stat-value">${state.lives || 0}</span></div>`;
+            if (hud.includes('cities')) html += `<div class="stat-item"><span class="stat-label">Cities:</span><span class="stat-value">${state.cities || 0}</span></div>`;
+            if (hud.includes('wave')) html += `<div class="stat-item"><span class="stat-label">Wave:</span><span class="stat-value">${state.wave || 1}</span></div>`;
             document.getElementById('gameStats').innerHTML = html;
         }
 
@@ -1326,6 +1364,153 @@
                 }
             }
 
+            // Twin-stick player (Geometry Swarm)
+            if (systems.includes('twinStick')) {
+                for (const id of world.query('Player', 'Transform', 'Velocity')) {
+                    const p = world.getComponent(id, 'Player');
+                    const t = world.getComponent(id, 'Transform');
+                    const v = world.getComponent(id, 'Velocity');
+
+                    v.vx = 0; v.vy = 0;
+                    if (keys['w'] || keys['arrowup']) v.vy = -p.speed;
+                    if (keys['s'] || keys['arrowdown']) v.vy = p.speed;
+                    if (keys['a'] || keys['arrowleft']) v.vx = -p.speed;
+                    if (keys['d'] || keys['arrowright']) v.vx = p.speed;
+
+                    t.x = Math.max(15, Math.min(canvas.width - 15, t.x));
+                    t.y = Math.max(15, Math.min(canvas.height - 15, t.y));
+
+                    // Auto-fire at nearest enemy
+                    state.fireTimer -= dt;
+                    if (state.fireTimer <= 0) {
+                        state.fireTimer = p.fireRate;
+                        const enemies = world.query('Enemy', 'Transform');
+                        if (enemies.length > 0) {
+                            let nearest = null, minDist = Infinity;
+                            for (const eid of enemies) {
+                                const et = world.getComponent(eid, 'Transform');
+                                const dx = et.x - t.x, dy = et.y - t.y;
+                                const dist = Math.sqrt(dx*dx + dy*dy);
+                                if (dist < minDist) { minDist = dist; nearest = et; }
+                            }
+                            if (nearest) {
+                                const dx = nearest.x - t.x, dy = nearest.y - t.y;
+                                const len = Math.sqrt(dx*dx + dy*dy);
+                                const b = world.createEntity();
+                                world.addComponent(b, 'Transform', { x: t.x, y: t.y });
+                                world.addComponent(b, 'Velocity', { vx: (dx/len) * 500, vy: (dy/len) * 500 });
+                                world.addComponent(b, 'Sprite', { type: 'circle', color: '#ffff00', size: 4 });
+                                world.addComponent(b, 'Collider', { radius: 4, group: 'bullet' });
+                                world.addComponent(b, 'Lifetime', { remaining: 1.5 });
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Geometry spawner
+            if (systems.includes('geometrySpawner')) {
+                state.spawnTimer -= dt;
+                if (state.spawnTimer <= 0) {
+                    state.spawnTimer = 1.5 - Math.min(state.score / 2000, 1);
+                    const shapes = ['diamond', 'square', 'triangle'];
+                    const colors = ['#ff4466', '#ffaa00', '#aa44ff', '#ff8844'];
+                    const edge = Math.floor(Math.random() * 4);
+                    let x, y;
+                    if (edge === 0) { x = Math.random() * canvas.width; y = -20; }
+                    else if (edge === 1) { x = canvas.width + 20; y = Math.random() * canvas.height; }
+                    else if (edge === 2) { x = Math.random() * canvas.width; y = canvas.height + 20; }
+                    else { x = -20; y = Math.random() * canvas.height; }
+
+                    const e = world.createEntity();
+                    world.addComponent(e, 'Transform', { x, y, rot: 0 });
+                    const player = world.query('Player', 'Transform')[0];
+                    const pt = player ? world.getComponent(player, 'Transform') : { x: canvas.width/2, y: canvas.height/2 };
+                    const dx = pt.x - x, dy = pt.y - y;
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    const speed = 80 + Math.random() * 60;
+                    world.addComponent(e, 'Velocity', { vx: (dx/len) * speed, vy: (dy/len) * speed, rotSpeed: (Math.random() - 0.5) * 3 });
+                    world.addComponent(e, 'Sprite', { type: shapes[Math.floor(Math.random() * shapes.length)], color: colors[Math.floor(Math.random() * colors.length)], size: 10 + Math.random() * 8 });
+                    world.addComponent(e, 'Collider', { radius: 12, group: 'enemy' });
+                    world.addComponent(e, 'Enemy', {});
+                }
+            }
+
+            // Missile Defense
+            if (systems.includes('missileDefense')) {
+                // Spawn missiles
+                state.missileTimer -= dt;
+                if (state.missileTimer <= 0) {
+                    state.missileTimer = 2 - Math.min(state.wave * 0.1, 1.5);
+                    const m = world.createEntity();
+                    const startX = Math.random() * canvas.width;
+                    const cities = world.query('City', 'Transform');
+                    const targetCity = cities[Math.floor(Math.random() * cities.length)];
+                    const targetX = targetCity ? world.getComponent(targetCity, 'Transform').x : canvas.width/2;
+                    world.addComponent(m, 'Transform', { x: startX, y: -10 });
+                    const dx = targetX - startX, dy = canvas.height - 20;
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    world.addComponent(m, 'Velocity', { vx: (dx/len) * 80, vy: (dy/len) * 80 });
+                    world.addComponent(m, 'Sprite', { type: 'missile', color: '#ff4444', size: 6 });
+                    world.addComponent(m, 'Missile', { targetX });
+                    world.addComponent(m, 'Collider', { radius: 6, group: 'enemy' });
+                }
+
+                // Handle click - launch interceptor
+                if (state.pendingClick) {
+                    const click = state.pendingClick;
+                    state.pendingClick = null;
+                    const i = world.createEntity();
+                    world.addComponent(i, 'Transform', { x: canvas.width/2, y: canvas.height - 30 });
+                    const dx = click.x - canvas.width/2, dy = click.y - (canvas.height - 30);
+                    const len = Math.sqrt(dx*dx + dy*dy);
+                    world.addComponent(i, 'Velocity', { vx: (dx/len) * 300, vy: (dy/len) * 300 });
+                    world.addComponent(i, 'Sprite', { type: 'circle', color: '#4488ff', size: 5 });
+                    world.addComponent(i, 'Interceptor', { targetX: click.x, targetY: click.y });
+                    world.addComponent(i, 'Collider', { radius: 20, group: 'bullet' });
+                }
+
+                // Check interceptor explosions
+                for (const id of world.query('Interceptor', 'Transform')) {
+                    const t = world.getComponent(id, 'Transform');
+                    const i = world.getComponent(id, 'Interceptor');
+                    const dx = i.targetX - t.x, dy = i.targetY - t.y;
+                    if (Math.sqrt(dx*dx + dy*dy) < 10) {
+                        world.destroyEntity(id);
+                        // Create explosion
+                        const exp = world.createEntity();
+                        world.addComponent(exp, 'Transform', { x: t.x, y: t.y });
+                        world.addComponent(exp, 'Sprite', { type: 'explosion', color: '#ff8844', size: 40 });
+                        world.addComponent(exp, 'Lifetime', { remaining: 0.5 });
+                        world.addComponent(exp, 'Collider', { radius: 40, group: 'bullet' });
+                    }
+                }
+
+                // Check missiles hitting cities
+                for (const mid of world.query('Missile', 'Transform')) {
+                    const mt = world.getComponent(mid, 'Transform');
+                    if (mt.y > canvas.height - 40) {
+                        for (const cid of world.query('City', 'Transform')) {
+                            const ct = world.getComponent(cid, 'Transform');
+                            if (Math.abs(mt.x - ct.x) < 30) {
+                                world.destroyEntity(cid);
+                                state.cities--;
+                                if (state.cities <= 0) { gameOver(); return; }
+                                break;
+                            }
+                        }
+                        world.destroyEntity(mid);
+                    }
+                }
+
+                // Wave progression
+                const missiles = world.query('Missile');
+                if (missiles.length === 0 && state.missileTimer < 1) {
+                    state.wave++;
+                    state.score += 100 * state.wave;
+                }
+            }
+
             world.flushDestroy();
         }
 
@@ -1400,6 +1585,53 @@
                         ctx.beginPath();
                         ctx.arc(0, 0, s.size, 0, Math.PI * 2);
                         ctx.fill();
+                        break;
+                    case 'diamond':
+                        ctx.beginPath();
+                        ctx.moveTo(0, -s.size);
+                        ctx.lineTo(s.size, 0);
+                        ctx.lineTo(0, s.size);
+                        ctx.lineTo(-s.size, 0);
+                        ctx.closePath();
+                        ctx.fill();
+                        break;
+                    case 'square':
+                        ctx.fillRect(-s.size, -s.size, s.size * 2, s.size * 2);
+                        break;
+                    case 'triangle':
+                        ctx.beginPath();
+                        ctx.moveTo(0, -s.size);
+                        ctx.lineTo(s.size, s.size);
+                        ctx.lineTo(-s.size, s.size);
+                        ctx.closePath();
+                        ctx.fill();
+                        break;
+                    case 'city':
+                        // Building shape
+                        ctx.fillRect(-s.size/2, -s.size, s.size, s.size);
+                        ctx.fillRect(-s.size, -s.size/2, s.size * 2, s.size/2);
+                        break;
+                    case 'missile':
+                        ctx.beginPath();
+                        ctx.moveTo(0, -s.size);
+                        ctx.lineTo(s.size/2, s.size);
+                        ctx.lineTo(-s.size/2, s.size);
+                        ctx.closePath();
+                        ctx.fill();
+                        // Trail
+                        ctx.strokeStyle = s.color;
+                        ctx.lineWidth = 1;
+                        ctx.beginPath();
+                        ctx.moveTo(0, s.size);
+                        ctx.lineTo(0, s.size + 15);
+                        ctx.stroke();
+                        break;
+                    case 'explosion':
+                        ctx.globalAlpha = 0.7;
+                        ctx.beginPath();
+                        ctx.arc(0, 0, s.size, 0, Math.PI * 2);
+                        ctx.fill();
+                        ctx.globalAlpha = 1;
                         break;
                 }
 
@@ -1501,6 +1733,17 @@
 
             if (gameMode === 'emulator' && chip8Keys[key] !== undefined) {
                 chip8.keyUp(chip8Keys[key]);
+            }
+        });
+
+        // Canvas click for Missile Defense
+        canvas.addEventListener('click', e => {
+            if (gameMode === 'ecs' && currentGame?.meta.id === 'missile-defense' && !paused) {
+                const rect = canvas.getBoundingClientRect();
+                state.pendingClick = {
+                    x: (e.clientX - rect.left) * (canvas.width / rect.width),
+                    y: (e.clientY - rect.top) * (canvas.height / rect.height)
+                };
             }
         });
 
