@@ -513,6 +513,42 @@
             50% { transform: scale(1.2); }
         }
 
+        /* CYCLE 4: Jump Availability Indicator */
+        .jump-indicator {
+            position: absolute;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            gap: 8px;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .jump-indicator.active {
+            display: flex;
+        }
+
+        .jump-pip {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: rgba(0, 255, 136, 0.3);
+            border: 2px solid var(--accent);
+            transition: all 0.15s ease-out;
+        }
+
+        .jump-pip.available {
+            background: var(--accent);
+            box-shadow: 0 0 10px var(--accent);
+        }
+
+        .jump-pip.used {
+            background: rgba(100, 100, 100, 0.3);
+            border-color: #555;
+            transform: scale(0.8);
+        }
+
         /* Responsive Mobile Layout */
         @media (max-width: 768px) {
             .container {
@@ -597,6 +633,11 @@
                 <div class="momentum-bar">
                     <div class="momentum-fill" id="momentumFill" style="width: 0%"></div>
                 </div>
+            </div>
+            <!-- CYCLE 4: Jump Availability Indicator -->
+            <div class="jump-indicator" id="jumpIndicator">
+                <div class="jump-pip" id="jumpPip1"></div>
+                <div class="jump-pip" id="jumpPip2"></div>
             </div>
             <!-- CYCLE 1: Virtual Touch Controls -->
             <div class="touch-controls" id="touchControls">
@@ -815,6 +856,70 @@
         const particlePool = new ParticlePool(200);
 
         // ============================================
+        // CYCLE 4: PROCEDURAL AUDIO SYSTEM
+        // ============================================
+        const Audio = {
+            ctx: null,
+            masterGain: null,
+            enabled: true,
+
+            init() {
+                if (this.ctx) return;
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+                this.masterGain = this.ctx.createGain();
+                this.masterGain.gain.value = 0.25;
+                this.masterGain.connect(this.ctx.destination);
+            },
+
+            resume() {
+                if (this.ctx && this.ctx.state === 'suspended') this.ctx.resume();
+            },
+
+            playJump(isDouble = false) {
+                if (!this.enabled || !this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                osc.frequency.setValueAtTime(isDouble ? 280 : 200, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(isDouble ? 560 : 400, this.ctx.currentTime + 0.08);
+                gain.gain.setValueAtTime(0.15, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.08);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.08);
+            },
+
+            playCoin(momentum = 1) {
+                if (!this.enabled || !this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                const basePitch = 800 + momentum * 200;
+                osc.frequency.setValueAtTime(basePitch, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(basePitch * 1.5, this.ctx.currentTime + 0.05);
+                gain.gain.setValueAtTime(0.1, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.05);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.05);
+            },
+
+            playDeath() {
+                if (!this.enabled || !this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                osc.frequency.setValueAtTime(300, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(60, this.ctx.currentTime + 0.2);
+                gain.gain.setValueAtTime(0.2, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.2);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.2);
+            }
+        };
+
+        // ============================================
         // GAME ENGINE
         // ============================================
 
@@ -886,6 +991,9 @@
                 this.afterimages = [];      // Position history for trail
                 this.cameraX = 0;           // Smooth camera position
                 this.cameraTargetX = 0;
+
+                // CYCLE 4: Death flash effect
+                this.deathFlash = 0;
 
                 // Generate initial platforms
                 this.generateInitialWorld();
@@ -977,6 +1085,7 @@
                 const wantsJump = (input.jump || this.jumpBufferTimer > 0);
 
                 if (wantsJump && canJump && this.player.vy >= 0) {
+                    const isDoubleJump = this.player.jumpsLeft < 2 && !this.player.grounded;
                     this.player.vy = -this.dna.jumpForce;
                     this.player.jumpsLeft = Math.max(0, this.player.jumpsLeft - 1);
                     this.player.grounded = false;
@@ -987,6 +1096,8 @@
                     // CYCLE 3: Stretch on jump
                     this.targetScaleX = 0.75;
                     this.targetScaleY = 1.3;
+                    // CYCLE 4: Jump sound
+                    if (!this.isAI) Audio.playJump(isDoubleJump);
                 }
 
                 // CYCLE 2: Variable Jump Height - cut jump when button released
@@ -1086,6 +1197,8 @@
                         this.spawnParticles(coin.x, coin.y, '#ffdd00', 5);
                         // CYCLE 2: Floating score text
                         this.spawnFloatingText(coin.x, coin.y - 20, `+${coinScore}`, '#ffcc00');
+                        // CYCLE 4: Coin sound (pitch increases with momentum)
+                        if (!this.isAI) Audio.playCoin(this.momentum);
                     }
                 }
 
@@ -1189,6 +1302,10 @@
                 this.spawnParticles(this.player.x, this.player.y, '#ff4444', 15);
                 // CYCLE 2: Screen shake on death
                 this.shakeIntensity = 15;
+                // CYCLE 4: Death sound
+                if (!this.isAI) Audio.playDeath();
+                // CYCLE 4: Death flash intensity
+                this.deathFlash = 1.0;
             }
 
             // CYCLE 2: Spawn floating score text
@@ -1344,6 +1461,14 @@
                         20, 0, Math.PI * 2
                     );
                     ctx.fill();
+                }
+
+                // CYCLE 4: Death flash overlay
+                if (this.deathFlash > 0) {
+                    ctx.fillStyle = `rgba(255, 68, 68, ${this.deathFlash * 0.6})`;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    this.deathFlash *= 0.85; // Rapid fade out
+                    if (this.deathFlash < 0.05) this.deathFlash = 0;
                 }
 
                 ctx.restore(); // CYCLE 2: Screen shake restore
@@ -2074,6 +2199,9 @@
             const momentumHud = document.getElementById('momentumHud');
 
             if (humanPlaying) {
+                // CYCLE 4: Initialize audio on user gesture
+                Audio.init();
+                Audio.resume();
                 currentGame = new Game(gameDNA, false);
                 // Show touch controls on mobile devices
                 if (isMobile && touchControls) {
@@ -2083,11 +2211,16 @@
                 if (momentumHud) {
                     momentumHud.classList.add('active');
                 }
+                // CYCLE 4: Show jump indicator
+                if (jumpIndicator) {
+                    jumpIndicator.classList.add('active');
+                }
                 gameLoop();
             } else {
                 // Hide controls when stopping
                 if (touchControls) touchControls.classList.remove('active');
                 if (momentumHud) momentumHud.classList.remove('active');
+                if (jumpIndicator) jumpIndicator.classList.remove('active');
             }
         }
 
@@ -2116,6 +2249,11 @@
         const momentumHud = document.getElementById('momentumHud');
         const momentumFill = document.getElementById('momentumFill');
         const comboDisplay = document.getElementById('comboDisplay');
+
+        // CYCLE 4: Jump indicator elements
+        const jumpIndicator = document.getElementById('jumpIndicator');
+        const jumpPip1 = document.getElementById('jumpPip1');
+        const jumpPip2 = document.getElementById('jumpPip2');
 
         // Detect mobile device
         const isMobile = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
@@ -2177,13 +2315,20 @@
                         comboDisplay.classList.remove('high');
                     }
                 }
+
+                // CYCLE 4: Update jump availability indicator
+                if (jumpPip1 && jumpPip2) {
+                    const jumps = currentGame.player.jumpsLeft;
+                    jumpPip1.className = 'jump-pip ' + (jumps >= 1 ? 'available' : 'used');
+                    jumpPip2.className = 'jump-pip ' + (jumps >= 2 ? 'available' : 'used');
+                }
             } else {
-                // Respawn after death
+                // CYCLE 4: Quick respawn (reduced from 1000ms to 500ms)
                 setTimeout(() => {
                     if (humanPlaying) {
                         currentGame = new Game(gameDNA, false);
                     }
-                }, 1000);
+                }, 500);
             }
 
             currentGame.render();
