@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SneakerNet: Air-Gapped Messenger</title>
+    <meta name="description" content="Transfer data between devices using only light. Encodes messages into a rapid stream of visual codes.">
+    <style>
+        :root {
+            --bg: #0f172a;
+            --text: #e2e8f0;
+            --accent: #22c55e;
+            --panel: #1e293b;
+        }
+        body {
+            margin: 0;
+            background: var(--bg);
+            color: var(--text);
+            font-family: system-ui, sans-serif;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            overflow: hidden;
+        }
+        header {
+            padding: 15px;
+            background: var(--panel);
+            border-bottom: 1px solid #334155;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        h1 { margin: 0; font-size: 1.2rem; color: var(--accent); }
+        
+        #main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 20px;
+            gap: 20px;
+            overflow-y: auto;
+        }
+        
+        .mode-switch {
+            display: flex;
+            background: #334155;
+            border-radius: 8px;
+            padding: 4px;
+        }
+        .mode-btn {
+            flex: 1;
+            padding: 10px;
+            border: none;
+            background: transparent;
+            color: #94a3b8;
+            cursor: pointer;
+            border-radius: 6px;
+            font-weight: bold;
+        }
+        .mode-btn.active {
+            background: var(--accent);
+            color: #0f172a;
+        }
+        
+        .panel {
+            display: none;
+            flex-direction: column;
+            gap: 15px;
+            height: 100%;
+        }
+        .panel.active { display: flex; }
+        
+        textarea {
+            background: var(--panel);
+            border: 1px solid #334155;
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            resize: none;
+            flex: 1;
+            font-family: monospace;
+        }
+        
+        button {
+            background: var(--accent);
+            color: #0f172a;
+            border: none;
+            padding: 15px;
+            border-radius: 8px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        
+        #visual-stream {
+            width: 100%;
+            aspect-ratio: 1;
+            background: black;
+            image-rendering: pixelated;
+            border-radius: 8px;
+            border: 2px solid #334155;
+        }
+        
+        #camera-preview {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            border-radius: 8px;
+            background: black;
+        }
+        
+        .status-bar {
+            padding: 10px;
+            background: var(--panel);
+            border-radius: 8px;
+            font-family: monospace;
+            font-size: 0.9rem;
+        }
+        
+        .progress-bar {
+            height: 4px;
+            background: #334155;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+        .progress-fill {
+            height: 100%;
+            background: var(--accent);
+            width: 0%;
+            transition: width 0.1s;
+        }
+        
+        /* Custom Code Grid */
+        .code-grid {
+            display: grid;
+            grid-template-columns: repeat(8, 1fr);
+            gap: 2px;
+            width: 100%;
+            height: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+        }
+        .cell {
+            background: #000;
+            border-radius: 2px;
+        }
+        .cell.on { background: #fff; }
+        
+    </style>
+</head>
+<body>
+    <header>
+        <h1>👟 SneakerNet</h1>
+        <div style="font-size: 0.8rem; color: #94a3b8;">Air-Gapped Messenger</div>
+    </header>
+    
+    <div id="main">
+        <div class="mode-switch">
+            <button class="mode-btn active" onclick="setMode('send')">📤 Send</button>
+            <button class="mode-btn" onclick="setMode('receive')">📥 Receive</button>
+        </div>
+        
+        <!-- SEND MODE -->
+        <div id="send-panel" class="panel active">
+            <textarea id="message-input" placeholder="Type your secret message here..."></textarea>
+            
+            <div class="status-bar">
+                <div>Speed: <span id="speed-val">10</span> FPS</div>
+                <input type="range" min="1" max="30" value="10" oninput="updateSpeed(this.value)" style="width:100%">
+            </div>
+            
+            <button id="send-btn" onclick="startTransmission()">Transmit Message</button>
+            
+            <div id="transmitter" style="display:none; flex-direction: column; align-items: center; gap: 10px;">
+                <canvas id="visual-stream" width="300" height="300"></canvas>
+                <div class="status-bar" style="width: 100%;">
+                    Transmitting Chunk: <span id="tx-chunk">0/0</span>
+                    <div class="progress-bar"><div id="tx-progress" class="progress-fill"></div></div>
+                </div>
+                <button onclick="stopTransmission()" style="background: #ef4444; width: 100%;">Stop</button>
+            </div>
+        </div>
+        
+        <!-- RECEIVE MODE -->
+        <div id="receive-panel" class="panel">
+            <div style="position: relative; flex: 1; min-height: 300px;">
+                <video id="camera-preview" autoplay playsinline></video>
+                <canvas id="scan-canvas" style="display:none;"></canvas>
+                <div style="position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: 200px; height: 200px; border: 2px solid var(--accent); box-shadow: 0 0 0 9999px rgba(0,0,0,0.8); pointer-events: none;"></div>
+            </div>
+            
+            <div class="status-bar">
+                Status: <span id="rx-status">Waiting for signal...</span>
+                <div id="rx-stats">Chunks: 0/0</div>
+                <div class="progress-bar"><div id="rx-progress" class="progress-fill"></div></div>
+            </div>
+            
+            <textarea id="received-message" readonly placeholder="Decoded message will appear here..."></textarea>
+            
+            <button id="scan-btn" onclick="toggleScanner()">Start Camera</button>
+        </div>
+    </div>
+
+    <script>
+        // --- PROTOCOL DEFINITION ---
+        // We use a custom 8x8 grid (64 bits) for high robustness and ease of detection
+        // Header: 8 bits (Pattern 10101010)
+        // Sequence: 8 bits (0-255)
+        // Total Chunks: 8 bits (0-255)
+        // Data: 32 bits (4 bytes)
+        // Checksum: 8 bits
+        
+        const GRID_SIZE = 8;
+        const CELL_SIZE = 300 / GRID_SIZE;
+        const HEADER_PATTERN = 0b10101010;
+        
+        let txInterval;
+        let txSpeed = 10; // FPS
+        let chunks = [];
+        let currentChunkIdx = 0;
+        
+        let rxActive = false;
+        let rxChunks = [];
+        let rxTotal = 0;
+        let rxLastSeq = -1;
+        
+        // --- UI LOGIC ---
+        
+        function setMode(mode) {
+            document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+            
+            if (mode === 'send') {
+                document.querySelector('.mode-btn:nth-child(1)').classList.add('active');
+                document.getElementById('send-panel').classList.add('active');
+                stopScanner();
+            } else {
+                document.querySelector('.mode-btn:nth-child(2)').classList.add('active');
+                document.getElementById('receive-panel').classList.add('active');
+                stopTransmission();
+            }
+        }
+        
+        function updateSpeed(val) {
+            txSpeed = val;
+            document.getElementById('speed-val').textContent = val;
+            if (txInterval) {
+                stopTransmission();
+                startTransmission();
+            }
+        }
+        
+        // --- TRANSMITTER ---
+        
+        function startTransmission() {
+            const text = document.getElementById('message-input').value;
+            if (!text) return alert("Enter a message!");
+            
+            // Encode text to bytes
+            const encoder = new TextEncoder();
+            const data = encoder.encode(text);
+            
+            // Chunk data (4 bytes per chunk)
+            chunks = [];
+            const chunkSize = 4;
+            const totalChunks = Math.ceil(data.length / chunkSize);
+            
+            if (totalChunks > 255) return alert("Message too long! Max 1KB.");
+            
+            for (let i = 0; i < totalChunks; i++) {
+                const chunkData = new Uint8Array(4);
+                const slice = data.slice(i * chunkSize, (i + 1) * chunkSize);
+                chunkData.set(slice);
+                
+                // Build packet
+                // [Header 8][Seq 8][Total 8][Data 32][Checksum 8] = 64 bits
+                const packet = new Uint8Array(8);
+                packet[0] = HEADER_PATTERN;
+                packet[1] = i;
+                packet[2] = totalChunks;
+                packet.set(chunkData, 3);
+                
+                // Simple checksum (XOR sum)
+                let checksum = 0;
+                for(let j=0; j<7; j++) checksum ^= packet[j];
+                packet[7] = checksum;
+                
+                chunks.push(packet);
+            }
+            
+            document.getElementById('message-input').style.display = 'none';
+            document.getElementById('send-btn').style.display = 'none';
+            document.getElementById('transmitter').style.display = 'flex';
+            
+            currentChunkIdx = 0;
+            txInterval = setInterval(renderNextFrame, 1000 / txSpeed);
+        }
+        
+        function stopTransmission() {
+            clearInterval(txInterval);
+            txInterval = null;
+            document.getElementById('message-input').style.display = 'block';
+            document.getElementById('send-btn').style.display = 'block';
+            document.getElementById('transmitter').style.display = 'none';
+        }
+        
+        function renderNextFrame() {
+            const ctx = document.getElementById('visual-stream').getContext('2d');
+            const packet = chunks[currentChunkIdx];
+            
+            // Draw Grid
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, 300, 300);
+            
+            // Convert packet bytes to bits
+            let bits = [];
+            for(let byte of packet) {
+                for(let b=7; b>=0; b--) {
+                    bits.push((byte >> b) & 1);
+                }
+            }
+            
+            // Draw bits
+            for(let i=0; i<64; i++) {
+                const x = (i % 8) * (300/8);
+                const y = Math.floor(i / 8) * (300/8);
+                
+                if (bits[i]) {
+                    ctx.fillStyle = '#fff';
+                    ctx.fillRect(x + 2, y + 2, (300/8) - 4, (300/8) - 4);
+                }
+            }
+            
+            // Update UI
+            document.getElementById('tx-chunk').textContent = `${currentChunkIdx + 1}/${chunks.length}`;
+            document.getElementById('tx-progress').style.width = `${((currentChunkIdx + 1) / chunks.length) * 100}%`;
+            
+            currentChunkIdx = (currentChunkIdx + 1) % chunks.length;
+        }
+        
+        // --- RECEIVER ---
+        
+        function toggleScanner() {
+            if (rxActive) stopScanner();
+            else startScanner();
+        }
+        
+        function startScanner() {
+            navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
+                .then(stream => {
+                    const video = document.getElementById('camera-preview');
+                    video.srcObject = stream;
+                    rxActive = true;
+                    document.getElementById('scan-btn').textContent = "Stop Camera";
+                    document.getElementById('scan-btn').style.background = "#ef4444";
+                    requestAnimationFrame(scanLoop);
+                })
+                .catch(err => alert("Camera error: " + err));
+        }
+        
+        function stopScanner() {
+            rxActive = false;
+            const video = document.getElementById('camera-preview');
+            if (video.srcObject) {
+                video.srcObject.getTracks().forEach(t => t.stop());
+                video.srcObject = null;
+            }
+            document.getElementById('scan-btn').textContent = "Start Camera";
+            document.getElementById('scan-btn').style.background = "var(--accent)";
+        }
+        
+        function scanLoop() {
+            if (!rxActive) return;
+            
+            const video = document.getElementById('camera-preview');
+            const canvas = document.getElementById('scan-canvas');
+            const ctx = canvas.getContext('2d');
+            
+            if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                canvas.width = 300;
+                canvas.height = 300;
+                
+                // Draw center crop of video
+                const size = Math.min(video.videoWidth, video.videoHeight) * 0.6;
+                const sx = (video.videoWidth - size) / 2;
+                const sy = (video.videoHeight - size) / 2;
+                
+                ctx.drawImage(video, sx, sy, size, size, 0, 0, 300, 300);
+                
+                // Analyze Grid
+                const packet = decodeFrame(ctx);
+                if (packet) {
+                    processPacket(packet);
+                }
+            }
+            
+            requestAnimationFrame(scanLoop);
+        }
+        
+        function decodeFrame(ctx) {
+            // Sample 8x8 grid points
+            const step = 300 / 8;
+            const half = step / 2;
+            let bits = [];
+            
+            // Thresholding (simple average brightness)
+            // In a real app, we'd use adaptive thresholding
+            // Here we assume high contrast
+            
+            for(let y=0; y<8; y++) {
+                for(let x=0; x<8; x++) {
+                    const pixel = ctx.getImageData(x * step + half, y * step + half, 1, 1).data;
+                    const brightness = (pixel[0] + pixel[1] + pixel[2]) / 3;
+                    bits.push(brightness > 128 ? 1 : 0);
+                }
+            }
+            
+            // Reconstruct bytes
+            const bytes = new Uint8Array(8);
+            for(let i=0; i<64; i++) {
+                if (bits[i]) {
+                    const byteIdx = Math.floor(i / 8);
+                    const bitIdx = 7 - (i % 8);
+                    bytes[byteIdx] |= (1 << bitIdx);
+                }
+            }
+            
+            // Validate Header
+            if (bytes[0] !== HEADER_PATTERN) return null;
+            
+            // Validate Checksum
+            let checksum = 0;
+            for(let j=0; j<7; j++) checksum ^= bytes[j];
+            if (checksum !== bytes[7]) return null;
+            
+            return bytes;
+        }
+        
+        function processPacket(packet) {
+            const seq = packet[1];
+            const total = packet[2];
+            const data = packet.slice(3, 7);
+            
+            if (rxChunks.length !== total) {
+                rxChunks = new Array(total).fill(null);
+                rxTotal = total;
+                document.getElementById('rx-status').textContent = "Receiving...";
+            }
+            
+            if (!rxChunks[seq]) {
+                rxChunks[seq] = data;
+                updateRxProgress();
+                
+                // Flash effect
+                document.getElementById('rx-status').style.color = '#fff';
+                setTimeout(() => document.getElementById('rx-status').style.color = '#94a3b8', 100);
+            }
+        }
+        
+        function updateRxProgress() {
+            const count = rxChunks.filter(c => c !== null).length;
+            document.getElementById('rx-stats').textContent = `Chunks: ${count}/${rxTotal}`;
+            document.getElementById('rx-progress').style.width = `${(count / rxTotal) * 100}%`;
+            
+            if (count === rxTotal && rxTotal > 0) {
+                // Reassemble
+                const fullData = new Uint8Array(rxTotal * 4);
+                for(let i=0; i<rxTotal; i++) {
+                    fullData.set(rxChunks[i], i * 4);
+                }
+                
+                // Decode text
+                const decoder = new TextDecoder();
+                // Remove trailing nulls if any
+                let text = decoder.decode(fullData);
+                text = text.replace(/\0/g, '');
+                
+                document.getElementById('received-message').value = text;
+                document.getElementById('rx-status').textContent = "Message Received!";
+                document.getElementById('rx-status').style.color = "var(--accent)";
+                
+                // Reset for next message? No, keep it.
+            }
+        }
+        
+    </script>
+</body>
+</html>

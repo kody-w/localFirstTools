@@ -1,0 +1,390 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Suminagashi Dreams</title>
+    <meta name="description" content="Digital paper marbling where floating inks create organic swirls through surface tension physics, then pull your creation onto handmade paper">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #f5f0e8; min-height: 100vh; font-family: 'Georgia', serif; color: #5a4a3a; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(245,240,232,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(120,100,80,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #6a5a4a; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #8a7a6a; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,60,0.2); border: 1px solid rgba(120,100,80,0.4);
+            color: #6a5a4a; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        .color-row { display: flex; gap: 8px; margin: 10px 0; }
+        .color-btn {
+            width: 30px; height: 30px; border-radius: 50%; cursor: pointer;
+            border: 2px solid rgba(0,0,0,0.2);
+        }
+        .color-btn.active { border-color: #333; }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #7a6a5a; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.6; z-index: 100; }
+        #tools { display: flex; gap: 8px; margin: 10px 0; }
+        .tool-btn { flex: 1; padding: 8px; font-size: 10px; }
+        .tool-btn.active { background: rgba(100,80,60,0.4); }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Suminagashi Dreams</h3>
+        <div class="control-row">
+            <label>Surface Tension <span class="value" id="tension-val">50</span></label>
+            <input type="range" id="tension" min="20" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Ink Viscosity <span class="value" id="viscosity-val">50</span></label>
+            <input type="range" id="viscosity" min="20" max="100" value="50">
+        </div>
+        <label>Ink Colors</label>
+        <div class="color-row">
+            <div class="color-btn active" style="background: #1a2a4a;" data-color="0"></div>
+            <div class="color-btn" style="background: #8a2a2a;" data-color="1"></div>
+            <div class="color-btn" style="background: #2a5a3a;" data-color="2"></div>
+            <div class="color-btn" style="background: #6a5a2a;" data-color="3"></div>
+        </div>
+        <label>Tools</label>
+        <div id="tools">
+            <button class="tool-btn active" data-tool="drop">Drop</button>
+            <button class="tool-btn" data-tool="stylus">Stylus</button>
+            <button class="tool-btn" data-tool="comb">Comb</button>
+        </div>
+        <button id="pull-btn">Pull Paper Print</button>
+        <button id="clear-btn">Clear Bath</button>
+    </div>
+    <div id="stats">
+        <div>Drops: <span id="drop-count">0</span></div>
+        <div>Swirls: <span id="swirl-count">0</span></div>
+        <div>State: <span id="bath-state">Ready</span></div>
+    </div>
+    <div id="info">Click to drop ink | Drag with tools to create patterns | Pull to paper</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initBath(); }
+        resize(); window.onresize = resize;
+        
+        let surfaceTension = 0.5;
+        let viscosity = 0.5;
+        let time = 0;
+        let currentColor = 0;
+        let currentTool = 'drop';
+        let isPulling = false;
+        let pullProgress = 0;
+        
+        const INK_COLORS = [
+            { h: 220, s: 60, l: 20 },
+            { h: 0, s: 60, l: 30 },
+            { h: 140, s: 50, l: 25 },
+            { h: 45, s: 60, l: 30 }
+        ];
+        
+        const inkDrops = [];
+        const velocityField = [];
+        const GRID_SIZE = 20;
+        let gridW, gridH;
+        
+        function initBath() {
+            gridW = Math.ceil(W / GRID_SIZE);
+            gridH = Math.ceil(H / GRID_SIZE);
+            velocityField.length = 0;
+            for (let i = 0; i < gridW * gridH; i++) {
+                velocityField.push({ vx: 0, vy: 0 });
+            }
+        }
+        
+        class InkDrop {
+            constructor(x, y, colorIndex, size) {
+                this.x = x;
+                this.y = y;
+                this.colorIndex = colorIndex;
+                this.color = INK_COLORS[colorIndex];
+                this.size = size || 30 + Math.random() * 20;
+                this.points = [];
+                this.initPoints();
+                this.age = 0;
+            }
+            
+            initPoints() {
+                const segments = 32;
+                for (let i = 0; i < segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+                    const noise = 0.8 + Math.random() * 0.4;
+                    this.points.push({
+                        angle: angle,
+                        radius: this.size * noise,
+                        vr: 0
+                    });
+                }
+            }
+            
+            update() {
+                this.age += 0.016;
+                
+                this.points.forEach((p, i) => {
+                    const worldX = this.x + Math.cos(p.angle) * p.radius;
+                    const worldY = this.y + Math.sin(p.angle) * p.radius;
+                    
+                    const gridX = Math.floor(worldX / GRID_SIZE);
+                    const gridY = Math.floor(worldY / GRID_SIZE);
+                    
+                    if (gridX >= 0 && gridX < gridW && gridY >= 0 && gridY < gridH) {
+                        const cell = velocityField[gridY * gridW + gridX];
+                        const force = Math.cos(p.angle) * cell.vx + Math.sin(p.angle) * cell.vy;
+                        p.vr += force * 0.5;
+                    }
+                    
+                    inkDrops.forEach(other => {
+                        if (other === this) return;
+                        const ox = other.x - this.x;
+                        const oy = other.y - this.y;
+                        const dist = Math.hypot(ox, oy);
+                        
+                        if (dist < this.size + other.size + 20) {
+                            const dx = worldX - other.x;
+                            const dy = worldY - other.y;
+                            const d = Math.hypot(dx, dy);
+                            
+                            other.points.forEach((op, oi) => {
+                                const owx = other.x + Math.cos(op.angle) * op.radius;
+                                const owy = other.y + Math.sin(op.angle) * op.radius;
+                                const pd = Math.hypot(worldX - owx, worldY - owy);
+                                
+                                if (pd < 30) {
+                                    const repel = (30 - pd) * surfaceTension * 0.01;
+                                    p.vr += repel;
+                                    op.vr += repel;
+                                }
+                            });
+                        }
+                    });
+                    
+                    const prevP = this.points[(i - 1 + this.points.length) % this.points.length];
+                    const nextP = this.points[(i + 1) % this.points.length];
+                    const avgRadius = (prevP.radius + nextP.radius) / 2;
+                    p.vr += (avgRadius - p.radius) * 0.02 * surfaceTension;
+                    
+                    p.vr *= 0.95 * viscosity;
+                    p.radius += p.vr;
+                    p.radius = Math.max(5, p.radius);
+                });
+            }
+            
+            draw() {
+                const alpha = isPulling ? 1 - pullProgress * 0.3 : 0.85;
+                
+                ctx.beginPath();
+                this.points.forEach((p, i) => {
+                    const x = this.x + Math.cos(p.angle) * p.radius;
+                    const y = this.y + Math.sin(p.angle) * p.radius;
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.closePath();
+                
+                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size * 1.5);
+                gradient.addColorStop(0, "hsla(" + this.color.h + ", " + this.color.s + "%, " + (this.color.l + 10) + "%, " + alpha + ")");
+                gradient.addColorStop(0.7, "hsla(" + this.color.h + ", " + this.color.s + "%, " + this.color.l + "%, " + (alpha * 0.9) + ")");
+                gradient.addColorStop(1, "hsla(" + this.color.h + ", " + (this.color.s - 10) + "%, " + (this.color.l - 5) + "%, " + (alpha * 0.7) + ")");
+                
+                ctx.fillStyle = gradient;
+                ctx.fill();
+                
+                ctx.strokeStyle = "hsla(" + this.color.h + ", " + this.color.s + "%, " + (this.color.l - 10) + "%, " + (alpha * 0.3) + ")";
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+        
+        function applyTool(x, y, lastX, lastY) {
+            if (currentTool === 'drop') return;
+            
+            const dx = x - lastX;
+            const dy = y - lastY;
+            const dist = Math.hypot(dx, dy);
+            
+            if (dist < 1) return;
+            
+            const toolWidth = currentTool === 'comb' ? 5 : 1;
+            const perpX = -dy / dist;
+            const perpY = dx / dist;
+            
+            for (let t = -toolWidth; t <= toolWidth; t++) {
+                const tx = x + perpX * t * 15;
+                const ty = y + perpY * t * 15;
+                
+                const gridX = Math.floor(tx / GRID_SIZE);
+                const gridY = Math.floor(ty / GRID_SIZE);
+                
+                if (gridX >= 0 && gridX < gridW && gridY >= 0 && gridY < gridH) {
+                    const cell = velocityField[gridY * gridW + gridX];
+                    cell.vx += dx * 0.3;
+                    cell.vy += dy * 0.3;
+                }
+            }
+        }
+        
+        function drawBackground() {
+            if (isPulling) {
+                const paperGrain = ctx.createLinearGradient(0, 0, W, H);
+                paperGrain.addColorStop(0, '#f8f4e8');
+                paperGrain.addColorStop(0.5, '#f5f0e5');
+                paperGrain.addColorStop(1, '#f2ede0');
+                ctx.fillStyle = paperGrain;
+            } else {
+                ctx.fillStyle = '#e8e0d5';
+            }
+            ctx.fillRect(0, 0, W, H);
+            
+            if (!isPulling) {
+                ctx.fillStyle = 'rgba(200, 190, 175, 0.3)';
+                for (let i = 0; i < 50; i++) {
+                    const x = (i * 137 + time * 2) % W;
+                    const y = (i * 89) % H;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 1, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+            
+            if (isPulling && pullProgress > 0.5) {
+                ctx.globalAlpha = (pullProgress - 0.5) * 0.1;
+                for (let i = 0; i < 100; i++) {
+                    const x = Math.random() * W;
+                    const y = Math.random() * H;
+                    ctx.fillStyle = 'rgba(180, 160, 140, 0.5)';
+                    ctx.fillRect(x, y, Math.random() * 3, 1);
+                }
+                ctx.globalAlpha = 1;
+            }
+        }
+        
+        function updateVelocityField() {
+            velocityField.forEach(cell => {
+                cell.vx *= 0.95;
+                cell.vy *= 0.95;
+            });
+        }
+        
+        function pullPaper() {
+            isPulling = true;
+            pullProgress = 0;
+            document.getElementById('bath-state').textContent = 'Pulling...';
+            
+            const pullAnim = () => {
+                pullProgress += 0.02;
+                if (pullProgress >= 1) {
+                    isPulling = false;
+                    document.getElementById('bath-state').textContent = 'Print Complete';
+                    setTimeout(() => {
+                        document.getElementById('bath-state').textContent = 'Ready';
+                    }, 2000);
+                    return;
+                }
+                requestAnimationFrame(pullAnim);
+            };
+            pullAnim();
+        }
+        
+        function updateStats() {
+            document.getElementById('drop-count').textContent = inkDrops.length;
+            let swirls = 0;
+            inkDrops.forEach(d => {
+                d.points.forEach(p => {
+                    if (Math.abs(p.vr) > 0.5) swirls++;
+                });
+            });
+            document.getElementById('swirl-count').textContent = Math.floor(swirls / 10);
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            updateVelocityField();
+            
+            inkDrops.forEach(d => {
+                d.update();
+                d.draw();
+            });
+            
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        let isDrawing = false;
+        let lastX = 0, lastY = 0;
+        
+        canvas.onmousedown = e => {
+            if (e.clientX < 200 && e.clientY < 380) return;
+            
+            isDrawing = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            
+            if (currentTool === 'drop') {
+                inkDrops.push(new InkDrop(e.clientX, e.clientY, currentColor));
+            }
+        };
+        
+        canvas.onmousemove = e => {
+            if (!isDrawing) return;
+            applyTool(e.clientX, e.clientY, lastX, lastY);
+            lastX = e.clientX;
+            lastY = e.clientY;
+        };
+        
+        canvas.onmouseup = () => { isDrawing = false; };
+        
+        document.getElementById('tension').oninput = e => {
+            surfaceTension = e.target.value / 100;
+            document.getElementById('tension-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('viscosity').oninput = e => {
+            viscosity = e.target.value / 100;
+            document.getElementById('viscosity-val').textContent = e.target.value;
+        };
+        
+        document.querySelectorAll('.color-btn').forEach(btn => {
+            btn.onclick = () => {
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentColor = parseInt(btn.dataset.color);
+            };
+        });
+        
+        document.querySelectorAll('.tool-btn').forEach(btn => {
+            btn.onclick = () => {
+                document.querySelectorAll('.tool-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentTool = btn.dataset.tool;
+            };
+        });
+        
+        document.getElementById('pull-btn').onclick = pullPaper;
+        document.getElementById('clear-btn').onclick = () => {
+            inkDrops.length = 0;
+            initBath();
+        };
+        
+        initBath();
+        animate();
+    </script>
+</body>
+</html>

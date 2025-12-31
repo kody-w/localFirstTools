@@ -1,0 +1,439 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Infinite procedural city flyover with Vaporwave aesthetic. Endless skyscrapers, neon lights, and retro-futuristic atmosphere generated on-the-fly.">
+    <!-- 3d, procedural, city, vaporwave, infinite, animation, threejs, aesthetic -->
+    <title>Infinite Vaporwave City</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', monospace;
+        }
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+        }
+        #ui {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: #ff00ff;
+            text-shadow: 0 0 5px #ff00ff;
+            pointer-events: none;
+            z-index: 10;
+        }
+        h1 {
+            font-size: 2rem;
+            margin: 0;
+            letter-spacing: 4px;
+            text-transform: uppercase;
+            font-style: italic;
+            background: linear-gradient(to bottom, #00ffff, #ff00ff);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .stats {
+            font-size: 0.8rem;
+            color: #00ffff;
+            margin-top: 5px;
+        }
+        #vhs-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+            z-index: 5;
+        }
+        .scanline {
+            width: 100%;
+            height: 100px;
+            z-index: 6;
+            background: linear-gradient(0deg, rgba(0,0,0,0) 0%, rgba(255, 255, 255, 0.1) 50%, rgba(0,0,0,0) 100%);
+            opacity: 0.1;
+            position: absolute;
+            bottom: 100%;
+            animation: scanline 10s linear infinite;
+            pointer-events: none;
+        }
+        @keyframes scanline {
+            0% { bottom: 100%; }
+            100% { bottom: -100px; }
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #00ffff;
+            padding: 10px;
+            border-radius: 5px;
+            pointer-events: auto;
+            z-index: 10;
+        }
+        button {
+            background: transparent;
+            border: 1px solid #ff00ff;
+            color: #ff00ff;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-family: inherit;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: rgba(255, 0, 255, 0.2);
+            box-shadow: 0 0 10px #ff00ff;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div id="vhs-overlay"></div>
+    <div class="scanline"></div>
+    
+    <div id="ui">
+        <h1>NEON HORIZON</h1>
+        <div class="stats">
+            SPEED: <span id="speed-val">100</span> KM/H<br>
+            DIST: <span id="dist-val">0</span> KM
+        </div>
+    </div>
+
+    <div id="controls">
+        <button id="toggle-cam">Toggle Camera</button>
+    </div>
+
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { GlitchPass } from 'three/addons/postprocessing/GlitchPass.js';
+
+        // --- Configuration ---
+        const CONFIG = {
+            chunkSize: 200, // Size of one city block chunk
+            renderDistance: 6, // How many chunks ahead to render
+            fogDensity: 0.008,
+            speed: 40, // Units per second
+            buildingDensity: 0.6,
+            colors: {
+                fog: 0x0a001a,
+                ground: 0x1a0033,
+                grid: 0xff00ff,
+                buildingBase: 0x000033,
+                neon1: 0x00ffff, // Cyan
+                neon2: 0xff00ff, // Magenta
+                neon3: 0xffff00  // Yellow
+            }
+        };
+
+        // --- State ---
+        const state = {
+            chunks: [], // Array of active chunks
+            currentChunkZ: 0,
+            distanceTraveled: 0,
+            cameraMode: 'fly', // 'fly' or 'street'
+            time: 0
+        };
+
+        // --- Setup ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(CONFIG.colors.fog);
+        scene.fog = new THREE.FogExp2(CONFIG.colors.fog, CONFIG.fogDensity);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: false }); // Disable AA for retro feel
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        // --- Post Processing ---
+        const renderScene = new RenderPass(scene, camera);
+        
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.2;
+        bloomPass.strength = 1.5;
+        bloomPass.radius = 0.5;
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Materials ---
+        // Reuse materials for performance
+        const materials = {
+            building: new THREE.MeshLambertMaterial({ color: CONFIG.colors.buildingBase }),
+            window: new THREE.MeshBasicMaterial({ color: CONFIG.colors.neon1 }),
+            gridLine: new THREE.LineBasicMaterial({ color: CONFIG.colors.grid, transparent: true, opacity: 0.5 }),
+            sun: new THREE.MeshBasicMaterial({ 
+                color: 0xff00aa, 
+                transparent: true, 
+                fog: false 
+            })
+        };
+
+        // --- Sun ---
+        // Vaporwave sun with stripes
+        const sunGeo = new THREE.CircleGeometry(300, 32);
+        const sun = new THREE.Mesh(sunGeo, materials.sun);
+        sun.position.set(0, 100, -800);
+        scene.add(sun);
+
+        // Sun stripes (using simple planes to mask)
+        for(let i=0; i<8; i++) {
+            const h = 5 + i * 2;
+            const y = -50 + i * 15;
+            const stripe = new THREE.Mesh(
+                new THREE.PlaneGeometry(600, h),
+                new THREE.MeshBasicMaterial({ color: CONFIG.colors.fog, fog: false })
+            );
+            stripe.position.set(0, y, 1); // Slightly in front of sun
+            sun.add(stripe);
+        }
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0x404040); // Soft white light
+        scene.add(ambientLight);
+
+        const dirLight = new THREE.DirectionalLight(0xff00ff, 0.5);
+        dirLight.position.set(0, 1, 0);
+        scene.add(dirLight);
+
+        // --- City Generation ---
+        
+        class Chunk {
+            constructor(zPos) {
+                this.zPos = zPos;
+                this.group = new THREE.Group();
+                this.group.position.z = zPos;
+                
+                this.generateGround();
+                this.generateBuildings();
+                
+                scene.add(this.group);
+            }
+            
+            generateGround() {
+                // Grid ground
+                const size = CONFIG.chunkSize;
+                const divisions = 10;
+                
+                const gridHelper = new THREE.GridHelper(size, divisions, CONFIG.colors.grid, CONFIG.colors.grid);
+                gridHelper.position.y = 0;
+                gridHelper.position.z = size / 2; // Center it relative to chunk start
+                // Fade grid into distance? 
+                // Three.js GridHelper doesn't support opacity easily without custom shader or modifying material
+                gridHelper.material = materials.gridLine;
+                this.group.add(gridHelper);
+                
+                // Solid ground below grid to hide background
+                const plane = new THREE.Mesh(
+                    new THREE.PlaneGeometry(size, size),
+                    new THREE.MeshBasicMaterial({ color: CONFIG.colors.ground })
+                );
+                plane.rotation.x = -Math.PI / 2;
+                plane.position.y = -0.1;
+                plane.position.z = size / 2;
+                this.group.add(plane);
+            }
+            
+            generateBuildings() {
+                const size = CONFIG.chunkSize;
+                const blockSize = size / 10; // 10x10 grid per chunk
+                
+                // Leave center path clear for "road"
+                const roadWidth = 2; 
+                
+                for(let x = 0; x < 10; x++) {
+                    for(let z = 0; z < 10; z++) {
+                        // Skip road
+                        if (x >= 5 - roadWidth && x < 5 + roadWidth) continue;
+                        
+                        if (Math.random() < CONFIG.buildingDensity) {
+                            const h = 10 + Math.random() * 50 + (Math.random() < 0.1 ? 60 : 0); // Occasional supertall
+                            const w = blockSize * 0.8;
+                            const d = blockSize * 0.8;
+                            
+                            const geometry = new THREE.BoxGeometry(w, h, d);
+                            const mesh = new THREE.Mesh(geometry, materials.building);
+                            
+                            mesh.position.x = (x - 4.5) * blockSize;
+                            mesh.position.y = h / 2;
+                            mesh.position.z = z * blockSize;
+                            
+                            this.group.add(mesh);
+                            
+                            // Add neon edges or windows
+                            if (Math.random() < 0.5) {
+                                this.addNeon(mesh, w, h, d);
+                            }
+                        }
+                    }
+                }
+            }
+            
+            addNeon(parent, w, h, d) {
+                // Random neon strip
+                const type = Math.floor(Math.random() * 3);
+                const color = [CONFIG.colors.neon1, CONFIG.colors.neon2, CONFIG.colors.neon3][Math.floor(Math.random()*3)];
+                const mat = new THREE.MeshBasicMaterial({ color: color });
+                
+                if (type === 0) {
+                    // Vertical strip
+                    const geo = new THREE.BoxGeometry(w * 0.1, h, d * 0.1);
+                    const mesh = new THREE.Mesh(geo, mat);
+                    mesh.position.x = (Math.random() - 0.5) * w;
+                    mesh.position.z = d/2 + 0.1;
+                    parent.add(mesh);
+                } else if (type === 1) {
+                    // Top rim
+                    const geo = new THREE.BoxGeometry(w, 1, d);
+                    const mesh = new THREE.Mesh(geo, mat);
+                    mesh.position.y = h/2 - 0.5;
+                    parent.add(mesh);
+                } else {
+                    // Random windows
+                    const winCount = Math.floor(h / 5);
+                    for(let i=0; i<winCount; i++) {
+                        if(Math.random() < 0.3) {
+                            const geo = new THREE.PlaneGeometry(w * 0.6, 2);
+                            const mesh = new THREE.Mesh(geo, mat);
+                            mesh.position.z = d/2 + 0.1;
+                            mesh.position.y = (i - winCount/2) * 4;
+                            parent.add(mesh);
+                        }
+                    }
+                }
+            }
+            
+            dispose() {
+                scene.remove(this.group);
+                // Cleanup geometries to prevent memory leaks
+                this.group.traverse(obj => {
+                    if(obj.geometry) obj.geometry.dispose();
+                });
+            }
+        }
+
+        // --- Logic ---
+        
+        function init() {
+            // Initial chunks
+            for(let i=0; i<CONFIG.renderDistance; i++) {
+                const chunk = new Chunk(-i * CONFIG.chunkSize);
+                state.chunks.push(chunk);
+            }
+            
+            updateCamera();
+        }
+        
+        function updateCamera() {
+            if (state.cameraMode === 'fly') {
+                camera.position.y = 40;
+                camera.position.x = 0;
+                camera.rotation.x = 0;
+            } else {
+                // Street view
+                camera.position.y = 2;
+                camera.position.x = 0;
+                camera.rotation.x = 0.1;
+            }
+        }
+
+        function updateChunks() {
+            // Move chunks towards camera (positive Z)
+            // Or move camera negative Z?
+            // Moving camera is easier for logic, but floating point precision issues eventually.
+            // Let's move camera negative Z, and reset when crossing a chunk boundary.
+            
+            // Actually, let's keep camera at Z=0 and move world positive Z.
+            // This creates the "treadmill" effect.
+            
+            const moveDist = CONFIG.speed * 0.016; // Approx per frame
+            state.distanceTraveled += moveDist;
+            
+            // Move all chunks
+            for(const chunk of state.chunks) {
+                chunk.group.position.z += moveDist;
+            }
+            
+            // Check if first chunk is behind camera
+            if (state.chunks[0].group.position.z > CONFIG.chunkSize) {
+                // Remove old chunk
+                const oldChunk = state.chunks.shift();
+                oldChunk.dispose();
+                
+                // Add new chunk at the end
+                const lastChunkZ = state.chunks[state.chunks.length - 1].group.position.z;
+                const newChunk = new Chunk(lastChunkZ - CONFIG.chunkSize);
+                state.chunks.push(newChunk);
+            }
+            
+            // Update UI
+            document.getElementById('dist-val').textContent = Math.floor(state.distanceTraveled / 100);
+        }
+
+        // --- Interaction ---
+        document.getElementById('toggle-cam').addEventListener('click', () => {
+            state.cameraMode = state.cameraMode === 'fly' ? 'street' : 'fly';
+            updateCamera();
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- Animation Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            state.time += 0.01;
+            
+            updateChunks();
+            
+            // Camera sway
+            if (state.cameraMode === 'fly') {
+                camera.position.x = Math.sin(state.time * 0.5) * 10;
+                camera.rotation.z = Math.sin(state.time * 0.5) * 0.05;
+                camera.position.y = 40 + Math.sin(state.time) * 2;
+            }
+            
+            // Sun follows camera (illusion of infinity)
+            // Since we move the world and keep camera at 0, sun stays at fixed Z relative to camera
+            // But we might want it to bob slightly
+            sun.position.y = 100 + Math.sin(state.time * 0.2) * 5;
+
+            composer.render();
+        }
+
+        init();
+        animate();
+
+    </script>
+</body>
+</html>

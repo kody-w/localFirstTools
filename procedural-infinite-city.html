@@ -1,0 +1,1007 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Infinite Cyberpunk City</title>
+    <meta name="description" content="Infinite procedural cyberpunk city flyover with seeded generation.">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #050510;
+            color: #ff00ff;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+        }
+        #hud {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            text-align: right;
+            pointer-events: none;
+        }
+        .hud-text {
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 2px 2px 0px #000;
+            color: #00ffff;
+        }
+        .sub-text {
+            font-size: 14px;
+            color: #ff00ff;
+            text-shadow: 1px 1px 0px #000;
+        }
+        #wanted-level {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 5px;
+        }
+        .star {
+            color: #333;
+            font-size: 24px;
+            text-shadow: 1px 1px 0 #000;
+        }
+        .star.active {
+            color: #ffff00;
+        }
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.5);
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div id="ui">
+        <h2 style="margin:0; text-shadow: 2px 2px 0 #000; font-style: italic;">NEON CITY STORIES</h2>
+    </div>
+
+    <div id="wanted-level">
+        <div class="star">★</div>
+        <div class="star">★</div>
+        <div class="star">★</div>
+        <div class="star">★</div>
+        <div class="star">★</div>
+    </div>
+
+    <div id="hud">
+        <div class="hud-text" id="speed">0 KM/H</div>
+        <div class="sub-text" id="zone">DOWNTOWN</div>
+    </div>
+
+    <div id="controls-hint">
+        WASD / ARROWS to Drive • SPACE to Brake • SHIFT for Turbo
+    </div>
+
+<script>
+/**
+ * NEON CITY STORIES (Procedural GTA-style)
+ * ----------------------------------------
+ * Infinite procedural city driving simulator.
+ */
+
+const CONFIG = {
+    fov: 800,
+    viewDistance: 3000,
+    blockSize: 600, // City block size
+    roadWidth: 250,
+    buildingHeight: 800,
+    cameraHeight: 150,
+    cameraDist: 400,
+    fogColor: '#050510'
+};
+
+// --- INPUT ---
+const keys = {};
+window.addEventListener('keydown', e => keys[e.key.toLowerCase()] = true);
+window.addEventListener('keyup', e => keys[e.key.toLowerCase()] = false);
+
+// --- MATH UTILS ---
+const PI = Math.PI;
+const TWO_PI = Math.PI * 2;
+function dist(x1, y1, x2, y2) { return Math.sqrt((x2-x1)**2 + (y2-y1)**2); }
+
+// --- SEEDED RANDOM ---
+class Random {
+    constructor(seed) { this.seed = seed; }
+    at(x, z) {
+        let h = 0x811c9dc5;
+        h ^= x; h = Math.imul(h, 0x01000193);
+        h ^= z; h = Math.imul(h, 0x01000193);
+        h ^= this.seed; h = Math.imul(h, 0x01000193);
+        return (h >>> 0) / 4294967296;
+    }
+}
+const rng = new Random(1337);
+
+// --- WORLD GENERATION ---
+const World = {
+    getBlock: function(x, z) {
+        // Convert world coords to grid coords
+        const gx = Math.floor(x / CONFIG.blockSize);
+        const gz = Math.floor(z / CONFIG.blockSize);
+        
+        // Use RNG to determine block type
+        const val = rng.at(gx, gz);
+        
+        // Grid logic: Roads are at coordinates divisible by something?
+        // Let's make a grid of roads.
+        // If we are near the edge of a block, it's a road.
+        
+        const localX = Math.abs(x % CONFIG.blockSize);
+        const localZ = Math.abs(z % CONFIG.blockSize);
+        
+        // Road check
+        const roadHalf = CONFIG.roadWidth / 2;
+        const isRoadX = localX < roadHalf || localX > CONFIG.blockSize - roadHalf;
+        const isRoadZ = localZ < roadHalf || localZ > CONFIG.blockSize - roadHalf;
+        
+        if (isRoadX || isRoadZ) return { type: 'road' };
+        
+        // Building
+        return {
+            type: 'building',
+            height: CONFIG.buildingHeight * (0.5 + val),
+            color: val > 0.5 ? '#00ffff' : '#ff00ff',
+            val: val
+        };
+    },
+    
+    // Get all collidable objects in range
+    getColliders: function(cx, cz, range) {
+        const colliders = [];
+        const startX = Math.floor((cx - range) / CONFIG.blockSize);
+        const endX = Math.floor((cx + range) / CONFIG.blockSize);
+        const startZ = Math.floor((cz - range) / CONFIG.blockSize);
+        const endZ = Math.floor((cz + range) / CONFIG.blockSize);
+
+        for (let z = startZ; z <= endZ; z++) {
+            for (let x = startX; x <= endX; x++) {
+                // Center of the block
+                const bx = x * CONFIG.blockSize + CONFIG.blockSize/2;
+                const bz = z * CONFIG.blockSize + CONFIG.blockSize/2;
+                
+                // Building size (block size minus road width)
+                const size = CONFIG.blockSize - CONFIG.roadWidth;
+                
+                // Check if this grid cell is a building (it always is in the center of a block in this logic)
+                // Unless we want parks?
+                const val = rng.at(x, z);
+                if (val > 0.1) { // 10% chance of park/empty lot
+                    colliders.push({
+                        x: bx, z: bz,
+                        w: size, d: size,
+                        h: CONFIG.buildingHeight * (0.5 + val),
+                        color: val > 0.5 ? '#00ffff' : '#ff00ff',
+                        val: val,
+                        type: 'building'
+                    });
+                }
+            }
+        }
+        return colliders;
+    }
+};
+
+// --- CAR PHYSICS ---
+const Car = {
+    x: 0, y: 0, z: 0,
+    speed: 0,
+    angle: 0,
+    vx: 0, vz: 0, // Velocity vector
+    
+    // Stats
+    maxSpeed: 80,
+    accel: 0.8,
+    friction: 0.98,
+    turnSpeed: 0.06,
+    driftFactor: 0.92, // How much velocity is retained in direction of travel vs facing
+    
+    update: function() {
+        // Input
+        let throttle = 0;
+        if (keys['w'] || keys['arrowup']) throttle = 1;
+        if (keys['s'] || keys['arrowdown']) throttle = -1;
+        
+        // Turbo
+        const max = keys['shift'] ? this.maxSpeed * 1.5 : this.maxSpeed;
+        
+        // Acceleration
+        if (throttle !== 0) {
+            this.speed += throttle * this.accel;
+        } else {
+            this.speed *= this.friction; // Drag when no throttle
+        }
+        
+        // Cap speed
+        if (this.speed > max) this.speed = max;
+        if (this.speed < -max/2) this.speed = -max/2;
+        
+        // Turning
+        if (Math.abs(this.speed) > 0.5) {
+            const dir = this.speed > 0 ? 1 : -1;
+            let turn = 0;
+            if (keys['a'] || keys['arrowleft']) turn = -1;
+            if (keys['d'] || keys['arrowright']) turn = 1;
+            
+            // Drifting logic: Turning changes angle, but velocity vector lags behind
+            this.angle += turn * this.turnSpeed * dir;
+        }
+        
+        // Physics Vector Math
+        // Current velocity vector
+        // We want to blend the current velocity vector towards the new heading vector
+        
+        // Heading vector
+        const hx = Math.sin(this.angle);
+        const hz = Math.cos(this.angle);
+        
+        // If we are moving, apply force in heading direction
+        // But also maintain some momentum (drift)
+        
+        // Simple arcade physics:
+        // 1. Calculate ideal velocity based on speed and angle
+        const targetVx = hx * this.speed;
+        const targetVz = hz * this.speed;
+        
+        // 2. Blend current velocity towards target (grip)
+        // Lower driftFactor = more grip. Higher = more drift.
+        // If holding space (handbrake), drift factor increases
+        const grip = keys[' '] ? 0.02 : 0.15;
+        
+        this.vx = this.vx * (1 - grip) + targetVx * grip;
+        this.vz = this.vz * (1 - grip) + targetVz * grip;
+        
+        // 3. Apply position
+        // Physics
+        this.vy += 0.8; // Gravity
+        
+        this.x += this.vx;
+        this.z += this.vz;
+        this.y += this.vy;
+        
+        // Ground Collision
+        if (this.y > 0) {
+            this.y = 0;
+            this.vy = 0;
+            // Friction
+            // this.vx *= 0.95; // Already handled by grip logic above?
+            // Actually, grip logic assumes we are on ground.
+        } else {
+            // Air resistance
+            this.vx *= 0.995;
+            this.vz *= 0.995;
+        }
+        
+        // Collision Detection
+        if (this.checkCollision(this.x, this.z, this.y)) {
+            // Bounce / Slide
+            this.speed *= -0.5;
+            this.vx *= -0.8; // More bounce
+            this.vz *= -0.8;
+            
+            // Launch up if hitting fast
+            const impactSpeed = Math.sqrt(this.vx*this.vx + this.vz*this.vz);
+            if (impactSpeed > 5) {
+                this.vy -= impactSpeed * 0.5;
+            }
+            
+            // Push out slightly to prevent sticking
+            this.x -= this.vx * 2;
+            this.z -= this.vz * 2;
+        }
+        
+        // Update HUD
+        // Calculate actual speed from velocity vector
+        const actualSpeed = Math.sqrt(this.vx*this.vx + this.vz*this.vz);
+        document.getElementById('speed').innerText = Math.floor(actualSpeed * 3) + " KM/H";
+    },
+    
+    checkCollision: function(x, z, y) {
+        // Simple point collision with building rectangles
+        // Find which block we are in
+        const gx = Math.floor(x / CONFIG.blockSize);
+        const gz = Math.floor(z / CONFIG.blockSize);
+        
+        // Center of that block
+        const bx = gx * CONFIG.blockSize + CONFIG.blockSize/2;
+        const bz = gz * CONFIG.blockSize + CONFIG.blockSize/2;
+        
+        // Building bounds
+        const size = CONFIG.blockSize - CONFIG.roadWidth;
+        const half = size / 2;
+        
+        // Check if inside building footprint
+        // Also check if building exists (parks)
+        const val = rng.at(gx, gz);
+        if (val <= 0.1) return false; // Park
+        
+        // Height check!
+        // Building height
+        const h = CONFIG.buildingHeight * (0.5 + val);
+        // y is negative up. If y < -h, we are above the building.
+        if (y !== undefined && y < -h) return false;
+        
+        // Car size buffer (approx 20 units)
+        const buffer = 20;
+        
+        if (x > bx - half - buffer && x < bx + half + buffer && 
+            z > bz - half - buffer && z < bz + half + buffer) {
+            return true;
+        }
+        return false;
+    }
+};
+
+// --- TRAFFIC AI ---
+const TrafficManager = {
+    cars: [],
+    maxCars: 150, // DEMOLITION DERBY MODE
+    spawnDist: 1000,
+    despawnDist: 1800,
+    
+    update: function() {
+        // Spawn aggressively
+        if (this.cars.length < this.maxCars) {
+            for(let k=0; k<5; k++) this.spawnCar();
+        }
+        
+        // Update existing
+        for (let i = this.cars.length - 1; i >= 0; i--) {
+            const car = this.cars[i];
+            
+            // Physics Update
+            car.x += car.vx;
+            car.z += car.vz;
+            car.y += car.vy;
+            
+            // Gravity (Y is negative UP)
+            car.vy += 0.8; // Always apply gravity
+            
+            if (car.y > 0) { // Hit ground
+                car.y = 0;
+                car.vy = -car.vy * 0.5; // Bouncy ground
+                if (Math.abs(car.vy) < 1) car.vy = 0;
+                
+                // Ground friction only when ON GROUND
+                if (car.crashed > 0) {
+                    car.vx *= 0.99; 
+                    car.vz *= 0.99;
+                    car.rotVel *= 0.98;
+                } else {
+                    car.vx *= 0.95;
+                    car.vz *= 0.95;
+                    car.rotVel *= 0.9;
+                }
+            } else {
+                // Air resistance
+                car.vx *= 0.995;
+                car.vz *= 0.995;
+                car.rotVel *= 0.995;
+            }
+            
+            car.angle += car.rotVel;
+            
+            // Building Collision for Traffic
+            if (Car.checkCollision(car.x, car.z, car.y)) {
+                 // Bounce off building
+                 car.vx *= -1.2; // Super bounce
+                 car.vz *= -1.2;
+                 car.x += car.vx * 2; // Push out
+                 car.z += car.vz * 2;
+                 car.rotVel += (Math.random() - 0.5) * 0.5; // Spin
+                 car.vy -= 5 + Math.random() * 10; // Launch UP!
+                 car.crashed = 500;
+            }
+
+            // Despawn if too far
+            const d = dist(Car.x, Car.z, car.x, car.z);
+            if (d > this.despawnDist) {
+                this.cars.splice(i, 1);
+                continue;
+            }
+            
+            // Collision with other traffic
+            for (let j = i + 1; j < this.cars.length; j++) {
+                const other = this.cars[j];
+                
+                // 3D Collision Check
+                const dx = car.x - other.x;
+                const dz = car.z - other.z;
+                const dy = car.y - other.y;
+                
+                const distXZ = Math.sqrt(dx*dx + dz*dz);
+                const distY = Math.abs(dy);
+                
+                // Car dimensions approx: width/depth ~40, height ~12
+                if (distXZ < 40 && distY < 12) { // 3D Collision
+                    
+                    if (distXZ > 0) {
+                        // Normal
+                        const nx = dx / distXZ;
+                        const nz = dz / distXZ;
+                        
+                        // Relative velocity
+                        const rvx = car.vx - other.vx;
+                        const rvz = car.vz - other.vz;
+                        const rvy = car.vy - other.vy;
+                        
+                        const velAlongNormal = rvx * nx + rvz * nz;
+                        
+                        // Vertical Collision (Stacking)
+                        if (distY < 10 && Math.abs(dy) > 2) {
+                            // One is on top of the other
+                            if (car.y < other.y) { // Car is above Other (y is negative up)
+                                if (car.vy > 0) { // Falling down onto other
+                                    car.vy = -car.vy * 0.3; // Small bounce
+                                    car.y = other.y - 12; // Sit on top
+                                    // Friction from car below
+                                    car.vx = car.vx * 0.9 + other.vx * 0.1;
+                                    car.vz = car.vz * 0.9 + other.vz * 0.1;
+                                }
+                            } else { // Other is above Car
+                                if (other.vy > 0) {
+                                    other.vy = -other.vy * 0.3;
+                                    other.y = car.y - 12;
+                                    other.vx = other.vx * 0.9 + car.vx * 0.1;
+                                    other.vz = other.vz * 0.9 + car.vz * 0.1;
+                                }
+                            }
+                        }
+                        
+                        if (velAlongNormal < 0) { // Only resolve if moving towards each other horizontally
+                            // REAL PHYSICS: Momentum Transfer
+                            // m1 = m2 (equal mass)
+                            // v1' = v1 - (1+e)(v1-v2).n * n / 2
+                            
+                            const restitution = 0.5; // Less bouncy, more "crunchy"
+                            const j = -(1 + restitution) * velAlongNormal;
+                            const impulse = j / 2; // Equal mass assumption
+                            
+                            const ix = impulse * nx;
+                            const iz = impulse * nz;
+                            
+                            // Apply impulse directly to velocity
+                            car.vx += ix;
+                            car.vz += iz;
+                            other.vx -= ix;
+                            other.vz -= iz;
+                            
+                            // ROTATIONAL PHYSICS (Approximated)
+                            // Impact point relative to center
+                            // We don't have exact impact point, assume edge
+                            // Add spin based on how off-center the hit is (tangential velocity)
+                            
+                            const tx = -nz; // Tangent vector
+                            const tz = nx;
+                            const rvt = (car.vx - other.vx) * tx + (car.vz - other.vz) * tz;
+                            
+                            // Transfer linear momentum to angular momentum
+                            car.rotVel += rvt * 0.01;
+                            other.rotVel -= rvt * 0.01;
+                            
+                            // Friction/Grip loss on impact
+                            // Reduce velocity slightly to simulate energy loss (crunch)
+                            car.vx *= 0.9;
+                            car.vz *= 0.9;
+                            other.vx *= 0.9;
+                            other.vz *= 0.9;
+                            
+                            // Vertical pop only on high speed impacts
+                            if (Math.abs(velAlongNormal) > 20) {
+                                const lift = Math.abs(velAlongNormal) * 0.2;
+                                car.vy -= lift;
+                                other.vy -= lift;
+                                
+                                // Add random tumble
+                                car.rotVel += (Math.random() - 0.5) * 0.2;
+                                other.rotVel += (Math.random() - 0.5) * 0.2;
+                            }
+                            
+                            // Disable AI for a bit
+                            car.crashed = 200;
+                            other.crashed = 200;
+                        }
+                        
+                        // Separation (Horizontal only)
+                        if (distY < 5) { // Only separate horizontally if they are roughly at same level
+                            const overlap = 40 - distXZ;
+                            const sx = nx * overlap * 0.5;
+                            const sz = nz * overlap * 0.5;
+                            car.x += sx;
+                            car.z += sz;
+                            other.x -= sx;
+                            other.z -= sz;
+                        }
+                    }
+                }
+            }
+            
+            // Collision with Player
+            const dPlayer = dist(car.x, car.z, Car.x, Car.z);
+            if (dPlayer < 40) {
+                const dx = car.x - Car.x;
+                const dz = car.z - Car.z;
+                const dist = Math.sqrt(dx*dx + dz*dz);
+                
+                if (dist > 0) {
+                    const nx = dx / dist;
+                    const nz = dz / dist;
+                    
+                    const rvx = car.vx - Car.vx;
+                    const rvz = car.vz - Car.vz;
+                    const velAlongNormal = rvx * nx + rvz * nz;
+                    
+                    if (velAlongNormal < 0) {
+                        // Player vs Car Physics
+                        // Player is heavier? Let's say equal mass for now for maximum chaos
+                        const restitution = 0.4; // Crunchy
+                        const j = -(1 + restitution) * velAlongNormal;
+                        const impulse = j / 2;
+                        
+                        const ix = impulse * nx;
+                        const iz = impulse * nz;
+                        
+                        car.vx += ix;
+                        car.vz += iz;
+                        Car.vx -= ix;
+                        Car.vz -= iz;
+                        
+                        // Spin
+                        const tx = -nz;
+                        const tz = nx;
+                        const rvt = (car.vx - Car.vx) * tx + (car.vz - Car.vz) * tz;
+                        car.rotVel += rvt * 0.015;
+                        
+                        // Vertical
+                        if (Math.abs(velAlongNormal) > 30) {
+                            car.vy -= Math.abs(velAlongNormal) * 0.3;
+                            // Player doesn't fly as easily, but maybe a bit
+                        }
+                        
+                        car.crashed = 200;
+                        
+                        // Energy loss
+                        car.vx *= 0.8;
+                        car.vz *= 0.8;
+                        Car.vx *= 0.9; // Player loses less speed
+                        Car.vz *= 0.9;
+                    }
+                    
+                    const overlap = 40 - dist;
+                    const sx = nx * overlap * 0.5;
+                    const sz = nz * overlap * 0.5;
+                    car.x += sx;
+                    car.z += sz;
+                }
+            }
+            
+            // AI Logic
+            if (car.crashed > 0) {
+                car.crashed--;
+                // No driving control
+            } else {
+                // Drive forward
+                const targetVx = Math.sin(car.angle) * car.maxSpeed;
+                const targetVz = Math.cos(car.angle) * car.maxSpeed;
+                
+                // Accelerate towards target velocity
+                car.vx = car.vx * 0.95 + targetVx * 0.05;
+                car.vz = car.vz * 0.95 + targetVz * 0.05;
+                
+                // Random lane changes / swerving
+                if (Math.random() < 0.02) {
+                     car.angle += (Math.random() - 0.5) * 0.5;
+                }
+            }
+        }
+    },
+    
+    spawnCar: function() {
+        const angle = Math.random() * TWO_PI;
+        const d = this.spawnDist * (0.2 + Math.random() * 0.3); // Spawn closer
+        
+        let x = Car.x + Math.sin(angle) * d;
+        let z = Car.z + Math.cos(angle) * d;
+        
+        const gx = Math.round(x / CONFIG.blockSize) * CONFIG.blockSize;
+        const gz = Math.round(z / CONFIG.blockSize) * CONFIG.blockSize;
+        
+        const dx = Math.abs(x - gx);
+        const dz = Math.abs(z - gz);
+        
+        let spawnX, spawnZ, spawnAngle;
+        const laneOffset = CONFIG.roadWidth / 4;
+        
+        // Chaos: 40% chance to spawn going WRONG WAY
+        const wrongWay = Math.random() < 0.4;
+        
+        if (dx < dz) {
+            spawnX = gx;
+            spawnZ = z;
+            if (Math.random() > 0.5) {
+                spawnX += laneOffset;
+                spawnAngle = wrongWay ? PI : 0;
+            } else {
+                spawnX -= laneOffset;
+                spawnAngle = wrongWay ? 0 : PI;
+            }
+        } else {
+            spawnZ = gz;
+            spawnX = x;
+            if (Math.random() > 0.5) {
+                spawnZ -= laneOffset;
+                spawnAngle = wrongWay ? PI/2 : -PI/2;
+            } else {
+                spawnZ += laneOffset;
+                spawnAngle = wrongWay ? -PI/2 : PI/2;
+            }
+        }
+        
+        const speed = 50 + Math.random() * 50;
+        
+        this.cars.push({
+            x: spawnX, z: spawnZ, y: 0,
+            angle: spawnAngle,
+            vx: Math.sin(spawnAngle) * speed,
+            vz: Math.cos(spawnAngle) * speed,
+            vy: 0,
+            rotVel: 0,
+            maxSpeed: 60 + Math.random() * 40,
+            color: Math.random() > 0.5 ? '#ffff00' : '#00ff00',
+            w: 18, d: 35, h: 12,
+            type: 'traffic',
+            crashed: 0
+        });
+    }
+};
+
+// --- RENDERER ---
+class Renderer {
+    constructor() {
+        this.canvas = document.getElementById('canvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+    }
+    
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+        this.cx = this.canvas.width / 2;
+        this.cy = this.canvas.height / 2;
+    }
+    
+    project(x, y, z, camX, camY, camZ, camAngle) {
+        // Translate
+        const dx = x - camX;
+        const dy = y - camY;
+        const dz = z - camZ;
+        
+        // Rotate (Yaw only)
+        const cos = Math.cos(-camAngle);
+        const sin = Math.sin(-camAngle);
+        
+        const rx = dx * cos - dz * sin;
+        const ry = dy;
+        const rz = dx * sin + dz * cos;
+        
+        if (rz <= 10) return { visible: false };
+        
+        const scale = CONFIG.fov / rz;
+        const x2d = rx * scale + this.cx;
+        const y2d = ry * scale + this.cy;
+        
+        return { x: x2d, y: y2d, scale: scale, dist: rz, visible: true };
+    }
+    
+    fadeColor(hex, opacity) {
+        const r = parseInt(hex.substr(1, 2), 16);
+        const g = parseInt(hex.substr(3, 2), 16);
+        const b = parseInt(hex.substr(5, 2), 16);
+        return `rgba(${r},${g},${b},${opacity})`;
+    }
+    
+    drawPoly(points, color, stroke) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(points[0].x, points[0].y);
+        for(let i=1; i<points.length; i++) this.ctx.lineTo(points[i].x, points[i].y);
+        this.ctx.closePath();
+        if (color) { this.ctx.fillStyle = color; this.ctx.fill(); }
+        if (stroke) { this.ctx.strokeStyle = stroke; this.ctx.stroke(); }
+    }
+    
+    render() {
+        // Camera follows car
+        // Smooth camera
+        const targetCamX = Car.x - Math.sin(Car.angle) * CONFIG.cameraDist;
+        const targetCamZ = Car.z - Math.cos(Car.angle) * CONFIG.cameraDist;
+        
+        // Simple lerp for camera lag
+        if (!this.camX) { this.camX = targetCamX; this.camZ = targetCamZ; }
+        this.camX += (targetCamX - this.camX) * 0.1;
+        this.camZ += (targetCamZ - this.camZ) * 0.1;
+        
+        const camY = -CONFIG.cameraHeight;
+        const camAngle = Car.angle; // Locked to car angle for now
+        
+        // Clear
+        this.ctx.fillStyle = CONFIG.fogColor;
+        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        
+        // Get objects
+        const objects = World.getColliders(Car.x, Car.z, CONFIG.viewDistance);
+        
+        // Add Car to render list
+        objects.push({
+            type: 'car',
+            x: Car.x, z: Car.z, y: 0,
+            w: 20, d: 40, h: 15,
+            angle: Car.angle
+        });
+        
+        // Add Traffic
+        TrafficManager.cars.forEach(car => {
+            objects.push(car);
+        });
+        
+        // Sort by distance
+        objects.forEach(obj => {
+            obj.distSq = (obj.x - this.camX)**2 + (obj.z - this.camZ)**2;
+        });
+        objects.sort((a, b) => b.distSq - a.distSq);
+        
+        // Draw
+        objects.forEach(obj => {
+            if (obj.type === 'building') this.drawBuilding(obj, this.camX, camY, this.camZ, camAngle);
+            else if (obj.type === 'car') this.drawCar(obj, this.camX, camY, this.camZ, camAngle);
+            else if (obj.type === 'traffic') this.drawTraffic(obj, this.camX, camY, this.camZ, camAngle);
+        });
+    }
+    
+    drawBuilding(obj, cx, cy, cz, ca) {
+        const groundY = 0;
+        const roofY = -obj.h;
+        
+        // Vertices
+        const v = [
+            { x: obj.x - obj.w/2, y: roofY, z: obj.z - obj.d/2 },
+            { x: obj.x + obj.w/2, y: roofY, z: obj.z - obj.d/2 },
+            { x: obj.x + obj.w/2, y: groundY, z: obj.z - obj.d/2 },
+            { x: obj.x - obj.w/2, y: groundY, z: obj.z - obj.d/2 },
+            { x: obj.x - obj.w/2, y: roofY, z: obj.z + obj.d/2 },
+            { x: obj.x + obj.w/2, y: roofY, z: obj.z + obj.d/2 },
+            { x: obj.x + obj.w/2, y: groundY, z: obj.z + obj.d/2 },
+            { x: obj.x - obj.w/2, y: groundY, z: obj.z + obj.d/2 }
+        ];
+        
+        const p = v.map(vert => this.project(vert.x, vert.y, vert.z, cx, cy, cz, ca));
+        
+        // Visibility check
+        if (p.every(pt => !pt.visible)) return;
+        
+        // Distance alpha
+        const dist = Math.sqrt(obj.distSq);
+        const alpha = Math.max(0, Math.min(1, 1 - (dist / CONFIG.viewDistance)));
+        if (alpha <= 0) return;
+        
+        const fillColor = this.fadeColor('#000000', alpha);
+        const strokeColor = this.fadeColor(obj.color, alpha);
+        const windowColor = this.fadeColor(obj.val > 0.5 ? '#00ffff' : '#ff00ff', alpha * 0.8);
+        
+        this.ctx.lineWidth = 1;
+        
+        // Faces (Painter's algo for faces is hard, just draw visible ones based on relative pos)
+        // Or just draw all back-to-front?
+        // Simple box drawing:
+        
+        const faces = [
+            [0, 1, 2, 3], // Front
+            [1, 5, 6, 2], // Right
+            [5, 4, 7, 6], // Back
+            [4, 0, 3, 7], // Left
+            [4, 5, 1, 0]  // Top
+        ];
+        
+        // Simple backface culling
+        faces.forEach(face => {
+            const p0 = p[face[0]];
+            const p1 = p[face[1]];
+            const p2 = p[face[2]];
+            
+            if (!p0.visible || !p1.visible || !p2.visible) return;
+            
+            // Cross product for winding
+            const val = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
+            
+            if (val > 0) {
+                const isRoof = face[0] === 4;
+                const pts = face.map(i => p[i]);
+                this.drawPoly(pts, isRoof ? this.fadeColor('#111', alpha) : fillColor, strokeColor);
+                
+                if (!isRoof) {
+                    // Windows
+                    this.drawWindows(pts, windowColor, obj.val, alpha);
+                }
+            }
+        });
+    }
+    
+    drawWindows(pts, color, seed, alpha) {
+        if (alpha < 0.3) return;
+        // Simple grid of rects
+        const tl = pts[0];
+        const tr = pts[1];
+        const bl = pts[3];
+        
+        const rows = 10;
+        const cols = 5;
+        
+        this.ctx.fillStyle = color;
+        
+        for(let r=1; r<rows; r++) {
+            for(let c=1; c<cols; c++) {
+                if (Math.random() > 0.3) { // Static windows for now, seed based is better but expensive to calc here
+                    const rRatio = r/rows;
+                    const cRatio = c/cols;
+                    
+                    const lx = tl.x + (bl.x - tl.x) * rRatio;
+                    const ly = tl.y + (bl.y - tl.y) * rRatio;
+                    const rx = tr.x + (pts[2].x - pts[1].x) * rRatio;
+                    const ry = tr.y + (pts[2].y - pts[1].y) * rRatio;
+                    
+                    const x = lx + (rx - lx) * cRatio;
+                    const y = ly + (ry - ly) * cRatio;
+                    
+                    const size = 3 * alpha;
+                    this.ctx.fillRect(x, y, size, size*1.5);
+                }
+            }
+        }
+    }
+    
+    drawCar(obj, cx, cy, cz, ca) {
+        // Car is a box that rotates
+        // We need to manually rotate vertices based on car angle
+        const w = obj.w;
+        const h = obj.h;
+        const d = obj.d;
+        
+        const cos = Math.cos(obj.angle);
+        const sin = Math.sin(obj.angle);
+        
+        const corners = [
+            {x: -w/2, z: -d/2}, {x: w/2, z: -d/2},
+            {x: w/2, z: d/2}, {x: -w/2, z: d/2}
+        ];
+        
+        // Rotate and translate
+        const v = [];
+        corners.forEach(c => {
+            const rx = c.x * cos - c.z * sin;
+            const rz = c.x * sin + c.z * cos;
+            v.push({ x: obj.x + rx, y: -h, z: obj.z + rz }); // Top
+        });
+        corners.forEach(c => {
+            const rx = c.x * cos - c.z * sin;
+            const rz = c.x * sin + c.z * cos;
+            v.push({ x: obj.x + rx, y: 0, z: obj.z + rz }); // Bottom
+        });
+        
+        // Project
+        const p = v.map(vert => this.project(vert.x, vert.y, vert.z, cx, cy, cz, ca));
+        if (p.every(pt => !pt.visible)) return;
+        
+        // Draw body
+        this.ctx.fillStyle = '#ff0000';
+        this.ctx.strokeStyle = '#fff';
+        this.ctx.lineWidth = 2;
+        
+        // Top
+        this.drawPoly([p[0], p[1], p[2], p[3]], '#cc0000', '#fff');
+        // Back (Tail lights)
+        this.drawPoly([p[0], p[1], p[5], p[4]], '#aa0000', '#fff');
+        // Sides
+        this.drawPoly([p[1], p[2], p[6], p[5]], '#aa0000', '#fff');
+        this.drawPoly([p[3], p[2], p[6], p[7]], '#aa0000', '#fff');
+        this.drawPoly([p[0], p[3], p[7], p[4]], '#aa0000', '#fff');
+        
+        // Glow
+        const center = this.project(obj.x, -h/2, obj.z, cx, cy, cz, ca);
+        if (center.visible) {
+            this.ctx.shadowBlur = 20;
+            this.ctx.shadowColor = '#ff0000';
+            this.ctx.fillStyle = 'rgba(255,0,0,0.5)';
+            this.ctx.beginPath();
+            this.ctx.arc(center.x, center.y, 10 * center.scale, 0, Math.PI*2);
+            this.ctx.fill();
+            this.ctx.shadowBlur = 0;
+        }
+    }
+    
+    drawTraffic(obj, cx, cy, cz, ca) {
+        // Similar to drawCar but simpler/different color
+        const w = obj.w;
+        const h = obj.h;
+        const d = obj.d;
+        
+        const cos = Math.cos(obj.angle);
+        const sin = Math.sin(obj.angle);
+        
+        const corners = [
+            {x: -w/2, z: -d/2}, {x: w/2, z: -d/2},
+            {x: w/2, z: d/2}, {x: -w/2, z: d/2}
+        ];
+        
+        const v = [];
+        corners.forEach(c => {
+            const rx = c.x * cos - c.z * sin;
+            const rz = c.x * sin + c.z * cos;
+            v.push({ x: obj.x + rx, y: -h, z: obj.z + rz });
+        });
+        corners.forEach(c => {
+            const rx = c.x * cos - c.z * sin;
+            const rz = c.x * sin + c.z * cos;
+            v.push({ x: obj.x + rx, y: 0, z: obj.z + rz });
+        });
+        
+        const p = v.map(vert => this.project(vert.x, vert.y, vert.z, cx, cy, cz, ca));
+        if (p.every(pt => !pt.visible)) return;
+        
+        // Honk visual
+        if (obj.honkTimer > 0) {
+            this.ctx.fillStyle = '#ffffff';
+        } else {
+            this.ctx.fillStyle = obj.color;
+        }
+        this.ctx.strokeStyle = '#fff';
+        this.ctx.lineWidth = 1;
+        
+        // Top
+        this.drawPoly([p[0], p[1], p[2], p[3]], null, '#fff');
+        this.ctx.fill();
+        
+        // Sides
+        this.drawPoly([p[1], p[2], p[6], p[5]], null, '#fff');
+        this.ctx.fill();
+        this.drawPoly([p[3], p[2], p[6], p[7]], null, '#fff');
+        this.ctx.fill();
+        this.drawPoly([p[0], p[3], p[7], p[4]], null, '#fff');
+        this.ctx.fill();
+        this.drawPoly([p[0], p[1], p[5], p[4]], null, '#fff');
+        this.ctx.fill();
+    }
+}
+
+// --- MAIN LOOP ---
+const renderer = new Renderer();
+
+function loop() {
+    Car.update();
+    TrafficManager.update();
+    renderer.render();
+    requestAnimationFrame(loop);
+}
+
+loop();
+
+</script>
+</body>
+</html>

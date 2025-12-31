@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ghost Frequency Scanner</title>
+    <meta name="description" content="Paranormal radio scanner that generates eerie EVP voices from static and noise">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0a0a; min-height: 100vh; font-family: 'Courier New', monospace; color: #00ff00; overflow: hidden; }
+        #container { display: flex; height: 100vh; }
+        #scanner {
+            flex: 1; display: flex; flex-direction: column; padding: 20px;
+            background: linear-gradient(180deg, #1a1a1a 0%, #0a0a0a 100%);
+            border-right: 1px solid #333;
+        }
+        #display {
+            background: #000; border: 3px solid #333; border-radius: 10px;
+            padding: 20px; margin-bottom: 20px; text-align: center;
+        }
+        #frequency { font-size: 48px; color: #00ff00; text-shadow: 0 0 20px #00ff00; }
+        #band { font-size: 14px; opacity: 0.6; margin-top: 10px; }
+        #spectrogram { flex: 1; background: #000; border: 3px solid #333; border-radius: 10px; }
+        #controls { padding: 20px; }
+        .dial {
+            width: 100%; height: 30px; margin: 15px 0;
+            -webkit-appearance: none; background: #222; border-radius: 15px;
+        }
+        .dial::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 30px; height: 30px;
+            background: linear-gradient(145deg, #444, #222); border-radius: 50%; cursor: pointer;
+            border: 2px solid #00ff00; box-shadow: 0 0 10px #00ff00;
+        }
+        #log {
+            width: 350px; background: #111; padding: 20px; overflow-y: auto;
+            border-left: 1px solid #333;
+        }
+        h3 { color: #00aa00; margin-bottom: 15px; }
+        .evp-entry {
+            background: rgba(0,255,0,0.1); border: 1px solid rgba(0,255,0,0.2);
+            padding: 10px; margin: 10px 0; border-radius: 5px; font-size: 12px;
+        }
+        .evp-entry.active { border-color: #00ff00; animation: pulse 1s infinite; }
+        @keyframes pulse { 50% { opacity: 0.7; } }
+        .timestamp { font-size: 10px; opacity: 0.5; }
+        button {
+            padding: 10px 20px; background: rgba(0,255,0,0.2); border: 1px solid #00ff00;
+            color: #00ff00; cursor: pointer; border-radius: 5px; margin: 5px;
+        }
+        #status { margin-top: 15px; font-size: 12px; }
+        .scanning { color: #ff6600; }
+        label { display: block; font-size: 12px; margin-top: 10px; opacity: 0.7; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="scanner">
+            <div id="display">
+                <div id="frequency">87.5 MHz</div>
+                <div id="band">FM BAND - SCANNING</div>
+            </div>
+            <canvas id="spectrogram"></canvas>
+            <div id="controls">
+                <label>Frequency Tuning</label>
+                <input type="range" class="dial" id="freq-dial" min="875" max="1080" value="875">
+                <label>Sensitivity</label>
+                <input type="range" class="dial" id="sensitivity" min="1" max="100" value="50">
+                <label>Noise Floor</label>
+                <input type="range" class="dial" id="noise" min="1" max="100" value="30">
+                <div style="margin-top:20px">
+                    <button id="scan-btn">AUTO SCAN</button>
+                    <button id="record-btn">RECORD EVP</button>
+                </div>
+                <div id="status">STATUS: <span class="scanning">STANDBY</span></div>
+            </div>
+        </div>
+        <div id="log">
+            <h3>EVP LOG</h3>
+            <div id="evp-list"></div>
+        </div>
+    </div>
+    <script>
+        const canvas = document.getElementById('spectrogram');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = canvas.offsetWidth; H = canvas.height = canvas.offsetHeight; }
+        resize(); window.onresize = resize;
+
+        let frequency = 87.5;
+        let sensitivity = 50;
+        let noiseFloor = 30;
+        let scanning = false;
+        let audioCtx = null;
+        let evpLog = [];
+        let spectrogramData = [];
+
+        const ghostPhrases = [
+            "help me", "get out", "behind you", "cold here", "remember",
+            "why", "alone", "listen", "forgotten", "waiting", "find me",
+            "darkness", "trapped", "hello", "goodbye", "never left",
+            "still here", "watching", "silence", "eternity", "lost"
+        ];
+
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playStatic(duration, intensity) {
+            if (!audioCtx) initAudio();
+            const bufferSize = audioCtx.sampleRate * duration;
+            const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < bufferSize; i++) {
+                data[i] = (Math.random() * 2 - 1) * intensity * 0.3;
+            }
+            const source = audioCtx.createBufferSource();
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = 1000 + Math.random() * 2000;
+            filter.Q.value = 1;
+            source.buffer = buffer;
+            gain.gain.value = 0.1;
+            source.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            source.start();
+        }
+
+        function generateEVP() {
+            const phrase = ghostPhrases[Math.floor(Math.random() * ghostPhrases.length)];
+            const clarity = Math.random() * 0.5 + 0.2;
+            const corrupted = phrase.split('').map(c => 
+                Math.random() > clarity ? (Math.random() > 0.5 ? '_' : '.') : c
+            ).join('');
+            return { original: phrase, heard: corrupted, clarity: Math.round(clarity * 100), freq: frequency };
+        }
+
+        function logEVP(evp) {
+            const entry = {
+                ...evp,
+                timestamp: new Date().toLocaleTimeString(),
+                id: Date.now()
+            };
+            evpLog.unshift(entry);
+            renderLog();
+        }
+
+        function renderLog() {
+            const list = document.getElementById('evp-list');
+            list.innerHTML = evpLog.slice(0, 20).map((e, i) => 
+                '<div class="evp-entry' + (i === 0 ? ' active' : '') + '">' +
+                '<div class="timestamp">' + e.timestamp + ' @ ' + e.freq.toFixed(1) + ' MHz</div>' +
+                '<div style="font-size:16px;margin:5px 0">"' + e.heard + '"</div>' +
+                '<div style="font-size:10px;opacity:0.5">Clarity: ' + e.clarity + '%</div></div>'
+            ).join('');
+        }
+
+        function updateSpectrogram() {
+            const newData = [];
+            for (let i = 0; i < 64; i++) {
+                let value = Math.random() * noiseFloor;
+                if (Math.abs(i - 32) < 5) value += sensitivity * 0.5;
+                if (Math.random() < 0.05) value += Math.random() * 50;
+                newData.push(Math.min(100, value));
+            }
+            spectrogramData.push(newData);
+            if (spectrogramData.length > W / 2) spectrogramData.shift();
+        }
+
+        function drawSpectrogram() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, W, H);
+            spectrogramData.forEach((col, x) => {
+                col.forEach((val, y) => {
+                    const hue = 120 - val;
+                    const alpha = val / 100;
+                    ctx.fillStyle = 'hsla(' + hue + ', 100%, 50%, ' + alpha + ')';
+                    ctx.fillRect(x * 2, y * (H / 64), 2, H / 64);
+                });
+            });
+            if (Math.random() < 0.02 * (sensitivity / 50)) {
+                ctx.fillStyle = 'rgba(255, 0, 0, 0.3)';
+                const anomalyY = Math.random() * H;
+                const anomalyW = 20 + Math.random() * 50;
+                ctx.fillRect(W - anomalyW, anomalyY, anomalyW, 5 + Math.random() * 10);
+            }
+        }
+
+        function animate() {
+            updateSpectrogram();
+            drawSpectrogram();
+            if (scanning) {
+                frequency += 0.1;
+                if (frequency > 108) frequency = 87.5;
+                document.getElementById('freq-dial').value = frequency * 10;
+                document.getElementById('frequency').textContent = frequency.toFixed(1) + ' MHz';
+                if (Math.random() < 0.01 * (sensitivity / 30)) {
+                    playStatic(0.3, sensitivity / 100);
+                    logEVP(generateEVP());
+                }
+            }
+            if (Math.random() < 0.1) playStatic(0.05, noiseFloor / 200);
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('freq-dial').oninput = e => {
+            frequency = e.target.value / 10;
+            document.getElementById('frequency').textContent = frequency.toFixed(1) + ' MHz';
+            scanning = false;
+            document.getElementById('status').innerHTML = 'STATUS: <span>MANUAL TUNE</span>';
+        };
+
+        document.getElementById('sensitivity').oninput = e => sensitivity = parseInt(e.target.value);
+        document.getElementById('noise').oninput = e => noiseFloor = parseInt(e.target.value);
+
+        document.getElementById('scan-btn').onclick = () => {
+            scanning = !scanning;
+            document.getElementById('status').innerHTML = 'STATUS: <span class="scanning">' + 
+                (scanning ? 'SCANNING...' : 'PAUSED') + '</span>';
+        };
+
+        document.getElementById('record-btn').onclick = () => {
+            if (!audioCtx) initAudio();
+            playStatic(1, sensitivity / 50);
+            setTimeout(() => logEVP(generateEVP()), 500);
+        };
+
+        animate();
+    </script>
+</body>
+</html>

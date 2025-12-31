@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dune Symphony</title>
+    <meta name="description" content="Wind sculpts procedural sand dunes while grain collisions create ambient desert soundscapes">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a0f05; overflow: hidden; font-family: 'Courier New', monospace; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(40,25,10,0.9);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(200,150,80,0.3);
+            color: #d4a060; z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #e8c080; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.7; }
+        input[type="range"] { width: 150px; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); color: rgba(200,150,80,0.5); font-size: 12px; }
+        button {
+            padding: 8px 16px; background: rgba(150,100,40,0.4); border: 1px solid rgba(200,150,80,0.4);
+            color: #d4a060; cursor: pointer; border-radius: 8px; margin-top: 10px;
+        }
+        #sound-toggle { position: fixed; top: 20px; right: 20px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Wind Forces</h3>
+        <div class="control-row">
+            <label>Wind Speed: <span id="speed-val">50%</span></label>
+            <input type="range" id="speed" min="0" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Wind Direction: <span id="dir-val">→</span></label>
+            <input type="range" id="direction" min="0" max="360" value="90">
+        </div>
+        <div class="control-row">
+            <label>Grain Density: <span id="density-val">Medium</span></label>
+            <input type="range" id="density" min="1" max="3" value="2">
+        </div>
+        <button id="gust-btn">Wind Gust</button>
+    </div>
+    <button id="sound-toggle">Sound: OFF</button>
+    <div id="info">Click and drag to direct wind | Each grain collision creates sound</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initTerrain(); }
+        resize(); window.onresize = resize;
+
+        let audioCtx = null;
+        let soundEnabled = false;
+        let windSpeed = 0.5;
+        let windDir = Math.PI / 2;
+        let grainDensity = 2;
+        let terrain = [];
+        let particles = [];
+        const cols = 200;
+        let cellWidth;
+
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        }
+
+        function playGrainSound(x, intensity) {
+            if (!soundEnabled || !audioCtx) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const freq = 80 + (x / W) * 200 + Math.random() * 50;
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            osc.type = 'sine';
+            gain.gain.setValueAtTime(intensity * 0.02, audioCtx.currentTime);
+            gain.gain.exponentialDecayTo && gain.gain.exponentialDecayTo(0.001, audioCtx.currentTime + 0.3);
+            gain.gain.setValueAtTime(intensity * 0.02, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0.001, audioCtx.currentTime + 0.2);
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.2);
+        }
+
+        function initTerrain() {
+            cellWidth = W / cols;
+            terrain = [];
+            for (let i = 0; i < cols; i++) {
+                const base = H * 0.6;
+                const dune1 = Math.sin(i * 0.03) * 80;
+                const dune2 = Math.sin(i * 0.07 + 2) * 40;
+                const noise = (Math.random() - 0.5) * 20;
+                terrain.push(base + dune1 + dune2 + noise);
+            }
+        }
+
+        class SandParticle {
+            constructor(x, y) {
+                this.x = x; this.y = y;
+                this.vx = 0; this.vy = 0;
+                this.life = 100 + Math.random() * 100;
+                this.size = 1 + Math.random() * 2;
+            }
+            update() {
+                const windForce = windSpeed * 0.5;
+                this.vx += Math.cos(windDir) * windForce * 0.1;
+                this.vy += 0.1;
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+                this.x += this.vx;
+                this.y += this.vy;
+                const col = Math.floor(this.x / cellWidth);
+                if (col >= 0 && col < cols) {
+                    if (this.y >= terrain[col]) {
+                        this.y = terrain[col];
+                        terrain[col] -= 0.05;
+                        if (col > 0) terrain[col-1] += 0.02;
+                        if (col < cols-1) terrain[col+1] += 0.02;
+                        playGrainSound(this.x, Math.abs(this.vy));
+                        this.vy = -Math.abs(this.vy) * 0.3;
+                        this.vx *= 0.5;
+                    }
+                }
+                this.life--;
+                return this.life > 0 && this.x > 0 && this.x < W;
+            }
+            draw() {
+                const alpha = Math.min(1, this.life / 50);
+                ctx.fillStyle = "rgba(220, 180, 120, " + alpha + ")";
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        function spawnParticles() {
+            const count = grainDensity * 3;
+            for (let i = 0; i < count; i++) {
+                const x = windDir < Math.PI ? 0 : W;
+                const y = H * 0.3 + Math.random() * H * 0.3;
+                particles.push(new SandParticle(x, y));
+            }
+        }
+
+        function drawSky() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H);
+            gradient.addColorStop(0, '#2a1505');
+            gradient.addColorStop(0.5, '#4a2510');
+            gradient.addColorStop(1, '#1a0f05');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.arc(Math.random() * W, Math.random() * H * 0.3, 0.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255,200,150,0.3)';
+                ctx.fill();
+            }
+        }
+
+        function drawTerrain() {
+            ctx.beginPath();
+            ctx.moveTo(0, H);
+            for (let i = 0; i < cols; i++) {
+                ctx.lineTo(i * cellWidth, terrain[i]);
+            }
+            ctx.lineTo(W, H);
+            ctx.closePath();
+            const gradient = ctx.createLinearGradient(0, H * 0.4, 0, H);
+            gradient.addColorStop(0, '#c4a060');
+            gradient.addColorStop(0.3, '#b08040');
+            gradient.addColorStop(0.7, '#906030');
+            gradient.addColorStop(1, '#704020');
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            for (let layer = 0; layer < 3; layer++) {
+                ctx.beginPath();
+                for (let i = 0; i < cols; i++) {
+                    const y = terrain[i] + layer * 30 + Math.sin(i * 0.1) * 3;
+                    if (i === 0) ctx.moveTo(0, y);
+                    else ctx.lineTo(i * cellWidth, y);
+                }
+                ctx.strokeStyle = "rgba(0,0,0," + (0.1 + layer * 0.05) + ")";
+                ctx.stroke();
+            }
+        }
+
+        function animate() {
+            drawSky();
+            spawnParticles();
+            particles = particles.filter(p => p.update());
+            drawTerrain();
+            particles.forEach(p => p.draw());
+            for (let i = 1; i < cols - 1; i++) {
+                const diff = (terrain[i-1] + terrain[i+1]) / 2 - terrain[i];
+                terrain[i] += diff * 0.01;
+            }
+            requestAnimationFrame(animate);
+        }
+
+        document.getElementById('speed').oninput = e => {
+            windSpeed = e.target.value / 100;
+            document.getElementById('speed-val').textContent = e.target.value + '%';
+        };
+        document.getElementById('direction').oninput = e => {
+            windDir = (e.target.value / 180) * Math.PI;
+            const arrows = ['→', '↗', '↑', '↖', '←', '↙', '↓', '↘', '→'];
+            document.getElementById('dir-val').textContent = arrows[Math.floor(e.target.value / 45)];
+        };
+        document.getElementById('density').oninput = e => {
+            grainDensity = parseInt(e.target.value);
+            const labels = ['Low', 'Medium', 'High'];
+            document.getElementById('density-val').textContent = labels[grainDensity - 1];
+        };
+        document.getElementById('gust-btn').onclick = () => {
+            for (let i = 0; i < 50; i++) particles.push(new SandParticle(Math.random() * W, H * 0.4));
+        };
+        document.getElementById('sound-toggle').onclick = function() {
+            if (!audioCtx) initAudio();
+            soundEnabled = !soundEnabled;
+            this.textContent = 'Sound: ' + (soundEnabled ? 'ON' : 'OFF');
+        };
+
+        let dragging = false;
+        canvas.onmousedown = () => dragging = true;
+        canvas.onmouseup = () => dragging = false;
+        canvas.onmousemove = e => {
+            if (dragging) {
+                windDir = Math.atan2(e.clientY - H/2, e.clientX - W/2);
+                windSpeed = Math.min(1, Math.hypot(e.clientX - W/2, e.clientY - H/2) / 300);
+            }
+        };
+
+        initTerrain();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Minecraft Worm Game</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: linear-gradient(135deg, #87CEEB, #98FB98);
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+        }
+        
+        #gameContainer {
+            position: relative;
+            width: 100vw;
+            height: 100vh;
+        }
+        
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 100;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+        }
+        
+        #score {
+            font-size: 24px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        
+        #controls {
+            font-size: 14px;
+            background: rgba(0,0,0,0.7);
+            padding: 10px;
+            border-radius: 5px;
+        }
+        
+        #gameOver {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            display: none;
+            z-index: 200;
+        }
+        
+        #welcome {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0,0,0,0.9);
+            color: white;
+            padding: 30px;
+            border-radius: 10px;
+            text-align: center;
+            z-index: 200;
+        }
+        
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            margin: 10px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+        }
+        
+        button:hover {
+            background: #45a049;
+        }
+
+        #stats {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            z-index: 100;
+            color: white;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.8);
+            text-align: right;
+        }
+
+        .stat-item {
+            margin-bottom: 5px;
+        }
+    </style>
+</head>
+<body>
+    <div id="gameContainer">
+        <div id="ui">
+            <div id="score">Score: 0</div>
+            <div id="controls">
+                🐛 Worm moves automatically<br>
+                🍔 Move food with WASD/Arrow Keys<br>
+                🖱️ Click to place food<br>
+                Space: Pause | R: Restart
+            </div>
+        </div>
+
+        <div id="stats">
+            <div class="stat-item">Length: <span id="length">3</span></div>
+            <div class="stat-item">High Score: <span id="highScore">0</span></div>
+            <div class="stat-item">Time: <span id="time">0s</span></div>
+        </div>
+        
+        <div id="welcome">
+            <h2>3D Minecraft Worm Game!</h2>
+            <div style="text-align: left; margin: 20px 0;">
+                <p>🐛 The worm moves automatically through the world</p>
+                <p>🍔 Use WASD/Arrow Keys or click to move the food</p>
+                <p>🚫 Game ends if the worm hits itself or walls</p>
+                <p>🏆 Try to achieve the highest score!</p>
+            </div>
+            <button onclick="wormGame.startGame()">Start Game</button>
+        </div>
+        
+        <div id="gameOver">
+            <h2>Game Over!</h2>
+            <p>Final Score: <span id="finalScore">0</span></p>
+            <p>Final Length: <span id="finalLength">0</span></p>
+            <button onclick="wormGame.restart()">Play Again</button>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        class MinecraftWormGame {
+            constructor() {
+                this.gridSize = 20;
+                this.blockSize = 1;
+                this.score = 0;
+                this.highScore = 0;
+                this.gameRunning = false;
+                this.gamePaused = false;
+                this.gameStarted = false;
+                this.startTime = 0;
+                this.consecutiveCollisions = 0;
+                
+                this.worm = [
+                    { x: 5, y: 0, z: 10 },
+                    { x: 4, y: 0, z: 10 },
+                    { x: 3, y: 0, z: 10 }
+                ];
+                
+                this.food = { x: Math.floor(this.gridSize/2), y: 0, z: Math.floor(this.gridSize/2) };
+                
+                this.init();
+                this.createTerrain();
+                this.createWorm();
+                this.createFood();
+                this.setupControls();
+                this.updateUI();
+                this.gameLoop();
+            }
+            
+            init() {
+                // Scene setup
+                this.scene = new THREE.Scene();
+                this.scene.fog = new THREE.Fog(0x87CEEB, 10, 50);
+                
+                // Camera setup
+                this.camera = new THREE.PerspectiveCamera(
+                    75, 
+                    window.innerWidth / window.innerHeight, 
+                    0.1, 
+                    1000
+                );
+                this.camera.position.set(10, 15, 25);
+                this.camera.lookAt(10, 0, 10);
+                
+                // Renderer setup
+                this.renderer = new THREE.WebGLRenderer({ antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                this.renderer.setClearColor(0x87CEEB);
+                this.renderer.shadowMap.enabled = true;
+                this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+                
+                document.getElementById('gameContainer').appendChild(this.renderer.domElement);
+                
+                // Lighting
+                const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+                this.scene.add(ambientLight);
+                
+                const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+                directionalLight.position.set(20, 30, 20);
+                directionalLight.castShadow = true;
+                directionalLight.shadow.mapSize.width = 2048;
+                directionalLight.shadow.mapSize.height = 2048;
+                directionalLight.shadow.camera.near = 0.5;
+                directionalLight.shadow.camera.far = 500;
+                directionalLight.shadow.camera.left = -30;
+                directionalLight.shadow.camera.right = 30;
+                directionalLight.shadow.camera.top = 30;
+                directionalLight.shadow.camera.bottom = -30;
+                this.scene.add(directionalLight);
+
+                // Add click detection
+                this.raycaster = new THREE.Raycaster();
+                this.mouse = new THREE.Vector2();
+            }
+            
+            createBlockTexture(color) {
+                const canvas = document.createElement('canvas');
+                canvas.width = canvas.height = 64;
+                const ctx = canvas.getContext('2d');
+                
+                // Fill with base color
+                ctx.fillStyle = color;
+                ctx.fillRect(0, 0, 64, 64);
+                
+                // Add pixel-style noise for texture
+                for (let i = 0; i < 100; i++) {
+                    const x = Math.floor(Math.random() * 64);
+                    const y = Math.floor(Math.random() * 64);
+                    const brightness = Math.random() * 0.3 - 0.15;
+                    
+                    const r = Math.max(0, Math.min(255, parseInt(color.slice(1, 3), 16) + brightness * 255));
+                    const g = Math.max(0, Math.min(255, parseInt(color.slice(3, 5), 16) + brightness * 255));
+                    const b = Math.max(0, Math.min(255, parseInt(color.slice(5, 7), 16) + brightness * 255));
+                    
+                    ctx.fillStyle = `rgb(${r},${g},${b})`;
+                    ctx.fillRect(x, y, 2, 2);
+                }
+                
+                const texture = new THREE.CanvasTexture(canvas);
+                texture.magFilter = THREE.NearestFilter;
+                texture.minFilter = THREE.NearestFilter;
+                return texture;
+            }
+            
+            createTerrain() {
+                const grassTexture = this.createBlockTexture('#228B22');
+                const dirtTexture = this.createBlockTexture('#8B4513');
+                
+                this.groundBlocks = [];
+                
+                // Create ground
+                for (let x = -2; x < this.gridSize + 2; x++) {
+                    for (let z = -2; z < this.gridSize + 2; z++) {
+                        // Grass layer
+                        const grassGeometry = new THREE.BoxGeometry(this.blockSize, this.blockSize, this.blockSize);
+                        const grassMaterial = new THREE.MeshLambertMaterial({ map: grassTexture });
+                        const grassBlock = new THREE.Mesh(grassGeometry, grassMaterial);
+                        grassBlock.position.set(x, -1, z);
+                        grassBlock.receiveShadow = true;
+                        grassBlock.userData = { x: x, z: z, clickable: true };
+                        this.scene.add(grassBlock);
+                        
+                        if (x >= 0 && x < this.gridSize && z >= 0 && z < this.gridSize) {
+                            this.groundBlocks.push(grassBlock);
+                        }
+                        
+                        // Dirt layer
+                        const dirtGeometry = new THREE.BoxGeometry(this.blockSize, this.blockSize, this.blockSize);
+                        const dirtMaterial = new THREE.MeshLambertMaterial({ map: dirtTexture });
+                        const dirtBlock = new THREE.Mesh(dirtGeometry, dirtMaterial);
+                        dirtBlock.position.set(x, -2, z);
+                        dirtBlock.receiveShadow = true;
+                        this.scene.add(dirtBlock);
+                    }
+                }
+                
+                // Create boundary walls
+                const stoneTexture = this.createBlockTexture('#696969');
+                const stoneMaterial = new THREE.MeshLambertMaterial({ map: stoneTexture });
+                
+                for (let i = -1; i <= this.gridSize; i++) {
+                    // Front and back walls
+                    for (let h = 0; h < 3; h++) {
+                        const wall1 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), stoneMaterial);
+                        wall1.position.set(i, h, -1);
+                        wall1.castShadow = true;
+                        this.scene.add(wall1);
+                        
+                        const wall2 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), stoneMaterial);
+                        wall2.position.set(i, h, this.gridSize);
+                        wall2.castShadow = true;
+                        this.scene.add(wall2);
+                    }
+                    
+                    // Left and right walls
+                    for (let h = 0; h < 3; h++) {
+                        const wall3 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), stoneMaterial);
+                        wall3.position.set(-1, h, i);
+                        wall3.castShadow = true;
+                        this.scene.add(wall3);
+                        
+                        const wall4 = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), stoneMaterial);
+                        wall4.position.set(this.gridSize, h, i);
+                        wall4.castShadow = true;
+                        this.scene.add(wall4);
+                    }
+                }
+            }
+            
+            createWorm() {
+                this.wormBlocks = [];
+                const wormTexture = this.createBlockTexture('#32CD32');
+                const headTexture = this.createBlockTexture('#228B22');
+                
+                this.worm.forEach((segment, index) => {
+                    const geometry = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+                    const material = new THREE.MeshLambertMaterial({ 
+                        map: index === 0 ? headTexture : wormTexture 
+                    });
+                    const block = new THREE.Mesh(geometry, material);
+                    block.position.set(segment.x, segment.y, segment.z);
+                    block.castShadow = true;
+                    this.scene.add(block);
+                    this.wormBlocks.push(block);
+                });
+            }
+            
+            createFood() {
+                if (this.foodBlock) {
+                    this.scene.remove(this.foodBlock);
+                }
+                
+                const foodTexture = this.createBlockTexture('#FF4500');
+                const geometry = new THREE.BoxGeometry(0.8, 0.8, 0.8);
+                const material = new THREE.MeshLambertMaterial({ map: foodTexture });
+                this.foodBlock = new THREE.Mesh(geometry, material);
+                this.foodBlock.position.set(this.food.x, this.food.y + 0.1, this.food.z);
+                this.foodBlock.castShadow = true;
+                this.scene.add(this.foodBlock);
+                
+                // Add floating animation
+                this.foodBlock.userData = { time: 0 };
+            }
+            
+            setupControls() {
+                document.addEventListener('keydown', (event) => {
+                    if (!this.gameRunning || this.gamePaused) {
+                        if (event.code === 'Space' && this.gameRunning) {
+                            this.gamePaused = false;
+                        }
+                        if (event.code === 'KeyR') {
+                            this.restart();
+                        }
+                        return;
+                    }
+                    
+                    switch (event.code) {
+                        case 'ArrowUp':
+                        case 'KeyW':
+                            this.moveFood(this.food.x, this.food.z - 1);
+                            break;
+                        case 'ArrowDown':
+                        case 'KeyS':
+                            this.moveFood(this.food.x, this.food.z + 1);
+                            break;
+                        case 'ArrowLeft':
+                        case 'KeyA':
+                            this.moveFood(this.food.x - 1, this.food.z);
+                            break;
+                        case 'ArrowRight':
+                        case 'KeyD':
+                            this.moveFood(this.food.x + 1, this.food.z);
+                            break;
+                        case 'Space':
+                            this.gamePaused = true;
+                            break;
+                        case 'KeyR':
+                            this.restart();
+                            break;
+                    }
+                });
+
+                // Mouse click controls
+                this.renderer.domElement.addEventListener('click', (event) => {
+                    if (!this.gameRunning) return;
+
+                    this.mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+                    this.mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+                    this.raycaster.setFromCamera(this.mouse, this.camera);
+                    const intersects = this.raycaster.intersectObjects(this.groundBlocks);
+
+                    if (intersects.length > 0) {
+                        const intersected = intersects[0].object;
+                        if (intersected.userData.clickable) {
+                            this.moveFood(intersected.userData.x, intersected.userData.z);
+                        }
+                    }
+                });
+                
+                // Handle window resize
+                window.addEventListener('resize', () => {
+                    this.camera.aspect = window.innerWidth / window.innerHeight;
+                    this.camera.updateProjectionMatrix();
+                    this.renderer.setSize(window.innerWidth, window.innerHeight);
+                });
+            }
+
+            moveFood(newX, newZ) {
+                if (newX >= 0 && newX < this.gridSize && newZ >= 0 && newZ < this.gridSize) {
+                    this.food.x = newX;
+                    this.food.z = newZ;
+                    this.createFood();
+                }
+            }
+            
+            updateWorm() {
+                if (!this.gameRunning || this.gamePaused) return;
+                
+                const head = { ...this.worm[0] };
+                const potentialDirections = [
+                    { x: 1, z: 0 }, { x: -1, z: 0 }, { x: 0, z: 1 }, { x: 0, z: -1 }
+                ];
+
+                // Find safe directions
+                const safeDirections = potentialDirections.filter(dir => {
+                    const newHead = { x: head.x + dir.x, z: head.z + dir.z };
+                    return !this.isCollision(newHead);
+                });
+
+                if (safeDirections.length > 0) {
+                    // Choose direction that moves towards food or random safe direction
+                    let chosenDirection;
+                    const foodDirection = potentialDirections.find(dir => {
+                        const newHead = { x: head.x + dir.x, z: head.z + dir.z };
+                        const currentDistance = Math.abs(head.x - this.food.x) + Math.abs(head.z - this.food.z);
+                        const newDistance = Math.abs(newHead.x - this.food.x) + Math.abs(newHead.z - this.food.z);
+                        return newDistance < currentDistance && !this.isCollision(newHead);
+                    });
+
+                    chosenDirection = foodDirection || safeDirections[Math.floor(Math.random() * safeDirections.length)];
+                    
+                    head.x += chosenDirection.x;
+                    head.z += chosenDirection.z;
+                    this.worm.unshift(head);
+
+                    // Check food collision
+                    if (head.x === this.food.x && head.z === this.food.z) {
+                        this.score++;
+                        // Don't remove tail when eating food (worm grows)
+                        this.food = { 
+                            x: Math.floor(this.gridSize/2), 
+                            y: 0, 
+                            z: Math.floor(this.gridSize/2) 
+                        };
+                        this.createFood();
+                    } else {
+                        this.worm.pop();
+                    }
+
+                    this.consecutiveCollisions = 0;
+                } else {
+                    // No safe directions - increment collision counter
+                    this.consecutiveCollisions++;
+                    if (this.consecutiveCollisions >= 3 && this.worm.length > 5) {
+                        this.gameOver();
+                        return;
+                    }
+                }
+                
+                this.updateWormVisuals();
+                this.updateUI();
+            }
+
+            isCollision(position) {
+                // Check wall collision
+                if (position.x < 0 || position.x >= this.gridSize || 
+                    position.z < 0 || position.z >= this.gridSize) {
+                    return true;
+                }
+                
+                // Check self collision
+                return this.worm.some(segment => 
+                    segment.x === position.x && segment.z === position.z);
+            }
+            
+            updateWormVisuals() {
+                // Remove old blocks
+                this.wormBlocks.forEach(block => this.scene.remove(block));
+                this.wormBlocks = [];
+                
+                // Create new blocks
+                const wormTexture = this.createBlockTexture('#32CD32');
+                const headTexture = this.createBlockTexture('#228B22');
+                
+                this.worm.forEach((segment, index) => {
+                    const geometry = new THREE.BoxGeometry(0.9, 0.9, 0.9);
+                    const material = new THREE.MeshLambertMaterial({ 
+                        map: index === 0 ? headTexture : wormTexture 
+                    });
+                    const block = new THREE.Mesh(geometry, material);
+                    block.position.set(segment.x, segment.y, segment.z);
+                    block.castShadow = true;
+                    this.scene.add(block);
+                    this.wormBlocks.push(block);
+                });
+            }
+            
+            animateFood() {
+                if (this.foodBlock) {
+                    this.foodBlock.userData.time += 0.05;
+                    this.foodBlock.position.y = this.food.y + 0.1 + Math.sin(this.foodBlock.userData.time) * 0.1;
+                    this.foodBlock.rotation.y += 0.02;
+                }
+            }
+
+            updateUI() {
+                document.getElementById('score').textContent = `Score: ${this.score}`;
+                document.getElementById('length').textContent = this.worm.length;
+                document.getElementById('highScore').textContent = this.highScore;
+                
+                if (this.gameRunning) {
+                    const timeAlive = Math.floor((Date.now() - this.startTime) / 1000);
+                    document.getElementById('time').textContent = `${timeAlive}s`;
+                }
+            }
+
+            startGame() {
+                document.getElementById('welcome').style.display = 'none';
+                this.gameRunning = true;
+                this.gameStarted = true;
+                this.startTime = Date.now();
+                this.updateUI();
+            }
+            
+            gameOver() {
+                this.gameRunning = false;
+                
+                if (this.score > this.highScore) {
+                    this.highScore = this.score;
+                }
+                
+                document.getElementById('finalScore').textContent = this.score;
+                document.getElementById('finalLength').textContent = this.worm.length;
+                document.getElementById('gameOver').style.display = 'block';
+            }
+            
+            restart() {
+                // Reset game state
+                this.score = 0;
+                this.gameRunning = false;
+                this.gamePaused = false;
+                this.gameStarted = false;
+                this.consecutiveCollisions = 0;
+                this.worm = [
+                    { x: 5, y: 0, z: 10 },
+                    { x: 4, y: 0, z: 10 },
+                    { x: 3, y: 0, z: 10 }
+                ];
+                this.food = { x: Math.floor(this.gridSize/2), y: 0, z: Math.floor(this.gridSize/2) };
+                
+                // Update UI
+                document.getElementById('gameOver').style.display = 'none';
+                document.getElementById('welcome').style.display = 'block';
+                
+                // Recreate worm and food
+                this.updateWormVisuals();
+                this.createFood();
+                this.updateUI();
+            }
+            
+            gameLoop() {
+                if (this.gameRunning && !this.gamePaused) {
+                    this.updateWorm();
+                }
+                
+                this.animateFood();
+                this.renderer.render(this.scene, this.camera);
+                
+                // Game speed
+                setTimeout(() => {
+                    requestAnimationFrame(() => this.gameLoop());
+                }, 300); // Slightly slower for better AI pathfinding
+            }
+        }
+        
+        // Start the game
+        const wormGame = new MinecraftWormGame();
+    </script>
+</body>
+</html>

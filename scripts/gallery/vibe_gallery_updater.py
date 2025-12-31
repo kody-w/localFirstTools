@@ -7,6 +7,42 @@ from datetime import datetime
 import re
 from html.parser import HTMLParser
 
+# Global date registry - maps filename to createdOn date
+_date_registry = {}
+_date_registry_path = None
+
+def load_date_registry(base_path):
+    """Load the app dates registry, creating if needed"""
+    global _date_registry, _date_registry_path
+    _date_registry_path = Path(base_path) / "app_dates_registry.json"
+
+    if _date_registry_path.exists():
+        with open(_date_registry_path, 'r') as f:
+            _date_registry = json.load(f)
+    else:
+        _date_registry = {}
+
+    return _date_registry
+
+def get_app_created_date(filename):
+    """Get createdOn date for an app, adding to registry if new"""
+    global _date_registry
+    today = datetime.now().strftime('%Y-%m-%d')
+
+    if filename not in _date_registry:
+        _date_registry[filename] = today
+        print(f"  📅 New app registered: {filename} (created: {today})")
+
+    return _date_registry[filename]
+
+def save_date_registry():
+    """Save the updated date registry"""
+    global _date_registry, _date_registry_path
+    if _date_registry_path:
+        with open(_date_registry_path, 'w') as f:
+            json.dump(_date_registry, f, indent=2, sort_keys=True)
+        print(f"📅 Date registry updated with {len(_date_registry)} apps")
+
 class HTMLMetadataExtractor(HTMLParser):
     def __init__(self):
         super().__init__()
@@ -37,6 +73,10 @@ def extract_metadata_from_html(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()[:5000]  # Read first 5000 chars for metadata
+
+        # Check for redirect files
+        if "Redirecting..." in content and "http-equiv=\"refresh\"" in content:
+            return None
 
         parser = HTMLMetadataExtractor()
         parser.feed(content)
@@ -166,6 +206,9 @@ def categorize_app(filepath, metadata):
 
 def scan_directories_for_apps(base_path):
     """Scan directories for HTML files and extract their metadata"""
+    # Load date registry for tracking when apps were added
+    load_date_registry(base_path)
+
     apps_by_category = {
         "visual_art": [],
         "3d_immersive": [],
@@ -179,18 +222,44 @@ def scan_directories_for_apps(base_path):
     }
 
     # Scan ALL directories for HTML files
-    # First scan apps directory and its subdirectories
-    apps_path = Path(base_path) / "apps"
-    if apps_path.exists():
-        for html_file in apps_path.rglob("*.html"):
+    # First scan Exhibition_Halls
+    halls_path = Path(base_path) / "Exhibition_Halls"
+    if halls_path.exists():
+        for html_file in halls_path.rglob("*.html"):
             if html_file.name.startswith('.'):
-                continue  # Skip hidden files
+                continue
 
             print(f"Processing: {html_file}")
             metadata = extract_metadata_from_html(html_file)
 
             if metadata:
-                category = categorize_app(html_file, metadata)
+                # Determine category from directory name if possible
+                parent_dir = html_file.parent.name
+                category = None
+                
+                # Reverse mapping from directory to category key
+                dir_to_cat = {
+                    "Visual_Arts": "visual_art",
+                    "Simulation_Lab": "particle_physics", # Defaulting to particle_physics but could be 3d_immersive
+                    "The_Arcade": "games_puzzles",
+                    "Sound_Studio": "audio_music",
+                    "Productivity_Suite": "creative_tools",
+                    "AI_Research": "experimental_ai",
+                    "Educational_Center": "educational_tools"
+                }
+                
+                # Special handling for Simulation_Lab which maps to multiple
+                if parent_dir == "Simulation_Lab":
+                    if "3d" in metadata.get("tags", []):
+                        category = "3d_immersive"
+                    else:
+                        category = "particle_physics"
+                else:
+                    category = dir_to_cat.get(parent_dir)
+                
+                if not category:
+                    category = categorize_app(html_file, metadata)
+
                 relative_path = html_file.relative_to(base_path)
 
                 app_entry = {
@@ -202,12 +271,13 @@ def scan_directories_for_apps(base_path):
                     "category": category,
                     "featured": len(metadata["tags"]) >= 3,
                     "complexity": metadata["complexity"],
-                    "interactionType": metadata["interactionType"]
+                    "interactionType": metadata["interactionType"],
+                    "createdOn": get_app_created_date(html_file.name)
                 }
 
                 apps_by_category[category].append(app_entry)
 
-    # Also scan root directory for HTML files
+    # Scan root directory for HTML files
     root_path = Path(base_path)
     for html_file in root_path.glob("*.html"):
         if html_file.name.startswith('.') or html_file.name == 'index.html':
@@ -228,43 +298,51 @@ def scan_directories_for_apps(base_path):
                 "category": category,
                 "featured": len(metadata["tags"]) >= 3,
                 "complexity": metadata["complexity"],
-                "interactionType": metadata["interactionType"]
+                "interactionType": metadata["interactionType"],
+                "createdOn": get_app_created_date(html_file.name)
             }
 
             apps_by_category[category].append(app_entry)
 
-    # Scan other directories at root level (artifacts, archive, etc.)
-    other_dirs = ["artifacts", "archive", "notes", "edgeAddons"]
-    for dir_name in other_dirs:
-        dir_path = Path(base_path) / dir_name
-        if not dir_path.exists():
-            continue
+    # Scan ALL other directories recursively for HTML files
+    # Skip known non-app directories
+    skip_dirs = {
+        '.git', 'node_modules', '__pycache__', '.vscode', '.idea',
+        'docs', 'scripts', 'data', '.DS_Store'
+    }
 
-        # Recursively scan for HTML files in these directories
-        for html_file in dir_path.rglob("*.html"):
-            if html_file.name.startswith('.'):
-                continue  # Skip hidden files
+    for item in root_path.iterdir():
+        if item.is_dir() and item.name not in skip_dirs and not item.name.startswith('.'):
+            # Skip if already scanned (Exhibition_Halls)
+            if item.name == 'Exhibition_Halls':
+                continue
 
-            print(f"Processing: {html_file}")
-            metadata = extract_metadata_from_html(html_file)
+            # Recursively scan this directory
+            for html_file in item.rglob("*.html"):
+                if html_file.name.startswith('.'):
+                    continue
 
-            if metadata:
-                category = categorize_app(html_file, metadata)
-                relative_path = html_file.relative_to(base_path)
+                print(f"Processing: {html_file}")
+                metadata = extract_metadata_from_html(html_file)
 
-                app_entry = {
-                    "title": metadata["title"],
-                    "filename": html_file.name,
-                    "path": str(relative_path),
-                    "description": metadata["description"],
-                    "tags": metadata["tags"],
-                    "category": category,
-                    "featured": len(metadata["tags"]) >= 3,
-                    "complexity": metadata["complexity"],
-                    "interactionType": metadata["interactionType"]
-                }
+                if metadata:
+                    category = categorize_app(html_file, metadata)
+                    relative_path = html_file.relative_to(base_path)
 
-                apps_by_category[category].append(app_entry)
+                    app_entry = {
+                        "title": metadata["title"],
+                        "filename": html_file.name,
+                        "path": str(relative_path),
+                        "description": metadata["description"],
+                        "tags": metadata["tags"],
+                        "category": category,
+                        "featured": len(metadata["tags"]) >= 3,
+                        "complexity": metadata["complexity"],
+                        "interactionType": metadata["interactionType"],
+                        "createdOn": get_app_created_date(html_file.name)
+                    }
+
+                    apps_by_category[category].append(app_entry)
 
     return apps_by_category
 
@@ -411,7 +489,7 @@ def update_embedded_manifest(base_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         config = json.load(f)
 
-    # Build compact manifest: [[path, title, icon], ...]
+    # Build compact manifest: [[path, title, icon, createdOn], ...]
     compact = []
     seen = set()
 
@@ -431,8 +509,9 @@ def update_embedded_manifest(base_path):
                 seen.add(path)
                 title = app.get("title", "Untitled")
                 icon = app.get("icon", icons[icon_idx % len(icons)])
+                createdOn = app.get("createdOn", "")
                 icon_idx += 1
-                compact.append([path, title, icon])
+                compact.append([path, title, icon, createdOn])
 
     # Generate the JavaScript array
     manifest_js = json.dumps(compact, ensure_ascii=False, separators=(',', ':'))
@@ -464,6 +543,9 @@ if __name__ == "__main__":
     try:
         config_file = update_vibe_gallery_config(base_dir)
         print(f"\n📁 Config file updated: {config_file}")
+
+        # Save the date registry with any new apps
+        save_date_registry()
 
         # Update embedded manifest for file:// protocol support
         update_embedded_manifest(base_dir)
