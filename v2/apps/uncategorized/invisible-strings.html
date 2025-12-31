@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Invisible Strings</title>
+    <meta name="description" content="Move freely through a canvas, but hidden forces subtly constrain your path - watch as puppet strings gradually reveal the forces that guided you">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #08080f; min-height: 100vh; font-family: 'Georgia', serif; color: #7080a0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(8,8,15,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(80,100,140,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #90a0c0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #a0b0d0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(50,70,100,0.4); border: 1px solid rgba(80,100,140,0.4);
+            color: #7090b0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #405070; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Invisible Strings</h3>
+        <div class="control-row">
+            <label>Force Strength <span class="value" id="force-val">50</span></label>
+            <input type="range" id="force" min="20" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Reveal Rate <span class="value" id="reveal-val">50</span></label>
+            <input type="range" id="reveal" min="20" max="100" value="50">
+        </div>
+        <button id="reset-btn">Reset Session</button>
+        <button id="reveal-btn">Reveal All Strings</button>
+    </div>
+    <div id="stats">
+        <div>Steps: <span id="step-count">0</span></div>
+        <div>Influences: <span id="influence-count">0</span></div>
+        <div>Awareness: <span id="awareness-state">Blind</span></div>
+    </div>
+    <div id="info">Move the cursor freely | Discover the invisible forces guiding you</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initForceFields(); }
+        resize(); window.onresize = resize;
+        
+        let forceStrength = 0.5;
+        let revealRate = 0.5;
+        let time = 0;
+        let stepCount = 0;
+        let showAllStrings = false;
+        
+        let avatarX = 0;
+        let avatarY = 0;
+        let targetX = 0;
+        let targetY = 0;
+        
+        const forceFields = [];
+        const trail = [];
+        const strings = [];
+        
+        class ForceField {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type;
+                this.radius = 100 + Math.random() * 100;
+                this.strength = 0.3 + Math.random() * 0.4;
+                this.visibility = 0;
+                this.hue = type === 'attract' ? 200 : 340;
+                this.pulsePhase = Math.random() * Math.PI * 2;
+            }
+            
+            getForce(px, py) {
+                const dx = this.x - px;
+                const dy = this.y - py;
+                const dist = Math.hypot(dx, dy);
+                
+                if (dist > this.radius || dist < 10) return { fx: 0, fy: 0 };
+                
+                const falloff = 1 - dist / this.radius;
+                const force = falloff * this.strength * forceStrength;
+                const multiplier = this.type === 'attract' ? 1 : -1;
+                
+                return {
+                    fx: (dx / dist) * force * multiplier,
+                    fy: (dy / dist) * force * multiplier
+                };
+            }
+            
+            draw() {
+                this.pulsePhase += 0.02;
+                const pulse = Math.sin(this.pulsePhase) * 0.2 + 1;
+                
+                if (this.visibility > 0.05 || showAllStrings) {
+                    const vis = showAllStrings ? 0.5 : this.visibility;
+                    
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.radius * pulse, 0, Math.PI * 2);
+                    ctx.strokeStyle = "hsla(" + this.hue + ", 50%, 50%, " + (vis * 0.2) + ")";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                    
+                    const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius);
+                    gradient.addColorStop(0, "hsla(" + this.hue + ", 60%, 50%, " + (vis * 0.1) + ")");
+                    gradient.addColorStop(1, "transparent");
+                    ctx.fillStyle = gradient;
+                    ctx.fill();
+                    
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 8, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + this.hue + ", 60%, 60%, " + (vis * 0.5) + ")";
+                    ctx.fill();
+                }
+            }
+        }
+        
+        function initForceFields() {
+            forceFields.length = 0;
+            
+            const attractors = 4 + Math.floor(Math.random() * 3);
+            const repulsors = 3 + Math.floor(Math.random() * 2);
+            
+            for (let i = 0; i < attractors; i++) {
+                forceFields.push(new ForceField(
+                    150 + Math.random() * (W - 300),
+                    100 + Math.random() * (H - 200),
+                    'attract'
+                ));
+            }
+            
+            for (let i = 0; i < repulsors; i++) {
+                forceFields.push(new ForceField(
+                    150 + Math.random() * (W - 300),
+                    100 + Math.random() * (H - 200),
+                    'repulse'
+                ));
+            }
+            
+            avatarX = W / 2;
+            avatarY = H / 2;
+            targetX = avatarX;
+            targetY = avatarY;
+            trail.length = 0;
+            strings.length = 0;
+            stepCount = 0;
+            showAllStrings = false;
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = 'rgba(8, 8, 15, 0.1)';
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function drawTrail() {
+            if (trail.length < 2) return;
+            
+            ctx.beginPath();
+            ctx.moveTo(trail[0].x, trail[0].y);
+            for (let i = 1; i < trail.length; i++) {
+                ctx.lineTo(trail[i].x, trail[i].y);
+            }
+            ctx.strokeStyle = 'rgba(100, 130, 180, 0.3)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+        
+        function drawStrings() {
+            strings.forEach(s => {
+                const age = time - s.time;
+                const alpha = Math.max(0, 1 - age * 0.5) * (showAllStrings ? 1 : s.strength);
+                
+                if (alpha < 0.02) return;
+                
+                ctx.beginPath();
+                ctx.moveTo(s.fromX, s.fromY);
+                ctx.lineTo(s.toX, s.toY);
+                ctx.strokeStyle = "hsla(" + s.hue + ", 50%, 70%, " + alpha + ")";
+                ctx.lineWidth = 1 + s.strength * 2;
+                ctx.stroke();
+            });
+        }
+        
+        function drawAvatar() {
+            ctx.beginPath();
+            ctx.arc(avatarX, avatarY, 8, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(150, 180, 220, 0.8)';
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.arc(avatarX, avatarY, 12, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(100, 130, 180, 0.4)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+        }
+        
+        function getAwarenessState() {
+            const visibleFields = forceFields.filter(f => f.visibility > 0.3).length;
+            const ratio = visibleFields / forceFields.length;
+            
+            if (ratio > 0.7 || showAllStrings) return 'Awakened';
+            if (ratio > 0.4) return 'Sensing';
+            if (ratio > 0.1) return 'Glimpsing';
+            return 'Blind';
+        }
+        
+        function updateStats() {
+            document.getElementById('step-count').textContent = stepCount;
+            document.getElementById('influence-count').textContent = forceFields.filter(f => f.visibility > 0.1).length;
+            document.getElementById('awareness-state').textContent = getAwarenessState();
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            let totalFx = 0;
+            let totalFy = 0;
+            
+            forceFields.forEach(field => {
+                const force = field.getForce(avatarX, avatarY);
+                totalFx += force.fx;
+                totalFy += force.fy;
+                
+                const dist = Math.hypot(field.x - avatarX, field.y - avatarY);
+                if (dist < field.radius) {
+                    field.visibility = Math.min(1, field.visibility + 0.01 * revealRate);
+                    
+                    if (Math.abs(force.fx) + Math.abs(force.fy) > 0.05) {
+                        strings.push({
+                            fromX: avatarX,
+                            fromY: avatarY,
+                            toX: field.x,
+                            toY: field.y,
+                            hue: field.hue,
+                            strength: Math.abs(force.fx) + Math.abs(force.fy),
+                            time: time
+                        });
+                    }
+                }
+            });
+            
+            const dx = targetX - avatarX + totalFx * 20;
+            const dy = targetY - avatarY + totalFy * 20;
+            
+            avatarX += dx * 0.1;
+            avatarY += dy * 0.1;
+            
+            if (Math.abs(dx) + Math.abs(dy) > 1) {
+                trail.push({ x: avatarX, y: avatarY });
+                if (trail.length > 200) trail.shift();
+                stepCount++;
+            }
+            
+            while (strings.length > 50) strings.shift();
+            
+            drawBackground();
+            forceFields.forEach(f => f.draw());
+            drawTrail();
+            drawStrings();
+            drawAvatar();
+            
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousemove = e => {
+            if (e.clientX < 200 && e.clientY < 300) return;
+            targetX = e.clientX;
+            targetY = e.clientY;
+        };
+        
+        document.getElementById('force').oninput = e => {
+            forceStrength = e.target.value / 100;
+            document.getElementById('force-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('reveal').oninput = e => {
+            revealRate = e.target.value / 100;
+            document.getElementById('reveal-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('reset-btn').onclick = initForceFields;
+        
+        document.getElementById('reveal-btn').onclick = () => {
+            showAllStrings = !showAllStrings;
+            document.getElementById('reveal-btn').textContent = showAllStrings ? 'Hide Strings' : 'Reveal All Strings';
+        };
+        
+        initForceFields();
+        animate();
+    </script>
+</body>
+</html>

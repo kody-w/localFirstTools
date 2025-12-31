@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live-Code Shader Playground</title>
+    <meta name="description" content="Real-time GLSL shader editor with microphone reactivity. Write code and see the visuals update instantly.">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        #canvas-container {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+        }
+
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+
+        #ui-layer {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #editor-container {
+            width: 500px;
+            max-width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.6);
+            backdrop-filter: blur(4px);
+            display: flex;
+            flex-direction: column;
+            pointer-events: auto;
+            transition: transform 0.3s ease;
+            border-right: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        #editor-container.hidden {
+            transform: translateX(-100%);
+        }
+
+        #toolbar {
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.2);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .title {
+            color: #0ff;
+            font-weight: bold;
+            font-size: 14px;
+        }
+
+        #code-editor {
+            flex: 1;
+            background: transparent;
+            color: #e0e0e0;
+            border: none;
+            padding: 15px;
+            font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            resize: none;
+            outline: none;
+            white-space: pre;
+            overflow-y: auto;
+            tab-size: 2;
+        }
+
+        #code-editor::selection {
+            background: rgba(0, 255, 255, 0.3);
+        }
+
+        #error-log {
+            background: rgba(50, 0, 0, 0.9);
+            color: #ff8888;
+            padding: 10px;
+            font-size: 12px;
+            max-height: 150px;
+            overflow-y: auto;
+            border-top: 1px solid #ff4444;
+            display: none;
+        }
+
+        .btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            padding: 5px 10px;
+            font-size: 11px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+            font-family: inherit;
+        }
+
+        .btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            border-color: #fff;
+        }
+
+        .btn.active {
+            background: rgba(0, 255, 255, 0.2);
+            border-color: #0ff;
+            color: #0ff;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+        }
+
+        #toggle-editor-btn {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: auto;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            font-size: 20px;
+        }
+        
+        #toggle-editor-btn:hover {
+            background: rgba(0, 255, 255, 0.2);
+            border-color: #0ff;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #444;
+            margin-right: 8px;
+        }
+
+        .status-indicator.ok { background: #0f0; box-shadow: 0 0 5px #0f0; }
+        .status-indicator.error { background: #f00; box-shadow: 0 0 5px #f00; }
+
+        /* Syntax Highlighting (Simple) */
+        .keyword { color: #ff79c6; }
+        .type { color: #8be9fd; }
+        .number { color: #bd93f9; }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <canvas id="glcanvas"></canvas>
+    </div>
+
+    <div id="ui-layer">
+        <div id="editor-container">
+            <div id="toolbar">
+                <div style="display: flex; align-items: center;">
+                    <div id="status-light" class="status-indicator ok"></div>
+                    <span class="title">SHADER PLAYGROUND</span>
+                </div>
+                <div style="display: flex; gap: 10px;">
+                    <button id="mic-btn" class="btn">🎤 Enable Mic</button>
+                    <button id="reset-btn" class="btn">↺ Reset</button>
+                </div>
+            </div>
+            <textarea id="code-editor" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+            <div id="error-log"></div>
+        </div>
+    </div>
+
+    <button id="toggle-editor-btn" title="Toggle Editor">
+        &lt;/&gt;
+    </button>
+
+    <script>
+        // --- WebGL Setup ---
+        const canvas = document.getElementById('glcanvas');
+        const gl = canvas.getContext('webgl');
+        
+        if (!gl) {
+            alert('WebGL not supported in this browser.');
+        }
+
+        // --- Audio Setup ---
+        let audioContext;
+        let analyser;
+        let microphone;
+        let dataArray;
+        let isMicActive = false;
+        let micVolume = 0;
+        let micTexture = null;
+
+        // --- Shader State ---
+        let program = null;
+        let positionBuffer;
+        let startTime = Date.now();
+        let mouseX = 0;
+        let mouseY = 0;
+
+        // --- Default Shader Code ---
+        const vertexShaderSource = `
+            attribute vec4 aVertexPosition;
+            void main() {
+                gl_Position = aVertexPosition;
+            }
+        `;
+
+        const defaultFragmentShader = `
+#ifdef GL_ES
+precision mediump float;
+#endif
+
+uniform float u_time;
+uniform vec2 u_resolution;
+uniform vec2 u_mouse;
+uniform float u_micVolume;      // 0.0 to 1.0
+uniform sampler2D u_micTexture; // Frequency spectrum
+
+// Simple palette function
+vec3 palette( in float t, in vec3 a, in vec3 b, in vec3 c, in vec3 d ) {
+    return a + b*cos( 6.28318*(c*t+d) );
+}
+
+void main() {
+    vec2 uv = (gl_FragCoord.xy * 2.0 - u_resolution.xy) / u_resolution.y;
+    vec2 uv0 = uv;
+    vec3 finalColor = vec3(0.0);
+    
+    // React to microphone volume
+    float audioReact = u_micVolume * 2.0;
+    
+    for (float i = 0.0; i < 4.0; i++) {
+        uv = fract(uv * 1.5) - 0.5;
+        
+        float d = length(uv) * exp(-length(uv0));
+        
+        vec3 col = palette(length(uv0) + i*.4 + u_time*.4, 
+            vec3(0.5, 0.5, 0.5),
+            vec3(0.5, 0.5, 0.5),
+            vec3(1.0, 1.0, 1.0),
+            vec3(0.263,0.416,0.557)
+        );
+        
+        d = sin(d*8. + u_time)/8.;
+        d = abs(d);
+        
+        // Audio reactivity: pulse the glow
+        float glow = 0.01 / d;
+        glow *= (1.0 + audioReact * 5.0); 
+        
+        // Add some spectrum data influence
+        // Sample the texture based on distance from center
+        float freq = texture2D(u_micTexture, vec2(length(uv0) * 0.5, 0.0)).r;
+        glow += freq * 0.5;
+
+        finalColor += col * glow;
+    }
+    
+    gl_FragColor = vec4(finalColor, 1.0);
+}
+        `;
+
+        // --- Initialization ---
+        const editor = document.getElementById('code-editor');
+        const errorLog = document.getElementById('error-log');
+        const statusLight = document.getElementById('status-light');
+        
+        editor.value = defaultFragmentShader.trim();
+
+        // Initialize buffers
+        positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        const positions = [
+            -1.0,  1.0,
+             1.0,  1.0,
+            -1.0, -1.0,
+             1.0, -1.0,
+        ];
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+        // Create initial texture for audio
+        micTexture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, micTexture);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, 1, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, new Uint8Array([0]));
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+        // --- Compilation Logic ---
+        function compileShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                const info = gl.getShaderInfoLog(shader);
+                gl.deleteShader(shader);
+                throw new Error(info);
+            }
+            return shader;
+        }
+
+        function updateShader() {
+            const fsSource = editor.value;
+            
+            try {
+                const vs = compileShader(gl, gl.VERTEX_SHADER, vertexShaderSource);
+                const fs = compileShader(gl, gl.FRAGMENT_SHADER, fsSource);
+                
+                const newProgram = gl.createProgram();
+                gl.attachShader(newProgram, vs);
+                gl.attachShader(newProgram, fs);
+                gl.linkProgram(newProgram);
+                
+                if (!gl.getProgramParameter(newProgram, gl.LINK_STATUS)) {
+                    throw new Error(gl.getProgramInfoLog(newProgram));
+                }
+                
+                if (program) gl.deleteProgram(program);
+                program = newProgram;
+                
+                // Clear errors
+                errorLog.style.display = 'none';
+                errorLog.textContent = '';
+                statusLight.className = 'status-indicator ok';
+                
+            } catch (e) {
+                errorLog.style.display = 'block';
+                errorLog.textContent = 'Shader Error:\n' + e.message;
+                statusLight.className = 'status-indicator error';
+            }
+        }
+
+        // Initial compile
+        updateShader();
+
+        // --- Event Listeners ---
+        editor.addEventListener('input', updateShader);
+        
+        // Handle Tab key in textarea
+        editor.addEventListener('keydown', function(e) {
+            if (e.key == 'Tab') {
+                e.preventDefault();
+                var start = this.selectionStart;
+                var end = this.selectionEnd;
+                this.value = this.value.substring(0, start) + "  " + this.value.substring(end);
+                this.selectionStart = this.selectionEnd = start + 2;
+                updateShader();
+            }
+        });
+
+        window.addEventListener('resize', resizeCanvas);
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            gl.viewport(0, 0, canvas.width, canvas.height);
+        }
+        resizeCanvas();
+
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = window.innerHeight - e.clientY; // Flip Y
+        });
+
+        // --- Audio Handling ---
+        document.getElementById('mic-btn').addEventListener('click', async function() {
+            if (isMicActive) return;
+            
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                microphone = audioContext.createMediaStreamSource(stream);
+                microphone.connect(analyser);
+                
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                
+                isMicActive = true;
+                this.textContent = "🎤 Mic Active";
+                this.classList.add('active');
+                
+            } catch (err) {
+                console.error('Error accessing microphone:', err);
+                alert('Could not access microphone. Please ensure you have granted permission.');
+            }
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            editor.value = defaultFragmentShader.trim();
+            updateShader();
+        });
+
+        const editorContainer = document.getElementById('editor-container');
+        document.getElementById('toggle-editor-btn').addEventListener('click', () => {
+            editorContainer.classList.toggle('hidden');
+        });
+
+        // --- Render Loop ---
+        function render() {
+            if (!program) {
+                requestAnimationFrame(render);
+                return;
+            }
+
+            // Update Audio Data
+            if (isMicActive && analyser) {
+                analyser.getByteFrequencyData(dataArray);
+                
+                // Calculate average volume
+                let sum = 0;
+                for(let i = 0; i < dataArray.length; i++) {
+                    sum += dataArray[i];
+                }
+                micVolume = sum / dataArray.length / 255.0; // Normalize 0-1
+
+                // Update texture
+                gl.bindTexture(gl.TEXTURE_2D, micTexture);
+                // We use luminance format for single channel frequency data
+                // We need to pad dataArray to power of 2 or just use linear filtering
+                // Let's just upload the array as a 1xN texture
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.LUMINANCE, dataArray.length, 1, 0, gl.LUMINANCE, gl.UNSIGNED_BYTE, dataArray);
+            }
+
+            gl.useProgram(program);
+
+            // Bind attributes
+            const positionLocation = gl.getAttribLocation(program, 'aVertexPosition');
+            gl.enableVertexAttribArray(positionLocation);
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.vertexAttribPointer(positionLocation, 2, gl.FLOAT, false, 0, 0);
+
+            // Bind uniforms
+            const timeLocation = gl.getUniformLocation(program, 'u_time');
+            const resolutionLocation = gl.getUniformLocation(program, 'u_resolution');
+            const mouseLocation = gl.getUniformLocation(program, 'u_mouse');
+            const micVolLocation = gl.getUniformLocation(program, 'u_micVolume');
+            const micTexLocation = gl.getUniformLocation(program, 'u_micTexture');
+
+            gl.uniform1f(timeLocation, (Date.now() - startTime) * 0.001);
+            gl.uniform2f(resolutionLocation, canvas.width, canvas.height);
+            gl.uniform2f(mouseLocation, mouseX, mouseY);
+            gl.uniform1f(micVolLocation, micVolume);
+
+            // Bind texture to unit 0
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, micTexture);
+            gl.uniform1i(micTexLocation, 0);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            requestAnimationFrame(render);
+        }
+
+        render();
+    </script>
+</body>
+</html>

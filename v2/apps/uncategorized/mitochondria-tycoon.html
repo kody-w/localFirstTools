@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mitochondria Tycoon</title>
+    <meta name="description" content="Manage cellular respiration factories by routing glucose through metabolic pathways to generate ATP energy">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: linear-gradient(180deg, #0a1520 0%, #051015 100%); min-height: 100vh; font-family: monospace; color: #80c0a0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(10,30,40,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(100,200,150,0.3);
+            z-index: 100; min-width: 180px;
+        }
+        h3 { margin-bottom: 15px; color: #a0e0c0; }
+        .stat { margin: 8px 0; display: flex; justify-content: space-between; }
+        .stat-value { color: #60ff90; font-weight: bold; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 8px 0;
+            background: rgba(40,100,80,0.5); border: 1px solid rgba(100,200,150,0.4);
+            color: #80c0a0; cursor: pointer; border-radius: 6px;
+        }
+        button:hover { background: rgba(60,120,100,0.6); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        #upgrades {
+            position: fixed; top: 20px; right: 20px; background: rgba(10,30,40,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(100,200,150,0.3);
+            z-index: 100;
+        }
+        .upgrade { padding: 8px; margin: 5px 0; background: rgba(40,80,60,0.3); border-radius: 5px; cursor: pointer; }
+        .upgrade:hover { background: rgba(60,100,80,0.4); }
+        .upgrade-cost { color: #ffcc00; font-size: 11px; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Cell Status</h3>
+        <div class="stat"><span>ATP:</span><span class="stat-value" id="atp">0</span></div>
+        <div class="stat"><span>Glucose:</span><span class="stat-value" id="glucose">10</span></div>
+        <div class="stat"><span>Oxygen:</span><span class="stat-value" id="oxygen">100</span></div>
+        <div class="stat"><span>Efficiency:</span><span class="stat-value" id="efficiency">100%</span></div>
+        <button id="inject-btn">Inject Glucose (Free)</button>
+        <button id="boost-btn">Boost Oxygen</button>
+    </div>
+    <div id="upgrades">
+        <h3>Upgrades</h3>
+        <div class="upgrade" id="upgrade-glycolysis">
+            <div>Glycolysis II</div>
+            <div class="upgrade-cost">Cost: 50 ATP</div>
+        </div>
+        <div class="upgrade" id="upgrade-krebs">
+            <div>Krebs Cycle II</div>
+            <div class="upgrade-cost">Cost: 100 ATP</div>
+        </div>
+        <div class="upgrade" id="upgrade-etc">
+            <div>ETC Boost</div>
+            <div class="upgrade-cost">Cost: 200 ATP</div>
+        </div>
+    </div>
+    <div id="info">Watch glucose transform into ATP energy | The powerhouse of the cell</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let atp = 0;
+        let glucose = 10;
+        let oxygen = 100;
+        let glycolysisLevel = 1;
+        let krebsLevel = 1;
+        let etcLevel = 1;
+        
+        let molecules = [];
+        let particles = [];
+        
+        const STAGES = {
+            CYTOPLASM: { x: 0.2, y: 0.5, name: 'Cytoplasm' },
+            GLYCOLYSIS: { x: 0.35, y: 0.5, name: 'Glycolysis' },
+            MATRIX: { x: 0.55, y: 0.5, name: 'Matrix' },
+            KREBS: { x: 0.7, y: 0.5, name: 'Krebs Cycle' },
+            ETC: { x: 0.85, y: 0.5, name: 'Electron Transport' }
+        };
+        
+        class Molecule {
+            constructor(type, x, y) {
+                this.type = type;
+                this.x = x;
+                this.y = y;
+                this.targetX = x;
+                this.targetY = y;
+                this.stage = 'CYTOPLASM';
+                this.progress = 0;
+                this.size = type === 'glucose' ? 12 : type === 'pyruvate' ? 8 : 5;
+                this.color = type === 'glucose' ? '#ffcc00' : type === 'pyruvate' ? '#ff9900' : '#00ff88';
+            }
+            update() {
+                this.x += (this.targetX - this.x) * 0.05;
+                this.y += (this.targetY - this.y) * 0.05;
+                this.y += Math.sin(Date.now() * 0.005 + this.x) * 0.3;
+                this.progress += 0.01 * (this.type === 'glucose' ? glycolysisLevel : krebsLevel);
+                
+                if (this.stage === 'CYTOPLASM' && this.progress > 0.5) {
+                    this.stage = 'GLYCOLYSIS';
+                    this.targetX = W * STAGES.GLYCOLYSIS.x;
+                }
+                else if (this.stage === 'GLYCOLYSIS' && this.progress > 1) {
+                    if (this.type === 'glucose') {
+                        this.type = 'pyruvate';
+                        this.size = 8;
+                        this.color = '#ff9900';
+                        atp += 2 * glycolysisLevel;
+                        spawnParticles(this.x, this.y, '#ffff00', 3);
+                    }
+                    this.stage = 'MATRIX';
+                    this.targetX = W * STAGES.MATRIX.x;
+                    this.progress = 0;
+                }
+                else if (this.stage === 'MATRIX' && this.progress > 0.5) {
+                    this.stage = 'KREBS';
+                    this.targetX = W * STAGES.KREBS.x;
+                }
+                else if (this.stage === 'KREBS' && this.progress > 1) {
+                    this.type = 'electron';
+                    this.size = 5;
+                    this.color = '#00ff88';
+                    atp += 2 * krebsLevel;
+                    spawnParticles(this.x, this.y, '#88ff88', 4);
+                    this.stage = 'ETC';
+                    this.targetX = W * STAGES.ETC.x;
+                    this.progress = 0;
+                }
+                else if (this.stage === 'ETC' && this.progress > 1) {
+                    if (oxygen > 0) {
+                        atp += 32 * etcLevel;
+                        oxygen -= 1;
+                        spawnParticles(this.x, this.y, '#00ffff', 8);
+                    }
+                    return false;
+                }
+                return true;
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size);
+                grad.addColorStop(0, this.color);
+                grad.addColorStop(1, 'rgba(0,0,0,0.5)');
+                ctx.fillStyle = grad;
+                ctx.fill();
+            }
+        }
+        
+        function spawnParticles(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                particles.push({
+                    x, y,
+                    vx: (Math.random() - 0.5) * 3,
+                    vy: (Math.random() - 0.5) * 3,
+                    life: 1,
+                    color
+                });
+            }
+        }
+        
+        function drawMitochondria() {
+            const cx = W * 0.6;
+            const cy = H * 0.5;
+            const width = W * 0.5;
+            const height = H * 0.4;
+            
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, width / 2, height / 2, 0, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(60, 100, 80, 0.3)';
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(100, 180, 140, 0.6)';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            
+            ctx.beginPath();
+            ctx.ellipse(cx, cy, width / 2 - 20, height / 2 - 20, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(80, 150, 120, 0.4)';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            
+            for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI * 2;
+                const foldX = cx + Math.cos(angle) * (width * 0.3);
+                const foldY = cy + Math.sin(angle) * (height * 0.3);
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.quadraticCurveTo(foldX + Math.cos(angle + 0.5) * 30, foldY + Math.sin(angle + 0.5) * 30, foldX, foldY);
+                ctx.strokeStyle = 'rgba(100, 200, 150, 0.3)';
+                ctx.lineWidth = 8;
+                ctx.stroke();
+            }
+        }
+        
+        function drawStages() {
+            Object.entries(STAGES).forEach(([key, stage]) => {
+                const x = W * stage.x;
+                const y = H * stage.y - 120;
+                
+                ctx.fillStyle = 'rgba(100, 200, 150, 0.1)';
+                ctx.fillRect(x - 40, y - 20, 80, 40);
+                ctx.strokeStyle = 'rgba(100, 200, 150, 0.3)';
+                ctx.strokeRect(x - 40, y - 20, 80, 40);
+                
+                ctx.fillStyle = '#80c0a0';
+                ctx.font = '10px monospace';
+                ctx.textAlign = 'center';
+                ctx.fillText(stage.name, x, y);
+                
+                if (key === 'GLYCOLYSIS') {
+                    ctx.fillText('+2 ATP', x, y + 12);
+                } else if (key === 'KREBS') {
+                    ctx.fillText('+2 ATP', x, y + 12);
+                } else if (key === 'ETC') {
+                    ctx.fillText('+32 ATP', x, y + 12);
+                }
+            });
+        }
+        
+        function update() {
+            if (glucose > 0 && Math.random() < 0.02) {
+                glucose--;
+                molecules.push(new Molecule('glucose', W * 0.15, H * 0.5 + (Math.random() - 0.5) * 100));
+            }
+            
+            oxygen = Math.min(100, oxygen + 0.05);
+            
+            molecules = molecules.filter(m => m.update());
+            
+            particles = particles.filter(p => {
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.03;
+                return p.life > 0;
+            });
+        }
+        
+        function draw() {
+            ctx.fillStyle = '#051015';
+            ctx.fillRect(0, 0, W, H);
+            
+            drawMitochondria();
+            drawStages();
+            
+            molecules.forEach(m => m.draw());
+            
+            particles.forEach(p => {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, 3 * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = p.color.replace(')', ', ' + p.life + ')').replace('rgb', 'rgba').replace('#', '');
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            });
+        }
+        
+        function updateUI() {
+            document.getElementById('atp').textContent = Math.floor(atp);
+            document.getElementById('glucose').textContent = glucose;
+            document.getElementById('oxygen').textContent = Math.floor(oxygen);
+            const eff = Math.floor((glycolysisLevel + krebsLevel + etcLevel) / 3 * 100);
+            document.getElementById('efficiency').textContent = eff + '%';
+        }
+        
+        function animate() {
+            update();
+            draw();
+            updateUI();
+            requestAnimationFrame(animate);
+        }
+        
+        document.getElementById('inject-btn').onclick = () => {
+            glucose += 5;
+        };
+        
+        document.getElementById('boost-btn').onclick = () => {
+            oxygen = 100;
+            spawnParticles(W * 0.85, H * 0.5, '#00aaff', 10);
+        };
+        
+        document.getElementById('upgrade-glycolysis').onclick = () => {
+            if (atp >= 50) {
+                atp -= 50;
+                glycolysisLevel++;
+            }
+        };
+        
+        document.getElementById('upgrade-krebs').onclick = () => {
+            if (atp >= 100) {
+                atp -= 100;
+                krebsLevel++;
+            }
+        };
+        
+        document.getElementById('upgrade-etc').onclick = () => {
+            if (atp >= 200) {
+                atp -= 200;
+                etcLevel++;
+            }
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,1310 @@
+
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Browser VM - Docker in WebAssembly</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'SF Mono', 'Monaco', 'Inconsolata', monospace;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .header {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 20px;
+            backdrop-filter: blur(10px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .header h1 {
+            font-size: 24px;
+            color: #fff;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-bar {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+            flex-wrap: wrap;
+        }
+
+        .status-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+            padding: 5px 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 5px;
+            font-size: 12px;
+        }
+
+        .status-indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: #4caf50;
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .main-container {
+            flex: 1;
+            display: flex;
+            padding: 20px;
+            gap: 20px;
+        }
+
+        .left-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .right-panel {
+            width: 350px;
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel {
+            background: rgba(0, 0, 0, 0.4);
+            border-radius: 10px;
+            padding: 20px;
+            backdrop-filter: blur(5px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .terminal {
+            flex: 1;
+            background: #000;
+            border-radius: 5px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            overflow-y: auto;
+            min-height: 400px;
+            max-height: 500px;
+            color: #0f0;
+            text-shadow: 0 0 3px #0f0;
+        }
+
+        .terminal-line {
+            margin: 2px 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+
+        .terminal-input {
+            display: flex;
+            align-items: center;
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+        }
+
+        .terminal-prompt {
+            color: #4caf50;
+            margin-right: 10px;
+        }
+
+        input[type="text"] {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #0f0;
+            font-family: inherit;
+            font-size: 14px;
+            outline: none;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            border: none;
+            color: white;
+            padding: 12px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.running {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+        }
+
+        .docker-images {
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .image-item {
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.05);
+            margin: 5px 0;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: all 0.3s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .image-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .image-size {
+            font-size: 12px;
+            color: #888;
+        }
+
+        .resource-monitor {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        .resource-item {
+            text-align: center;
+        }
+
+        .resource-bar {
+            height: 8px;
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 5px;
+        }
+
+        .resource-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #4caf50, #8bc34a);
+            transition: width 0.3s;
+        }
+
+        .loader {
+            display: none;
+            text-align: center;
+            padding: 20px;
+        }
+
+        .loader.active {
+            display: block;
+        }
+
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top-color: #fff;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .tab-buttons {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 15px;
+        }
+
+        .tab-button {
+            padding: 8px 16px;
+            background: rgba(255, 255, 255, 0.1);
+            border: none;
+            color: white;
+            border-radius: 5px 5px 0 0;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .tab-button.active {
+            background: rgba(255, 255, 255, 0.2);
+        }
+
+        .filesystem-tree {
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 300px;
+            overflow-y: auto;
+            background: rgba(0, 0, 0, 0.3);
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        .file-item {
+            padding: 2px 0;
+            cursor: pointer;
+        }
+
+        .file-item:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        @media (max-width: 768px) {
+            .main-container {
+                flex-direction: column;
+            }
+            .right-panel {
+                width: 100%;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>🖥️ Browser VM - Docker Without Docker</h1>
+        <div class="status-bar">
+            <div class="status-item">
+                <div class="status-indicator"></div>
+                <span>VM Status: <span id="vmStatus">Initializing</span></span>
+            </div>
+            <div class="status-item">
+                <span>Kernel: Linux 5.10 (WASM)</span>
+            </div>
+            <div class="status-item">
+                <span>Containers: <span id="containerCount">0</span></span>
+            </div>
+            <div class="status-item">
+                <span>Memory: <span id="memoryUsage">0</span> MB</span>
+            </div>
+        </div>
+    </div>
+
+    <div class="main-container">
+        <div class="left-panel">
+            <div class="panel">
+                <h3>🖥️ Virtual Terminal</h3>
+                <div class="terminal" id="terminal">
+                    <div class="terminal-line">Welcome to Browser VM v1.0</div>
+                    <div class="terminal-line">Running Linux kernel in WebAssembly...</div>
+                    <div class="terminal-line">Type 'help' for available commands</div>
+                </div>
+                <div class="terminal-input">
+                    <span class="terminal-prompt">root@browser:~#</span>
+                    <input type="text" id="terminalInput" placeholder="Enter command...">
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>📁 Filesystem</h3>
+                <div class="tab-buttons">
+                    <button class="tab-button active" onclick="showTab('fs')">Files</button>
+                    <button class="tab-button" onclick="showTab('processes')">Processes</button>
+                    <button class="tab-button" onclick="showTab('network')">Network</button>
+                </div>
+                <div class="filesystem-tree" id="filesystemTree">
+                    <div class="file-item">📁 /</div>
+                    <div class="file-item">  📁 bin/</div>
+                    <div class="file-item">  📁 etc/</div>
+                    <div class="file-item">  📁 home/</div>
+                    <div class="file-item">  📁 var/</div>
+                    <div class="file-item">    📁 lib/</div>
+                    <div class="file-item">      📁 docker/</div>
+                    <div class="file-item">        📁 containers/</div>
+                    <div class="file-item">        📁 images/</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="right-panel">
+            <div class="panel">
+                <h3>🐳 Docker Control</h3>
+                <div class="controls">
+                    <button onclick="initializeVM()">Initialize VM</button>
+                    <button onclick="pullImage()" id="pullBtn">Pull Image</button>
+                    <button onclick="runContainer()" id="runBtn">Run Container</button>
+                    <button onclick="stopContainer()" id="stopBtn">Stop Container</button>
+                </div>
+                <div class="loader" id="loader">
+                    <div class="spinner"></div>
+                    <p>Loading VM...</p>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>📦 Available Images</h3>
+                <div class="docker-images" id="dockerImages">
+                    <div class="image-item" onclick="selectImage('alpine')">
+                        <span>alpine:latest</span>
+                        <span class="image-size">5.6 MB</span>
+                    </div>
+                    <div class="image-item" onclick="selectImage('busybox')">
+                        <span>busybox:latest</span>
+                        <span class="image-size">1.2 MB</span>
+                    </div>
+                    <div class="image-item" onclick="selectImage('nginx')">
+                        <span>nginx:alpine</span>
+                        <span class="image-size">23 MB</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3>📊 Resource Monitor</h3>
+                <div class="resource-monitor">
+                    <div class="resource-item">
+                        <div>CPU</div>
+                        <div class="resource-bar">
+                            <div class="resource-fill" id="cpuBar" style="width: 20%"></div>
+                        </div>
+                        <small id="cpuPercent">20%</small>
+                    </div>
+                    <div class="resource-item">
+                        <div>Memory</div>
+                        <div class="resource-bar">
+                            <div class="resource-fill" id="memBar" style="width: 35%"></div>
+                        </div>
+                        <small id="memPercent">35%</small>
+                    </div>
+                    <div class="resource-item">
+                        <div>Disk</div>
+                        <div class="resource-bar">
+                            <div class="resource-fill" id="diskBar" style="width: 10%"></div>
+                        </div>
+                        <small id="diskPercent">10%</small>
+                    </div>
+                    <div class="resource-item">
+                        <div>Network</div>
+                        <div class="resource-bar">
+                            <div class="resource-fill" id="netBar" style="width: 5%"></div>
+                        </div>
+                        <small id="netPercent">5%</small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Virtual Machine State
+        class BrowserVM {
+            constructor() {
+                this.initialized = false;
+                this.kernel = null;
+                this.filesystem = new Map();
+                this.processes = [];
+                this.containers = new Map();
+                this.selectedImage = 'alpine';
+                this.memory = {
+                    total: 512 * 1024 * 1024, // 512MB
+                    used: 0
+                };
+                
+                this.initFilesystem();
+            }
+
+            initFilesystem() {
+                // Simulate a basic Linux filesystem
+                this.filesystem.set('/', { type: 'dir', children: ['bin', 'etc', 'home', 'var'] });
+                this.filesystem.set('/bin', { type: 'dir', children: ['docker', 'sh', 'ls'] });
+                this.filesystem.set('/etc', { type: 'dir', children: ['passwd', 'hosts'] });
+                this.filesystem.set('/var/lib/docker', { type: 'dir', children: [] });
+            }
+
+            async initialize() {
+                addTerminalLine('[VM] Initializing WebAssembly kernel...');
+                
+                // Simulate kernel boot
+                await this.simulateDelay(1000);
+                addTerminalLine('[VM] Loading Linux kernel 5.10...');
+                
+                await this.simulateDelay(800);
+                addTerminalLine('[VM] Mounting virtual filesystem...');
+                
+                await this.simulateDelay(600);
+                addTerminalLine('[VM] Initializing container runtime...');
+                
+                await this.simulateDelay(500);
+                addTerminalLine('[VM] Starting Docker daemon (containerd)...');
+                
+                this.initialized = true;
+                this.kernel = {
+                    version: '5.10.0-wasm',
+                    uptime: 0,
+                    loadAverage: [0.15, 0.10, 0.05]
+                };
+                
+                addTerminalLine('[VM] System ready!');
+                document.getElementById('vmStatus').textContent = 'Running';
+                
+                // Start resource monitoring
+                this.startResourceMonitor();
+                
+                return true;
+            }
+
+            async pullDockerImage(imageName) {
+                addTerminalLine(`[Docker] Pulling image: ${imageName}:latest`);
+                
+                // Simulate pulling layers
+                const layers = [
+                    'a3ed95caeb02',
+                    '1d8e4b6c7f9a',
+                    'c9b1b535fdd9',
+                    'e2d85cbf1e4c'
+                ];
+                
+                for (let i = 0; i < layers.length; i++) {
+                    await this.simulateDelay(500);
+                    addTerminalLine(`[Docker] Pulling layer ${i+1}/4: ${layers[i]}`);
+                }
+                
+                await this.simulateDelay(300);
+                addTerminalLine(`[Docker] Image ${imageName}:latest pulled successfully`);
+                
+                // Add to filesystem
+                this.filesystem.set(`/var/lib/docker/images/${imageName}`, {
+                    type: 'image',
+                    size: Math.floor(Math.random() * 50) + 10,
+                    layers: layers
+                });
+                
+                return true;
+            }
+
+            async runContainer(imageName) {
+                const containerId = this.generateContainerId();
+                addTerminalLine(`[Docker] Creating container from ${imageName}:latest`);
+                
+                await this.simulateDelay(500);
+                addTerminalLine(`[Docker] Container ID: ${containerId}`);
+                
+                await this.simulateDelay(300);
+                addTerminalLine('[Docker] Mounting layers...');
+                
+                await this.simulateDelay(400);
+                addTerminalLine('[Docker] Setting up network namespace...');
+                
+                await this.simulateDelay(300);
+                addTerminalLine('[Docker] Starting container process...');
+                
+                const container = {
+                    id: containerId,
+                    image: imageName,
+                    status: 'running',
+                    pid: Math.floor(Math.random() * 10000) + 1000,
+                    memory: Math.floor(Math.random() * 100) + 50,
+                    cpu: Math.random() * 30 + 10
+                };
+                
+                this.containers.set(containerId, container);
+                this.processes.push({
+                    pid: container.pid,
+                    name: `docker-${imageName}`,
+                    memory: container.memory
+                });
+                
+                addTerminalLine(`[Docker] Container ${containerId.slice(0, 12)} is running`);
+                addTerminalLine(`[Docker] Process PID: ${container.pid}`);
+                
+                document.getElementById('containerCount').textContent = this.containers.size;
+                
+                // Simulate container output
+                setTimeout(() => {
+                    if (imageName === 'nginx') {
+                        addTerminalLine('[nginx] Starting nginx server...');
+                        addTerminalLine('[nginx] Listening on port 80');
+                    } else if (imageName === 'alpine') {
+                        addTerminalLine('[alpine] Alpine Linux started');
+                        addTerminalLine('[alpine] / # echo "Hello from container!"');
+                        addTerminalLine('Hello from container!');
+                    }
+                }, 1000);
+                
+                return containerId;
+            }
+
+            async executeCommand(command) {
+                const parts = command.trim().split(' ');
+                const cmd = parts[0];
+                
+                switch(cmd) {
+                    case 'help':
+                        return this.showHelp();
+                    case 'docker':
+                        return this.dockerCommand(parts.slice(1));
+                    case 'ls':
+                        return this.listFiles(parts[1] || '/');
+                    case 'ps':
+                        return this.listProcesses();
+                    case 'uname':
+                        return 'Linux browser-vm 5.10.0-wasm #1 SMP WASM x86_64 GNU/Linux';
+                    case 'free':
+                        return this.showMemory();
+                    case 'df':
+                        return this.showDiskUsage();
+                    case 'echo':
+                        return parts.slice(1).join(' ');
+                    case 'clear':
+                        document.getElementById('terminal').innerHTML = '';
+                        return '';
+                    default:
+                        return `Command not found: ${cmd}. Type 'help' for available commands.`;
+                }
+            }
+
+            dockerCommand(args) {
+                if (args.length === 0) return 'Usage: docker [ps|images|run|stop]';
+                
+                const subcommand = args[0];
+                switch(subcommand) {
+                    case 'ps':
+                        if (this.containers.size === 0) {
+                            return 'No containers running';
+                        }
+                        let output = 'CONTAINER ID    IMAGE    STATUS    PID\n';
+                        this.containers.forEach(c => {
+                            output += `${c.id.slice(0,12)}    ${c.image}    ${c.status}    ${c.pid}\n`;
+                        });
+                        return output;
+                    case 'images':
+                        return 'REPOSITORY    TAG    SIZE\n' +
+                               'alpine        latest    5.6MB\n' +
+                               'busybox       latest    1.2MB\n' +
+                               'nginx         alpine    23MB';
+                    case 'run':
+                        return 'Use the UI button to run containers';
+                    case 'stop':
+                        return 'Use the UI button to stop containers';
+                    default:
+                        return `Unknown docker command: ${subcommand}`;
+                }
+            }
+
+            listFiles(path) {
+                const entry = this.filesystem.get(path);
+                if (!entry) return `ls: cannot access '${path}': No such file or directory`;
+                if (entry.type !== 'dir') return path;
+                
+                return entry.children.join('  ');
+            }
+
+            listProcesses() {
+                let output = 'PID    NAME    MEM(MB)\n';
+                output += '1      init      2\n';
+                output += '42     dockerd   45\n';
+                this.processes.forEach(p => {
+                    output += `${p.pid}    ${p.name}    ${p.memory}\n`;
+                });
+                return output;
+            }
+
+            showMemory() {
+                const used = Math.floor(this.memory.used / 1024 / 1024);
+                const total = Math.floor(this.memory.total / 1024 / 1024);
+                const free = total - used;
+                return `              total        used        free\n` +
+                       `Mem:          ${total}         ${used}         ${free}`;
+            }
+
+            showDiskUsage() {
+                return 'Filesystem     Size  Used Avail Use% Mounted on\n' +
+                       '/dev/wasm      1.0G  100M  900M  10% /';
+            }
+
+            showHelp() {
+                return `Available commands:
+  help     - Show this help message
+  docker   - Docker commands (ps, images, run, stop)
+  ls       - List files
+  ps       - List processes
+  uname    - Show system information
+  free     - Show memory usage
+  df       - Show disk usage
+  echo     - Echo text
+  clear    - Clear terminal`;
+            }
+
+            generateContainerId() {
+                return Array.from({length: 64}, () => 
+                    Math.floor(Math.random() * 16).toString(16)
+                ).join('');
+            }
+
+            simulateDelay(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            startResourceMonitor() {
+                setInterval(() => {
+                    // Simulate resource usage
+                    const cpu = Math.random() * 50 + 10;
+                    const mem = Math.random() * 40 + 20;
+                    const disk = Math.random() * 20 + 5;
+                    const net = Math.random() * 30 + 5;
+                    
+                    document.getElementById('cpuBar').style.width = cpu + '%';
+                    document.getElementById('cpuPercent').textContent = Math.floor(cpu) + '%';
+                    
+                    document.getElementById('memBar').style.width = mem + '%';
+                    document.getElementById('memPercent').textContent = Math.floor(mem) + '%';
+                    
+                    document.getElementById('diskBar').style.width = disk + '%';
+                    document.getElementById('diskPercent').textContent = Math.floor(disk) + '%';
+                    
+                    document.getElementById('netBar').style.width = net + '%';
+                    document.getElementById('netPercent').textContent = Math.floor(net) + '%';
+                    
+                    const memUsed = Math.floor((mem / 100) * 512);
+                    document.getElementById('memoryUsage').textContent = memUsed;
+                }, 2000);
+            }
+        }
+
+        // Initialize VM instance
+        const vm = new BrowserVM();
+
+        // Terminal functions
+        function addTerminalLine(text, isError = false) {
+            const terminal = document.getElementById('terminal');
+            const line = document.createElement('div');
+            line.className = 'terminal-line';
+            line.textContent = text;
+            if (isError) line.style.color = '#ff6b6b';
+            terminal.appendChild(line);
+            terminal.scrollTop = terminal.scrollHeight;
+        }
+
+        // Control functions
+        async function initializeVM() {
+            const loader = document.getElementById('loader');
+            loader.classList.add('active');
+            
+            document.getElementById('pullBtn').disabled = true;
+            document.getElementById('runBtn').disabled = true;
+            
+            await vm.initialize();
+            
+            loader.classList.remove('active');
+            document.getElementById('pullBtn').disabled = false;
+            document.getElementById('runBtn').disabled = false;
+        }
+
+        async function pullImage() {
+            if (!vm.initialized) {
+                addTerminalLine('[Error] VM not initialized', true);
+                return;
+            }
+            
+            document.getElementById('pullBtn').disabled = true;
+            document.getElementById('pullBtn').textContent = 'Pulling...';
+            
+            await vm.pullDockerImage(vm.selectedImage);
+            
+            document.getElementById('pullBtn').disabled = false;
+            document.getElementById('pullBtn').textContent = 'Pull Image';
+        }
+
+        async function runContainer() {
+            if (!vm.initialized) {
+                addTerminalLine('[Error] VM not initialized', true);
+                return;
+            }
+            
+            document.getElementById('runBtn').disabled = true;
+            document.getElementById('runBtn').classList.add('running');
+            document.getElementById('runBtn').textContent = 'Running...';
+            
+            await vm.runContainer(vm.selectedImage);
+            
+            document.getElementById('runBtn').disabled = false;
+            document.getElementById('runBtn').classList.remove('running');
+            document.getElementById('runBtn').textContent = 'Run Container';
+            document.getElementById('stopBtn').disabled = false;
+        }
+
+        async function stopContainer() {
+            if (vm.containers.size === 0) {
+                addTerminalLine('[Error] No containers running', true);
+                return;
+            }
+            
+            const container = Array.from(vm.containers.values())[0];
+            addTerminalLine(`[Docker] Stopping container ${container.id.slice(0, 12)}...`);
+            
+            await vm.simulateDelay(500);
+            
+            vm.containers.delete(container.id);
+            vm.processes = vm.processes.filter(p => p.pid !== container.pid);
+            
+            addTerminalLine(`[Docker] Container stopped`);
+            document.getElementById('containerCount').textContent = vm.containers.size;
+            
+            if (vm.containers.size === 0) {
+                document.getElementById('stopBtn').disabled = true;
+            }
+        }
+
+        function selectImage(imageName) {
+            vm.selectedImage = imageName;
+            addTerminalLine(`[UI] Selected image: ${imageName}`);
+            
+            // Update UI to show selection
+            document.querySelectorAll('.image-item').forEach(item => {
+                item.style.background = 'rgba(255, 255, 255, 0.05)';
+            });
+            event.currentTarget.style.background = 'rgba(102, 126, 234, 0.3)';
+        }
+
+        function showTab(tab) {
+            // Update tab buttons
+            document.querySelectorAll('.tab-button').forEach(btn => {
+                btn.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Update content based on tab
+            const tree = document.getElementById('filesystemTree');
+            
+            switch(tab) {
+                case 'fs':
+                    tree.innerHTML = `
+                        <div class="file-item">📁 /</div>
+                        <div class="file-item">  📁 bin/</div>
+                        <div class="file-item">  📁 etc/</div>
+                        <div class="file-item">  📁 home/</div>
+                        <div class="file-item">  📁 var/</div>
+                        <div class="file-item">    📁 lib/</div>
+                        <div class="file-item">      📁 docker/</div>
+                        <div class="file-item">        📁 containers/</div>
+                        <div class="file-item">        📁 images/</div>
+                    `;
+                    break;
+                case 'processes':
+                    let processHtml = '<div class="file-item">PID | Process Name</div>';
+                    processHtml += '<div class="file-item">1   | /sbin/init</div>';
+                    processHtml += '<div class="file-item">42  | dockerd</div>';
+                    vm.processes.forEach(p => {
+                        processHtml += `<div class="file-item">${p.pid} | ${p.name}</div>`;
+                    });
+                    tree.innerHTML = processHtml;
+                    break;
+                case 'network':
+                    tree.innerHTML = `
+                        <div class="file-item">Interface: eth0 (virtual)</div>
+                        <div class="file-item">IP: 172.17.0.1</div>
+                        <div class="file-item">Gateway: 172.17.0.254</div>
+                        <div class="file-item">DNS: 8.8.8.8</div>
+                        <div class="file-item">Bridge: docker0</div>
+                    `;
+                    break;
+            }
+        }
+
+        // Terminal input handler
+        document.getElementById('terminalInput').addEventListener('keypress', async function(e) {
+            if (e.key === 'Enter') {
+                const command = this.value.trim();
+                if (command) {
+                    addTerminalLine(`root@browser:~# ${command}`);
+                    
+                    if (vm.initialized) {
+                        const output = await vm.executeCommand(command);
+                        if (output) addTerminalLine(output);
+        
+                    } else {
+                        addTerminalLine('[Error] VM not initialized. Run "Initialize VM" first.', true);
+                    }
+                    
+                    this.value = '';
+                }
+            }
+        });
+
+        // Auto-initialize on page load with a delay for effect
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                addTerminalLine('[System] Browser VM Ready. Click "Initialize VM" to start.');
+                addTerminalLine('[System] This VM runs entirely in your browser using WebAssembly.');
+                addTerminalLine('[System] No server required - everything is client-side!');
+            }, 500);
+        });
+
+        // Additional WebAssembly VM functionality
+        class ContainerRuntime {
+            constructor() {
+                this.layers = new Map();
+                this.volumes = new Map();
+                this.networks = new Map();
+                
+                // Initialize default network
+                this.networks.set('bridge', {
+                    name: 'bridge',
+                    driver: 'bridge',
+                    subnet: '172.17.0.0/16',
+                    gateway: '172.17.0.1'
+                });
+            }
+
+            async createContainer(image, options = {}) {
+                const container = {
+                    id: this.generateId(),
+                    image: image,
+                    created: Date.now(),
+                    state: 'created',
+                    config: {
+                        hostname: options.hostname || this.generateId().slice(0, 12),
+                        env: options.env || [],
+                        cmd: options.cmd || ['/bin/sh'],
+                        workingDir: options.workingDir || '/',
+                        user: options.user || 'root'
+                    },
+                    network: {
+                        ip: this.allocateIP(),
+                        ports: options.ports || [],
+                        dns: ['8.8.8.8', '8.8.4.4']
+                    },
+                    mounts: options.volumes || [],
+                    resources: {
+                        cpuShares: options.cpuShares || 1024,
+                        memoryLimit: options.memory || 134217728, // 128MB default
+                        pidsLimit: options.pidsLimit || 100
+                    }
+                };
+                
+                return container;
+            }
+
+            allocateIP() {
+                // Simple IP allocation (would be more complex in real implementation)
+                const base = '172.17.0.';
+                const lastOctet = Math.floor(Math.random() * 250) + 2;
+                return base + lastOctet;
+            }
+
+            generateId() {
+                return Array.from({length: 64}, () => 
+                    Math.floor(Math.random() * 16).toString(16)
+                ).join('');
+            }
+        }
+
+        // WebAssembly Linux Kernel Simulation
+        class WASMKernel {
+            constructor() {
+                this.syscalls = new Map();
+                this.processes = new Map();
+                this.nextPid = 1;
+                this.bootTime = Date.now();
+                
+                this.initSyscalls();
+            }
+
+            initSyscalls() {
+                // Simulate basic Linux syscalls
+                this.syscalls.set('open', this.sysOpen.bind(this));
+                this.syscalls.set('read', this.sysRead.bind(this));
+                this.syscalls.set('write', this.sysWrite.bind(this));
+                this.syscalls.set('close', this.sysClose.bind(this));
+                this.syscalls.set('fork', this.sysFork.bind(this));
+                this.syscalls.set('execve', this.sysExecve.bind(this));
+                this.syscalls.set('exit', this.sysExit.bind(this));
+            }
+
+            sysOpen(path, flags) {
+                // Simulate file opening
+                return { fd: Math.floor(Math.random() * 1000) + 3, path, flags };
+            }
+
+            sysRead(fd, buffer, count) {
+                // Simulate reading from file descriptor
+                return count; // Return number of bytes "read"
+            }
+
+            sysWrite(fd, buffer, count) {
+                // Simulate writing to file descriptor
+                if (fd === 1) { // stdout
+                    addTerminalLine(`[Process] ${buffer}`);
+                }
+                return count;
+            }
+
+            sysClose(fd) {
+                return 0; // Success
+            }
+
+            sysFork() {
+                const childPid = this.nextPid++;
+                return childPid;
+            }
+
+            sysExecve(filename, argv, envp) {
+                // Simulate executing a new program
+                const pid = this.nextPid++;
+                this.processes.set(pid, {
+                    pid,
+                    filename,
+                    argv,
+                    envp,
+                    state: 'running'
+                });
+                return 0;
+            }
+
+            sysExit(status) {
+                // Process exit
+                return status;
+            }
+        }
+
+        // OCI (Open Container Initiative) Runtime Spec Implementation
+        class OCIRuntime {
+            constructor(kernel) {
+                this.kernel = kernel;
+                this.spec = {
+                    version: "1.0.0",
+                    platform: {
+                        os: "linux",
+                        arch: "wasm32"
+                    }
+                };
+            }
+
+            async createContainer(bundle) {
+                // Parse OCI runtime spec
+                const config = bundle.config;
+                
+                // Create namespaces
+                const namespaces = {
+                    pid: this.createPidNamespace(),
+                    net: this.createNetNamespace(),
+                    mnt: this.createMountNamespace(),
+                    uts: this.createUtsNamespace(),
+                    ipc: this.createIpcNamespace()
+                };
+                
+                // Setup root filesystem
+                const rootfs = await this.setupRootfs(config.root);
+                
+                // Create container process
+                const process = {
+                    terminal: config.process.terminal || false,
+                    user: config.process.user || { uid: 0, gid: 0 },
+                    args: config.process.args || ["/bin/sh"],
+                    env: config.process.env || [],
+                    cwd: config.process.cwd || "/",
+                    capabilities: config.process.capabilities || {}
+                };
+                
+                return {
+                    id: this.generateId(),
+                    bundle,
+                    namespaces,
+                    rootfs,
+                    process,
+                    state: 'created'
+                };
+            }
+
+            createPidNamespace() {
+                return { type: 'pid', path: '/proc/self/ns/pid' };
+            }
+
+            createNetNamespace() {
+                return { type: 'net', path: '/proc/self/ns/net' };
+            }
+
+            createMountNamespace() {
+                return { type: 'mnt', path: '/proc/self/ns/mnt' };
+            }
+
+            createUtsNamespace() {
+                return { type: 'uts', path: '/proc/self/ns/uts' };
+            }
+
+            createIpcNamespace() {
+                return { type: 'ipc', path: '/proc/self/ns/ipc' };
+            }
+
+            async setupRootfs(root) {
+                // Simulate setting up container root filesystem
+                return {
+                    path: root.path || '/var/lib/docker/overlay2',
+                    readonly: root.readonly || false
+                };
+            }
+
+            generateId() {
+                return Array.from({length: 32}, () => 
+                    Math.floor(Math.random() * 16).toString(16)
+                ).join('');
+            }
+        }
+
+        // Docker Image Layer Management
+        class LayerStore {
+            constructor() {
+                this.layers = new Map();
+                this.images = new Map();
+            }
+
+            async pullLayer(digest) {
+                // Simulate pulling a layer from registry
+                const layer = {
+                    digest,
+                    size: Math.floor(Math.random() * 10485760) + 1048576, // 1-10MB
+                    mediaType: 'application/vnd.docker.image.rootfs.diff.tar.gzip',
+                    data: new ArrayBuffer(1024) // Simplified - would be actual layer data
+                };
+                
+                this.layers.set(digest, layer);
+                return layer;
+            }
+
+            async extractLayer(layer) {
+                // Simulate extracting layer to filesystem
+                return {
+                    files: Math.floor(Math.random() * 100) + 10,
+                    directories: Math.floor(Math.random() * 20) + 5,
+                    extractedSize: layer.size * 2
+                };
+            }
+
+            createImage(manifest) {
+                const image = {
+                    id: this.generateImageId(),
+                    manifest,
+                    layers: manifest.layers || [],
+                    config: manifest.config || {},
+                    created: Date.now()
+                };
+                
+                this.images.set(image.id, image);
+                return image;
+            }
+
+            generateImageId() {
+                return 'sha256:' + Array.from({length: 64}, () => 
+                    Math.floor(Math.random() * 16).toString(16)
+                ).join('');
+            }
+        }
+
+        // Virtual Network Stack
+        class NetworkStack {
+            constructor() {
+                this.interfaces = new Map();
+                this.bridges = new Map();
+                this.iptables = {
+                    filter: { INPUT: [], OUTPUT: [], FORWARD: [] },
+                    nat: { PREROUTING: [], POSTROUTING: [], OUTPUT: [] }
+                };
+                
+                this.initDefaultNetwork();
+            }
+
+            initDefaultNetwork() {
+                // Create docker0 bridge
+                this.createBridge('docker0', {
+                    subnet: '172.17.0.0/16',
+                    gateway: '172.17.0.1'
+                });
+                
+                // Create lo interface
+                this.interfaces.set('lo', {
+                    name: 'lo',
+                    type: 'loopback',
+                    ip: '127.0.0.1',
+                    netmask: '255.0.0.0',
+                    state: 'UP'
+                });
+            }
+
+            createBridge(name, config) {
+                const bridge = {
+                    name,
+                    type: 'bridge',
+                    subnet: config.subnet,
+                    gateway: config.gateway,
+                    interfaces: [],
+                    state: 'UP'
+                };
+                
+                this.bridges.set(name, bridge);
+                this.interfaces.set(name, {
+                    name,
+                    type: 'bridge',
+                    ip: config.gateway,
+                    state: 'UP'
+                });
+                
+                return bridge;
+            }
+
+            createVeth(containerName) {
+                // Create virtual ethernet pair for container
+                const vethHost = `veth${Math.random().toString(36).substr(2, 6)}`;
+                const vethContainer = 'eth0';
+                
+                return {
+                    host: {
+                        name: vethHost,
+                        type: 'veth',
+                        peer: vethContainer,
+                        state: 'UP'
+                    },
+                    container: {
+                        name: vethContainer,
+                        type: 'veth',
+                        peer: vethHost,
+                        state: 'UP'
+                    }
+                };
+            }
+
+            addIptableRule(table, chain, rule) {
+                if (this.iptables[table] && this.iptables[table][chain]) {
+                    this.iptables[table][chain].push(rule);
+                }
+            }
+        }
+
+        // Initialize additional components
+        const containerRuntime = new ContainerRuntime();
+        const wasmKernel = new WASMKernel();
+        const ociRuntime = new OCIRuntime(wasmKernel);
+        const layerStore = new LayerStore();
+        const networkStack = new NetworkStack();
+
+        // Extend VM with additional capabilities
+        vm.containerRuntime = containerRuntime;
+        vm.kernel = wasmKernel;
+        vm.ociRuntime = ociRuntime;
+        vm.layerStore = layerStore;
+        vm.networkStack = networkStack;
+
+        // Add keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            // Ctrl+L to clear terminal
+            if (e.ctrlKey && e.key === 'l') {
+                e.preventDefault();
+                document.getElementById('terminal').innerHTML = '';
+                addTerminalLine('[Terminal cleared]');
+            }
+            
+            // Ctrl+C to stop running process (simulation)
+            if (e.ctrlKey && e.key === 'c') {
+                e.preventDefault();
+                addTerminalLine('^C');
+                addTerminalLine('[Process interrupted]');
+            }
+        });
+
+        // Simulate WebAssembly module loading
+        async function loadWASMModule() {
+            addTerminalLine('[WASM] Loading WebAssembly modules...');
+            
+            // In a real implementation, this would load actual WASM modules
+            // For now, we simulate it
+            const modules = [
+                'kernel.wasm',
+                'containerruntime.wasm',
+                'network.wasm',
+                'storage.wasm'
+            ];
+            
+            for (const module of modules) {
+                await vm.simulateDelay(200);
+                addTerminalLine(`[WASM] Loaded ${module}`);
+            }
+            
+            addTerminalLine('[WASM] All modules loaded successfully');
+        }
+
+        // Performance monitoring
+        let performanceStats = {
+            operations: 0,
+            networkPackets: 0,
+            diskIO: 0
+        };
+
+        setInterval(() => {
+            performanceStats.operations += Math.floor(Math.random() * 1000);
+            performanceStats.networkPackets += Math.floor(Math.random() * 100);
+            performanceStats.diskIO += Math.floor(Math.random() * 50);
+        }, 1000);
+
+        // WebAssembly memory management simulation
+        class WASMMemory {
+            constructor(initial = 256, maximum = 32768) {
+                this.pages = initial;
+                this.maximum = maximum;
+                this.pageSize = 65536; // 64KB per page
+                this.used = 0;
+            }
+
+            grow(delta) {
+                const newPages = this.pages + delta;
+                if (newPages > this.maximum) {
+                    throw new Error('Out of memory');
+                }
+                const oldPages = this.pages;
+                this.pages = newPages;
+                return oldPages;
+            }
+
+            allocate(bytes) {
+                this.used += bytes;
+                if (this.used > this.pages * this.pageSize) {
+                    const pagesNeeded = Math.ceil((this.used - this.pages * this.pageSize) / this.pageSize);
+                    this.grow(pagesNeeded);
+                }
+                return this.used - bytes; // Return "address"
+            }
+
+            free(address, bytes) {
+                this.used = Math.max(0, this.used - bytes);
+            }
+        }
+
+        vm.wasmMemory = new WASMMemory();
+
+        console.log('Browser VM initialized. This simulates a complete Linux environment with Docker support running entirely in your browser via WebAssembly.');
+    </script>
+</body>
+</html>
