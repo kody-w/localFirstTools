@@ -1034,7 +1034,7 @@
             return group;
         }
 
-        // Animation System
+        // Animation System - Enhanced with limb movement
         const AnimationSystem = {
             animations: new Map(),
 
@@ -1045,8 +1045,33 @@
                     phase: Math.random() * Math.PI * 2,
                     walkPhase: 0,
                     attackPhase: 0,
-                    isAttacking: false
+                    castPhase: 0,
+                    isAttacking: false,
+                    isCasting: false,
+                    limbCache: null
                 });
+            },
+
+            // Get limb meshes from model group
+            getLimbs(entity) {
+                if (!entity.modelGroup) return null;
+                const limbs = {
+                    armL: null, armR: null,
+                    legL: null, legR: null,
+                    head: null, weapon: null,
+                    cape: null, staff: null
+                };
+                entity.modelGroup.traverse(child => {
+                    if (child.name === 'armL' || child.name === 'sleeveL') limbs.armL = child;
+                    if (child.name === 'armR' || child.name === 'sleeveR') limbs.armR = child;
+                    if (child.name === 'legL') limbs.legL = child;
+                    if (child.name === 'legR') limbs.legR = child;
+                    if (child.name === 'head' || child.name === 'helmet') limbs.head = child;
+                    if (child.name === 'bladeR' || child.name === 'hammerHead' || child.name === 'staff') limbs.weapon = child;
+                    if (child.name === 'cape') limbs.cape = child;
+                    if (child.name === 'staffOrb') limbs.staff = child;
+                });
+                return limbs;
             },
 
             // Update all animations
@@ -1055,6 +1080,11 @@
                     if (!entity || entity.dead || !entity.mesh) return;
 
                     anim.phase += dt * 2;
+
+                    // Cache limbs for performance
+                    if (!anim.limbCache && entity.modelGroup) {
+                        anim.limbCache = this.getLimbs(entity);
+                    }
 
                     // Idle animation (breathing/bobbing)
                     const breathe = 1 + Math.sin(anim.phase) * 0.03;
@@ -1065,22 +1095,54 @@
                         entity.modelGroup.scale.y = breathe;
                         entity.modelGroup.position.y = bob;
 
-                        // Walk animation
+                        const limbs = anim.limbCache;
+
+                        // Walk animation with limb movement
                         if (entity.isMoving) {
                             anim.walkPhase += dt * 12;
                             const walkBob = Math.abs(Math.sin(anim.walkPhase)) * 0.1;
                             const walkTilt = Math.sin(anim.walkPhase) * 0.05;
                             entity.modelGroup.position.y += walkBob;
                             entity.modelGroup.rotation.z = walkTilt;
+
+                            // Animate limbs during walk
+                            if (limbs) {
+                                const legSwing = Math.sin(anim.walkPhase) * 0.4;
+                                const armSwing = Math.sin(anim.walkPhase) * 0.3;
+
+                                if (limbs.legL) limbs.legL.rotation.x = legSwing;
+                                if (limbs.legR) limbs.legR.rotation.x = -legSwing;
+                                if (limbs.armL) limbs.armL.rotation.x = -armSwing;
+                                if (limbs.armR) limbs.armR.rotation.x = armSwing;
+
+                                // Cape flow
+                                if (limbs.cape) {
+                                    limbs.cape.rotation.x = Math.sin(anim.walkPhase * 0.5) * 0.15 + 0.1;
+                                }
+                            }
                         } else {
                             entity.modelGroup.rotation.z *= 0.9;
+                            // Return limbs to rest
+                            if (limbs) {
+                                if (limbs.legL) limbs.legL.rotation.x *= 0.9;
+                                if (limbs.legR) limbs.legR.rotation.x *= 0.9;
+                                if (limbs.armL) limbs.armL.rotation.x *= 0.9;
+                                if (limbs.armR) limbs.armR.rotation.x *= 0.9;
+                            }
                         }
 
-                        // Attack animation
+                        // Attack animation with weapon swing
                         if (anim.isAttacking) {
                             anim.attackPhase += dt * 15;
                             const attackLean = Math.sin(anim.attackPhase) * 0.2;
                             entity.modelGroup.rotation.x = attackLean;
+
+                            // Weapon and arm swing
+                            if (limbs) {
+                                const swingArc = Math.sin(anim.attackPhase * 2) * 1.2;
+                                if (limbs.armR) limbs.armR.rotation.x = -swingArc;
+                                if (limbs.weapon) limbs.weapon.rotation.x = -swingArc * 0.5;
+                            }
 
                             if (anim.attackPhase > Math.PI) {
                                 anim.isAttacking = false;
@@ -1088,6 +1150,28 @@
                             }
                         } else {
                             entity.modelGroup.rotation.x *= 0.9;
+                        }
+
+                        // Cast animation (arms raised, staff glow)
+                        if (anim.isCasting) {
+                            anim.castPhase += dt * 10;
+                            if (limbs) {
+                                const raiseAmt = Math.sin(anim.castPhase) * 0.8;
+                                if (limbs.armL) limbs.armL.rotation.x = -raiseAmt - 0.5;
+                                if (limbs.armR) limbs.armR.rotation.x = -raiseAmt - 0.5;
+                                if (limbs.staff) {
+                                    limbs.staff.material.emissiveIntensity = 0.5 + Math.sin(anim.castPhase * 3) * 0.5;
+                                }
+                            }
+                            if (anim.castPhase > Math.PI) {
+                                anim.isCasting = false;
+                                anim.castPhase = 0;
+                            }
+                        }
+
+                        // Head look (subtle idle movement)
+                        if (limbs && limbs.head) {
+                            limbs.head.rotation.y = Math.sin(anim.phase * 0.5) * 0.1;
                         }
                     }
                 });
@@ -1099,6 +1183,15 @@
                 if (anim) {
                     anim.isAttacking = true;
                     anim.attackPhase = 0;
+                }
+            },
+
+            // Trigger cast animation
+            triggerCast(entity) {
+                const anim = this.animations.get(entity);
+                if (anim) {
+                    anim.isCasting = true;
+                    anim.castPhase = 0;
                 }
             }
         };
@@ -2537,6 +2630,11 @@
 
                 // ROUND 3: Play cast sound
                 AudioManager.playCast(key);
+
+                // Trigger cast animation
+                if (typeof AnimationSystem !== 'undefined') {
+                    AnimationSystem.triggerCast(this);
+                }
 
                 // Ability power scaling with level (10% per level)
                 const levelBonus = 1 + (this.level - 1) * 0.1;
@@ -5156,9 +5254,56 @@
             const gridHelper = new THREE.GridHelper(200, 50, 0x333333, 0x111111);
             scene.add(gridHelper);
 
-            // Visual Ground with texture
+            // Visual Ground with procedural grass texture
             const planeGeo = new THREE.PlaneGeometry(200, 200, 50, 50);
-            const planeMat = new THREE.MeshStandardMaterial({ color: 0x1a2a1a, roughness: 0.9 });
+
+            // Create procedural ground texture
+            const groundCanvas = document.createElement('canvas');
+            groundCanvas.width = 512;
+            groundCanvas.height = 512;
+            const gCtx = groundCanvas.getContext('2d');
+
+            // Base grass color
+            gCtx.fillStyle = '#1a2a1a';
+            gCtx.fillRect(0, 0, 512, 512);
+
+            // Add noise/grass texture variation
+            for (let i = 0; i < 8000; i++) {
+                const x = Math.random() * 512;
+                const y = Math.random() * 512;
+                const shade = Math.random() * 30;
+                gCtx.fillStyle = `rgb(${26 + shade}, ${42 + shade}, ${26 + shade})`;
+                gCtx.fillRect(x, y, 2, 3);
+            }
+
+            // Add dirt patches
+            for (let i = 0; i < 50; i++) {
+                const x = Math.random() * 512;
+                const y = Math.random() * 512;
+                gCtx.fillStyle = `rgba(60, 45, 30, ${0.2 + Math.random() * 0.2})`;
+                gCtx.beginPath();
+                gCtx.arc(x, y, 5 + Math.random() * 15, 0, Math.PI * 2);
+                gCtx.fill();
+            }
+
+            // Add some lighter grass highlights
+            for (let i = 0; i < 2000; i++) {
+                const x = Math.random() * 512;
+                const y = Math.random() * 512;
+                gCtx.fillStyle = `rgba(50, 80, 40, ${0.3 + Math.random() * 0.3})`;
+                gCtx.fillRect(x, y, 1, 4);
+            }
+
+            const groundTexture = new THREE.CanvasTexture(groundCanvas);
+            groundTexture.wrapS = THREE.RepeatWrapping;
+            groundTexture.wrapT = THREE.RepeatWrapping;
+            groundTexture.repeat.set(8, 8);
+
+            const planeMat = new THREE.MeshStandardMaterial({
+                map: groundTexture,
+                roughness: 0.9,
+                metalness: 0.1
+            });
             const ground = new THREE.Mesh(planeGeo, planeMat);
             ground.rotation.x = -Math.PI / 2;
             ground.receiveShadow = true;
