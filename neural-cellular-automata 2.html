@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Cellular Automata</title>
+    <meta name="description" content="A Game of Life where the rules are determined by an evolving neural network, creating organic, living textures.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; color: #fff; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+        #ui { 
+            position: absolute; 
+            top: 20px; 
+            left: 20px; 
+            background: rgba(10, 10, 15, 0.85); 
+            backdrop-filter: blur(10px);
+            padding: 20px; 
+            border-radius: 12px; 
+            border: 1px solid rgba(255,255,255,0.1);
+            box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+            width: 280px;
+            pointer-events: auto; 
+        }
+        h2 { margin: 0 0 10px 0; font-size: 1.2rem; font-weight: 600; color: #fff; }
+        p { font-size: 0.9rem; color: #aaa; margin-bottom: 15px; line-height: 1.4; }
+        
+        .control-group { margin-bottom: 15px; }
+        
+        button { 
+            cursor: pointer; 
+            padding: 10px 16px; 
+            background: #2d2d3a; 
+            color: #fff; 
+            border: 1px solid #444; 
+            border-radius: 6px; 
+            font-size: 0.9rem;
+            transition: all 0.2s;
+            width: 100%;
+            margin-bottom: 8px;
+        }
+        button:hover { background: #3d3d4a; border-color: #666; }
+        button:active { transform: translateY(1px); }
+        
+        .row { display: flex; gap: 8px; }
+        .row button { width: 50%; }
+
+        label { display: flex; align-items: center; font-size: 0.9rem; color: #ccc; cursor: pointer; margin-bottom: 8px; }
+        input[type=checkbox] { margin-right: 10px; accent-color: #00bcd4; }
+        input[type=range] { width: 100%; margin-top: 5px; accent-color: #00bcd4; }
+        
+        .stat { font-family: monospace; font-size: 0.8rem; color: #666; margin-top: 10px; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2>Neural Automata</h2>
+        <p>A "Game of Life" where the rules are decided by a neural network that evolves over time.</p>
+        
+        <div class="control-group">
+            <button id="btn-randomize">🎲 Randomize Rules</button>
+            <div class="row">
+                <button id="btn-mutate">🧬 Mutate</button>
+                <button id="btn-seed">🌱 Seed</button>
+            </div>
+            <button id="btn-clear">🧹 Clear World</button>
+        </div>
+
+        <div class="control-group">
+            <label>
+                <input type="checkbox" id="auto-mutate" checked> 
+                Auto-Evolve Rules
+            </label>
+            <label>
+                Mutation Rate
+                <input type="range" id="mutation-rate" min="0.01" max="0.5" step="0.01" value="0.05">
+            </label>
+        </div>
+
+        <div class="stat" id="status">Generation: 0</div>
+    </div>
+    <canvas id="glcanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('glcanvas');
+        const gl = canvas.getContext('webgl2');
+        
+        if (!gl) {
+            alert("WebGL 2 is required for this simulation.");
+        }
+
+        // CRITICAL FIX: Enable floating point texture rendering
+        if (!gl.getExtension('EXT_color_buffer_float')) {
+            alert("Your browser does not support EXT_color_buffer_float. The simulation may not work.");
+        }
+
+        // Configuration
+        const TEXTURE_SIZE = 512; // Simulation grid size
+        let animationFrameId;
+        let frameCount = 0;
+        let lastMutationTime = 0;
+        
+        // Neural Network Weights (The "Genome")
+        // Architecture: 
+        // Input: 9 channels (RGBA center + RGBA neighbors sum + 1 bias)
+        // Hidden: 16 neurons
+        // Output: 4 channels (RGBA update)
+        // Total weights: (9 * 16) + (16 * 4) = 144 + 64 = 208 floats
+        
+        const INPUT_SIZE = 9;
+        const HIDDEN_SIZE = 16;
+        const OUTPUT_SIZE = 4;
+        
+        let layer1Weights = new Float32Array(INPUT_SIZE * HIDDEN_SIZE);
+        let layer2Weights = new Float32Array(HIDDEN_SIZE * OUTPUT_SIZE);
+        
+        function randomWeights() {
+            for(let i=0; i<layer1Weights.length; i++) layer1Weights[i] = (Math.random() * 2 - 1) * 1.0;
+            for(let i=0; i<layer2Weights.length; i++) layer2Weights[i] = (Math.random() * 2 - 1) * 0.5; // Smaller output weights for stability
+        }
+        
+        function mutateWeights(rate) {
+            for(let i=0; i<layer1Weights.length; i++) {
+                if(Math.random() < 0.1) layer1Weights[i] += (Math.random() * 2 - 1) * rate;
+            }
+            for(let i=0; i<layer2Weights.length; i++) {
+                if(Math.random() < 0.1) layer2Weights[i] += (Math.random() * 2 - 1) * rate;
+            }
+        }
+
+        randomWeights();
+
+        // Shaders
+        const vsSource = `#version 300 es
+            in vec4 position;
+            void main() {
+                gl_Position = position;
+            }
+        `;
+
+        const fsSource = `#version 300 es
+            precision highp float;
+            
+            uniform sampler2D u_texture;
+            uniform vec2 u_resolution;
+            uniform float u_layer1[${INPUT_SIZE * HIDDEN_SIZE}];
+            uniform float u_layer2[${HIDDEN_SIZE * OUTPUT_SIZE}];
+            uniform vec2 u_mouse;
+            uniform float u_mouseDown;
+            uniform float u_time;
+
+            out vec4 outColor;
+
+            // Activation function
+            float activate(float x) {
+                // Tanh-like
+                return 2.0 / (1.0 + exp(-2.0 * x)) - 1.0;
+                // return max(0.0, x); // ReLU
+                // return sin(x); // Weird alien physics
+            }
+
+            void main() {
+                vec2 uv = gl_FragCoord.xy / u_resolution;
+                vec2 pixel = 1.0 / u_resolution;
+
+                // 1. Perception
+                vec4 center = texture(u_texture, uv);
+                
+                // Calculate sum of neighbors (3x3 convolution with ones, excluding center)
+                vec4 neighbors = vec4(0.0);
+                neighbors += texture(u_texture, uv + vec2(-1, -1) * pixel);
+                neighbors += texture(u_texture, uv + vec2( 0, -1) * pixel);
+                neighbors += texture(u_texture, uv + vec2( 1, -1) * pixel);
+                neighbors += texture(u_texture, uv + vec2(-1,  0) * pixel);
+                neighbors += texture(u_texture, uv + vec2( 1,  0) * pixel);
+                neighbors += texture(u_texture, uv + vec2(-1,  1) * pixel);
+                neighbors += texture(u_texture, uv + vec2( 0,  1) * pixel);
+                neighbors += texture(u_texture, uv + vec2( 1,  1) * pixel);
+                
+                // Normalize neighbors slightly to keep values in range
+                neighbors /= 8.0;
+
+                // Input vector
+                float inputs[${INPUT_SIZE}];
+                inputs[0] = center.r;
+                inputs[1] = center.g;
+                inputs[2] = center.b;
+                inputs[3] = center.a;
+                inputs[4] = neighbors.r;
+                inputs[5] = neighbors.g;
+                inputs[6] = neighbors.b;
+                inputs[7] = neighbors.a;
+                inputs[8] = 1.0; // Bias
+
+                // 2. Neural Network Processing
+                
+                // Hidden Layer
+                float hidden[${HIDDEN_SIZE}];
+                for(int i = 0; i < ${HIDDEN_SIZE}; i++) {
+                    float sum = 0.0;
+                    for(int j = 0; j < ${INPUT_SIZE}; j++) {
+                        sum += inputs[j] * u_layer1[i * ${INPUT_SIZE} + j];
+                    }
+                    hidden[i] = activate(sum);
+                }
+
+                // Output Layer
+                float outputs[${OUTPUT_SIZE}];
+                for(int i = 0; i < ${OUTPUT_SIZE}; i++) {
+                    float sum = 0.0;
+                    for(int j = 0; j < ${HIDDEN_SIZE}; j++) {
+                        sum += hidden[j] * u_layer2[i * ${HIDDEN_SIZE} + j];
+                    }
+                    outputs[i] = sum; // Linear output for delta
+                }
+
+                // 3. Update State
+                // Apply delta with a small time step
+                float dt = 0.5;
+                vec4 newState = center + vec4(outputs[0], outputs[1], outputs[2], outputs[3]) * dt;
+                
+                // Clamp to 0-1
+                newState = clamp(newState, 0.0, 1.0);
+
+                // Mouse interaction
+                float dist = distance(gl_FragCoord.xy, u_mouse);
+                if (u_mouseDown > 0.5 && dist < 20.0) {
+                    // Draw random noise
+                    newState = vec4(
+                        fract(sin(dot(uv, vec2(12.9898, 78.233))) * 43758.5453),
+                        fract(sin(dot(uv + 1.0, vec2(12.9898, 78.233))) * 43758.5453),
+                        fract(sin(dot(uv + 2.0, vec2(12.9898, 78.233))) * 43758.5453),
+                        1.0
+                    );
+                }
+
+                outColor = newState;
+            }
+        `;
+
+        const displayVsSource = `#version 300 es
+            in vec4 position;
+            out vec2 v_uv;
+            void main() {
+                v_uv = position.xy * 0.5 + 0.5;
+                gl_Position = position;
+            }
+        `;
+
+        const displayFsSource = `#version 300 es
+            precision highp float;
+            in vec2 v_uv;
+            uniform sampler2D u_texture;
+            out vec4 outColor;
+            void main() {
+                outColor = texture(u_texture, v_uv);
+            }
+        `;
+
+        // WebGL Boilerplate
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        function createProgram(gl, vs, fs) {
+            const program = gl.createProgram();
+            gl.attachShader(program, createShader(gl, gl.VERTEX_SHADER, vs));
+            gl.attachShader(program, createShader(gl, gl.FRAGMENT_SHADER, fs));
+            gl.linkProgram(program);
+            if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+                console.error(gl.getProgramInfoLog(program));
+                return null;
+            }
+            return program;
+        }
+
+        const program = createProgram(gl, vsSource, fsSource);
+        const displayProgram = createProgram(gl, displayVsSource, displayFsSource);
+
+        // Buffers
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+            -1, -1,
+             1, -1,
+            -1,  1,
+             1,  1,
+        ]), gl.STATIC_DRAW);
+
+        // Textures (Ping-Pong)
+        const textures = [];
+        const framebuffers = [];
+
+        for (let i = 0; i < 2; i++) {
+            const tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TEXTURE_SIZE, TEXTURE_SIZE, 0, gl.RGBA, gl.FLOAT, null);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+            textures.push(tex);
+
+            const fb = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+            
+            const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+            if (status !== gl.FRAMEBUFFER_COMPLETE) {
+                console.error("Framebuffer not complete: " + status);
+                alert("WebGL Framebuffer not complete. Error code: " + status);
+            }
+
+            framebuffers.push(fb);
+        }
+
+        // Seed initial state
+        function seed() {
+            const data = new Float32Array(TEXTURE_SIZE * TEXTURE_SIZE * 4);
+            for (let i = 0; i < data.length; i += 4) {
+                // Seed center
+                const x = (i / 4) % TEXTURE_SIZE;
+                const y = Math.floor((i / 4) / TEXTURE_SIZE);
+                const dx = x - TEXTURE_SIZE / 2;
+                const dy = y - TEXTURE_SIZE / 2;
+                
+                if (dx*dx + dy*dy < 2500) {
+                    data[i] = Math.random();
+                    data[i+1] = Math.random();
+                    data[i+2] = Math.random();
+                    data[i+3] = 1.0;
+                } else {
+                    data[i] = 0;
+                    data[i+1] = 0;
+                    data[i+2] = 0;
+                    data[i+3] = 0;
+                }
+            }
+            gl.bindTexture(gl.TEXTURE_2D, textures[0]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TEXTURE_SIZE, TEXTURE_SIZE, 0, gl.RGBA, gl.FLOAT, data);
+            gl.bindTexture(gl.TEXTURE_2D, textures[1]);
+            gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TEXTURE_SIZE, TEXTURE_SIZE, 0, gl.RGBA, gl.FLOAT, data);
+        }
+        
+        function clear() {
+             const data = new Float32Array(TEXTURE_SIZE * TEXTURE_SIZE * 4); // All zeros
+             gl.bindTexture(gl.TEXTURE_2D, textures[0]);
+             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TEXTURE_SIZE, TEXTURE_SIZE, 0, gl.RGBA, gl.FLOAT, data);
+             gl.bindTexture(gl.TEXTURE_2D, textures[1]);
+             gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, TEXTURE_SIZE, TEXTURE_SIZE, 0, gl.RGBA, gl.FLOAT, data);
+        }
+
+        seed();
+
+        // Interaction
+        let mouseX = 0, mouseY = 0, mouseDown = 0;
+        canvas.addEventListener('mousemove', e => {
+            const rect = canvas.getBoundingClientRect();
+            mouseX = (e.clientX - rect.left) * (TEXTURE_SIZE / rect.width);
+            mouseY = (rect.height - (e.clientY - rect.top)) * (TEXTURE_SIZE / rect.height); // Flip Y
+        });
+        canvas.addEventListener('mousedown', () => mouseDown = 1);
+        canvas.addEventListener('mouseup', () => mouseDown = 0);
+        
+        // Touch support
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            mouseX = (touch.clientX - rect.left) * (TEXTURE_SIZE / rect.width);
+            mouseY = (rect.height - (touch.clientY - rect.top)) * (TEXTURE_SIZE / rect.height);
+        }, {passive: false});
+        canvas.addEventListener('touchstart', () => mouseDown = 1);
+        canvas.addEventListener('touchend', () => mouseDown = 0);
+
+        // UI Handlers
+        document.getElementById('btn-randomize').onclick = () => {
+            randomWeights();
+        };
+        document.getElementById('btn-mutate').onclick = () => {
+            mutateWeights(parseFloat(document.getElementById('mutation-rate').value) * 5); // Stronger manual mutation
+        };
+        document.getElementById('btn-seed').onclick = seed;
+        document.getElementById('btn-clear').onclick = clear;
+
+        // Main Loop
+        let current = 0;
+        
+        function render(time) {
+            // Auto-evolution
+            if (document.getElementById('auto-mutate').checked) {
+                if (time - lastMutationTime > 200) { // Mutate every 200ms
+                    mutateWeights(parseFloat(document.getElementById('mutation-rate').value) * 0.1);
+                    lastMutationTime = time;
+                }
+            }
+
+            // 1. Compute Step
+            gl.useProgram(program);
+            
+            // Bind uniforms
+            gl.uniform1i(gl.getUniformLocation(program, 'u_texture'), 0);
+            gl.uniform2f(gl.getUniformLocation(program, 'u_resolution'), TEXTURE_SIZE, TEXTURE_SIZE);
+            gl.uniform2f(gl.getUniformLocation(program, 'u_mouse'), mouseX, mouseY);
+            gl.uniform1f(gl.getUniformLocation(program, 'u_mouseDown'), mouseDown);
+            gl.uniform1f(gl.getUniformLocation(program, 'u_time'), time * 0.001);
+            
+            gl.uniform1fv(gl.getUniformLocation(program, 'u_layer1'), layer1Weights);
+            gl.uniform1fv(gl.getUniformLocation(program, 'u_layer2'), layer2Weights);
+
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[current]);
+            
+            gl.bindFramebuffer(gl.FRAMEBUFFER, framebuffers[1 - current]);
+            gl.viewport(0, 0, TEXTURE_SIZE, TEXTURE_SIZE);
+            
+            gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+            gl.enableVertexAttribArray(0);
+            gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+            
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            // 2. Display Step
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.viewport(0, 0, canvas.width, canvas.height);
+            gl.useProgram(displayProgram);
+            
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, textures[1 - current]); // Draw the one we just wrote to
+            gl.uniform1i(gl.getUniformLocation(displayProgram, 'u_texture'), 0);
+            
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            // Swap
+            current = 1 - current;
+            frameCount++;
+            document.getElementById('status').innerText = `Generation: ${frameCount}`;
+            
+            requestAnimationFrame(render);
+        }
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+        window.dispatchEvent(new Event('resize'));
+
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>

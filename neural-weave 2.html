@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Weave</title>
+    <meta name="description" content="Create thought nodes and watch connections strengthen with repeated use, visualizing how neural pathways form through reinforcement">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #080810; min-height: 100vh; font-family: 'Georgia', serif; color: #9090b0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(12,12,20,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(120,100,180,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #b0a0d0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #c0b0e0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(80,60,120,0.4); border: 1px solid rgba(120,100,180,0.4);
+            color: #a090c0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #706080; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Neural Weave</h3>
+        <div class="control-row">
+            <label>Pulse Speed <span class="value" id="pulse-val">50</span></label>
+            <input type="range" id="pulse" min="20" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Decay Rate <span class="value" id="decay-val">30</span></label>
+            <input type="range" id="decay" min="10" max="80" value="30">
+        </div>
+        <button id="fire-btn">Fire All Neurons</button>
+        <button id="clear-btn">Reset Network</button>
+    </div>
+    <div id="stats">
+        <div>Neurons: <span id="neuron-count">0</span></div>
+        <div>Connections: <span id="conn-count">0</span></div>
+        <div>Strongest: <span id="strongest">0</span></div>
+    </div>
+    <div id="info">Click to create neurons | Drag between neurons to connect | Repeat to strengthen</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let pulseSpeed = 0.5;
+        let decayRate = 0.3;
+        let time = 0;
+        
+        const neurons = [];
+        const connections = [];
+        const pulses = [];
+        
+        let isDragging = false;
+        let dragStart = null;
+        let dragEnd = null;
+        
+        class Neuron {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 12;
+                this.charge = 0;
+                this.hue = 260 + Math.random() * 40;
+                this.id = neurons.length;
+                this.connections = [];
+            }
+            
+            fire() {
+                this.charge = 1;
+                
+                this.connections.forEach(conn => {
+                    const targetId = conn.from === this.id ? conn.to : conn.from;
+                    const target = neurons[targetId];
+                    
+                    pulses.push({
+                        x: this.x,
+                        y: this.y,
+                        targetX: target.x,
+                        targetY: target.y,
+                        progress: 0,
+                        strength: conn.strength,
+                        hue: this.hue
+                    });
+                });
+            }
+            
+            update() {
+                if (this.charge > 0) {
+                    this.charge -= 0.02;
+                }
+            }
+            
+            draw() {
+                const pulse = 1 + this.charge * 0.3;
+                const glow = this.charge * 0.5;
+                
+                if (glow > 0.1) {
+                    const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 3);
+                    gradient.addColorStop(0, "hsla(" + this.hue + ", 70%, 60%, " + glow + ")");
+                    gradient.addColorStop(1, "transparent");
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(this.x - this.radius * 3, this.y - this.radius * 3, this.radius * 6, this.radius * 6);
+                }
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius * pulse, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + this.hue + ", 60%, " + (40 + this.charge * 30) + "%, 0.9)";
+                ctx.fill();
+                ctx.strokeStyle = "hsla(" + this.hue + ", 70%, 70%, 0.8)";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            
+            containsPoint(x, y) {
+                return Math.hypot(x - this.x, y - this.y) < this.radius * 2;
+            }
+        }
+        
+        function findConnection(a, b) {
+            return connections.find(c => 
+                (c.from === a && c.to === b) || (c.from === b && c.to === a)
+            );
+        }
+        
+        function createConnection(a, b) {
+            const existing = findConnection(a, b);
+            if (existing) {
+                existing.strength = Math.min(1, existing.strength + 0.15);
+                existing.lastReinforced = time;
+                
+                for (let i = 0; i < 5; i++) {
+                    const t = Math.random();
+                    pulses.push({
+                        x: neurons[a].x + (neurons[b].x - neurons[a].x) * t,
+                        y: neurons[a].y + (neurons[b].y - neurons[a].y) * t,
+                        targetX: neurons[a].x + (neurons[b].x - neurons[a].x) * t,
+                        targetY: neurons[a].y + (neurons[b].y - neurons[a].y) * t,
+                        progress: 1,
+                        strength: existing.strength,
+                        hue: (neurons[a].hue + neurons[b].hue) / 2,
+                        isSparkle: true
+                    });
+                }
+            } else {
+                const conn = { from: a, to: b, strength: 0.2, lastReinforced: time };
+                connections.push(conn);
+                neurons[a].connections.push(conn);
+                neurons[b].connections.push(conn);
+            }
+        }
+        
+        function drawConnections() {
+            connections.forEach(conn => {
+                const a = neurons[conn.from];
+                const b = neurons[conn.to];
+                
+                const age = time - conn.lastReinforced;
+                const decay = Math.max(0, conn.strength - age * decayRate * 0.0001);
+                
+                if (decay < 0.05) return;
+                
+                const pulse = Math.sin(time * pulseSpeed * 2) * 0.2 + 0.8;
+                
+                ctx.beginPath();
+                ctx.moveTo(a.x, a.y);
+                
+                const midX = (a.x + b.x) / 2;
+                const midY = (a.y + b.y) / 2;
+                const offset = Math.sin(time + conn.from) * 10 * decay;
+                
+                ctx.quadraticCurveTo(midX + offset, midY + offset, b.x, b.y);
+                
+                const hue = (a.hue + b.hue) / 2;
+                ctx.strokeStyle = "hsla(" + hue + ", 60%, " + (40 + decay * 30) + "%, " + (decay * pulse) + ")";
+                ctx.lineWidth = 1 + decay * 4;
+                ctx.stroke();
+            });
+        }
+        
+        function drawPulses() {
+            for (let i = pulses.length - 1; i >= 0; i--) {
+                const p = pulses[i];
+                
+                if (p.isSparkle) {
+                    p.progress -= 0.05;
+                    if (p.progress <= 0) {
+                        pulses.splice(i, 1);
+                        continue;
+                    }
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 4 * p.progress, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + p.hue + ", 80%, 80%, " + p.progress + ")";
+                    ctx.fill();
+                    continue;
+                }
+                
+                p.progress += 0.03 * pulseSpeed;
+                
+                if (p.progress >= 1) {
+                    const targetNeuron = neurons.find(n => 
+                        Math.hypot(n.x - p.targetX, n.y - p.targetY) < 5
+                    );
+                    if (targetNeuron && Math.random() < p.strength * 0.5) {
+                        targetNeuron.fire();
+                    }
+                    pulses.splice(i, 1);
+                    continue;
+                }
+                
+                const x = p.x + (p.targetX - p.x) * p.progress;
+                const y = p.y + (p.targetY - p.y) * p.progress;
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 4 + p.strength * 4, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + p.hue + ", 80%, 70%, " + (1 - p.progress) + ")";
+                ctx.fill();
+            }
+        }
+        
+        function drawDragLine() {
+            if (!isDragging || !dragStart) return;
+            
+            ctx.beginPath();
+            ctx.moveTo(dragStart.x, dragStart.y);
+            ctx.lineTo(dragEnd.x, dragEnd.y);
+            ctx.strokeStyle = 'rgba(180, 150, 220, 0.5)';
+            ctx.lineWidth = 2;
+            ctx.setLineDash([5, 5]);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = '#080810';
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function updateStats() {
+            document.getElementById('neuron-count').textContent = neurons.length;
+            document.getElementById('conn-count').textContent = connections.length;
+            
+            let strongest = 0;
+            connections.forEach(c => {
+                if (c.strength > strongest) strongest = c.strength;
+            });
+            document.getElementById('strongest').textContent = (strongest * 100).toFixed(0) + '%';
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawConnections();
+            neurons.forEach(n => n.update());
+            neurons.forEach(n => n.draw());
+            drawPulses();
+            drawDragLine();
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousedown = e => {
+            if (e.clientX < 200 && e.clientY < 250) return;
+            
+            const clickedNeuron = neurons.find(n => n.containsPoint(e.clientX, e.clientY));
+            
+            if (clickedNeuron) {
+                isDragging = true;
+                dragStart = { x: clickedNeuron.x, y: clickedNeuron.y, neuron: clickedNeuron };
+                dragEnd = { x: e.clientX, y: e.clientY };
+            } else {
+                neurons.push(new Neuron(e.clientX, e.clientY));
+            }
+        };
+        
+        canvas.onmousemove = e => {
+            if (isDragging) {
+                dragEnd = { x: e.clientX, y: e.clientY };
+            }
+        };
+        
+        canvas.onmouseup = e => {
+            if (isDragging && dragStart) {
+                const endNeuron = neurons.find(n => n.containsPoint(e.clientX, e.clientY));
+                
+                if (endNeuron && endNeuron !== dragStart.neuron) {
+                    createConnection(dragStart.neuron.id, endNeuron.id);
+                    dragStart.neuron.fire();
+                }
+            }
+            
+            isDragging = false;
+            dragStart = null;
+        };
+        
+        document.getElementById('pulse').oninput = e => {
+            pulseSpeed = e.target.value / 100;
+            document.getElementById('pulse-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('decay').oninput = e => {
+            decayRate = e.target.value / 100;
+            document.getElementById('decay-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('fire-btn').onclick = () => {
+            neurons.forEach(n => n.fire());
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            neurons.length = 0;
+            connections.length = 0;
+            pulses.length = 0;
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

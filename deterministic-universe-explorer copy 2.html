@@ -1,0 +1,711 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A deterministic procedural universe generator. Fly from galactic scale to planetary surfaces with consistent, seed-based generation.">
+    <!-- 3d, procedural, universe, galaxy, space, simulation, threejs, deterministic -->
+    <title>Deterministic Universe Explorer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', monospace; color: #fff; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            pointer-events: none;
+        }
+        
+        h1 {
+            font-size: 24px; margin: 0 0 10px 0;
+            text-transform: uppercase; letter-spacing: 4px;
+            text-shadow: 0 0 10px #00ffff;
+        }
+        
+        .panel {
+            background: rgba(0, 10, 20, 0.8);
+            border: 1px solid #00ffff;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            pointer-events: auto;
+            max-width: 300px;
+            backdrop-filter: blur(5px);
+        }
+        
+        .data-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; color: #aaa; }
+        .data-val { color: #fff; font-weight: bold; font-family: monospace; }
+        
+        button {
+            background: rgba(0, 255, 255, 0.1);
+            border: 1px solid #00ffff;
+            color: #00ffff;
+            padding: 8px 12px;
+            cursor: pointer;
+            width: 100%;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+            margin-top: 5px;
+        }
+        button:hover { background: rgba(0, 255, 255, 0.3); box-shadow: 0 0 10px rgba(0, 255, 255, 0.5); }
+        
+        #breadcrumbs {
+            position: absolute; top: 20px; right: 20px;
+            display: flex; gap: 10px;
+        }
+        .crumb {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #555;
+            padding: 5px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        .crumb:hover { border-color: #fff; }
+        .crumb.active { border-color: #00ffff; color: #00ffff; }
+        
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 24px; letter-spacing: 5px; text-transform: uppercase;
+            pointer-events: none; opacity: 0; transition: opacity 0.3s;
+        }
+        
+        .scan-line {
+            position: absolute; top: 0; left: 0; width: 100%; height: 2px;
+            background: rgba(0, 255, 255, 0.3);
+            animation: scan 3s linear infinite;
+            pointer-events: none;
+            z-index: 10;
+        }
+        @keyframes scan { 0% { top: 0%; opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div class="scan-line"></div>
+    
+    <div id="ui">
+        <div class="panel">
+            <h1>Omni-Verse</h1>
+            <div class="data-row"><span>Universe Seed</span> <span id="seed-val" class="data-val">1337</span></div>
+            <div class="data-row"><span>Current Scale</span> <span id="scale-val" class="data-val">GALAXY</span></div>
+            <div class="data-row"><span>Coordinates</span> <span id="coords-val" class="data-val">0, 0, 0</span></div>
+        </div>
+        
+        <div id="info-panel" class="panel" style="display:none;">
+            <h2 id="obj-name" style="margin:0 0 10px 0; font-size:16px; color:#00ffff;">Object Name</h2>
+            <div id="obj-stats"></div>
+            <button id="action-btn">Enter System</button>
+        </div>
+    </div>
+    
+    <div id="breadcrumbs">
+        <div class="crumb active" id="crumb-galaxy">GALAXY</div>
+        <div class="crumb" id="crumb-system" style="display:none;">SYSTEM</div>
+        <div class="crumb" id="crumb-planet" style="display:none;">PLANET</div>
+    </div>
+    
+    <div id="loading">Generating...</div>
+
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- PRNG (Linear Congruential Generator) ---
+        class RNG {
+            constructor(seed) {
+                this.seed = seed;
+            }
+            
+            // Returns 0..1
+            next() {
+                this.seed = (this.seed * 1664525 + 1013904223) % 4294967296;
+                return this.seed / 4294967296;
+            }
+            
+            // Returns min..max
+            range(min, max) {
+                return min + this.next() * (max - min);
+            }
+            
+            // Returns integer min..max-1
+            int(min, max) {
+                return Math.floor(this.range(min, max));
+            }
+            
+            // Pick from array
+            pick(arr) {
+                return arr[this.int(0, arr.length)];
+            }
+        }
+
+        // --- Name Generator ---
+        const SYLLABLES = ["or", "ion", "el", "ar", "cy", "ni", "us", "pro", "cen", "tau", "ri", "bet", "al", "gam", "ma", "del", "ta", "ep", "si", "lon", "ze", "ta", "et", "a", "the", "ta", "io", "ta", "kap", "pa", "lam", "bda", "mu", "nu", "xi", "omi", "cron", "pi", "rho", "sig", "ma", "tau", "up", "si", "lon", "phi", "chi", "psi", "ome", "ga"];
+        
+        function generateName(rng) {
+            const len = rng.int(2, 5);
+            let name = "";
+            for(let i=0; i<len; i++) {
+                name += SYLLABLES[rng.int(0, SYLLABLES.length)];
+            }
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        }
+
+        // --- State ---
+        const STATE = {
+            seed: Math.floor(Math.random() * 100000),
+            view: 'GALAXY', // GALAXY, SYSTEM, PLANET
+            currentStar: null,
+            currentPlanet: null,
+            cameraTarget: new THREE.Vector3(),
+            transitioning: false
+        };
+
+        document.getElementById('seed-val').textContent = STATE.seed;
+
+        // --- Three.js Setup ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000005);
+        scene.fog = new THREE.FogExp2(0x000005, 0.0005);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+        camera.position.set(0, 200, 400);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxDistance = 2000;
+        controls.minDistance = 10;
+
+        // Post Processing
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.1;
+        bloomPass.strength = 1.2;
+        bloomPass.radius = 0.5;
+        
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Raycaster ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        let hoveredObject = null;
+
+        // --- Galaxy Generation ---
+        const galaxyGroup = new THREE.Group();
+        scene.add(galaxyGroup);
+        
+        let starData = []; // Store data for raycasting
+
+        function generateGalaxy() {
+            // Clear previous
+            while(galaxyGroup.children.length > 0) galaxyGroup.remove(galaxyGroup.children[0]);
+            starData = [];
+
+            const rng = new RNG(STATE.seed);
+            const starCount = 10000;
+            
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(starCount * 3);
+            const colors = new Float32Array(starCount * 3);
+            const sizes = new Float32Array(starCount);
+
+            const colorPalette = [
+                new THREE.Color(0x99ccff), // Blue
+                new THREE.Color(0xffffff), // White
+                new THREE.Color(0xffff99), // Yellow
+                new THREE.Color(0xffcc66), // Orange
+                new THREE.Color(0xff6666)  // Red
+            ];
+
+            for(let i=0; i<starCount; i++) {
+                // Spiral Galaxy Logic
+                const branchAngle = (i % 3) * ((Math.PI * 2) / 3);
+                const dist = rng.range(10, 1000);
+                const spin = dist * 0.005; // Twist
+                const angle = branchAngle + spin + rng.range(-0.5, 0.5);
+                
+                // Random offset from arm
+                const spread = rng.range(0, 50) * (dist/1000);
+                
+                const x = Math.cos(angle) * dist + rng.range(-spread, spread);
+                const y = rng.range(-10, 10) * (1 - dist/1000); // Flattened disk
+                const z = Math.sin(angle) * dist + rng.range(-spread, spread);
+
+                positions[i*3] = x;
+                positions[i*3+1] = y;
+                positions[i*3+2] = z;
+
+                // Color based on temp/age (random for now)
+                const color = colorPalette[rng.int(0, colorPalette.length)];
+                colors[i*3] = color.r;
+                colors[i*3+1] = color.g;
+                colors[i*3+2] = color.b;
+
+                sizes[i] = rng.range(1, 3);
+
+                // Store data for interaction
+                starData.push({
+                    id: i,
+                    seed: rng.int(0, 99999999), // Deterministic seed for this star
+                    x, y, z,
+                    color: color.getHex(),
+                    name: generateName(rng) + " " + (rng.next() > 0.5 ? "Major" : "Minor")
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+            // Shader Material for Stars
+            const material = new THREE.PointsMaterial({
+                size: 2,
+                vertexColors: true,
+                map: createStarTexture(),
+                transparent: true,
+                alphaTest: 0.1,
+                blending: THREE.AdditiveBlending
+            });
+
+            const points = new THREE.Points(geometry, material);
+            galaxyGroup.add(points);
+        }
+
+        function createStarTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            const tex = new THREE.CanvasTexture(canvas);
+            return tex;
+        }
+
+        // --- System Generation ---
+        const systemGroup = new THREE.Group();
+        scene.add(systemGroup);
+        systemGroup.visible = false;
+
+        function generateSystem(star) {
+            // Clear previous
+            while(systemGroup.children.length > 0) systemGroup.remove(systemGroup.children[0]);
+            
+            const rng = new RNG(star.seed);
+            
+            // Central Star
+            const starGeo = new THREE.SphereGeometry(10, 32, 32);
+            const starMat = new THREE.MeshBasicMaterial({ color: star.color });
+            const starMesh = new THREE.Mesh(starGeo, starMat);
+            systemGroup.add(starMesh);
+            
+            // Star Glow
+            const glowGeo = new THREE.SpriteMaterial({ 
+                map: createStarTexture(), 
+                color: star.color, 
+                transparent: true, 
+                blending: THREE.AdditiveBlending 
+            });
+            const glow = new THREE.Sprite(glowGeo);
+            glow.scale.set(60, 60, 1);
+            systemGroup.add(glow);
+
+            // Planets
+            const planetCount = rng.int(2, 9);
+            const planets = [];
+            
+            for(let i=0; i<planetCount; i++) {
+                const dist = 40 + i * 30 + rng.range(0, 10);
+                const size = rng.range(2, 6);
+                const speed = 0.01 / (i + 1);
+                const angle = rng.range(0, Math.PI * 2);
+                
+                // Planet Type
+                const type = rng.pick(['Rocky', 'Gas Giant', 'Ice', 'Lava', 'Oceanic']);
+                let color = 0xffffff;
+                if(type === 'Rocky') color = 0x886644;
+                if(type === 'Gas Giant') { color = 0xffcc99; size *= 2; }
+                if(type === 'Ice') color = 0xaaddff;
+                if(type === 'Lava') color = 0xff3300;
+                if(type === 'Oceanic') color = 0x2244ff;
+
+                const geo = new THREE.SphereGeometry(size, 32, 32);
+                const mat = new THREE.MeshStandardMaterial({ 
+                    color: color,
+                    roughness: 0.8,
+                    metalness: 0.2
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                mesh.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+                
+                // Orbit Line
+                const orbitGeo = new THREE.RingGeometry(dist - 0.2, dist + 0.2, 64);
+                const orbitMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1, side: THREE.DoubleSide });
+                const orbit = new THREE.Mesh(orbitGeo, orbitMat);
+                orbit.rotation.x = Math.PI / 2;
+                systemGroup.add(orbit);
+                
+                systemGroup.add(mesh);
+                
+                planets.push({
+                    mesh,
+                    dist,
+                    speed,
+                    angle,
+                    seed: rng.int(0, 99999999),
+                    type,
+                    name: generateName(rng),
+                    size
+                });
+            }
+            
+            // Add light
+            const light = new THREE.PointLight(star.color, 2, 500);
+            systemGroup.add(light);
+            
+            return planets;
+        }
+
+        // --- Planet Surface Generation ---
+        const planetGroup = new THREE.Group();
+        scene.add(planetGroup);
+        planetGroup.visible = false;
+
+        function generatePlanetSurface(planet) {
+            while(planetGroup.children.length > 0) planetGroup.remove(planetGroup.children[0]);
+            
+            const rng = new RNG(planet.seed);
+            
+            // High res sphere
+            const geo = new THREE.IcosahedronGeometry(20, 50); // High detail
+            
+            // Displace vertices for terrain
+            const pos = geo.attributes.position;
+            const colors = [];
+            
+            const noiseOffset = rng.range(0, 100);
+            const roughness = rng.range(0.5, 2.0);
+            
+            for(let i=0; i<pos.count; i++) {
+                const x = pos.getX(i);
+                const y = pos.getY(i);
+                const z = pos.getZ(i);
+                
+                // Simple pseudo-noise
+                const n = Math.sin(x * 0.2 + noiseOffset) * Math.cos(y * 0.2 + noiseOffset) * Math.sin(z * 0.2);
+                const n2 = Math.sin(x * 1.5) * Math.cos(y * 1.5) * 0.2;
+                
+                const h = 1 + (n + n2) * 0.1 * roughness;
+                
+                pos.setXYZ(i, x*h, y*h, z*h);
+                
+                // Vertex Color based on height
+                let c = new THREE.Color();
+                if(planet.type === 'Oceanic') {
+                    if(h < 1.0) c.setHex(0x0000ff); // Ocean
+                    else if(h < 1.05) c.setHex(0xffeeaa); // Sand
+                    else c.setHex(0x228822); // Grass
+                } else if(planet.type === 'Lava') {
+                    if(h < 0.98) c.setHex(0xff3300); // Lava
+                    else c.setHex(0x330000); // Rock
+                } else if(planet.type === 'Ice') {
+                    c.setHex(0xaaddff);
+                } else {
+                    // Rocky
+                    if(h < 1.0) c.setHex(0x554433);
+                    else c.setHex(0x887766);
+                }
+                
+                colors.push(c.r, c.g, c.b);
+            }
+            
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.computeVertexNormals();
+            
+            const mat = new THREE.MeshStandardMaterial({ 
+                vertexColors: true,
+                roughness: 0.9,
+                metalness: 0.1
+            });
+            
+            const mesh = new THREE.Mesh(geo, mat);
+            planetGroup.add(mesh);
+            
+            // Atmosphere
+            if(planet.type !== 'Rocky' && planet.type !== 'Lava') {
+                const atmoGeo = new THREE.SphereGeometry(22, 64, 64);
+                const atmoMat = new THREE.MeshBasicMaterial({
+                    color: planet.type === 'Oceanic' ? 0x44aaff : 0xffffff,
+                    transparent: true,
+                    opacity: 0.2,
+                    side: THREE.BackSide
+                });
+                const atmo = new THREE.Mesh(atmoGeo, atmoMat);
+                planetGroup.add(atmo);
+            }
+            
+            // Add directional light simulating sun
+            const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            sunLight.position.set(50, 20, 50);
+            planetGroup.add(sunLight);
+            
+            // Add ambient
+            const ambient = new THREE.AmbientLight(0x404040);
+            planetGroup.add(ambient);
+            
+            // Life?
+            if(planet.type === 'Oceanic' && rng.next() > 0.3) {
+                // Generate some "trees"
+                const treeGeo = new THREE.ConeGeometry(0.2, 1, 4);
+                const treeMat = new THREE.MeshStandardMaterial({ color: 0x004400 });
+                const treeMesh = new THREE.InstancedMesh(treeGeo, treeMat, 100);
+                
+                const dummy = new THREE.Object3D();
+                let count = 0;
+                for(let i=0; i<pos.count; i+=10) {
+                    if(count >= 100) break;
+                    const x = pos.getX(i);
+                    const y = pos.getY(i);
+                    const z = pos.getZ(i);
+                    const len = Math.sqrt(x*x+y*y+z*z);
+                    
+                    // Only on land
+                    if(len > 20.5) {
+                        dummy.position.set(x, y, z);
+                        dummy.lookAt(0,0,0);
+                        dummy.scale.setScalar(rng.range(0.5, 1.5));
+                        dummy.updateMatrix();
+                        treeMesh.setMatrixAt(count++, dummy.matrix);
+                    }
+                }
+                planetGroup.add(treeMesh);
+                return "Detected: Vegetation";
+            }
+            
+            return "Detected: Barren";
+        }
+
+        // --- Interaction Logic ---
+        
+        let currentSystemPlanets = [];
+
+        function onMouseClick(event) {
+            if(STATE.transitioning) return;
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            
+            if(STATE.view === 'GALAXY') {
+                // Raycast against points is hard, use distance check to starData
+                // Project stars to screen space? Too slow for 10k.
+                // Use threshold raycaster
+                raycaster.params.Points.threshold = 5;
+                const intersects = raycaster.intersectObject(galaxyGroup.children[0]);
+                
+                if(intersects.length > 0) {
+                    const index = intersects[0].index;
+                    const star = starData[index];
+                    selectStar(star);
+                }
+            } else if(STATE.view === 'SYSTEM') {
+                const intersects = raycaster.intersectObjects(systemGroup.children);
+                if(intersects.length > 0) {
+                    // Find which planet
+                    const obj = intersects[0].object;
+                    const planet = currentSystemPlanets.find(p => p.mesh === obj);
+                    if(planet) {
+                        selectPlanet(planet);
+                    }
+                }
+            }
+        }
+        
+        function selectStar(star) {
+            STATE.currentStar = star;
+            document.getElementById('obj-name').textContent = star.name;
+            document.getElementById('obj-stats').innerHTML = `
+                Type: Star<br>
+                Class: ${star.color.toString(16)}<br>
+                Coords: ${star.x.toFixed(0)}, ${star.y.toFixed(0)}, ${star.z.toFixed(0)}
+            `;
+            document.getElementById('action-btn').textContent = "Warp to System";
+            document.getElementById('action-btn').onclick = () => warpToSystem(star);
+            document.getElementById('info-panel').style.display = 'block';
+        }
+        
+        function selectPlanet(planet) {
+            STATE.currentPlanet = planet;
+            document.getElementById('obj-name').textContent = planet.name;
+            document.getElementById('obj-stats').innerHTML = `
+                Type: ${planet.type}<br>
+                Size: ${planet.size.toFixed(1)}<br>
+                Orbit: ${planet.dist.toFixed(0)} AU
+            `;
+            document.getElementById('action-btn').textContent = "Land on Surface";
+            document.getElementById('action-btn').onclick = () => warpToPlanet(planet);
+            document.getElementById('info-panel').style.display = 'block';
+        }
+        
+        function warpToSystem(star) {
+            STATE.transitioning = true;
+            document.getElementById('loading').style.opacity = 1;
+            
+            // Animation simulation
+            setTimeout(() => {
+                STATE.view = 'SYSTEM';
+                galaxyGroup.visible = false;
+                systemGroup.visible = true;
+                planetGroup.visible = false;
+                
+                currentSystemPlanets = generateSystem(star);
+                
+                camera.position.set(0, 100, 200);
+                controls.target.set(0, 0, 0);
+                controls.maxDistance = 500;
+                controls.minDistance = 20;
+                
+                document.getElementById('scale-val').textContent = "SOLAR SYSTEM";
+                document.getElementById('crumb-system').style.display = 'block';
+                document.getElementById('crumb-system').classList.add('active');
+                document.getElementById('crumb-galaxy').classList.remove('active');
+                document.getElementById('info-panel').style.display = 'none';
+                document.getElementById('loading').style.opacity = 0;
+                STATE.transitioning = false;
+            }, 1000);
+        }
+        
+        function warpToPlanet(planet) {
+            STATE.transitioning = true;
+            document.getElementById('loading').style.opacity = 1;
+            
+            setTimeout(() => {
+                STATE.view = 'PLANET';
+                systemGroup.visible = false;
+                planetGroup.visible = true;
+                
+                const life = generatePlanetSurface(planet);
+                
+                camera.position.set(0, 0, 60);
+                controls.target.set(0, 0, 0);
+                controls.maxDistance = 100;
+                controls.minDistance = 25;
+                
+                document.getElementById('scale-val').textContent = "PLANETARY SURFACE";
+                document.getElementById('crumb-planet').style.display = 'block';
+                document.getElementById('crumb-planet').classList.add('active');
+                document.getElementById('crumb-system').classList.remove('active');
+                
+                // Update info panel for surface
+                document.getElementById('obj-name').textContent = planet.name;
+                document.getElementById('obj-stats').innerHTML = `
+                    Atmosphere: Analyzed<br>
+                    Geology: ${planet.type}<br>
+                    Life Signs: ${life}
+                `;
+                document.getElementById('action-btn').style.display = 'none'; // No deeper level
+                document.getElementById('info-panel').style.display = 'block';
+                
+                document.getElementById('loading').style.opacity = 0;
+                STATE.transitioning = false;
+            }, 1000);
+        }
+        
+        // Breadcrumb navigation
+        document.getElementById('crumb-galaxy').onclick = () => {
+            if(STATE.view === 'GALAXY' || STATE.transitioning) return;
+            STATE.view = 'GALAXY';
+            galaxyGroup.visible = true;
+            systemGroup.visible = false;
+            planetGroup.visible = false;
+            camera.position.set(0, 200, 400);
+            controls.maxDistance = 2000;
+            document.getElementById('scale-val').textContent = "GALAXY";
+            document.getElementById('crumb-system').style.display = 'none';
+            document.getElementById('crumb-planet').style.display = 'none';
+            document.getElementById('crumb-galaxy').classList.add('active');
+            document.getElementById('info-panel').style.display = 'none';
+        };
+        
+        document.getElementById('crumb-system').onclick = () => {
+            if(STATE.view === 'SYSTEM' || STATE.transitioning) return;
+            // Go back to current system
+            STATE.view = 'SYSTEM';
+            systemGroup.visible = true;
+            planetGroup.visible = false;
+            camera.position.set(0, 100, 200);
+            controls.maxDistance = 500;
+            document.getElementById('scale-val').textContent = "SOLAR SYSTEM";
+            document.getElementById('crumb-planet').style.display = 'none';
+            document.getElementById('crumb-system').classList.add('active');
+            document.getElementById('crumb-planet').classList.remove('active');
+            document.getElementById('info-panel').style.display = 'none';
+            document.getElementById('action-btn').style.display = 'block';
+        };
+
+        window.addEventListener('click', onMouseClick);
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- Main Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            
+            if(STATE.view === 'GALAXY') {
+                galaxyGroup.rotation.y += 0.0005;
+            } else if(STATE.view === 'SYSTEM') {
+                // Orbit planets
+                currentSystemPlanets.forEach(p => {
+                    p.angle += p.speed;
+                    p.mesh.position.x = Math.cos(p.angle) * p.dist;
+                    p.mesh.position.z = Math.sin(p.angle) * p.dist;
+                });
+            } else if(STATE.view === 'PLANET') {
+                planetGroup.rotation.y += 0.001;
+            }
+            
+            composer.render();
+        }
+
+        // Start
+        generateGalaxy();
+        animate();
+
+    </script>
+</body>
+</html>

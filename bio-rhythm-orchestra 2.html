@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bio-Rhythm Orchestra</title>
+    <meta name="description" content="Generative ambient music synchronized to your heart rate detected via webcam photoplethysmography (PPG).">
+    <style>
+        :root {
+            --bg-color: #050505;
+            --text-color: #e0e0e0;
+            --accent-color: #ff4081;
+            --secondary-color: #00bcd4;
+            --panel-bg: rgba(20, 20, 20, 0.8);
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+        }
+
+        #container {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #video-container {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            width: 160px;
+            height: 120px;
+            border-radius: 10px;
+            overflow: hidden;
+            border: 2px solid var(--secondary-color);
+            z-index: 10;
+            opacity: 0.8;
+            transition: opacity 0.3s;
+        }
+
+        #video-container:hover {
+            opacity: 1;
+        }
+
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            transform: scaleX(-1); /* Mirror effect */
+        }
+
+        #visualizer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 1;
+        }
+
+        #ui-layer {
+            position: relative;
+            z-index: 5;
+            text-align: center;
+            pointer-events: none; /* Let clicks pass through to canvas if needed */
+        }
+
+        .hud-panel {
+            background: var(--panel-bg);
+            padding: 20px;
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            pointer-events: auto;
+            max-width: 500px;
+            margin: 0 auto;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+        }
+
+        h1 {
+            margin: 0 0 10px 0;
+            font-weight: 300;
+            letter-spacing: 2px;
+            background: linear-gradient(45deg, var(--accent-color), var(--secondary-color));
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+
+        p {
+            font-size: 0.9rem;
+            color: #aaa;
+            margin-bottom: 20px;
+            line-height: 1.5;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-around;
+            margin-bottom: 20px;
+        }
+
+        .stat-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: bold;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+        }
+
+        #bpm-value {
+            color: var(--accent-color);
+            text-shadow: 0 0 10px rgba(255, 64, 129, 0.5);
+        }
+
+        button {
+            background: linear-gradient(45deg, var(--accent-color), var(--secondary-color));
+            border: none;
+            padding: 12px 30px;
+            border-radius: 30px;
+            color: white;
+            font-size: 1rem;
+            font-weight: bold;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0, 188, 212, 0.4);
+        }
+
+        button:disabled {
+            background: #444;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        #signal-canvas {
+            width: 100%;
+            height: 60px;
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 5px;
+            margin-top: 15px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #444;
+            margin-right: 8px;
+        }
+
+        .status-active {
+            background-color: #00ff00;
+            box-shadow: 0 0 5px #00ff00;
+        }
+
+        .status-detecting {
+            background-color: #ffeb3b;
+            animation: pulse 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 0.5; }
+            50% { opacity: 1; }
+            100% { opacity: 0.5; }
+        }
+
+        #instructions {
+            margin-top: 10px;
+            font-size: 0.8rem;
+            color: #888;
+        }
+    </style>
+</head>
+<body>
+
+<div id="container">
+    <canvas id="visualizer"></canvas>
+    
+    <div id="video-container">
+        <video id="webcam" playsinline autoplay muted></video>
+    </div>
+
+    <div id="ui-layer">
+        <div class="hud-panel">
+            <h1>Bio-Rhythm Orchestra</h1>
+            <p>Generative music synced to your heartbeat. Place your finger gently over the camera or sit still in good lighting.</p>
+            
+            <div class="stat-row">
+                <div class="stat-item">
+                    <div id="bpm-value" class="stat-value">--</div>
+                    <div class="stat-label">Heart Rate (BPM)</div>
+                </div>
+            </div>
+
+            <canvas id="signal-canvas"></canvas>
+            <div id="instructions">Status: <span id="status-text">Waiting to start...</span></div>
+
+            <div style="margin-top: 20px;">
+                <button id="start-btn">Start Experience</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    /**
+     * Bio-Rhythm Orchestra
+     * 
+     * Uses webcam photoplethysmography (PPG) to detect heart rate and 
+     * generates ambient music using Web Audio API.
+     */
+
+    // --- Configuration ---
+    const CONFIG = {
+        samplingRate: 30, // FPS for processing
+        bufferSize: 256,  // Size of signal buffer for analysis
+        minBPM: 40,
+        maxBPM: 200,
+        smoothing: 0.9,   // EMA smoothing factor for BPM
+        graphHistory: 150 // Number of points to show in graph
+    };
+
+    // --- State ---
+    const state = {
+        isRunning: false,
+        bpm: 0,
+        confidence: 0,
+        signalBuffer: [],
+        timestamps: [],
+        lastFrameTime: 0,
+        beatDetected: false,
+        lastBeatTime: 0,
+        audioContext: null,
+        nextNoteTime: 0,
+        currentNoteIndex: 0
+    };
+
+    // --- DOM Elements ---
+    const video = document.getElementById('webcam');
+    const startBtn = document.getElementById('start-btn');
+    const bpmDisplay = document.getElementById('bpm-value');
+    const statusText = document.getElementById('status-text');
+    const signalCanvas = document.getElementById('signal-canvas');
+    const visualizerCanvas = document.getElementById('visualizer');
+    const signalCtx = signalCanvas.getContext('2d');
+    const visCtx = visualizerCanvas.getContext('2d');
+
+    // Offscreen canvas for pixel reading
+    const processCanvas = document.createElement('canvas');
+    const processCtx = processCanvas.getContext('2d', { willReadFrequently: true });
+
+    // --- Audio System ---
+    class AudioEngine {
+        constructor() {
+            this.ctx = null;
+            this.masterGain = null;
+            this.reverb = null;
+            this.scale = [261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25]; // C Major
+            // Pentatonic C: C, D, E, G, A
+            this.pentatonic = [261.63, 293.66, 329.63, 392.00, 440.00, 523.25, 587.33, 659.25];
+            this.activeOscillators = [];
+        }
+
+        async init() {
+            this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            this.masterGain = this.ctx.createGain();
+            this.masterGain.gain.value = 0.5;
+            
+            // Create Reverb
+            this.reverb = this.ctx.createConvolver();
+            await this.createReverbImpulse();
+            
+            this.masterGain.connect(this.reverb);
+            this.reverb.connect(this.ctx.destination);
+            // Also connect dry signal
+            this.masterGain.connect(this.ctx.destination);
+        }
+
+        async createReverbImpulse() {
+            const duration = 3;
+            const decay = 2;
+            const rate = this.ctx.sampleRate;
+            const length = rate * duration;
+            const impulse = this.ctx.createBuffer(2, length, rate);
+            const left = impulse.getChannelData(0);
+            const right = impulse.getChannelData(1);
+
+            for (let i = 0; i < length; i++) {
+                const n = i / length;
+                // Exponential decay noise
+                left[i] = (Math.random() * 2 - 1) * Math.pow(1 - n, decay);
+                right[i] = (Math.random() * 2 - 1) * Math.pow(1 - n, decay);
+            }
+            this.reverb.buffer = impulse;
+        }
+
+        playNote(bpm) {
+            if (!this.ctx) return;
+
+            const now = this.ctx.currentTime;
+            const duration = 60 / Math.max(40, bpm); // Duration of a beat
+            
+            // Select note based on some logic (random for now, could be mapped to signal intensity)
+            const noteFreq = this.pentatonic[Math.floor(Math.random() * this.pentatonic.length)];
+            
+            // Oscillator 1 (Sine/Triangle)
+            const osc = this.ctx.createOscillator();
+            osc.type = Math.random() > 0.5 ? 'sine' : 'triangle';
+            osc.frequency.setValueAtTime(noteFreq, now);
+
+            // Envelope
+            const gain = this.ctx.createGain();
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.2, now + 0.1);
+            gain.gain.exponentialRampToValueAtTime(0.001, now + duration * 2);
+
+            // Filter
+            const filter = this.ctx.createBiquadFilter();
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(200, now);
+            filter.frequency.linearRampToValueAtTime(2000, now + 0.1);
+            filter.frequency.exponentialRampToValueAtTime(200, now + duration);
+
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(this.masterGain);
+
+            osc.start(now);
+            osc.stop(now + duration * 2);
+
+            // Cleanup
+            setTimeout(() => {
+                osc.disconnect();
+                gain.disconnect();
+                filter.disconnect();
+            }, (duration * 2 + 0.1) * 1000);
+
+            // Bass drone (occasional)
+            if (Math.random() < 0.3) {
+                this.playDrone(noteFreq / 4, duration * 4);
+            }
+        }
+
+        playDrone(freq, duration) {
+            const now = this.ctx.currentTime;
+            const osc = this.ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(freq, now);
+
+            const gain = this.ctx.createGain();
+            gain.gain.setValueAtTime(0, now);
+            gain.gain.linearRampToValueAtTime(0.1, now + 1);
+            gain.gain.linearRampToValueAtTime(0, now + duration);
+
+            osc.connect(gain);
+            gain.connect(this.masterGain);
+
+            osc.start(now);
+            osc.stop(now + duration);
+        }
+
+        playHeartbeat() {
+            if (!this.ctx) return;
+            const now = this.ctx.currentTime;
+            
+            // Low thud
+            const osc = this.ctx.createOscillator();
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(60, now);
+            osc.frequency.exponentialRampToValueAtTime(40, now + 0.1);
+
+            const gain = this.ctx.createGain();
+            gain.gain.setValueAtTime(0.5, now);
+            gain.gain.exponentialRampToValueAtTime(0.01, now + 0.15);
+
+            osc.connect(gain);
+            gain.connect(this.masterGain);
+
+            osc.start(now);
+            osc.stop(now + 0.2);
+        }
+    }
+
+    const audio = new AudioEngine();
+
+    // --- Signal Processing ---
+    
+    function getAverageGreen(ctx, width, height) {
+        // Sample center area
+        const sampleSize = 40;
+        const sx = (width - sampleSize) / 2;
+        const sy = (height - sampleSize) / 2;
+        
+        const frame = ctx.getImageData(sx, sy, sampleSize, sampleSize);
+        const data = frame.data;
+        let sum = 0;
+        
+        // Green channel is usually best for PPG
+        for (let i = 0; i < data.length; i += 4) {
+            sum += data[i + 1]; 
+        }
+        
+        return sum / (data.length / 4);
+    }
+
+    function processSignal() {
+        if (state.signalBuffer.length < CONFIG.bufferSize) return;
+
+        // Simple peak detection
+        // 1. Normalize/Detrend (High pass filter equivalent)
+        const raw = state.signalBuffer.slice(-CONFIG.bufferSize);
+        const mean = raw.reduce((a, b) => a + b, 0) / raw.length;
+        const detrended = raw.map(v => v - mean);
+
+        // 2. Moving average (Low pass filter)
+        const smoothed = [];
+        const windowSize = 5;
+        for (let i = 0; i < detrended.length - windowSize; i++) {
+            let sum = 0;
+            for (let j = 0; j < windowSize; j++) {
+                sum += detrended[i + j];
+            }
+            smoothed.push(sum / windowSize);
+        }
+
+        // 3. Find peaks
+        const peaks = [];
+        for (let i = 1; i < smoothed.length - 1; i++) {
+            if (smoothed[i] > smoothed[i-1] && smoothed[i] > smoothed[i+1] && smoothed[i] > 0) {
+                peaks.push({ index: i, value: smoothed[i] });
+            }
+        }
+
+        // 4. Calculate intervals
+        if (peaks.length > 2) {
+            // Filter peaks by height (simple threshold)
+            const maxPeak = Math.max(...peaks.map(p => p.value));
+            const threshold = maxPeak * 0.6;
+            const validPeaks = peaks.filter(p => p.value > threshold);
+
+            if (validPeaks.length >= 2) {
+                // Calculate average distance between peaks
+                let totalDist = 0;
+                let count = 0;
+                for (let i = 1; i < validPeaks.length; i++) {
+                    totalDist += (validPeaks[i].index - validPeaks[i-1].index);
+                    count++;
+                }
+                
+                if (count > 0) {
+                    const avgDistFrames = totalDist / count;
+                    const fps = CONFIG.samplingRate; // Approximation
+                    const secondsPerBeat = avgDistFrames / fps;
+                    const instantBpm = 60 / secondsPerBeat;
+
+                    if (instantBpm > CONFIG.minBPM && instantBpm < CONFIG.maxBPM) {
+                        // Smooth BPM
+                        if (state.bpm === 0) state.bpm = instantBpm;
+                        else state.bpm = (state.bpm * CONFIG.smoothing) + (instantBpm * (1 - CONFIG.smoothing));
+                        
+                        state.confidence = Math.min(state.confidence + 10, 100);
+                    } else {
+                        state.confidence = Math.max(state.confidence - 2, 0);
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Visuals ---
+
+    function drawSignalGraph() {
+        const w = signalCanvas.width;
+        const h = signalCanvas.height;
+        signalCtx.clearRect(0, 0, w, h);
+
+        if (state.signalBuffer.length < 2) return;
+
+        signalCtx.beginPath();
+        signalCtx.strokeStyle = '#00bcd4';
+        signalCtx.lineWidth = 2;
+
+        const slice = state.signalBuffer.slice(-CONFIG.graphHistory);
+        const min = Math.min(...slice);
+        const max = Math.max(...slice);
+        const range = max - min || 1;
+
+        for (let i = 0; i < slice.length; i++) {
+            const x = (i / (CONFIG.graphHistory - 1)) * w;
+            const normalized = (slice[i] - min) / range;
+            const y = h - (normalized * h * 0.8 + h * 0.1); // 10% padding
+            
+            if (i === 0) signalCtx.moveTo(x, y);
+            else signalCtx.lineTo(x, y);
+        }
+        signalCtx.stroke();
+    }
+
+    class Particle {
+        constructor(w, h) {
+            this.reset(w, h);
+        }
+
+        reset(w, h) {
+            this.x = Math.random() * w;
+            this.y = Math.random() * h;
+            this.vx = (Math.random() - 0.5) * 2;
+            this.vy = (Math.random() - 0.5) * 2;
+            this.size = Math.random() * 3 + 1;
+            this.color = `hsla(${Math.random() * 60 + 300}, 70%, 50%, ${Math.random() * 0.5 + 0.1})`;
+            this.life = 1.0;
+        }
+
+        update(beatPulse) {
+            this.x += this.vx * (1 + beatPulse * 5);
+            this.y += this.vy * (1 + beatPulse * 5);
+            this.life -= 0.005;
+            
+            if (beatPulse > 0.1) {
+                this.size += beatPulse;
+            } else {
+                this.size *= 0.98;
+            }
+        }
+
+        draw(ctx) {
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, Math.max(0.1, this.size), 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+
+    const particles = [];
+    let beatPulse = 0;
+
+    function initVisualizer() {
+        visualizerCanvas.width = window.innerWidth;
+        visualizerCanvas.height = window.innerHeight;
+        
+        for(let i=0; i<100; i++) {
+            particles.push(new Particle(visualizerCanvas.width, visualizerCanvas.height));
+        }
+    }
+
+    function drawVisualizer() {
+        const w = visualizerCanvas.width;
+        const h = visualizerCanvas.height;
+        
+        // Fade effect
+        visCtx.fillStyle = 'rgba(5, 5, 5, 0.1)';
+        visCtx.fillRect(0, 0, w, h);
+
+        // Beat pulse decay
+        beatPulse *= 0.9;
+
+        // Center pulse
+        if (state.bpm > 0) {
+            const radius = 50 + beatPulse * 50;
+            visCtx.beginPath();
+            visCtx.arc(w/2, h/2, radius, 0, Math.PI * 2);
+            visCtx.strokeStyle = `hsla(330, 100%, 50%, ${0.2 + beatPulse})`;
+            visCtx.lineWidth = 2 + beatPulse * 10;
+            visCtx.stroke();
+        }
+
+        particles.forEach(p => {
+            p.update(beatPulse);
+            p.draw(visCtx);
+            if (p.life <= 0 || p.x < 0 || p.x > w || p.y < 0 || p.y > h) {
+                p.reset(w, h);
+            }
+        });
+    }
+
+    // --- Main Loop ---
+
+    function loop(timestamp) {
+        if (!state.isRunning) return;
+
+        // Video Processing
+        if (video.readyState === video.HAVE_ENOUGH_DATA) {
+            // Draw video to offscreen canvas to read pixels
+            processCanvas.width = 100; // Downsample for performance
+            processCanvas.height = 100;
+            processCtx.drawImage(video, 0, 0, 100, 100);
+            
+            const avgGreen = getAverageGreen(processCtx, 100, 100);
+            state.signalBuffer.push(avgGreen);
+            if (state.signalBuffer.length > CONFIG.bufferSize * 2) {
+                state.signalBuffer.shift();
+            }
+
+            // Process signal periodically
+            if (timestamp - state.lastFrameTime > 1000 / CONFIG.samplingRate) {
+                processSignal();
+                state.lastFrameTime = timestamp;
+            }
+        }
+
+        // Update UI
+        if (state.confidence > 20) {
+            bpmDisplay.innerText = Math.round(state.bpm);
+            statusText.innerText = "Signal detected. Generating music...";
+            statusText.style.color = "#00ff00";
+        } else {
+            bpmDisplay.innerText = "--";
+            statusText.innerText = "Detecting pulse... (Stay still / Check light)";
+            statusText.style.color = "#ffeb3b";
+        }
+
+        drawSignalGraph();
+        drawVisualizer();
+
+        // Audio Scheduling
+        if (state.bpm > 0 && state.confidence > 20) {
+            const beatInterval = 60 / state.bpm;
+            const now = audio.ctx.currentTime;
+            
+            if (now >= state.nextNoteTime) {
+                audio.playNote(state.bpm);
+                audio.playHeartbeat();
+                beatPulse = 1.0; // Trigger visual pulse
+                state.nextNoteTime = now + beatInterval;
+            }
+        }
+
+        requestAnimationFrame(loop);
+    }
+
+    // --- Initialization ---
+
+    async function startApp() {
+        try {
+            await audio.init();
+            
+            const stream = await navigator.mediaDevices.getUserMedia({ 
+                video: { facingMode: "user", width: { ideal: 320 }, height: { ideal: 240 } } 
+            });
+            video.srcObject = stream;
+            
+            state.isRunning = true;
+            startBtn.disabled = true;
+            startBtn.innerText = "Running...";
+            
+            initVisualizer();
+            loop(0);
+
+        } catch (err) {
+            console.error("Error starting app:", err);
+            statusText.innerText = "Error: " + err.message;
+            alert("Could not access camera. Please ensure you have a webcam and have granted permission.");
+        }
+    }
+
+    startBtn.addEventListener('click', startApp);
+    
+    // Handle resize
+    window.addEventListener('resize', () => {
+        visualizerCanvas.width = window.innerWidth;
+        visualizerCanvas.height = window.innerHeight;
+        signalCanvas.width = document.querySelector('.hud-panel').clientWidth - 40;
+    });
+    
+    // Initial canvas size
+    setTimeout(() => {
+        signalCanvas.width = document.querySelector('.hud-panel').clientWidth - 40;
+        signalCanvas.height = 60;
+    }, 100);
+
+</script>
+</body>
+</html>

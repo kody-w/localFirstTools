@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Genetic Car Evolution</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #1a1a1a;
+            font-family: 'Courier New', monospace;
+            color: #0f0;
+        }
+        #canvas {
+            display: block;
+        }
+        #ui {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #0f0;
+            border-radius: 5px;
+            pointer-events: none;
+        }
+        .stat {
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        #controls {
+            position: absolute;
+            top: 10px;
+            right: 10px;
+            background: rgba(0, 0, 0, 0.8);
+            padding: 15px;
+            border: 1px solid #0f0;
+            border-radius: 5px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        button {
+            background: #003300;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 8px 15px;
+            cursor: pointer;
+            font-family: inherit;
+            font-weight: bold;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #005500;
+            box-shadow: 0 0 10px #0f0;
+        }
+        .highlight {
+            color: #fff;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div id="ui">
+        <div class="stat">Generation: <span id="gen" class="highlight">1</span></div>
+        <div class="stat">Alive: <span id="alive" class="highlight">20</span>/20</div>
+        <div class="stat">Best Distance: <span id="best-dist" class="highlight">0</span>m</div>
+        <div class="stat">Time: <span id="time">0.0</span>s</div>
+        <div class="stat">Mutation Rate: <span id="mutation">5</span>%</div>
+    </div>
+
+    <div id="controls">
+        <button onclick="toggleSpeed()">Toggle Fast Forward</button>
+        <button onclick="nextGen()">Force Next Gen</button>
+        <button onclick="resetSim()">Reset Simulation</button>
+    </div>
+
+    <!-- Matter.js Physics Engine -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/matter-js/0.19.0/matter.min.js"></script>
+
+    <script>
+        // --- Configuration ---
+        const POPULATION_SIZE = 20;
+        const MUTATION_RATE = 0.05;
+        const ROUND_TIME = 20; // Seconds per generation
+        const GRAVITY = 1;
+        
+        // --- Physics Setup ---
+        const Engine = Matter.Engine,
+              Render = Matter.Render,
+              Runner = Matter.Runner,
+              Bodies = Matter.Bodies,
+              Composite = Matter.Composite,
+              Constraint = Matter.Constraint,
+              Vector = Matter.Vector,
+              Body = Matter.Body,
+              Events = Matter.Events;
+
+        const engine = Engine.create();
+        const world = engine.world;
+        engine.gravity.y = GRAVITY;
+
+        const canvas = document.getElementById('canvas');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        const render = Render.create({
+            canvas: canvas,
+            engine: engine,
+            options: {
+                width: window.innerWidth,
+                height: window.innerHeight,
+                wireframes: false,
+                background: '#1a1a1a'
+            }
+        });
+
+        // --- Game State ---
+        let cars = [];
+        let terrain = [];
+        let generation = 1;
+        let timer = 0;
+        let bestDistance = 0;
+        let isFastForward = false;
+        let runner = Runner.create();
+        
+        // --- Car DNA Structure ---
+        // DNA = { 
+        //   vertices: [Vector, ...], 
+        //   wheels: [{vertexIndex, radius}, ...] 
+        // }
+
+        class Car {
+            constructor(dna, x, y) {
+                this.dna = dna || this.generateRandomDNA();
+                this.bodies = [];
+                this.constraints = [];
+                this.composite = Composite.create();
+                this.maxDist = 0;
+                this.alive = true;
+                
+                this.build(x, y);
+            }
+
+            generateRandomDNA() {
+                const vertices = [];
+                const numVertices = 8;
+                for(let i=0; i<numVertices; i++) {
+                    const angle = (i / numVertices) * Math.PI * 2;
+                    const radius = 20 + Math.random() * 40;
+                    vertices.push({
+                        x: Math.cos(angle) * radius,
+                        y: Math.sin(angle) * radius
+                    });
+                }
+
+                const wheels = [];
+                const numWheels = 2;
+                for(let i=0; i<numWheels; i++) {
+                    wheels.push({
+                        vertexIndex: Math.floor(Math.random() * numVertices),
+                        radius: 15 + Math.random() * 25,
+                        density: 0.01 + Math.random() * 0.05
+                    });
+                }
+
+                return { vertices, wheels };
+            }
+
+            build(startX, startY) {
+                // Create Chassis
+                const chassis = Bodies.fromVertices(startX, startY, [this.dna.vertices], {
+                    collisionFilter: { group: -1 },
+                    friction: 0.5,
+                    density: 0.02,
+                    render: { fillStyle: `hsl(${Math.random()*360}, 70%, 50%)` }
+                });
+                
+                this.bodies.push(chassis);
+                this.chassis = chassis;
+
+                // Create Wheels
+                this.dna.wheels.forEach(w => {
+                    const vertex = this.dna.vertices[w.vertexIndex];
+                    const wheelX = startX + vertex.x;
+                    const wheelY = startY + vertex.y;
+                    
+                    const wheel = Bodies.circle(wheelX, wheelY, w.radius, {
+                        collisionFilter: { group: -1 },
+                        friction: 0.9,
+                        density: w.density,
+                        render: { fillStyle: '#333', strokeStyle: '#fff', lineWidth: 2 }
+                    });
+
+                    const axle = Constraint.create({
+                        bodyA: chassis,
+                        bodyB: wheel,
+                        pointA: vertex,
+                        stiffness: 0.2,
+                        damping: 0.1,
+                        length: 0,
+                        render: { visible: true, lineWidth: 2, strokeStyle: '#666' }
+                    });
+
+                    this.bodies.push(wheel);
+                    this.constraints.push(axle);
+                });
+
+                Composite.add(this.composite, [...this.bodies, ...this.constraints]);
+                Composite.add(world, this.composite);
+            }
+
+            destroy() {
+                Composite.remove(world, this.composite);
+            }
+
+            update() {
+                if (!this.alive) return;
+                
+                const dist = this.chassis.position.x;
+                if (dist > this.maxDist) this.maxDist = dist;
+                
+                // Kill if flipped or stuck (simple check)
+                // (In a real sim we'd check velocity or rotation)
+            }
+        }
+
+        // --- Terrain Generation ---
+        function generateTerrain() {
+            Composite.remove(world, terrain);
+            terrain = [];
+
+            let x = 0;
+            let y = window.innerHeight - 100;
+            const groundWidth = 100;
+            
+            // Start platform
+            const startPlat = Bodies.rectangle(200, window.innerHeight - 50, 600, 100, { 
+                isStatic: true,
+                render: { fillStyle: '#222' }
+            });
+            terrain.push(startPlat);
+            x = 500;
+
+            // Procedural Hills
+            for (let i = 0; i < 100; i++) {
+                const width = 100 + Math.random() * 200;
+                const height = 20 + Math.random() * 100;
+                const angle = (Math.random() - 0.5) * 0.5;
+                
+                y += (Math.random() - 0.5) * 100;
+                y = Math.min(Math.max(y, window.innerHeight - 300), window.innerHeight + 100);
+
+                const ground = Bodies.rectangle(x + width/2, y, width, 20, {
+                    isStatic: true,
+                    angle: angle,
+                    friction: 0.8,
+                    render: { fillStyle: '#0f0' }
+                });
+                
+                terrain.push(ground);
+                x += width * Math.cos(angle);
+            }
+
+            Composite.add(world, terrain);
+        }
+
+        // --- Genetic Algorithm ---
+        function nextGen() {
+            // 1. Evaluate Fitness
+            cars.sort((a, b) => b.maxDist - a.maxDist);
+            const bestCar = cars[0];
+            bestDistance = Math.max(bestDistance, bestCar.maxDist);
+            
+            document.getElementById('best-dist').innerText = Math.floor(bestDistance);
+
+            // 2. Selection (Top 50%)
+            const parents = cars.slice(0, POPULATION_SIZE / 2);
+            
+            // 3. Crossover & Mutation
+            const nextGenDNA = [];
+            
+            // Elitism: Keep the best one unchanged
+            nextGenDNA.push(JSON.parse(JSON.stringify(bestCar.dna)));
+
+            while (nextGenDNA.length < POPULATION_SIZE) {
+                const p1 = parents[Math.floor(Math.random() * parents.length)];
+                const p2 = parents[Math.floor(Math.random() * parents.length)];
+                
+                const childDNA = crossover(p1.dna, p2.dna);
+                mutate(childDNA);
+                nextGenDNA.push(childDNA);
+            }
+
+            // 4. Reset World
+            cars.forEach(c => c.destroy());
+            cars = [];
+            
+            // Rebuild cars
+            nextGenDNA.forEach(dna => {
+                cars.push(new Car(dna, 200, window.innerHeight - 200));
+            });
+
+            generation++;
+            timer = 0;
+            updateUI();
+        }
+
+        function crossover(dna1, dna2) {
+            const newVertices = [];
+            for(let i=0; i<dna1.vertices.length; i++) {
+                // 50/50 chance from each parent
+                newVertices.push(Math.random() > 0.5 ? {...dna1.vertices[i]} : {...dna2.vertices[i]});
+            }
+            
+            // Wheels from one parent or the other
+            const newWheels = Math.random() > 0.5 ? 
+                JSON.parse(JSON.stringify(dna1.wheels)) : 
+                JSON.parse(JSON.stringify(dna2.wheels));
+
+            return { vertices: newVertices, wheels: newWheels };
+        }
+
+        function mutate(dna) {
+            // Mutate Vertices (Shape)
+            dna.vertices.forEach(v => {
+                if (Math.random() < MUTATION_RATE) {
+                    v.x += (Math.random() - 0.5) * 20;
+                    v.y += (Math.random() - 0.5) * 20;
+                }
+            });
+
+            // Mutate Wheels
+            dna.wheels.forEach(w => {
+                if (Math.random() < MUTATION_RATE) {
+                    w.radius += (Math.random() - 0.5) * 10;
+                    w.radius = Math.max(5, w.radius);
+                }
+                if (Math.random() < MUTATION_RATE) {
+                    w.vertexIndex = Math.floor(Math.random() * dna.vertices.length);
+                }
+            });
+        }
+
+        // --- Main Loop ---
+        function init() {
+            generateTerrain();
+            
+            // Initial Population
+            for(let i=0; i<POPULATION_SIZE; i++) {
+                cars.push(new Car(null, 200, window.innerHeight - 200));
+            }
+
+            Runner.run(runner, engine);
+            Render.run(render);
+            
+            requestAnimationFrame(loop);
+        }
+
+        function loop() {
+            // Camera Follow Best Car
+            let leader = cars[0];
+            cars.forEach(c => {
+                c.update();
+                if (c.chassis.position.x > leader.chassis.position.x) leader = c;
+            });
+
+            // Pan Camera
+            const camX = -leader.chassis.position.x + window.innerWidth * 0.3;
+            Render.lookAt(render, {
+                min: { x: -camX, y: 0 },
+                max: { x: -camX + window.innerWidth, y: window.innerHeight }
+            });
+
+            // Timer Logic
+            timer += 1/60;
+            document.getElementById('time').innerText = timer.toFixed(1);
+            
+            if (timer > ROUND_TIME) {
+                nextGen();
+            }
+
+            requestAnimationFrame(loop);
+        }
+
+        // --- UI Functions ---
+        function updateUI() {
+            document.getElementById('gen').innerText = generation;
+            document.getElementById('alive').innerText = cars.length;
+        }
+
+        function toggleSpeed() {
+            isFastForward = !isFastForward;
+            runner.delta = isFastForward ? 1000/120 : 1000/60; // Double speed physics
+            // Note: Matter.js time scaling is complex, this is a simple hack
+        }
+
+        function resetSim() {
+            cars.forEach(c => c.destroy());
+            cars = [];
+            generation = 1;
+            bestDistance = 0;
+            timer = 0;
+            generateTerrain();
+            for(let i=0; i<POPULATION_SIZE; i++) {
+                cars.push(new Car(null, 200, window.innerHeight - 200));
+            }
+            updateUI();
+        }
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        init();
+
+    </script>
+</body>
+</html>

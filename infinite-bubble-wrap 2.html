@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infinite Bubble Wrap</title>
+    <meta name="description" content="An endless sheet of bubble wrap with physics-accurate pops, layered ASMR audio synthesis, and haptic pulses.">
+    <!-- tags: fidget, asmr, satisfying, audio, touch, haptic, relaxing -->
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            font-family: system-ui, sans-serif;
+            overflow: hidden;
+            user-select: none;
+            -webkit-user-select: none;
+            touch-action: manipulation;
+        }
+
+        .stats-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0, 0, 0, 0.3);
+            backdrop-filter: blur(10px);
+            padding: 10px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            color: white;
+            font-size: 0.9em;
+            z-index: 100;
+        }
+
+        .stat {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .stat-value {
+            font-weight: bold;
+            font-size: 1.2em;
+        }
+
+        .controls {
+            display: flex;
+            gap: 15px;
+        }
+
+        .control-btn {
+            background: rgba(255, 255, 255, 0.2);
+            border: none;
+            color: white;
+            padding: 8px 15px;
+            border-radius: 20px;
+            cursor: pointer;
+            font-size: 0.85em;
+            transition: all 0.2s ease;
+        }
+
+        .control-btn:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+
+        .control-btn.active {
+            background: rgba(255, 255, 255, 0.4);
+        }
+
+        #bubbleCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: pointer;
+        }
+
+        .achievement {
+            position: fixed;
+            top: 60px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-100px);
+            background: linear-gradient(135deg, #ffecd2, #fcb69f);
+            color: #333;
+            padding: 15px 30px;
+            border-radius: 30px;
+            font-weight: bold;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.3);
+            transition: transform 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55);
+            z-index: 200;
+        }
+
+        .achievement.show {
+            transform: translateX(-50%) translateY(0);
+        }
+
+        .combo-display {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            font-size: 3em;
+            font-weight: bold;
+            color: white;
+            text-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            opacity: 0;
+            transform: scale(0.5);
+            transition: all 0.2s ease;
+            pointer-events: none;
+        }
+
+        .combo-display.visible {
+            opacity: 1;
+            transform: scale(1);
+        }
+    </style>
+</head>
+<body>
+    <div class="stats-bar">
+        <div class="stat">
+            <span>Pops:</span>
+            <span class="stat-value" id="popCount">0</span>
+        </div>
+        <div class="stat">
+            <span>Speed:</span>
+            <span class="stat-value" id="popSpeed">0</span>
+            <span>/sec</span>
+        </div>
+        <div class="controls">
+            <button class="control-btn active" id="soundToggle">Sound ON</button>
+            <button class="control-btn" id="hapticToggle">Haptics ON</button>
+            <button class="control-btn" id="freshSheet">Fresh Sheet</button>
+        </div>
+    </div>
+
+    <canvas id="bubbleCanvas"></canvas>
+
+    <div class="achievement" id="achievement"></div>
+    <div class="combo-display" id="comboDisplay"></div>
+
+    <script>
+        const canvas = document.getElementById('bubbleCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Settings
+        let soundEnabled = true;
+        let hapticEnabled = true;
+
+        // Stats
+        let totalPops = 0;
+        let recentPops = [];
+        let combo = 0;
+        let lastPopTime = 0;
+
+        // Audio context
+        let audioCtx = null;
+
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+
+        // Generate pop sound with synthesis
+        function playPop(x, y, size) {
+            if (!soundEnabled || !audioCtx) return;
+
+            // Base frequency based on size (smaller = higher pitch)
+            const baseFreq = 800 - (size * 20) + Math.random() * 100;
+
+            // Create noise burst
+            const duration = 0.08 + Math.random() * 0.04;
+            const now = audioCtx.currentTime;
+
+            // Pop sound: filtered noise burst
+            const noiseBuffer = audioCtx.createBuffer(1, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+            const output = noiseBuffer.getChannelData(0);
+
+            for (let i = 0; i < noiseBuffer.length; i++) {
+                // Exponential decay
+                const envelope = Math.exp(-i / (noiseBuffer.length * 0.15));
+                output[i] = (Math.random() * 2 - 1) * envelope;
+            }
+
+            const noiseSource = audioCtx.createBufferSource();
+            noiseSource.buffer = noiseBuffer;
+
+            // Filter for "pop" character
+            const filter = audioCtx.createBiquadFilter();
+            filter.type = 'bandpass';
+            filter.frequency.value = baseFreq;
+            filter.Q.value = 5;
+
+            // Gain
+            const gain = audioCtx.createGain();
+            gain.gain.value = 0.3 + Math.random() * 0.2;
+
+            // Add subtle reverb feel with delay
+            const delay = audioCtx.createDelay();
+            delay.delayTime.value = 0.02;
+            const delayGain = audioCtx.createGain();
+            delayGain.gain.value = 0.1;
+
+            noiseSource.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+
+            // Tiny delay for room feel
+            gain.connect(delay);
+            delay.connect(delayGain);
+            delayGain.connect(audioCtx.destination);
+
+            noiseSource.start(now);
+            noiseSource.stop(now + duration);
+
+            // Secondary "air release" sound
+            const airDuration = 0.05;
+            const airOsc = audioCtx.createOscillator();
+            airOsc.type = 'sine';
+            airOsc.frequency.value = baseFreq * 2;
+            airOsc.frequency.exponentialRampToValueAtTime(baseFreq * 0.5, now + airDuration);
+
+            const airGain = audioCtx.createGain();
+            airGain.gain.value = 0.05;
+            airGain.gain.exponentialRampToValueAtTime(0.001, now + airDuration);
+
+            airOsc.connect(airGain);
+            airGain.connect(audioCtx.destination);
+            airOsc.start(now);
+            airOsc.stop(now + airDuration);
+        }
+
+        // Haptic feedback
+        function vibrate(pattern) {
+            if (!hapticEnabled) return;
+            if (navigator.vibrate) {
+                navigator.vibrate(pattern);
+            }
+        }
+
+        // Bubble class
+        class Bubble {
+            constructor(x, y, radius) {
+                this.x = x;
+                this.y = y;
+                this.radius = radius;
+                this.popped = false;
+                this.popProgress = 0;
+                this.hue = 200 + Math.random() * 30; // Blue-ish
+                this.pressProgress = 0;
+            }
+
+            draw() {
+                if (this.popped) {
+                    // Draw pop animation
+                    if (this.popProgress < 1) {
+                        const scale = 1 + this.popProgress * 0.3;
+                        const alpha = 1 - this.popProgress;
+
+                        ctx.save();
+                        ctx.globalAlpha = alpha;
+                        ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.radius * scale, 0, Math.PI * 2);
+                        ctx.fillStyle = `hsla(${this.hue}, 50%, 70%, 0.5)`;
+                        ctx.fill();
+                        ctx.restore();
+
+                        this.popProgress += 0.15;
+                    }
+                    return;
+                }
+
+                const r = this.radius * (1 - this.pressProgress * 0.1);
+
+                // Bubble shadow
+                ctx.beginPath();
+                ctx.arc(this.x + 2, this.y + 2, r, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+                ctx.fill();
+
+                // Bubble body
+                const gradient = ctx.createRadialGradient(
+                    this.x - r * 0.3, this.y - r * 0.3, 0,
+                    this.x, this.y, r
+                );
+                gradient.addColorStop(0, `hsla(${this.hue}, 60%, 85%, 0.9)`);
+                gradient.addColorStop(0.7, `hsla(${this.hue}, 50%, 75%, 0.8)`);
+                gradient.addColorStop(1, `hsla(${this.hue}, 40%, 65%, 0.7)`);
+
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+                ctx.fillStyle = gradient;
+                ctx.fill();
+
+                // Highlight
+                ctx.beginPath();
+                ctx.arc(this.x - r * 0.3, this.y - r * 0.3, r * 0.25, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
+                ctx.fill();
+
+                // Second smaller highlight
+                ctx.beginPath();
+                ctx.arc(this.x - r * 0.15, this.y - r * 0.45, r * 0.1, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
+                ctx.fill();
+
+                // Pressed effect
+                if (this.pressProgress > 0) {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(255, 255, 255, ${this.pressProgress * 0.3})`;
+                    ctx.fill();
+                }
+            }
+
+            contains(px, py) {
+                const dx = px - this.x;
+                const dy = py - this.y;
+                return dx * dx + dy * dy <= this.radius * this.radius;
+            }
+
+            pop() {
+                if (this.popped) return false;
+                this.popped = true;
+                return true;
+            }
+        }
+
+        // Grid of bubbles
+        let bubbles = [];
+        let bubbleSize = 25;
+        let cols, rows;
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            generateBubbles();
+        }
+
+        function generateBubbles() {
+            bubbles = [];
+            const padding = 5;
+            const totalSize = bubbleSize * 2 + padding;
+
+            cols = Math.ceil(canvas.width / totalSize) + 1;
+            rows = Math.ceil(canvas.height / totalSize) + 1;
+
+            const offsetX = (canvas.width - (cols - 1) * totalSize) / 2;
+            const offsetY = 50 + (canvas.height - 50 - (rows - 1) * totalSize) / 2;
+
+            for (let row = 0; row < rows; row++) {
+                for (let col = 0; col < cols; col++) {
+                    const x = offsetX + col * totalSize + (row % 2 ? totalSize / 2 : 0);
+                    const y = offsetY + row * totalSize * 0.866;
+                    const size = bubbleSize * (0.9 + Math.random() * 0.2);
+                    bubbles.push(new Bubble(x, y, size));
+                }
+            }
+        }
+
+        // Input handling
+        let activePointers = new Map();
+
+        function handlePointerDown(e) {
+            e.preventDefault();
+            initAudio();
+
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            activePointers.set(e.pointerId, { x, y });
+
+            // Check for bubble press
+            for (const bubble of bubbles) {
+                if (!bubble.popped && bubble.contains(x, y)) {
+                    bubble.pressProgress = 0.5;
+                }
+            }
+        }
+
+        function handlePointerMove(e) {
+            if (!activePointers.has(e.pointerId)) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            activePointers.set(e.pointerId, { x, y });
+
+            // Update press progress for bubbles under pointer
+            for (const bubble of bubbles) {
+                if (!bubble.popped && bubble.contains(x, y)) {
+                    bubble.pressProgress = Math.min(1, bubble.pressProgress + 0.1);
+                }
+            }
+        }
+
+        function handlePointerUp(e) {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+
+            // Pop bubbles
+            for (const bubble of bubbles) {
+                if (!bubble.popped && bubble.contains(x, y)) {
+                    if (bubble.pop()) {
+                        totalPops++;
+                        recentPops.push(Date.now());
+                        updateCombo();
+
+                        playPop(bubble.x, bubble.y, bubble.radius);
+                        vibrate([10]);
+
+                        // Jiggle neighbors
+                        jiggleNeighbors(bubble);
+                    }
+                }
+            }
+
+            activePointers.delete(e.pointerId);
+
+            // Reset press progress for all bubbles
+            for (const bubble of bubbles) {
+                bubble.pressProgress = 0;
+            }
+
+            updateStats();
+            checkAchievements();
+        }
+
+        function jiggleNeighbors(poppedBubble) {
+            for (const bubble of bubbles) {
+                if (bubble.popped) continue;
+
+                const dx = bubble.x - poppedBubble.x;
+                const dy = bubble.y - poppedBubble.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < bubbleSize * 4) {
+                    // Apply jiggle
+                    const strength = 1 - dist / (bubbleSize * 4);
+                    bubble.pressProgress = strength * 0.3;
+                }
+            }
+        }
+
+        function updateCombo() {
+            const now = Date.now();
+            if (now - lastPopTime < 300) {
+                combo++;
+            } else {
+                combo = 1;
+            }
+            lastPopTime = now;
+
+            const comboDisplay = document.getElementById('comboDisplay');
+            if (combo >= 3) {
+                comboDisplay.textContent = `${combo}x COMBO!`;
+                comboDisplay.classList.add('visible');
+
+                clearTimeout(comboDisplay.hideTimeout);
+                comboDisplay.hideTimeout = setTimeout(() => {
+                    comboDisplay.classList.remove('visible');
+                }, 1000);
+            }
+        }
+
+        // Stats
+        function updateStats() {
+            document.getElementById('popCount').textContent = totalPops;
+
+            // Calculate pops per second
+            const now = Date.now();
+            recentPops = recentPops.filter(t => now - t < 1000);
+            document.getElementById('popSpeed').textContent = recentPops.length;
+        }
+
+        // Achievements
+        const achievements = [
+            { count: 10, message: "First 10! Keep going!" },
+            { count: 50, message: "50 pops! Stress relief engaged!" },
+            { count: 100, message: "100 pops! Bubble master!" },
+            { count: 250, message: "250! You're addicted!" },
+            { count: 500, message: "500 POPS! LEGENDARY!" },
+            { count: 1000, message: "1000!!! BUBBLE GOD!!!" }
+        ];
+        let achievementIndex = 0;
+
+        function checkAchievements() {
+            if (achievementIndex >= achievements.length) return;
+
+            if (totalPops >= achievements[achievementIndex].count) {
+                showAchievement(achievements[achievementIndex].message);
+                achievementIndex++;
+            }
+        }
+
+        function showAchievement(message) {
+            const el = document.getElementById('achievement');
+            el.textContent = message;
+            el.classList.add('show');
+
+            setTimeout(() => {
+                el.classList.remove('show');
+            }, 3000);
+        }
+
+        // Controls
+        document.getElementById('soundToggle').addEventListener('click', (e) => {
+            soundEnabled = !soundEnabled;
+            e.target.textContent = soundEnabled ? 'Sound ON' : 'Sound OFF';
+            e.target.classList.toggle('active', soundEnabled);
+            if (soundEnabled) initAudio();
+        });
+
+        document.getElementById('hapticToggle').addEventListener('click', (e) => {
+            hapticEnabled = !hapticEnabled;
+            e.target.textContent = hapticEnabled ? 'Haptics ON' : 'Haptics OFF';
+            e.target.classList.toggle('active', hapticEnabled);
+        });
+
+        document.getElementById('freshSheet').addEventListener('click', () => {
+            generateBubbles();
+            if (soundEnabled) {
+                // Paper crinkle sound
+                initAudio();
+                const duration = 0.3;
+                const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * duration, audioCtx.sampleRate);
+                const data = buffer.getChannelData(0);
+
+                for (let i = 0; i < buffer.length; i++) {
+                    const t = i / buffer.length;
+                    const envelope = Math.sin(t * Math.PI);
+                    data[i] = (Math.random() * 2 - 1) * envelope * 0.2;
+                }
+
+                const source = audioCtx.createBufferSource();
+                source.buffer = buffer;
+
+                const filter = audioCtx.createBiquadFilter();
+                filter.type = 'highpass';
+                filter.frequency.value = 2000;
+
+                source.connect(filter);
+                filter.connect(audioCtx.destination);
+                source.start();
+            }
+        });
+
+        // Event listeners
+        canvas.addEventListener('pointerdown', handlePointerDown);
+        canvas.addEventListener('pointermove', handlePointerMove);
+        canvas.addEventListener('pointerup', handlePointerUp);
+        canvas.addEventListener('pointercancel', handlePointerUp);
+        canvas.addEventListener('pointerleave', handlePointerUp);
+
+        window.addEventListener('resize', resize);
+
+        // Animation loop
+        function animate() {
+            // Clear with gradient
+            const gradient = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
+            gradient.addColorStop(0, '#667eea');
+            gradient.addColorStop(1, '#764ba2');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw bubbles
+            for (const bubble of bubbles) {
+                bubble.draw();
+
+                // Decay press progress
+                if (bubble.pressProgress > 0 && !activePointers.size) {
+                    bubble.pressProgress *= 0.9;
+                    if (bubble.pressProgress < 0.01) bubble.pressProgress = 0;
+                }
+            }
+
+            requestAnimationFrame(animate);
+        }
+
+        // Initialize
+        resize();
+        animate();
+
+        // Load saved stats
+        const savedPops = localStorage.getItem('bubbleWrapPops');
+        if (savedPops) {
+            totalPops = parseInt(savedPops);
+            document.getElementById('popCount').textContent = totalPops;
+
+            // Set achievement index
+            for (let i = 0; i < achievements.length; i++) {
+                if (totalPops >= achievements[i].count) {
+                    achievementIndex = i + 1;
+                }
+            }
+        }
+
+        // Save on unload
+        window.addEventListener('beforeunload', () => {
+            localStorage.setItem('bubbleWrapPops', totalPops);
+        });
+
+        // Periodic save
+        setInterval(() => {
+            localStorage.setItem('bubbleWrapPops', totalPops);
+        }, 5000);
+    </script>
+</body>
+</html>
