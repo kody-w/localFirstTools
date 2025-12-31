@@ -878,6 +878,15 @@
                 this.shakeIntensity = 0;    // Screen shake on death
                 this.floatingTexts = [];    // Floating score popups
 
+                // CYCLE 3: Animation and Polish
+                this.scaleX = 1.0;          // Squash/stretch horizontal
+                this.scaleY = 1.0;          // Squash/stretch vertical
+                this.targetScaleX = 1.0;
+                this.targetScaleY = 1.0;
+                this.afterimages = [];      // Position history for trail
+                this.cameraX = 0;           // Smooth camera position
+                this.cameraTargetX = 0;
+
                 // Generate initial platforms
                 this.generateInitialWorld();
             }
@@ -975,6 +984,9 @@
                     this.jumpBufferTimer = 0;
                     this.jumpsUsed++;
                     this.actionVariety.add('jump');
+                    // CYCLE 3: Stretch on jump
+                    this.targetScaleX = 0.75;
+                    this.targetScaleY = 1.3;
                 }
 
                 // CYCLE 2: Variable Jump Height - cut jump when button released
@@ -1021,6 +1033,11 @@
                             this.player.vy = 0;
                             this.player.grounded = true;
                             this.player.jumpsLeft = 2;
+                            // CYCLE 3: Squash on landing
+                            if (!this.wasGrounded) {
+                                this.targetScaleX = 1.35;
+                                this.targetScaleY = 0.65;
+                            }
                         }
                     }
                 }
@@ -1123,6 +1140,35 @@
                     // CYCLE 1: Moving backward decays momentum
                     this.momentum = Math.max(1.0, this.momentum - 0.005);
                 }
+
+                // CYCLE 3: Squash/Stretch interpolation
+                this.scaleX += (this.targetScaleX - this.scaleX) * 0.2;
+                this.scaleY += (this.targetScaleY - this.scaleY) * 0.2;
+                this.targetScaleX += (1.0 - this.targetScaleX) * 0.15;
+                this.targetScaleY += (1.0 - this.targetScaleY) * 0.15;
+
+                // CYCLE 3: Afterimage trail (only when moving fast and high momentum)
+                if (this.momentum > 1.3 && this.time % 3 === 0) {
+                    this.afterimages.push({
+                        x: this.player.x, y: this.player.y,
+                        alpha: 0.4, scaleX: this.scaleX, scaleY: this.scaleY
+                    });
+                    if (this.afterimages.length > 8) this.afterimages.shift();
+                }
+                // Fade out afterimages
+                for (let i = this.afterimages.length - 1; i >= 0; i--) {
+                    this.afterimages[i].alpha -= 0.05;
+                    if (this.afterimages[i].alpha <= 0) this.afterimages.splice(i, 1);
+                }
+
+                // CYCLE 3: Smooth camera following
+                this.cameraTargetX = this.player.x - 200;
+                if (this.cameraTargetX > this.cameraX) {
+                    this.cameraX += (this.cameraTargetX - this.cameraX) * 0.08;
+                }
+
+                // Track grounded state for landing detection
+                this.wasGrounded = this.player.grounded;
             }
 
             collides(a, b) {
@@ -1190,7 +1236,22 @@
                 }
 
                 ctx.save();
-                ctx.translate(-this.scrollOffset, 0);
+                // CYCLE 3: Use smooth camera instead of hard scrollOffset
+                ctx.translate(-this.cameraX, 0);
+
+                // CYCLE 3: Draw afterimages first (behind player)
+                for (const ghost of this.afterimages) {
+                    ctx.globalAlpha = ghost.alpha * 0.5;
+                    ctx.fillStyle = '#00ff88';
+                    const gw = this.player.width * ghost.scaleX;
+                    const gh = this.player.height * ghost.scaleY;
+                    ctx.fillRect(
+                        ghost.x + (this.player.width - gw) / 2,
+                        ghost.y + (this.player.height - gh),
+                        gw, gh
+                    );
+                }
+                ctx.globalAlpha = 1;
 
                 // Platforms
                 for (const plat of this.platforms) {
@@ -1224,14 +1285,26 @@
                     ctx.fill();
                 }
 
-                // Player
+                // Player with CYCLE 3 Squash/Stretch
                 if (this.alive) {
-                    ctx.fillStyle = '#00ff88';
-                    ctx.fillRect(this.player.x, this.player.y, this.player.width, this.player.height);
-                    // Eyes
+                    const pw = this.player.width * this.scaleX;
+                    const ph = this.player.height * this.scaleY;
+                    const px = this.player.x + (this.player.width - pw) / 2;
+                    const py = this.player.y + (this.player.height - ph);
+
+                    // Momentum-based color shift (green -> cyan at high momentum)
+                    const colorMix = (this.momentum - 1) / 2; // 0 to 1
+                    const r = Math.floor(0 + colorMix * 0);
+                    const g = Math.floor(255 - colorMix * 55);
+                    const b = Math.floor(136 + colorMix * 119);
+                    ctx.fillStyle = `rgb(${r},${g},${b})`;
+
+                    ctx.fillRect(px, py, pw, ph);
+                    // Eyes (scaled)
                     ctx.fillStyle = '#000';
-                    ctx.fillRect(this.player.x + 8, this.player.y + 10, 5, 5);
-                    ctx.fillRect(this.player.x + 18, this.player.y + 10, 5, 5);
+                    const eyeScale = Math.min(this.scaleX, this.scaleY);
+                    ctx.fillRect(px + 8 * eyeScale, py + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
+                    ctx.fillRect(px + 18 * eyeScale, py + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
                 }
 
                 // CYCLE 1: Particles from pool
@@ -1261,12 +1334,12 @@
 
                 ctx.restore(); // World transform
 
-                // Death location marker
+                // Death location marker (uses smooth camera)
                 if (this.deathLocation) {
                     ctx.fillStyle = 'rgba(255,0,0,0.5)';
                     ctx.beginPath();
                     ctx.arc(
-                        this.deathLocation.x - this.scrollOffset,
+                        this.deathLocation.x - this.cameraX,
                         this.deathLocation.y,
                         20, 0, Math.PI * 2
                     );
