@@ -1174,6 +1174,27 @@
                 osc1.start(); osc2.start();
                 osc1.stop(this.ctx.currentTime + 0.2);
                 osc2.stop(this.ctx.currentTime + 0.2);
+            },
+
+            // CYCLE 21: Combo break sound - descending "sad" tone when combo lost
+            playComboBreak(comboLost = 1) {
+                if (!this.enabled || !this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'sine';
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                // Higher combos = more dramatic descending tone
+                const intensity = Math.min(1, comboLost / 10);
+                const startFreq = 180 + intensity * 80;
+                const endFreq = 90;
+                const duration = 0.1 + intensity * 0.06;
+                osc.frequency.setValueAtTime(startFreq, this.ctx.currentTime);
+                osc.frequency.exponentialRampToValueAtTime(endFreq, this.ctx.currentTime + duration);
+                gain.gain.setValueAtTime(0.05 + intensity * 0.03, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
+                osc.start();
+                osc.stop(this.ctx.currentTime + duration);
             }
         };
 
@@ -1282,6 +1303,11 @@
                 // CYCLE 7: Hit freeze for impactful moments
                 this.hitFreezeFrames = 0;
                 this.bufferedJump = false; // CYCLE 20: Input buffer during hit-freeze
+
+                // CYCLE 21: Jump anticipation (pre-jump squash)
+                this.jumpAnticipationFrames = 0;
+                this.pendingJump = false;
+                this.pendingJumpIsDouble = false;
 
                 // Generate initial platforms
                 this.generateInitialWorld();
@@ -1428,20 +1454,34 @@
                 const canJump = (this.coyoteTimer > 0 || this.player.jumpsLeft > 0);
                 const wantsJump = (input.jump || this.jumpBufferTimer > 0);
 
-                if (wantsJump && canJump && this.player.vy >= 0) {
+                // CYCLE 21: Process jump anticipation countdown
+                if (this.jumpAnticipationFrames > 0) {
+                    this.jumpAnticipationFrames--;
+                    if (this.jumpAnticipationFrames === 0 && this.pendingJump) {
+                        // Execute the actual jump after anticipation
+                        this.player.vy = -this.dna.jumpForce;
+                        this.player.jumpsLeft = Math.max(0, this.player.jumpsLeft - 1);
+                        this.player.grounded = false;
+                        this.coyoteTimer = 0;
+                        this.jumpBufferTimer = 0;
+                        this.jumpsUsed++;
+                        this.actionVariety.add('jump');
+                        // CYCLE 3: Post-squat stretch on jump
+                        this.targetScaleX = 0.7;
+                        this.targetScaleY = 1.35;
+                        // CYCLE 4: Jump sound
+                        if (!this.isAI) Audio.playJump(this.pendingJumpIsDouble);
+                        this.pendingJump = false;
+                    }
+                } else if (wantsJump && canJump && this.player.vy >= 0 && !this.pendingJump) {
+                    // CYCLE 21: Initiate jump anticipation (pre-jump squash)
                     const isDoubleJump = this.player.jumpsLeft < 2 && !this.player.grounded;
-                    this.player.vy = -this.dna.jumpForce;
-                    this.player.jumpsLeft = Math.max(0, this.player.jumpsLeft - 1);
-                    this.player.grounded = false;
-                    this.coyoteTimer = 0;
-                    this.jumpBufferTimer = 0;
-                    this.jumpsUsed++;
-                    this.actionVariety.add('jump');
-                    // CYCLE 3: Stretch on jump
-                    this.targetScaleX = 0.75;
-                    this.targetScaleY = 1.3;
-                    // CYCLE 4: Jump sound
-                    if (!this.isAI) Audio.playJump(isDoubleJump);
+                    this.pendingJump = true;
+                    this.pendingJumpIsDouble = isDoubleJump;
+                    this.jumpAnticipationFrames = isDoubleJump ? 2 : 3; // Shorter for double jump
+                    // Pre-jump squat visual (compress before spring)
+                    this.targetScaleX = 1.2;
+                    this.targetScaleY = 0.75;
                 }
 
                 // CYCLE 2: Variable Jump Height - cut jump when button released
@@ -1739,6 +1779,10 @@
                     // CYCLE 1: Momentum decay when idle
                     this.momentum = Math.max(1.0, this.momentum - 0.01);
                     if (this.time - this.lastPlatformTime > 120) {
+                        // CYCLE 21: Play combo break sound before resetting
+                        if (this.combo > 0 && !this.isAI) {
+                            Audio.playComboBreak(this.combo);
+                        }
                         this.combo = 0; // Reset combo after 2 seconds of no chains
                         this.platformChain = 0;
                     }
@@ -1956,24 +2000,41 @@
 
                 // Obstacles - CYCLE 5: Orange with glow (distinct from death flash)
                 // CYCLE 12: Removed shadowBlur (10-20x perf hit) - use stroke layers instead
+                // CYCLE 21: Batched rendering (3 draw calls instead of 3n)
+                // Outer glow layer - single path for all obstacles
+                ctx.strokeStyle = 'rgba(255, 170, 0, 0.3)';
+                ctx.lineWidth = 8;
+                ctx.beginPath();
                 for (const obs of this.obstacles) {
-                    // Outer glow layer (stroke-based, much faster than shadowBlur)
-                    ctx.strokeStyle = 'rgba(255, 170, 0, 0.3)';
-                    ctx.lineWidth = 8;
-                    ctx.beginPath();
                     ctx.moveTo(obs.x, obs.y - obs.size/2);
                     ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
                     ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
                     ctx.closePath();
-                    ctx.stroke();
-                    // Main fill
-                    ctx.fillStyle = '#ff9500';
-                    ctx.fill();
-                    // Border accent
-                    ctx.strokeStyle = '#ffd700';
-                    ctx.lineWidth = 2;
-                    ctx.stroke();
                 }
+                ctx.stroke();
+
+                // Main fill - single path for all obstacles
+                ctx.fillStyle = '#ff9500';
+                ctx.beginPath();
+                for (const obs of this.obstacles) {
+                    ctx.moveTo(obs.x, obs.y - obs.size/2);
+                    ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
+                    ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
+                    ctx.closePath();
+                }
+                ctx.fill();
+
+                // Border accent - single path for all obstacles
+                ctx.strokeStyle = '#ffd700';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                for (const obs of this.obstacles) {
+                    ctx.moveTo(obs.x, obs.y - obs.size/2);
+                    ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
+                    ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
+                    ctx.closePath();
+                }
+                ctx.stroke();
 
                 // Player with CYCLE 3 Squash/Stretch
                 if (this.alive) {
