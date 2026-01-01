@@ -3642,6 +3642,135 @@
             heavy() { this.shake(0.7, 0.4); }
         };
 
+        // ==========================================
+        // CONSENSUS FEATURE 1: Hit-Stop System
+        // Adds game feel by briefly pausing on impacts
+        // ==========================================
+        const HitStop = {
+            active: false,
+            duration: 0,
+            originalTimeScale: 1,
+
+            // Trigger a hit-stop freeze frame
+            trigger(ms = 50) {
+                if (this.active) return;
+                this.active = true;
+                this.duration = ms;
+                this.originalTimeScale = clock.timeScale || 1;
+                // Slow time dramatically
+                if (clock.timeScale !== undefined) {
+                    clock.timeScale = 0.05;
+                }
+            },
+
+            // Trigger with screen shake for heavy impacts
+            heavyHit(ms = 80) {
+                this.trigger(ms);
+                screenShake.heavy();
+            },
+
+            // Light hit for regular attacks
+            lightHit(ms = 30) {
+                this.trigger(ms);
+                screenShake.light();
+            },
+
+            // Update - call in game loop
+            update(dt) {
+                if (!this.active) return;
+                this.duration -= dt * 1000;
+                if (this.duration <= 0) {
+                    this.active = false;
+                    if (clock.timeScale !== undefined) {
+                        clock.timeScale = this.originalTimeScale;
+                    }
+                }
+            }
+        };
+
+        // ==========================================
+        // CONSENSUS FEATURE 2: Timer Registry
+        // Track all timeouts/intervals for cleanup
+        // ==========================================
+        const TimerRegistry = {
+            timeouts: new Map(),
+            intervals: new Map(),
+            nextId: 0,
+
+            // Tracked setTimeout
+            setTimeout(callback, delay, context = 'global') {
+                const id = this.nextId++;
+                const timerId = window.setTimeout(() => {
+                    callback();
+                    this.timeouts.delete(id);
+                }, delay);
+                this.timeouts.set(id, { timerId, context });
+                return id;
+            },
+
+            // Tracked setInterval
+            setInterval(callback, delay, context = 'global') {
+                const id = this.nextId++;
+                const intervalId = window.setInterval(callback, delay);
+                this.intervals.set(id, { intervalId, context });
+                return id;
+            },
+
+            // Clear a specific timeout
+            clearTimeout(id) {
+                const entry = this.timeouts.get(id);
+                if (entry) {
+                    window.clearTimeout(entry.timerId);
+                    this.timeouts.delete(id);
+                }
+            },
+
+            // Clear a specific interval
+            clearInterval(id) {
+                const entry = this.intervals.get(id);
+                if (entry) {
+                    window.clearInterval(entry.intervalId);
+                    this.intervals.delete(id);
+                }
+            },
+
+            // Clear all timers for a specific entity/context
+            clearForContext(context) {
+                for (const [id, entry] of this.timeouts) {
+                    if (entry.context === context) {
+                        window.clearTimeout(entry.timerId);
+                        this.timeouts.delete(id);
+                    }
+                }
+                for (const [id, entry] of this.intervals) {
+                    if (entry.context === context) {
+                        window.clearInterval(entry.intervalId);
+                        this.intervals.delete(id);
+                    }
+                }
+            },
+
+            // Clear all timers (on game end)
+            clearAll() {
+                for (const [, entry] of this.timeouts) {
+                    window.clearTimeout(entry.timerId);
+                }
+                for (const [, entry] of this.intervals) {
+                    window.clearInterval(entry.intervalId);
+                }
+                this.timeouts.clear();
+                this.intervals.clear();
+            },
+
+            // Get count for debugging
+            getStats() {
+                return {
+                    timeouts: this.timeouts.size,
+                    intervals: this.intervals.size
+                };
+            }
+        };
+
         function togglePause() {
             if (gameState === 'victory' || gameState === 'defeat') return;
             if (gameState === 'paused') {
@@ -3681,6 +3810,12 @@
             // ROUND 4: Clear intervals to prevent memory leaks
             if (spawnIntervalId) { clearInterval(spawnIntervalId); spawnIntervalId = null; }
             if (cleanupIntervalId) { clearInterval(cleanupIntervalId); cleanupIntervalId = null; }
+
+            // CONSENSUS: Clear all tracked timers
+            TimerRegistry.clearAll();
+
+            // CONSENSUS: Dispose explosion pool
+            ExplosionPool.dispose();
 
             const overlay = document.createElement('div');
             overlay.id = 'game-over-overlay';
@@ -3914,6 +4049,13 @@
 
                 this.hp -= amt;
                 spawnFloatingText(amt, this.mesh.position, type === 'crit' ? '#ff3c3c' : '#fff');
+
+                // CONSENSUS: Hit-stop for impactful hits
+                if (type === 'crit' || amt > 100) {
+                    HitStop.heavyHit(60);
+                } else if (amt > 50) {
+                    HitStop.lightHit(25);
+                }
 
                 // ROUND 2: Screen shake on damage
                 if (this === player) {
@@ -5440,45 +5582,157 @@
             update();
         }
 
-        function createExplosion(pos, color, count) {
-            const geom = new THREE.BufferGeometry();
-            const positions = new Float32Array(count * 3);
-            const velocities = [];
+        // ==========================================
+        // CONSENSUS FEATURE 3: Explosion Pool
+        // Reuses explosion objects for better performance
+        // ==========================================
+        const ExplosionPool = {
+            pool: [],
+            activeExplosions: [],
+            maxPoolSize: 30,
+            maxParticles: 50,
 
-            for (let i = 0; i < count; i++) {
-                positions[i * 3] = pos.x;
-                positions[i * 3 + 1] = pos.y;
-                positions[i * 3 + 2] = pos.z;
-                velocities.push({
-                    x: (Math.random() - 0.5),
-                    y: (Math.random() - 0.5) + 1,
-                    z: (Math.random() - 0.5)
+            // Pre-create explosion objects
+            init() {
+                for (let i = 0; i < 10; i++) {
+                    this.pool.push(this._createExplosionObject());
+                }
+            },
+
+            _createExplosionObject() {
+                const geom = new THREE.BufferGeometry();
+                const positions = new Float32Array(this.maxParticles * 3);
+                geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+                const mat = new THREE.PointsMaterial({
+                    color: 0xffffff,
+                    size: 0.4,
+                    transparent: true,
+                    depthWrite: false
                 });
-            }
+                const points = new THREE.Points(geom, mat);
+                points.visible = false;
+                return {
+                    points,
+                    velocities: [],
+                    frame: 0,
+                    active: false,
+                    count: 0
+                };
+            },
 
-            geom.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-            const mat = new THREE.PointsMaterial({ color: color, size: 0.4, transparent: true });
-            const points = new THREE.Points(geom, mat);
-            scene.add(points);
+            // Get an explosion from pool or create new
+            get() {
+                let explosion = this.pool.pop();
+                if (!explosion) {
+                    if (this.activeExplosions.length < this.maxPoolSize) {
+                        explosion = this._createExplosionObject();
+                    } else {
+                        // Recycle oldest active explosion
+                        explosion = this.activeExplosions.shift();
+                        this._reset(explosion);
+                    }
+                }
+                return explosion;
+            },
 
-            let frame = 0;
-            const anim = () => {
-                frame++;
-                const posAttr = points.geometry.attributes.position;
-                for (let i = 0; i < count; i++) {
-                    posAttr.setXYZ(i,
-                        posAttr.getX(i) + velocities[i].x * 0.2,
-                        posAttr.getY(i) + velocities[i].y * 0.2,
-                        posAttr.getZ(i) + velocities[i].z * 0.2
-                    );
-                    velocities[i].y -= 0.05; // Gravity
+            // Return explosion to pool
+            release(explosion) {
+                this._reset(explosion);
+                if (this.pool.length < this.maxPoolSize) {
+                    this.pool.push(explosion);
+                }
+            },
+
+            _reset(explosion) {
+                explosion.active = false;
+                explosion.frame = 0;
+                explosion.points.visible = false;
+                if (explosion.points.parent) {
+                    scene.remove(explosion.points);
+                }
+            },
+
+            // Spawn an explosion at position
+            spawn(pos, color, count) {
+                const explosion = this.get();
+                const actualCount = Math.min(count, this.maxParticles);
+
+                explosion.count = actualCount;
+                explosion.frame = 0;
+                explosion.active = true;
+                explosion.velocities = [];
+
+                const posAttr = explosion.points.geometry.attributes.position;
+                for (let i = 0; i < actualCount; i++) {
+                    posAttr.setXYZ(i, pos.x, pos.y, pos.z);
+                    explosion.velocities.push({
+                        x: (Math.random() - 0.5),
+                        y: (Math.random() - 0.5) + 1,
+                        z: (Math.random() - 0.5)
+                    });
+                }
+                // Zero out unused particles
+                for (let i = actualCount; i < this.maxParticles; i++) {
+                    posAttr.setXYZ(i, 0, -1000, 0);
                 }
                 posAttr.needsUpdate = true;
-                mat.opacity -= 0.02;
-                if (frame < 50) requestAnimationFrame(anim);
-                else scene.remove(points);
+
+                explosion.points.material.color.setHex(color);
+                explosion.points.material.opacity = 1;
+                explosion.points.visible = true;
+
+                scene.add(explosion.points);
+                this.activeExplosions.push(explosion);
+
+                return explosion;
+            },
+
+            // Update all active explosions (call in game loop)
+            update() {
+                for (let i = this.activeExplosions.length - 1; i >= 0; i--) {
+                    const exp = this.activeExplosions[i];
+                    if (!exp.active) continue;
+
+                    exp.frame++;
+                    const posAttr = exp.points.geometry.attributes.position;
+
+                    for (let j = 0; j < exp.count; j++) {
+                        posAttr.setXYZ(j,
+                            posAttr.getX(j) + exp.velocities[j].x * 0.2,
+                            posAttr.getY(j) + exp.velocities[j].y * 0.2,
+                            posAttr.getZ(j) + exp.velocities[j].z * 0.2
+                        );
+                        exp.velocities[j].y -= 0.05;
+                    }
+                    posAttr.needsUpdate = true;
+                    exp.points.material.opacity -= 0.02;
+
+                    if (exp.frame >= 50) {
+                        this.activeExplosions.splice(i, 1);
+                        this.release(exp);
+                    }
+                }
+            },
+
+            // Cleanup all (on game end)
+            dispose() {
+                this.activeExplosions.forEach(exp => {
+                    if (exp.points.parent) scene.remove(exp.points);
+                    exp.points.geometry.dispose();
+                    exp.points.material.dispose();
+                });
+                this.pool.forEach(exp => {
+                    exp.points.geometry.dispose();
+                    exp.points.material.dispose();
+                });
+                this.activeExplosions = [];
+                this.pool = [];
             }
-            anim();
+        };
+
+        // Wrapper function for backward compatibility
+        function createExplosion(pos, color, count) {
+            ExplosionPool.spawn(pos, color, count || 20);
         }
 
         // ROUND 10: Particle trail system for projectiles
@@ -7775,6 +8029,9 @@
             // ROUND 3: Initialize audio system
             AudioManager.init();
 
+            // CONSENSUS: Initialize explosion pool
+            ExplosionPool.init();
+
             // Setup Scene
             scene = new THREE.Scene();
             scene.fog = new THREE.Fog(0x050508, 20, 80); // Distance fog for atmosphere
@@ -8776,6 +9033,12 @@
                 if (typeof ParticleSystem !== 'undefined' && ParticleSystem.update) {
                     ParticleSystem.update(dt);
                 }
+
+                // CONSENSUS: Update hit-stop system
+                HitStop.update(dt);
+
+                // CONSENSUS: Update explosion pool
+                ExplosionPool.update();
 
                 // Update environment animations (grass, fireflies)
                 if (typeof updateEnvironment === 'function') {
