@@ -972,6 +972,10 @@
         // Global particle pool (shared across game instances for efficiency)
         const particlePool = new ParticlePool(200);
 
+        // CYCLE 34: Cached vignette gradient (avoids per-frame createRadialGradient)
+        let cachedVignetteGradient = null;
+        let cachedVignetteHeight = 0;
+
         // ============================================
         // CYCLE 19: AFTERIMAGE OBJECT POOL
         // Eliminates GC pressure from afterimage object churn
@@ -1354,6 +1358,7 @@
                 this.closeCallCooldown = 0; // CYCLE 16: Cooldown to prevent farming
                 this.survivalTimer = 0;     // CYCLE 23: Frames survived continuously
                 this.survivalStreak = 0;    // CYCLE 23: 10-second survival bonuses earned
+                this.spawnInTimer = this.isAI ? 0 : 15; // CYCLE 34: Respawn fade-in (15 frames)
                 this.idleTime = 0;
                 this.actionVariety = new Set();
 
@@ -2013,6 +2018,17 @@
                 if (currentTier > this.lastMomentumTier && currentTier >= 1.5 && !this.isAI) {
                     Audio.playMomentumTier(currentTier);
                     Haptics.light(); // Subtle haptic for tier up
+                    // CYCLE 34: Momentum tier visual celebration - floating text + radial burst
+                    const tierColor = currentTier >= 2.5 ? '#ff44ff' : (currentTier >= 2.0 ? '#00ffff' : '#88ff88');
+                    this.spawnFloatingText(this.player.x, this.player.y - 60, `x${currentTier.toFixed(1)} MOMENTUM!`, tierColor);
+                    for (let i = 0; i < 8; i++) {
+                        const angle = (i / 8) * Math.PI * 2;
+                        const speed = 3 + currentTier;
+                        particlePool.acquire(
+                            this.player.x + this.player.width / 2, this.player.y + this.player.height / 2,
+                            Math.cos(angle) * speed, Math.sin(angle) * speed, tierColor, 20 + Math.random() * 10
+                        );
+                    }
                     this.lastMomentumTier = currentTier;
                 } else if (currentTier < this.lastMomentumTier) {
                     this.lastMomentumTier = currentTier; // Track tier down (no sound)
@@ -2428,10 +2444,19 @@
 
                 // Player with CYCLE 3 Squash/Stretch
                 if (this.alive) {
-                    const pw = this.player.width * this.scaleX;
-                    const ph = this.player.height * this.scaleY;
+                    // CYCLE 34: Respawn spawn-in effect - scale and fade from 0.3 to 1.0
+                    let spawnAlpha = 1, spawnScale = 1;
+                    if (this.spawnInTimer > 0) {
+                        const t = 1 - (this.spawnInTimer / 15);
+                        spawnScale = 0.3 + t * 0.7;
+                        spawnAlpha = t;
+                        this.spawnInTimer--;
+                    }
+                    const pw = this.player.width * this.scaleX * spawnScale;
+                    const ph = this.player.height * this.scaleY * spawnScale;
                     const px = this.player.x + (this.player.width - pw) / 2;
                     const py = this.player.y + (this.player.height - ph);
+                    ctx.globalAlpha = spawnAlpha;
 
                     // CYCLE 22: Speed lines behind player at high momentum
                     if (this.momentum > 1.5) {
@@ -2512,6 +2537,7 @@
                     }
 
                     ctx.restore();
+                    ctx.globalAlpha = 1; // CYCLE 34: Reset after spawn-in effect
                 }
 
                 // CYCLE 30: First-jump invitation arrow - guides new players
@@ -2651,17 +2677,22 @@
                     if (this.closeCallFlash < 0.05) this.closeCallFlash = 0;
                 }
 
-                // CYCLE 28: Momentum vignette - screen edge darkening at high speed
+                // CYCLE 28+34: Momentum vignette with cached gradient (eliminates per-frame allocation)
                 if (this.momentum > 1.2 && this.alive) {
-                    const vignetteIntensity = Math.min(0.4, (this.momentum - 1.2) * 0.25);
-                    const gradient = ctx.createRadialGradient(
-                        canvas.width / 2, canvas.height / 2, canvas.height * 0.3,
-                        canvas.width / 2, canvas.height / 2, canvas.height * 0.85
-                    );
-                    gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
-                    gradient.addColorStop(1, `rgba(20, 10, 40, ${vignetteIntensity})`);
-                    ctx.fillStyle = gradient;
+                    if (!cachedVignetteGradient || cachedVignetteHeight !== canvas.height) {
+                        cachedVignetteHeight = canvas.height;
+                        cachedVignetteGradient = ctx.createRadialGradient(
+                            canvas.width / 2, canvas.height / 2, canvas.height * 0.3,
+                            canvas.width / 2, canvas.height / 2, canvas.height * 0.85
+                        );
+                        cachedVignetteGradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+                        cachedVignetteGradient.addColorStop(1, 'rgba(20, 10, 40, 0.4)');
+                    }
+                    const vignetteIntensity = Math.min(1, (this.momentum - 1.2) * 0.625);
+                    ctx.globalAlpha = vignetteIntensity;
+                    ctx.fillStyle = cachedVignetteGradient;
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
+                    ctx.globalAlpha = 1;
                 }
 
                 ctx.restore(); // CYCLE 2: Screen shake restore
