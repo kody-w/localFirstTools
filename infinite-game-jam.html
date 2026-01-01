@@ -475,6 +475,26 @@
             background: rgba(0, 255, 136, 0.6);
         }
 
+        /* CYCLE 23: Touch ripple effect for spatial feedback */
+        .touch-btn, .touch-jump { position: relative; overflow: hidden; }
+        .touch-btn::after, .touch-jump::after {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: inherit;
+            background: radial-gradient(circle, var(--accent) 0%, transparent 70%);
+            opacity: 0;
+            transform: scale(0.5);
+            pointer-events: none;
+        }
+        .touch-btn.ripple::after, .touch-jump.ripple::after {
+            animation: touchRipple 0.25s ease-out;
+        }
+        @keyframes touchRipple {
+            0% { opacity: 0.6; transform: scale(0.5); }
+            100% { opacity: 0; transform: scale(1.3); }
+        }
+
         /* FEATURE 2: Momentum/Combo HUD */
         .momentum-hud {
             position: absolute;
@@ -1233,6 +1253,23 @@
                 gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + duration);
                 osc.start();
                 osc.stop(this.ctx.currentTime + duration);
+            },
+
+            // CYCLE 23: Survival streak reward - warm ascending chime
+            playSurvivalStreak(streakCount = 1) {
+                if (!this.enabled || !this.ctx) return;
+                const osc = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc.type = 'triangle';
+                osc.connect(gain);
+                gain.connect(this.masterGain);
+                const baseFreq = 320 + streakCount * 40;
+                osc.frequency.setValueAtTime(baseFreq, this.ctx.currentTime);
+                osc.frequency.linearRampToValueAtTime(baseFreq * 1.25, this.ctx.currentTime + 0.15);
+                gain.gain.setValueAtTime(0.06, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.2);
+                osc.start();
+                osc.stop(this.ctx.currentTime + 0.2);
             }
         };
 
@@ -1299,6 +1336,8 @@
                 this.jumpsUsed = 0;
                 this.closeCallCount = 0;
                 this.closeCallCooldown = 0; // CYCLE 16: Cooldown to prevent farming
+                this.survivalTimer = 0;     // CYCLE 23: Frames survived continuously
+                this.survivalStreak = 0;    // CYCLE 23: 10-second survival bonuses earned
                 this.idleTime = 0;
                 this.actionVariety = new Set();
 
@@ -1852,6 +1891,20 @@
                     this.lastMomentumTier = currentTier; // Track tier down (no sound)
                 }
 
+                // CYCLE 23: Survival streak timer - reward for continuous play
+                this.survivalTimer++;
+                if (this.survivalTimer >= 600) { // 10 seconds at 60fps
+                    this.survivalTimer = 0;
+                    this.survivalStreak++;
+                    const bonus = Math.round((10 + this.survivalStreak * 5) * this.momentum);
+                    this.score += bonus;
+                    if (!this.isAI) {
+                        this.spawnFloatingText(this.player.x, this.player.y - 70, `+${bonus} SURVIVOR`, '#88ff88');
+                        Audio.playSurvivalStreak(this.survivalStreak);
+                        Haptics.light();
+                    }
+                }
+
                 // CYCLE 3: Squash/Stretch interpolation
                 this.scaleX += (this.targetScaleX - this.scaleX) * 0.2;
                 this.scaleY += (this.targetScaleY - this.scaleY) * 0.2;
@@ -2018,11 +2071,20 @@
                 }
                 ctx.globalAlpha = 1;
 
-                // Platforms
+                // Platforms - CYCLE 23: Batched rendering (3 passes instead of 3n state changes)
+                // Static platforms - body
+                ctx.fillStyle = '#6a89cc';
                 for (const plat of this.platforms) {
-                    ctx.fillStyle = plat.isMoving ? '#4a69bd' : '#6a89cc';
-                    ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
-                    ctx.fillStyle = '#82ccdd';
+                    if (!plat.isMoving) ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
+                }
+                // Moving platforms - body
+                ctx.fillStyle = '#4a69bd';
+                for (const plat of this.platforms) {
+                    if (plat.isMoving) ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
+                }
+                // All platforms - highlight strip
+                ctx.fillStyle = '#82ccdd';
+                for (const plat of this.platforms) {
                     ctx.fillRect(plat.x, plat.y, plat.width, 4);
                 }
 
@@ -2975,11 +3037,19 @@
         function setupTouchControls() {
             if (!touchLeft || !touchRight || !touchJump) return;
 
+            // CYCLE 23: Touch ripple helper
+            const triggerRipple = (el) => {
+                el.classList.remove('ripple');
+                void el.offsetWidth; // Force reflow for re-trigger
+                el.classList.add('ripple');
+            };
+
             // Left button - CYCLE 18: Added haptic feedback
             touchLeft.addEventListener('touchstart', (e) => {
                 e.preventDefault();
                 keys.left = true;
                 touchLeft.classList.add('pressed');
+                triggerRipple(touchLeft); // CYCLE 23: Ripple effect
                 Haptics.light();
             }, { passive: false });
             touchLeft.addEventListener('touchend', () => {
@@ -2992,6 +3062,7 @@
                 e.preventDefault();
                 keys.right = true;
                 touchRight.classList.add('pressed');
+                triggerRipple(touchRight); // CYCLE 23: Ripple effect
                 Haptics.light();
             }, { passive: false });
             touchRight.addEventListener('touchend', () => {
@@ -3005,6 +3076,7 @@
                 e.preventDefault();
                 keys.jump = true;
                 touchJump.classList.add('pressed');
+                triggerRipple(touchJump); // CYCLE 23: Ripple effect
                 Haptics.medium();
             }, { passive: false });
             touchJump.addEventListener('touchend', () => {
