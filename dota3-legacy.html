@@ -2564,6 +2564,39 @@
                 osc.stop(now + 0.12);
             },
 
+            // Rune powerup sound - magical ascending arpeggio
+            playPowerup() {
+                if (!gameSettings.soundEnabled || !this.ctx) return;
+                this.resume();
+                const now = this.ctx.currentTime;
+                const notes = [523, 659, 784, 1047, 1319]; // C5-E6 arpeggio
+                notes.forEach((freq, i) => {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'sine';
+                    osc.connect(gain);
+                    gain.connect(this.masterGain);
+                    osc.frequency.setValueAtTime(freq, now + i * 0.07);
+                    gain.gain.setValueAtTime(0, now + i * 0.07);
+                    gain.gain.linearRampToValueAtTime(0.15, now + i * 0.07 + 0.02);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.07 + 0.25);
+                    osc.start(now + i * 0.07);
+                    osc.stop(now + i * 0.07 + 0.3);
+                });
+                // Shimmer effect
+                const shimmer = this.ctx.createOscillator();
+                const shimmerGain = this.ctx.createGain();
+                shimmer.type = 'triangle';
+                shimmer.connect(shimmerGain);
+                shimmerGain.connect(this.masterGain);
+                shimmer.frequency.setValueAtTime(2000, now);
+                shimmer.frequency.linearRampToValueAtTime(4000, now + 0.4);
+                shimmerGain.gain.setValueAtTime(0.05, now);
+                shimmerGain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+                shimmer.start(now);
+                shimmer.stop(now + 0.45);
+            },
+
             // Death sound - descending tone
             playDeath(type = 'creep') {
                 if (!gameSettings.soundEnabled || !this.ctx) return;
@@ -6382,6 +6415,391 @@
             jungleCamps.forEach(camp => camp.update(dt));
         }
 
+        // ==========================================
+        // RUNE SYSTEM - Power-ups that spawn on map
+        // ==========================================
+        const RUNE_TYPES = {
+            double_damage: {
+                name: 'Double Damage',
+                icon: '⚔️',
+                color: 0xff4400,
+                glowColor: 0xff6600,
+                duration: 30,
+                effect: (hero) => {
+                    const originalDamage = hero.damage;
+                    hero.damage *= 2;
+                    hero.hasDDRune = true;
+                    showMessage('DOUBLE DAMAGE! +100% damage for 30s');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    setTimeout(() => {
+                        hero.damage = originalDamage;
+                        hero.hasDDRune = false;
+                        showMessage('Double Damage expired');
+                    }, 30000);
+                }
+            },
+            haste: {
+                name: 'Haste',
+                icon: '💨',
+                color: 0x00ffff,
+                glowColor: 0x00aaff,
+                duration: 20,
+                effect: (hero) => {
+                    const originalSpeed = hero.speed;
+                    hero.speed *= 1.8;
+                    hero.hasHasteRune = true;
+                    showMessage('HASTE! +80% movement speed for 20s');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    setTimeout(() => {
+                        hero.speed = originalSpeed;
+                        hero.hasHasteRune = false;
+                        showMessage('Haste expired');
+                    }, 20000);
+                }
+            },
+            regeneration: {
+                name: 'Regeneration',
+                icon: '💚',
+                color: 0x00ff00,
+                glowColor: 0x44ff44,
+                duration: 25,
+                effect: (hero) => {
+                    hero.hasRegenRune = true;
+                    showMessage('REGENERATION! Full HP/MP restore over 25s');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    let ticks = 0;
+                    const regenInterval = setInterval(() => {
+                        if (hero.dead || ticks >= 50) {
+                            clearInterval(regenInterval);
+                            hero.hasRegenRune = false;
+                            if (ticks >= 50) showMessage('Regeneration expired');
+                            return;
+                        }
+                        hero.hp = Math.min(hero.hp + hero.maxHp * 0.02, hero.maxHp);
+                        hero.mp = Math.min(hero.mp + hero.maxMp * 0.02, hero.maxMp);
+                        ticks++;
+                    }, 500);
+                }
+            },
+            invisibility: {
+                name: 'Invisibility',
+                icon: '👻',
+                color: 0x8844ff,
+                glowColor: 0xaa66ff,
+                duration: 30,
+                effect: (hero) => {
+                    hero.isInvisible = true;
+                    hero.mesh.traverse(child => {
+                        if (child.material) {
+                            child.material.transparent = true;
+                            child.material.opacity = 0.3;
+                        }
+                    });
+                    showMessage('INVISIBILITY! Hidden for 30s (breaks on attack)');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    hero.invisTimeout = setTimeout(() => {
+                        hero.isInvisible = false;
+                        hero.mesh.traverse(child => {
+                            if (child.material) child.material.opacity = 1;
+                        });
+                        showMessage('Invisibility expired');
+                    }, 30000);
+                }
+            },
+            arcane: {
+                name: 'Arcane',
+                icon: '💜',
+                color: 0xff00ff,
+                glowColor: 0xff44ff,
+                duration: 40,
+                effect: (hero) => {
+                    hero.hasArcaneRune = true;
+                    hero.cooldownMultiplier = (hero.cooldownMultiplier || 1) * 0.5;
+                    showMessage('ARCANE! 50% cooldown reduction for 40s');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    setTimeout(() => {
+                        hero.cooldownMultiplier = (hero.cooldownMultiplier || 0.5) / 0.5;
+                        hero.hasArcaneRune = false;
+                        showMessage('Arcane expired');
+                    }, 40000);
+                }
+            },
+            illusion: {
+                name: 'Illusion',
+                icon: '👥',
+                color: 0x4488ff,
+                glowColor: 0x66aaff,
+                duration: 60,
+                effect: (hero) => {
+                    showMessage('ILLUSION! Creates 2 decoys');
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    // Create 2 illusion clones
+                    for (let i = 0; i < 2; i++) {
+                        const offsetAngle = (i / 2) * Math.PI * 2 + Math.PI / 4;
+                        const offsetDist = 3;
+                        const illusionX = hero.mesh.position.x + Math.cos(offsetAngle) * offsetDist;
+                        const illusionZ = hero.mesh.position.z + Math.sin(offsetAngle) * offsetDist;
+
+                        // Create illusion mesh (copy of hero)
+                        const illusionGroup = new THREE.Group();
+                        const illusionBody = new THREE.Mesh(
+                            new THREE.SphereGeometry(0.6, 8, 6),
+                            new THREE.MeshStandardMaterial({
+                                color: hero.team === TEAM_RADIANT ? 0x00ff88 : 0xff4444,
+                                transparent: true,
+                                opacity: 0.5,
+                                emissive: 0x4488ff,
+                                emissiveIntensity: 0.3
+                            })
+                        );
+                        illusionGroup.add(illusionBody);
+                        illusionGroup.position.set(illusionX, 0.8, illusionZ);
+                        scene.add(illusionGroup);
+
+                        // Illusion wanders randomly then fades
+                        let illusionLife = 60;
+                        const illusionUpdate = setInterval(() => {
+                            illusionLife--;
+                            // Random movement
+                            illusionGroup.position.x += (Math.random() - 0.5) * 0.2;
+                            illusionGroup.position.z += (Math.random() - 0.5) * 0.2;
+
+                            if (illusionLife <= 10) {
+                                illusionBody.material.opacity = illusionLife / 20;
+                            }
+                            if (illusionLife <= 0) {
+                                clearInterval(illusionUpdate);
+                                scene.remove(illusionGroup);
+                            }
+                        }, 1000);
+                    }
+                }
+            },
+            bounty: {
+                name: 'Bounty',
+                icon: '💰',
+                color: 0xffd700,
+                glowColor: 0xffaa00,
+                duration: 0,
+                effect: (hero) => {
+                    const goldAmount = 100 + Math.floor(gameTime * 2); // Gold scales with game time
+                    const xpAmount = 50 + Math.floor(gameTime);
+                    hero.gold += goldAmount;
+                    hero.xp += xpAmount;
+                    hero.checkLevelUp();
+                    showMessage(`BOUNTY! +${goldAmount} gold, +${xpAmount} XP`);
+                    AudioManager.playGold && AudioManager.playGold();
+                    showGoldText(hero.mesh.position, goldAmount);
+                }
+            },
+            wisdom: {
+                name: 'Wisdom',
+                icon: '📖',
+                color: 0xffff00,
+                glowColor: 0xffff88,
+                duration: 0,
+                effect: (hero) => {
+                    const xpAmount = 200 + Math.floor(gameTime * 5);
+                    hero.xp += xpAmount;
+                    hero.checkLevelUp();
+                    showMessage(`WISDOM! +${xpAmount} XP`);
+                    AudioManager.playPowerup && AudioManager.playPowerup();
+                    createExplosion(hero.mesh.position, 0xffff00, 30);
+                }
+            }
+        };
+
+        // Active runes on the map
+        const activeRunes = [];
+        const RUNE_SPAWN_POSITIONS = [
+            { x: -15, z: 15 },   // Top rune spot
+            { x: 15, z: -15 },   // Bottom rune spot
+            { x: 0, z: 0 },      // Boss pit area (bounty/wisdom only)
+            { x: -30, z: -30 },  // Radiant jungle
+            { x: 30, z: 30 }     // Dire jungle
+        ];
+        const RUNE_SPAWN_INTERVAL = 120; // 2 minutes
+        let lastRuneSpawn = 0;
+
+        class Rune {
+            constructor(x, z, type) {
+                this.type = type;
+                this.runeData = RUNE_TYPES[type];
+                this.collected = false;
+
+                // Create rune visual
+                this.group = new THREE.Group();
+
+                // Outer glow ring
+                const ringGeo = new THREE.TorusGeometry(0.8, 0.1, 8, 16);
+                const ringMat = new THREE.MeshBasicMaterial({
+                    color: this.runeData.color,
+                    transparent: true,
+                    opacity: 0.6
+                });
+                this.ring = new THREE.Mesh(ringGeo, ringMat);
+                this.ring.rotation.x = Math.PI / 2;
+                this.group.add(this.ring);
+
+                // Central orb
+                const orbGeo = new THREE.SphereGeometry(0.4, 16, 12);
+                const orbMat = new THREE.MeshStandardMaterial({
+                    color: this.runeData.color,
+                    emissive: this.runeData.glowColor,
+                    emissiveIntensity: 1.5,
+                    metalness: 0.8,
+                    roughness: 0.2
+                });
+                this.orb = new THREE.Mesh(orbGeo, orbMat);
+                this.orb.position.y = 0.6;
+                this.group.add(this.orb);
+
+                // Inner crystal shape
+                const crystalGeo = new THREE.OctahedronGeometry(0.25);
+                const crystalMat = new THREE.MeshBasicMaterial({
+                    color: 0xffffff,
+                    transparent: true,
+                    opacity: 0.8
+                });
+                this.crystal = new THREE.Mesh(crystalGeo, crystalMat);
+                this.crystal.position.y = 0.6;
+                this.group.add(this.crystal);
+
+                // Point light for glow effect
+                this.light = new THREE.PointLight(this.runeData.color, 1.5, 8);
+                this.light.position.y = 1;
+                this.group.add(this.light);
+
+                this.group.position.set(x, 0.1, z);
+                scene.add(this.group);
+
+                this.phase = Math.random() * Math.PI * 2;
+                this.bobSpeed = 2 + Math.random();
+            }
+
+            update(dt) {
+                if (this.collected) return;
+
+                this.phase += dt * this.bobSpeed;
+
+                // Bobbing animation
+                this.orb.position.y = 0.6 + Math.sin(this.phase) * 0.15;
+                this.crystal.position.y = 0.6 + Math.sin(this.phase) * 0.15;
+
+                // Rotation
+                this.ring.rotation.z += dt * 1.5;
+                this.crystal.rotation.y += dt * 3;
+                this.crystal.rotation.x += dt * 1.5;
+
+                // Pulsing glow
+                const pulse = 1 + Math.sin(this.phase * 2) * 0.3;
+                this.orb.material.emissiveIntensity = pulse;
+                this.light.intensity = 1 + Math.sin(this.phase * 2) * 0.5;
+
+                // Check for hero pickup
+                if (player && !player.dead) {
+                    const dist = Math.hypot(
+                        this.group.position.x - player.mesh.position.x,
+                        this.group.position.z - player.mesh.position.z
+                    );
+                    if (dist < 2) {
+                        this.collect(player);
+                    }
+                }
+            }
+
+            collect(hero) {
+                if (this.collected) return;
+                this.collected = true;
+
+                // Apply rune effect
+                this.runeData.effect(hero);
+
+                // Collection animation
+                const startY = this.group.position.y;
+                let collectPhase = 0;
+                const collectAnim = setInterval(() => {
+                    collectPhase += 0.1;
+                    this.group.position.y = startY + collectPhase * 2;
+                    this.group.scale.setScalar(1 - collectPhase / 2);
+                    this.orb.material.opacity = 1 - collectPhase / 2;
+                    this.ring.material.opacity = 0.6 * (1 - collectPhase / 2);
+
+                    if (collectPhase >= 1) {
+                        clearInterval(collectAnim);
+                        scene.remove(this.group);
+                        const idx = activeRunes.indexOf(this);
+                        if (idx !== -1) activeRunes.splice(idx, 1);
+                    }
+                }, 30);
+
+                // Particle burst
+                createExplosion(this.group.position, this.runeData.color, 25);
+            }
+
+            destroy() {
+                scene.remove(this.group);
+            }
+        }
+
+        function spawnRune(position, forcedType = null) {
+            // Determine rune type
+            let runeType;
+            if (forcedType) {
+                runeType = forcedType;
+            } else {
+                const types = Object.keys(RUNE_TYPES);
+                // Bounty/wisdom more common at boss pit and jungle spots
+                if (position.x === 0 && position.z === 0) {
+                    runeType = Math.random() < 0.5 ? 'bounty' : 'wisdom';
+                } else if (Math.abs(position.x) >= 25) {
+                    runeType = Math.random() < 0.6 ? 'bounty' : types[Math.floor(Math.random() * types.length)];
+                } else {
+                    // Power runes at river spots
+                    const powerRunes = ['double_damage', 'haste', 'regeneration', 'invisibility', 'arcane', 'illusion'];
+                    runeType = powerRunes[Math.floor(Math.random() * powerRunes.length)];
+                }
+            }
+
+            const rune = new Rune(position.x, position.z, runeType);
+            activeRunes.push(rune);
+            return rune;
+        }
+
+        function initRunes() {
+            // Spawn initial bounty runes
+            spawnRune(RUNE_SPAWN_POSITIONS[3], 'bounty'); // Radiant jungle
+            spawnRune(RUNE_SPAWN_POSITIONS[4], 'bounty'); // Dire jungle
+        }
+
+        function updateRunes(dt) {
+            // Update existing runes
+            activeRunes.forEach(rune => rune.update(dt));
+
+            // Spawn new runes periodically
+            if (gameTime - lastRuneSpawn >= RUNE_SPAWN_INTERVAL) {
+                lastRuneSpawn = gameTime;
+
+                // Spawn power runes at river spots
+                if (activeRunes.filter(r => r.group.position.x === -15).length === 0) {
+                    spawnRune(RUNE_SPAWN_POSITIONS[0]);
+                }
+                if (activeRunes.filter(r => r.group.position.x === 15).length === 0) {
+                    spawnRune(RUNE_SPAWN_POSITIONS[1]);
+                }
+
+                // Spawn bounty runes in jungles
+                if (activeRunes.filter(r => r.group.position.x === -30).length === 0) {
+                    spawnRune(RUNE_SPAWN_POSITIONS[3], 'bounty');
+                }
+                if (activeRunes.filter(r => r.group.position.x === 30).length === 0) {
+                    spawnRune(RUNE_SPAWN_POSITIONS[4], 'bounty');
+                }
+
+                showMessage('Runes have spawned!');
+            }
+        }
+
         function spawnFloatingText(amt, pos, color) {
             // ROUND 1: Respect settings
             if (!gameSettings.showDamageNumbers) return;
@@ -7161,6 +7579,9 @@
 
             // Initialize jungle camps
             initJungleCamps();
+
+            // Initialize rune system
+            initRunes();
 
             // LOGIC GROUND (Invisible, for reliable raycasting)
             const hitGeo = new THREE.PlaneGeometry(500, 500);
@@ -8044,6 +8465,9 @@
 
                 // Update jungle camp respawn timers
                 updateJungleCamps(dt);
+
+                // Update rune system
+                updateRunes(dt);
 
                 // Update animation and particle systems
                 if (typeof AnimationSystem !== 'undefined' && AnimationSystem.update) {
