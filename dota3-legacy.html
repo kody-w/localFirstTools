@@ -1853,6 +1853,9 @@
             salve: { name: 'Healing Salve', cost: 100, icon: '💊', effect: 'heal', value: 300, desc: '+300 HP (instant)', category: 'consumable' },
             clarity: { name: 'Clarity', cost: 75, icon: '💧', effect: 'mana_restore', value: 200, desc: '+200 Mana (instant)', category: 'consumable' },
             flask: { name: 'Magic Flask', cost: 150, icon: '🧪', effect: 'heal_both', value: 200, desc: '+200 HP & Mana', category: 'consumable' },
+            // ROUND 10: Ward items
+            observer: { name: 'Observer Ward', cost: 75, icon: '👁️', effect: 'place_ward', wardType: 'observer', desc: 'Place to reveal area (5 min)', category: 'consumable', hasActive: true },
+            sentry: { name: 'Sentry Ward', cost: 100, icon: '🔮', effect: 'place_ward', wardType: 'sentry', desc: 'Place to detect invisible (4 min)', category: 'consumable', hasActive: true },
 
             // === BASIC ITEMS ===
             boots: { name: 'Boots', cost: 300, icon: '👢', effect: 'speed', value: 0.05, desc: '+20% Move Speed', category: 'basic' },
@@ -2078,6 +2081,156 @@
 
             itemCooldowns[cooldownKey] = item.cooldown;
             showMessage(`Used ${item.name}!`);
+        }
+
+        // ROUND 10: Use item from inventory by itemId
+        function useItemActive(itemId, item) {
+            if (!player || !item.hasActive) return;
+
+            const cooldownKey = `inv_${itemId}`;
+
+            if (itemCooldowns[cooldownKey] && itemCooldowns[cooldownKey] > 0) {
+                showMessage('Item on cooldown!');
+                AudioManager.playError();
+                return;
+            }
+
+            switch (item.effect) {
+                case 'active_blink':
+                    player.performBlink(12, 0xffaa00);
+                    AudioManager.playAbility('blink');
+                    break;
+                case 'active_bkb':
+                    player.magicImmune = true;
+                    createShield(player, 0);
+                    AudioManager.playAbility('buff');
+                    setTimeout(() => { player.magicImmune = false; }, 5000);
+                    break;
+                case 'active_invis':
+                    player.invisible = true;
+                    player.mesh.visible = false;
+                    AudioManager.playAbility('shadow');
+                    setTimeout(() => {
+                        player.invisible = false;
+                        player.mesh.visible = true;
+                    }, 4000);
+                    break;
+                case 'place_ward':
+                    placeWard(player.mesh.position, item.wardType);
+                    // Remove ward from inventory after use
+                    const idx = player.inventory.indexOf(itemId);
+                    if (idx > -1) player.inventory.splice(idx, 1);
+                    updateInventoryUI();
+                    break;
+            }
+
+            if (item.cooldown) {
+                itemCooldowns[cooldownKey] = item.cooldown;
+            }
+            showMessage(`Used ${item.name}!`);
+        }
+
+        // ROUND 10: Ward System
+        const placedWards = [];
+
+        function placeWard(position, type) {
+            const wardColor = type === 'observer' ? 0x00ff88 : 0xff00ff;
+            const wardDuration = type === 'observer' ? 300000 : 240000; // 5min / 4min
+            const visionRadius = type === 'observer' ? 15 : 8;
+
+            // Create ward mesh
+            const wardGroup = new THREE.Group();
+
+            // Ward stake
+            const stake = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.05, 0.1, 0.8, 8),
+                new THREE.MeshStandardMaterial({ color: 0x664422 })
+            );
+            stake.position.y = 0.4;
+            wardGroup.add(stake);
+
+            // Ward crystal/eye
+            const crystal = new THREE.Mesh(
+                new THREE.OctahedronGeometry(0.2),
+                new THREE.MeshBasicMaterial({
+                    color: wardColor,
+                    transparent: true,
+                    opacity: 0.8
+                })
+            );
+            crystal.position.y = 0.9;
+            wardGroup.add(crystal);
+
+            // Vision ring (ground indicator)
+            const visionRing = new THREE.Mesh(
+                new THREE.RingGeometry(visionRadius - 0.2, visionRadius, 32),
+                new THREE.MeshBasicMaterial({
+                    color: wardColor,
+                    transparent: true,
+                    opacity: 0.1,
+                    side: THREE.DoubleSide
+                })
+            );
+            visionRing.rotation.x = -Math.PI / 2;
+            visionRing.position.y = 0.05;
+            wardGroup.add(visionRing);
+
+            wardGroup.position.copy(position);
+            scene.add(wardGroup);
+
+            const ward = {
+                type,
+                position: position.clone(),
+                group: wardGroup,
+                crystal,
+                visionRadius,
+                team: player.team,
+                createdAt: Date.now()
+            };
+            placedWards.push(ward);
+
+            // Animate crystal rotation
+            const animateWard = () => {
+                if (!ward.group.parent) return;
+                crystal.rotation.y += 0.02;
+                crystal.position.y = 0.9 + Math.sin(Date.now() * 0.003) * 0.05;
+                requestAnimationFrame(animateWard);
+            };
+            animateWard();
+
+            // Remove ward after duration
+            setTimeout(() => {
+                scene.remove(wardGroup);
+                const idx = placedWards.indexOf(ward);
+                if (idx > -1) placedWards.splice(idx, 1);
+                showMessage(`${type === 'observer' ? 'Observer' : 'Sentry'} ward expired`);
+            }, wardDuration);
+
+            // Play sound
+            AudioManager.playUI();
+            showMessage(`Placed ${type === 'observer' ? 'Observer' : 'Sentry'} Ward`);
+        }
+
+        // Draw wards on minimap
+        function drawWardsOnMinimap(ctx, mapToScreen) {
+            placedWards.forEach(ward => {
+                const x = mapToScreen(ward.position.x);
+                const z = mapToScreen(ward.position.z);
+
+                // Ward icon
+                ctx.fillStyle = ward.type === 'observer' ? '#00ff88' : '#ff00ff';
+                ctx.beginPath();
+                ctx.arc(x, z, 4, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Vision radius indicator
+                ctx.strokeStyle = ward.type === 'observer' ? 'rgba(0,255,136,0.2)' : 'rgba(255,0,255,0.2)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                const radius = ward.visionRadius * 2.2; // Convert to minimap scale
+                ctx.arc(x, z, radius, 0, Math.PI * 2);
+                ctx.stroke();
+            });
         }
 
         function updateInventoryUI() {
@@ -5982,6 +6135,11 @@
             // ROUND 10: Draw minimap pings
             if (typeof drawMinimapPings === 'function') {
                 drawMinimapPings(ctx);
+            }
+
+            // ROUND 10: Draw wards on minimap
+            if (typeof drawWardsOnMinimap === 'function') {
+                drawWardsOnMinimap(ctx, mapToScreen);
             }
         }
 
