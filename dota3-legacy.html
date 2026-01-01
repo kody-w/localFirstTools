@@ -2482,6 +2482,14 @@
         }
 
         function processHeroKill(killer, victim) {
+            // R4: HitStop on hero kill for game feel impact
+            if (typeof HitStop !== 'undefined') {
+                HitStop.heavyHit(80);  // 80ms freeze on hero kill
+            }
+            if (typeof screenShake !== 'undefined') {
+                screenShake.heavy();   // Heavy shake for kill confirm
+            }
+
             // Track kill streak for killer
             killer.killStreak = (killer.killStreak || 0) + 1;
             killer.deaths = killer.deaths || 0;
@@ -4214,6 +4222,23 @@
                 this.shieldActive = false;
                 this.shieldHealth = 0;
                 this.shieldMesh = null;
+
+                // R4: Clear rune effect timers to prevent memory leaks
+                if (this.invisTimeout) {
+                    clearTimeout(this.invisTimeout);
+                    this.invisTimeout = null;
+                }
+                if (this.arcaneTimeout) {
+                    clearTimeout(this.arcaneTimeout);
+                    this.arcaneTimeout = null;
+                }
+                if (this.regenInterval) {
+                    clearInterval(this.regenInterval);
+                    this.regenInterval = null;
+                }
+                // Reset rune effects
+                this.isInvisible = false;
+                this.cooldownMultiplier = 1;
 
                 // ROUND 10: Enhanced death visual effect
                 const deathPos = this.mesh.position.clone();
@@ -6348,10 +6373,11 @@
             screenShake.heavy();
             // ROUND 1: Guard against dead player
             if (!player || player.dead) return;
-            // AOE Damage - ROUND 8: Use scaled damage
-            entities.forEach(e => {
-                if (e && !e.dead && e.team !== player.team && e.mesh && e.mesh.position.distanceTo(pos) < 10) {
-                    e.takeDamage(damage, 'crit');
+            // AOE Damage - R4: Use SpatialGrid for O(n) instead of O(n²)
+            const nearby = SpatialGrid.getNearby(pos.x, pos.z, 10);
+            nearby.forEach(({entity}) => {
+                if (!entity.dead && entity.team !== player.team) {
+                    entity.takeDamage(damage, 'crit');
                 }
             });
         }
@@ -6440,16 +6466,14 @@
             };
             expandRing();
 
-            // Damage and stun enemies
-            entities.forEach(e => {
-                if (e && !e.dead && e.team !== player.team && e.mesh) {
-                    const dist = e.mesh.position.distanceTo(pos);
-                    if (dist < 5) {
-                        e.takeDamage(damage, 'physical');
-                        e.stunned = true;
-                        e.stunEndTime = clock.getElapsedTime() + 1.5;
-                        createExplosion(e.mesh.position, 0xffaa00, 5);
-                    }
+            // Damage and stun enemies - R4: Use SpatialGrid
+            const nearby = SpatialGrid.getNearby(pos.x, pos.z, 5);
+            nearby.forEach(({entity}) => {
+                if (!entity.dead && entity.team !== player.team) {
+                    entity.takeDamage(damage, 'physical');
+                    entity.stunned = true;
+                    entity.stunEndTime = clock.getElapsedTime() + 1.5;
+                    createExplosion(entity.mesh.position, 0xffaa00, 5);
                 }
             });
 
@@ -6482,15 +6506,13 @@
                     };
                     expand();
 
-                    // Damage enemies
-                    entities.forEach(e => {
-                        if (e && !e.dead && e.team !== player.team && e.mesh) {
-                            const dist = e.mesh.position.distanceTo(pos);
-                            if (dist < 12) {
-                                e.takeDamage(damage / 3, 'physical');
-                                e.speed *= 0.5; // Slow
-                                setTimeout(() => { if (e) e.speed *= 2; }, 3000);
-                            }
+                    // Damage enemies - R4: Use SpatialGrid
+                    const nearbyEq = SpatialGrid.getNearby(pos.x, pos.z, 12);
+                    nearbyEq.forEach(({entity}) => {
+                        if (!entity.dead && entity.team !== player.team) {
+                            entity.takeDamage(damage / 3, 'physical');
+                            entity.speed *= 0.5; // Slow
+                            setTimeout(() => { if (entity) entity.speed *= 2; }, 3000);
                         }
                     });
 
@@ -6539,17 +6561,17 @@
                     setTimeout(() => scene.remove(trail), 200);
                 }
 
-                // Check collision
+                // Check collision - R4: Use SpatialGrid
                 let hit = false;
-                entities.forEach(e => {
-                    if (!hit && e && !e.dead && e.team !== player.team && e.mesh) {
-                        if (projectile.position.distanceTo(e.mesh.position) < 1.5) {
-                            e.takeDamage(damage, 'magical');
-                            createExplosion(e.mesh.position, 0xff4400, 15);
-                            hit = true;
-                        }
+                const nearbyFb = SpatialGrid.getNearby(projectile.position.x, projectile.position.z, 1.5);
+                for (let i = 0; i < nearbyFb.length && !hit; i++) {
+                    const entity = nearbyFb[i].entity;
+                    if (!entity.dead && entity.team !== player.team) {
+                        entity.takeDamage(damage, 'magical');
+                        createExplosion(entity.mesh.position, 0xff4400, 15);
+                        hit = true;
                     }
-                });
+                }
 
                 if (hit || traveled > 30) {
                     createExplosion(projectile.position, 0xff4400, 10);
@@ -6594,14 +6616,13 @@
                     flame.scale.y = 0.8 + Math.sin(duration * 0.01 + i) * 0.3;
                 });
 
-                // Damage enemies in ring
+                // Damage enemies in ring - R4: Use SpatialGrid
                 if (duration % 500 < 20) {
-                    entities.forEach(e => {
-                        if (e && !e.dead && e.team !== player.team && e.mesh) {
-                            const dist = e.mesh.position.distanceTo(pos);
-                            if (dist > 3 && dist < 5) {
-                                e.takeDamage(damagePerTick, 'magical');
-                            }
+                    const nearbyRing = SpatialGrid.getNearby(pos.x, pos.z, 5);
+                    nearbyRing.forEach(({entity, distSq}) => {
+                        const dist = Math.sqrt(distSq);
+                        if (!entity.dead && entity.team !== player.team && dist > 3) {
+                            entity.takeDamage(damagePerTick, 'magical');
                         }
                     });
                 }
@@ -6653,13 +6674,12 @@
                     createExplosion(targetPos, 0xff4400, 80);
                     screenShake.heavy();
 
-                    // Damage in area
-                    entities.forEach(e => {
-                        if (e && !e.dead && e.team !== player.team && e.mesh) {
-                            const dist = e.mesh.position.distanceTo(targetPos);
-                            if (dist < 6) {
-                                e.takeDamage(damage * (1 - dist / 12), 'magical');
-                            }
+                    // Damage in area - R4: Use SpatialGrid
+                    const nearbyMeteor = SpatialGrid.getNearby(targetPos.x, targetPos.z, 6);
+                    nearbyMeteor.forEach(({entity, distSq}) => {
+                        const dist = Math.sqrt(distSq);
+                        if (!entity.dead && entity.team !== player.team) {
+                            entity.takeDamage(damage * (1 - dist / 12), 'magical');
                         }
                     });
 
@@ -7261,9 +7281,12 @@
                     showMessage('REGENERATION! Full HP/MP restore over 25s');
                     AudioManager.playPowerup && AudioManager.playPowerup();
                     let ticks = 0;
-                    const regenInterval = setInterval(() => {
+                    // R4: Store interval ID on hero so it can be cleared on death
+                    if (hero.regenInterval) clearInterval(hero.regenInterval);
+                    hero.regenInterval = setInterval(() => {
                         if (hero.dead || ticks >= 50) {
-                            clearInterval(regenInterval);
+                            clearInterval(hero.regenInterval);
+                            hero.regenInterval = null;
                             hero.hasRegenRune = false;
                             if (ticks >= 50) showMessage('Regeneration expired');
                             return;
@@ -7310,9 +7333,12 @@
                     hero.cooldownMultiplier = (hero.cooldownMultiplier || 1) * 0.5;
                     showMessage('ARCANE! 50% cooldown reduction for 40s');
                     AudioManager.playPowerup && AudioManager.playPowerup();
-                    setTimeout(() => {
+                    // R4: Store timeout ID so it can be cleared on death
+                    if (hero.arcaneTimeout) clearTimeout(hero.arcaneTimeout);
+                    hero.arcaneTimeout = setTimeout(() => {
                         hero.cooldownMultiplier = (hero.cooldownMultiplier || 0.5) / 0.5;
                         hero.hasArcaneRune = false;
+                        hero.arcaneTimeout = null;
                         showMessage('Arcane expired');
                     }, 40000);
                 }
