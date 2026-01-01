@@ -441,6 +441,33 @@
     <!-- Kill Feed -->
     <div id="kill-feed" style="position:fixed;top:80px;right:20px;width:260px;max-height:200px;overflow:hidden;z-index:200;pointer-events:none;"></div>
 
+    <!-- ROUND 10: Match Statistics Panel (Tab to toggle) -->
+    <div id="match-stats-panel" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);width:600px;max-height:80vh;background:linear-gradient(135deg,rgba(20,25,35,0.98),rgba(15,20,30,0.98));border:2px solid #334455;border-radius:12px;padding:20px;display:none;z-index:350;overflow-y:auto;">
+        <h2 style="text-align:center;font-family:var(--font-display);color:#ffd700;margin-bottom:20px;font-size:24px;">📊 MATCH STATISTICS</h2>
+        <div style="display:flex;justify-content:space-between;margin-bottom:15px;">
+            <div id="radiant-stats" style="flex:1;margin-right:10px;padding:10px;background:rgba(0,255,136,0.1);border-radius:8px;border:1px solid #00ff88;">
+                <h3 style="color:#00ff88;margin-bottom:10px;text-align:center;">RADIANT</h3>
+                <div id="radiant-heroes-stats"></div>
+            </div>
+            <div id="dire-stats" style="flex:1;margin-left:10px;padding:10px;background:rgba(255,60,60,0.1);border-radius:8px;border:1px solid #ff3c3c;">
+                <h3 style="color:#ff3c3c;margin-bottom:10px;text-align:center;">DIRE</h3>
+                <div id="dire-heroes-stats"></div>
+            </div>
+        </div>
+        <div id="player-detailed-stats" style="margin-top:15px;padding:15px;background:rgba(255,215,0,0.1);border-radius:8px;border:1px solid #ffd700;">
+            <h3 style="color:#ffd700;margin-bottom:10px;text-align:center;">YOUR STATS</h3>
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:10px;text-align:center;">
+                <div><span style="color:#888;">Damage Dealt</span><br><span id="stat-damage-dealt" style="color:#fff;font-size:18px;">0</span></div>
+                <div><span style="color:#888;">Damage Taken</span><br><span id="stat-damage-taken" style="color:#fff;font-size:18px;">0</span></div>
+                <div><span style="color:#888;">Healing Done</span><br><span id="stat-healing" style="color:#fff;font-size:18px;">0</span></div>
+                <div><span style="color:#888;">Gold Earned</span><br><span id="stat-gold-earned" style="color:#fff;font-size:18px;">0</span></div>
+                <div><span style="color:#888;">Creeps Killed</span><br><span id="stat-creeps-killed" style="color:#fff;font-size:18px;">0</span></div>
+                <div><span style="color:#888;">Abilities Used</span><br><span id="stat-abilities-used" style="color:#fff;font-size:18px;">0</span></div>
+            </div>
+        </div>
+        <p style="text-align:center;color:#667788;margin-top:15px;font-size:12px;">Press TAB to close</p>
+    </div>
+
     <!-- ROUND 2: Pause Overlay -->
     <div id="pause-overlay" style="position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.85);display:none;flex-direction:column;align-items:center;justify-content:center;z-index:400;">
         <h1 style="font-family:var(--font-display);font-size:48px;color:#fff;margin-bottom:10px;">PAUSED</h1>
@@ -2303,6 +2330,12 @@
                 }
 
                 target.takeDamage(dmg, isCrit ? 'crit' : 'physical', this);
+
+                // ROUND 10: Track damage dealt for match stats
+                if (this === player && typeof matchStats !== 'undefined') {
+                    matchStats.trackDamageDealt(dmg);
+                }
+
                 return dmg;
             }
 
@@ -2373,6 +2406,10 @@
                 // ROUND 2: Screen shake on damage
                 if (this === player) {
                     screenShake.light();
+                    // ROUND 10: Track damage taken for match stats
+                    if (typeof matchStats !== 'undefined') {
+                        matchStats.trackDamageTaken(amt);
+                    }
                 }
 
                 // Flash
@@ -2653,6 +2690,11 @@
 
                 // Hero-specific ability implementations
                 this.executeHeroAbility(key, levelBonus);
+
+                // ROUND 10: Track ability use for match stats
+                if (this === player && typeof matchStats !== 'undefined') {
+                    matchStats.trackAbilityUse();
+                }
             }
 
             executeHeroAbility(key, levelBonus) {
@@ -3112,26 +3154,104 @@
             }
 
             tryUseAbility() {
-                // Use abilities based on situation
-                const abilityOrder = ['r', 'q', 'w', 'e']; // Priority order
+                // ROUND 10: Enhanced strategic ability usage
+                const hpPercent = this.hp / this.maxHp;
+                const mpPercent = this.mp / this.maxMp;
 
-                for (const key of abilityOrder) {
-                    const ab = this.abilities[key];
-                    if (ab.currentCd <= 0 && this.mp >= ab.cost) {
-                        // R only when enemy is low
-                        if (key === 'r' && this.aiTarget) {
-                            if (this.aiTarget.hp / this.aiTarget.maxHp > 0.4) continue;
+                // Count nearby enemies for group fight detection
+                let nearbyEnemies = 0;
+                let nearbyAllies = 0;
+                let lowestEnemyHpPercent = 1;
+                let lowestEnemy = null;
+
+                entities.forEach(e => {
+                    if (e.dead || !e.mesh) return;
+                    const dist = this.mesh.position.distanceTo(e.mesh.position);
+                    if (dist < 15) {
+                        if (e.team !== this.team && e.team !== 0) {
+                            nearbyEnemies++;
+                            const eHpPct = e.hp / e.maxHp;
+                            if (eHpPct < lowestEnemyHpPercent) {
+                                lowestEnemyHpPercent = eHpPct;
+                                lowestEnemy = e;
+                            }
+                        } else if (e.team === this.team && e !== this) {
+                            nearbyAllies++;
                         }
+                    }
+                });
 
+                // Defensive ability priority when low HP
+                if (hpPercent < 0.4) {
+                    // Try to use shield/defensive ability (E slot usually)
+                    const ab = this.abilities['e'];
+                    if (ab && ab.currentCd <= 0 && this.mp >= ab.cost) {
                         this.mp -= ab.cost;
                         ab.currentCd = ab.cd;
-
-                        // Execute ability effect
                         const levelBonus = 1 + (this.level - 1) * 0.1;
-                        this.executeHeroAbility(key, levelBonus);
+                        this.executeHeroAbility('e', levelBonus);
                         return;
                     }
                 }
+
+                // Ultimate ability for team fights or finishing low enemies
+                const rAb = this.abilities['r'];
+                if (rAb && rAb.currentCd <= 0 && this.mp >= rAb.cost) {
+                    // Use ult if: enemy is low, or outnumbered in team fight
+                    const shouldUlt = (lowestEnemyHpPercent < 0.3) ||
+                                     (nearbyEnemies >= 2 && nearbyAllies >= 1) ||
+                                     (hpPercent < 0.25);
+                    if (shouldUlt && this.aiTarget) {
+                        this.mp -= rAb.cost;
+                        rAb.currentCd = rAb.cd;
+                        const levelBonus = 1 + (this.level - 1) * 0.1;
+                        // Target lowest HP enemy if possible
+                        if (lowestEnemy) this.aiTarget = lowestEnemy;
+                        this.executeHeroAbility('r', levelBonus);
+                        return;
+                    }
+                }
+
+                // Regular ability usage
+                const abilityOrder = ['q', 'w']; // Q and W for damage
+                for (const key of abilityOrder) {
+                    const ab = this.abilities[key];
+                    if (ab.currentCd <= 0 && this.mp >= ab.cost) {
+                        // Only use if we have enough mana reserve (keep 30% for emergencies)
+                        if (mpPercent > 0.3 || hpPercent > 0.7) {
+                            this.mp -= ab.cost;
+                            ab.currentCd = ab.cd;
+                            const levelBonus = 1 + (this.level - 1) * 0.1;
+                            this.executeHeroAbility(key, levelBonus);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // ROUND 10: Kiting behavior for ranged heroes
+            executeKiting(dt, target) {
+                if (!target || target.dead) return false;
+
+                const dist = this.mesh.position.distanceTo(target.mesh.position);
+                const attackRange = 3;
+                const safeRange = 5;
+
+                // If enemy is too close, back away while attacking
+                if (dist < safeRange && dist > attackRange * 0.5) {
+                    // Move away from target
+                    const awayDir = this.mesh.position.clone().sub(target.mesh.position).normalize();
+                    this.mesh.position.add(awayDir.multiplyScalar(this.speed * dt * 30));
+                    this.mesh.rotation.y = Math.atan2(-awayDir.x, -awayDir.z);
+
+                    // Attack while moving
+                    if (clock.getElapsedTime() - this.lastAttack > this.getAttackInterval()) {
+                        this.performAttack(target);
+                        this.lastAttack = clock.getElapsedTime();
+                    }
+                    return true;
+                }
+                return false;
             }
         }
 
@@ -3349,6 +3469,11 @@
                         // Show gold floating text
                         showGoldText(this.mesh.position, this.goldReward);
                         AudioManager.playGold(); // ROUND 9: Gold sound
+                        // ROUND 10: Track gold and creep kill for match stats
+                        if (typeof matchStats !== 'undefined') {
+                            matchStats.trackGold(this.goldReward);
+                            matchStats.trackCreepKill();
+                        }
                     }
                 }
 
@@ -5677,9 +5802,26 @@
                     toggleShop();
                     return;
                 }
+                // ROUND 10: Toggle match stats with Tab
+                if (e.key === 'Tab') {
+                    e.preventDefault();
+                    toggleMatchStats();
+                    return;
+                }
                 if (gameState !== 'playing') return;
                 if (!player || player.dead) return;
                 if (['q', 'w', 'e', 'r'].includes(e.key.toLowerCase())) player.cast(e.key.toLowerCase());
+                // ROUND 10: Item hotkeys 1-6
+                if (['1', '2', '3', '4', '5', '6'].includes(e.key)) {
+                    const slotIndex = parseInt(e.key) - 1;
+                    if (player.inventory && player.inventory[slotIndex]) {
+                        const itemId = player.inventory[slotIndex];
+                        const item = ITEMS[itemId];
+                        if (item && item.hasActive) {
+                            useItemActive(itemId, item);
+                        }
+                    }
+                }
             });
             window.addEventListener('resize', () => {
                 camera.aspect = window.innerWidth / window.innerHeight;
@@ -5836,12 +5978,29 @@
                 ctx.lineWidth = 1;
                 ctx.strokeRect(camX - 30, camZ - 20, 60, 40);
             }
+
+            // ROUND 10: Draw minimap pings
+            if (typeof drawMinimapPings === 'function') {
+                drawMinimapPings(ctx);
+            }
         }
 
         // ROUND 8: Minimap click-to-move
+        // ROUND 10: Added ping system with Alt+click or G key
+        const minimapPings = [];
+        let pingKeyHeld = false;
+
         function initMinimapClick() {
             const c = document.getElementById('minimap-canvas');
             if (!c) return;
+
+            // G key to enable ping mode
+            window.addEventListener('keydown', (e) => {
+                if (e.key.toLowerCase() === 'g') pingKeyHeld = true;
+            });
+            window.addEventListener('keyup', (e) => {
+                if (e.key.toLowerCase() === 'g') pingKeyHeld = false;
+            });
 
             c.addEventListener('click', (e) => {
                 if (gameState !== 'playing' || !player || player.dead) return;
@@ -5855,6 +6014,12 @@
                 const worldX = (clickX / 220) * 100 - 50;
                 const worldZ = (clickZ / 220) * 100 - 50;
 
+                // ROUND 10: Alt+click or G+click to ping
+                if (e.altKey || pingKeyHeld) {
+                    createPing(worldX, worldZ, clickX, clickZ);
+                    return;
+                }
+
                 player.targetPos.set(worldX, 0, worldZ);
 
                 // Visual feedback on minimap
@@ -5863,6 +6028,103 @@
                 ctx.beginPath();
                 ctx.arc(clickX, clickZ, 5, 0, Math.PI * 2);
                 ctx.fill();
+            });
+        }
+
+        // ROUND 10: Ping system for communication
+        function createPing(worldX, worldZ, minimapX, minimapZ) {
+            // Play ping sound
+            AudioManager.playUI();
+
+            // Create 3D ping marker in world
+            const pingMarker = new THREE.Group();
+
+            // Vertical beam
+            const beam = new THREE.Mesh(
+                new THREE.CylinderGeometry(0.1, 0.3, 8, 8),
+                new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.7 })
+            );
+            beam.position.y = 4;
+            pingMarker.add(beam);
+
+            // Ground ring
+            const ring = new THREE.Mesh(
+                new THREE.RingGeometry(1.5, 2, 32),
+                new THREE.MeshBasicMaterial({ color: 0xffff00, transparent: true, opacity: 0.6, side: THREE.DoubleSide })
+            );
+            ring.rotation.x = -Math.PI / 2;
+            ring.position.y = 0.1;
+            pingMarker.add(ring);
+
+            // Ping icon (exclamation mark using cones)
+            const marker = new THREE.Mesh(
+                new THREE.ConeGeometry(0.4, 1.2, 8),
+                new THREE.MeshBasicMaterial({ color: 0xffff00 })
+            );
+            marker.position.y = 8.5;
+            marker.rotation.x = Math.PI; // Point down
+            pingMarker.add(marker);
+
+            pingMarker.position.set(worldX, 0, worldZ);
+            scene.add(pingMarker);
+
+            // Store ping info for minimap animation
+            const ping = {
+                worldX, worldZ,
+                minimapX, minimapZ,
+                age: 0,
+                marker: pingMarker
+            };
+            minimapPings.push(ping);
+
+            // Animate ping
+            let frame = 0;
+            const animatePing = () => {
+                frame++;
+                ping.age = frame;
+
+                // Pulsing effect
+                const pulse = 1 + Math.sin(frame * 0.2) * 0.2;
+                ring.scale.setScalar(pulse);
+
+                // Fade out
+                const fade = 1 - (frame / 180);
+                beam.material.opacity = fade * 0.7;
+                ring.material.opacity = fade * 0.6;
+                marker.material.opacity = fade;
+
+                if (frame < 180) {
+                    requestAnimationFrame(animatePing);
+                } else {
+                    scene.remove(pingMarker);
+                    const idx = minimapPings.indexOf(ping);
+                    if (idx > -1) minimapPings.splice(idx, 1);
+                }
+            };
+            animatePing();
+
+            // Show message
+            showMessage('📍 Ping!');
+        }
+
+        // Draw pings on minimap (called in updateMinimap)
+        function drawMinimapPings(ctx) {
+            minimapPings.forEach(ping => {
+                const alpha = Math.max(0, 1 - (ping.age / 180));
+                const pulse = 1 + Math.sin(ping.age * 0.2) * 0.3;
+
+                ctx.save();
+                ctx.globalAlpha = alpha;
+                ctx.strokeStyle = '#ffff00';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(ping.minimapX, ping.minimapZ, 8 * pulse, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.fillStyle = '#ffff00';
+                ctx.beginPath();
+                ctx.arc(ping.minimapX, ping.minimapZ, 3, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.restore();
             });
         }
 
@@ -6191,6 +6453,95 @@
                 }, 8000);
             }
         };
+
+        // ROUND 10: Match Statistics Tracking System
+        const matchStats = {
+            damageDealt: 0,
+            damageTaken: 0,
+            healingDone: 0,
+            goldEarned: 0,
+            creepsKilled: 0,
+            abilitiesUsed: 0,
+            heroKills: 0,
+            deaths: 0,
+            assists: 0,
+
+            reset() {
+                this.damageDealt = 0;
+                this.damageTaken = 0;
+                this.healingDone = 0;
+                this.goldEarned = 0;
+                this.creepsKilled = 0;
+                this.abilitiesUsed = 0;
+                this.heroKills = 0;
+                this.deaths = 0;
+                this.assists = 0;
+            },
+
+            trackDamageDealt(amount) { this.damageDealt += Math.floor(amount); },
+            trackDamageTaken(amount) { this.damageTaken += Math.floor(amount); },
+            trackHealing(amount) { this.healingDone += Math.floor(amount); },
+            trackGold(amount) { this.goldEarned += amount; },
+            trackCreepKill() { this.creepsKilled++; },
+            trackAbilityUse() { this.abilitiesUsed++; },
+            trackHeroKill() { this.heroKills++; },
+            trackDeath() { this.deaths++; }
+        };
+
+        let matchStatsOpen = false;
+
+        function toggleMatchStats() {
+            matchStatsOpen = !matchStatsOpen;
+            const panel = document.getElementById('match-stats-panel');
+            if (panel) {
+                panel.style.display = matchStatsOpen ? 'block' : 'none';
+                if (matchStatsOpen) updateMatchStatsUI();
+            }
+        }
+
+        function updateMatchStatsUI() {
+            // Update player detailed stats
+            document.getElementById('stat-damage-dealt').textContent = matchStats.damageDealt.toLocaleString();
+            document.getElementById('stat-damage-taken').textContent = matchStats.damageTaken.toLocaleString();
+            document.getElementById('stat-healing').textContent = matchStats.healingDone.toLocaleString();
+            document.getElementById('stat-gold-earned').textContent = matchStats.goldEarned.toLocaleString();
+            document.getElementById('stat-creeps-killed').textContent = matchStats.creepsKilled;
+            document.getElementById('stat-abilities-used').textContent = matchStats.abilitiesUsed;
+
+            // Update team stats
+            const radiantDiv = document.getElementById('radiant-heroes-stats');
+            const direDiv = document.getElementById('dire-heroes-stats');
+            if (!radiantDiv || !direDiv) return;
+
+            radiantDiv.innerHTML = '';
+            direDiv.innerHTML = '';
+
+            entities.forEach(e => {
+                if (!(e instanceof Hero) && !(e instanceof AIHero)) return;
+                if (e.dead && !e.isAI) return;
+
+                const heroName = e.heroDef ? e.heroDef.name : 'Hero';
+                const kda = `${e.kills || 0}/${e.deaths || 0}/${e.assists || 0}`;
+                const level = e.level || 1;
+                const gold = e.gold || 0;
+                const isPlayer = e === player;
+
+                const row = document.createElement('div');
+                row.style.cssText = `display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(255,255,255,0.1);font-size:12px;${isPlayer ? 'background:rgba(255,215,0,0.2);padding:4px;border-radius:4px;' : ''}`;
+                row.innerHTML = `
+                    <span style="color:${isPlayer ? '#ffd700' : '#fff'};">${heroName}${isPlayer ? ' (You)' : ''}</span>
+                    <span style="color:#888;">Lv${level}</span>
+                    <span style="color:#00ff88;">${kda}</span>
+                    <span style="color:#ffd700;">${gold}g</span>
+                `;
+
+                if (e.team === TEAM_RADIANT) {
+                    radiantDiv.appendChild(row);
+                } else {
+                    direDiv.appendChild(row);
+                }
+            });
+        }
 
         function initPortrait() {
             // Tiny separate scene for the 3D portrait
