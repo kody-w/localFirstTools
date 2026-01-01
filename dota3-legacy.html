@@ -2293,7 +2293,124 @@
         let mouse = new THREE.Vector2();
         let gameTime = 0;
         let score = { radiant: 0, dire: 0 };
+        let firstBlood = false; // Track if first blood has occurred
         let portraitScene, portraitCamera, portraitRenderer, portraitMesh;
+
+        // ==========================================
+        // KILL STREAK SYSTEM
+        // ==========================================
+        const KILL_STREAK_NAMES = {
+            3: 'KILLING SPREE',
+            4: 'DOMINATING',
+            5: 'MEGA KILL',
+            6: 'UNSTOPPABLE',
+            7: 'WICKED SICK',
+            8: 'MONSTER KILL',
+            9: 'GODLIKE',
+            10: 'BEYOND GODLIKE'
+        };
+
+        const KILL_STREAK_GOLD = {
+            0: 0,    // No streak
+            3: 150,  // Killing Spree
+            4: 200,  // Dominating
+            5: 250,  // Mega Kill
+            6: 300,  // Unstoppable
+            7: 350,  // Wicked Sick
+            8: 400,  // Monster Kill
+            9: 500,  // Godlike
+            10: 600  // Beyond Godlike
+        };
+
+        function announceKillStreak(killer, streak) {
+            if (!KILL_STREAK_NAMES[streak]) return;
+
+            const name = KILL_STREAK_NAMES[streak];
+            showMessage(`${killer.name || 'Player'} is ${name}!`, 3000);
+
+            // Play streak sound
+            AudioManager.playKillStreak && AudioManager.playKillStreak(streak);
+
+            // Visual effect on killer
+            if (killer.mesh) {
+                createExplosion(killer.mesh.position, 0xffd700, 40);
+            }
+        }
+
+        function announceFirstBlood(killer, victim) {
+            if (firstBlood) return;
+            firstBlood = true;
+
+            showMessage('FIRST BLOOD!', 4000);
+            AudioManager.playFirstBlood && AudioManager.playFirstBlood();
+
+            // Bonus gold for first blood
+            if (killer && killer.team === TEAM_RADIANT) {
+                killer.gold = (killer.gold || 0) + 200;
+                showGoldText(killer.mesh.position, 200);
+            }
+        }
+
+        function calculateBountyGold(victim) {
+            let baseGold = 200;
+
+            // Bonus gold based on victim's level
+            baseGold += (victim.level || 1) * 20;
+
+            // Bonus gold based on victim's kill streak
+            const streak = victim.killStreak || 0;
+            const streakTier = Math.min(10, Math.max(0, streak));
+            baseGold += KILL_STREAK_GOLD[streakTier >= 3 ? streakTier : 0] || 0;
+
+            // Bonus gold based on victim's net worth (gold + item value)
+            const netWorth = (victim.gold || 0) + ((victim.inventory || []).length * 500);
+            baseGold += Math.floor(netWorth * 0.05); // 5% of net worth
+
+            return baseGold;
+        }
+
+        function processHeroKill(killer, victim) {
+            // Track kill streak for killer
+            killer.killStreak = (killer.killStreak || 0) + 1;
+            killer.deaths = killer.deaths || 0;
+
+            // Track deaths for victim
+            victim.deaths = (victim.deaths || 0) + 1;
+
+            // Calculate gold reward
+            const bountyGold = calculateBountyGold(victim);
+            killer.gold = (killer.gold || 0) + bountyGold;
+            showGoldText(killer.mesh.position, bountyGold);
+
+            // XP reward
+            const bountyXP = 100 + ((victim.level || 1) * 50);
+            killer.xp = (killer.xp || 0) + bountyXP;
+            killer.checkLevelUp && killer.checkLevelUp();
+
+            // First blood check
+            if (!firstBlood) {
+                announceFirstBlood(killer, victim);
+            }
+
+            // Kill streak announcement
+            if (killer.killStreak >= 3) {
+                announceKillStreak(killer, Math.min(10, killer.killStreak));
+            }
+
+            // End victim's kill streak
+            if ((victim.killStreak || 0) >= 3) {
+                const endMessage = `${killer.name || 'Enemy'} ended ${victim.name || 'Player'}'s killing spree!`;
+                showMessage(endMessage, 2500);
+            }
+            victim.killStreak = 0;
+
+            // Update kill feed
+            killFeed.add(
+                killer.name || (killer.team === TEAM_RADIANT ? 'Radiant Hero' : 'Dire Hero'),
+                victim.name || (victim.team === TEAM_RADIANT ? 'Radiant Hero' : 'Dire Hero'),
+                killer.team
+            );
+        }
 
         // ROUND 1: Data Persistence System
         const STORAGE_KEYS = {
@@ -2663,6 +2780,79 @@
                 gain.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
                 osc.start(now);
                 osc.stop(now + 0.12);
+            },
+
+            // First Blood announcement sound - dramatic horn
+            playFirstBlood() {
+                if (!gameSettings.soundEnabled || !this.ctx) return;
+                this.resume();
+                const now = this.ctx.currentTime;
+                // Deep horn note
+                const horn = this.ctx.createOscillator();
+                const hornGain = this.ctx.createGain();
+                horn.type = 'sawtooth';
+                horn.connect(hornGain);
+                hornGain.connect(this.masterGain);
+                horn.frequency.setValueAtTime(110, now);
+                horn.frequency.setValueAtTime(165, now + 0.3);
+                horn.frequency.setValueAtTime(220, now + 0.6);
+                hornGain.gain.setValueAtTime(0, now);
+                hornGain.gain.linearRampToValueAtTime(0.25, now + 0.1);
+                hornGain.gain.setValueAtTime(0.25, now + 0.8);
+                hornGain.gain.exponentialRampToValueAtTime(0.01, now + 1.2);
+                horn.start(now);
+                horn.stop(now + 1.3);
+                // Accompanying shimmer
+                const shimmer = this.ctx.createOscillator();
+                const shimGain = this.ctx.createGain();
+                shimmer.type = 'sine';
+                shimmer.connect(shimGain);
+                shimGain.connect(this.masterGain);
+                shimmer.frequency.setValueAtTime(880, now);
+                shimmer.frequency.linearRampToValueAtTime(1760, now + 0.5);
+                shimGain.gain.setValueAtTime(0.08, now + 0.2);
+                shimGain.gain.exponentialRampToValueAtTime(0.01, now + 0.8);
+                shimmer.start(now + 0.2);
+                shimmer.stop(now + 0.9);
+            },
+
+            // Kill streak announcement - escalating intensity
+            playKillStreak(streakLevel) {
+                if (!gameSettings.soundEnabled || !this.ctx) return;
+                this.resume();
+                const now = this.ctx.currentTime;
+                const intensity = Math.min(1, (streakLevel - 2) / 8); // 0 to 1 based on streak
+                const noteCount = Math.min(5, streakLevel - 1);
+
+                // Ascending fanfare notes
+                for (let i = 0; i < noteCount; i++) {
+                    const osc = this.ctx.createOscillator();
+                    const gain = this.ctx.createGain();
+                    osc.type = 'square';
+                    osc.connect(gain);
+                    gain.connect(this.masterGain);
+                    const baseFreq = 220 + (streakLevel * 20);
+                    osc.frequency.setValueAtTime(baseFreq * Math.pow(1.26, i), now + i * 0.08);
+                    gain.gain.setValueAtTime(0, now + i * 0.08);
+                    gain.gain.linearRampToValueAtTime(0.15 + intensity * 0.1, now + i * 0.08 + 0.02);
+                    gain.gain.exponentialRampToValueAtTime(0.01, now + i * 0.08 + 0.2);
+                    osc.start(now + i * 0.08);
+                    osc.stop(now + i * 0.08 + 0.25);
+                }
+
+                // Power chord at the end for high streaks
+                if (streakLevel >= 5) {
+                    const chord = this.ctx.createOscillator();
+                    const chordGain = this.ctx.createGain();
+                    chord.type = 'sawtooth';
+                    chord.connect(chordGain);
+                    chordGain.connect(this.masterGain);
+                    chord.frequency.setValueAtTime(440 + streakLevel * 30, now + noteCount * 0.08);
+                    chordGain.gain.setValueAtTime(0.2 + intensity * 0.15, now + noteCount * 0.08);
+                    chordGain.gain.exponentialRampToValueAtTime(0.01, now + noteCount * 0.08 + 0.5);
+                    chord.start(now + noteCount * 0.08);
+                    chord.stop(now + noteCount * 0.08 + 0.6);
+                }
             },
 
             // Victory fanfare
