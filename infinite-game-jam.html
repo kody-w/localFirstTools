@@ -1381,6 +1381,9 @@
                 this.apexIntensity = 0;     // Current apex glow strength (0-1)
                 this.apexPulsePhase = 0;    // Phase for shimmer animation
 
+                // CYCLE 28: Platform landing ripple effect
+                this.landingRipples = [];   // Active ripple animations
+
                 // CYCLE 4: Death flash effect
                 this.deathFlash = 0;
 
@@ -1700,6 +1703,17 @@
                                 // CYCLE 14: Landing screen shake for impact feel
                                 if (squashIntensity > 0.5) {
                                     this.shakeIntensity = Math.max(this.shakeIntensity, squashIntensity * 4);
+                                }
+
+                                // CYCLE 28: Platform landing ripple - expanding ring effect
+                                if (!this.isAI && squashIntensity > 0.2) {
+                                    this.landingRipples.push({
+                                        x: this.player.x + this.player.width / 2,
+                                        y: plat.y,
+                                        radius: 10,
+                                        maxRadius: 40 + squashIntensity * 30,
+                                        alpha: 0.6 + squashIntensity * 0.3
+                                    });
                                 }
 
                                 // CYCLE 6: Landing thump sound
@@ -2132,21 +2146,28 @@
                 }
                 ctx.globalAlpha = 1;
 
+                // CYCLE 28: Viewport culling bounds - skip off-screen objects
+                const viewLeft = this.cameraX - 50;  // Small buffer for objects entering view
+                const viewRight = this.cameraX + canvas.width + 50;
+
                 // Platforms - CYCLE 23: Batched rendering (3 passes instead of 3n state changes)
                 // Static platforms - body
                 ctx.fillStyle = '#6a89cc';
                 for (const plat of this.platforms) {
-                    if (!plat.isMoving) ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
+                    if (!plat.isMoving && plat.x + plat.width > viewLeft && plat.x < viewRight)
+                        ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
                 }
                 // Moving platforms - body
                 ctx.fillStyle = '#4a69bd';
                 for (const plat of this.platforms) {
-                    if (plat.isMoving) ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
+                    if (plat.isMoving && plat.x + plat.width > viewLeft && plat.x < viewRight)
+                        ctx.fillRect(plat.x, plat.y, plat.width, plat.height);
                 }
                 // All platforms - highlight strip
                 ctx.fillStyle = '#82ccdd';
                 for (const plat of this.platforms) {
-                    ctx.fillRect(plat.x, plat.y, plat.width, 4);
+                    if (plat.x + plat.width > viewLeft && plat.x < viewRight)
+                        ctx.fillRect(plat.x, plat.y, plat.width, 4);
                 }
 
                 // CYCLE 26: Platform rhythm glow - traveling wave synchronized to momentum
@@ -2161,12 +2182,30 @@
                 }
                 ctx.globalAlpha = 1;
 
+                // CYCLE 28: Landing ripple rendering - expanding rings on platform
+                for (let i = this.landingRipples.length - 1; i >= 0; i--) {
+                    const rip = this.landingRipples[i];
+                    rip.radius += 3;
+                    const progress = rip.radius / rip.maxRadius;
+                    rip.alpha = (1 - progress) * 0.5;
+                    if (rip.radius >= rip.maxRadius) {
+                        this.landingRipples.splice(i, 1);
+                        continue;
+                    }
+                    ctx.strokeStyle = `rgba(130, 200, 220, ${rip.alpha})`;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.ellipse(rip.x, rip.y, rip.radius, rip.radius * 0.3, 0, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+
                 // Coins - CYCLE 18: Batched rendering (2 draw calls instead of 2n)
+                // CYCLE 28: Added viewport culling
                 // Coin bodies - single path for all coins
                 ctx.fillStyle = '#ffd700';
                 ctx.beginPath();
                 for (const coin of this.coins) {
-                    if (coin.collected) continue;
+                    if (coin.collected || coin.x < viewLeft || coin.x > viewRight) continue;
                     ctx.moveTo(coin.x + 10, coin.y);
                     ctx.arc(coin.x, coin.y, 10, 0, Math.PI * 2);
                 }
@@ -2175,7 +2214,7 @@
                 ctx.fillStyle = '#ffed4a';
                 ctx.beginPath();
                 for (const coin of this.coins) {
-                    if (coin.collected) continue;
+                    if (coin.collected || coin.x < viewLeft || coin.x > viewRight) continue;
                     ctx.moveTo(coin.x - 2 + 4, coin.y - 2);
                     ctx.arc(coin.x - 2, coin.y - 2, 4, 0, Math.PI * 2);
                 }
@@ -2183,7 +2222,7 @@
                 // CYCLE 24: Coin shimmer - sweeping shine effect
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.6)';
                 for (const coin of this.coins) {
-                    if (coin.collected) continue;
+                    if (coin.collected || coin.x < viewLeft || coin.x > viewRight) continue;
                     const phase = (this.time - (coin.spawnTime || 0)) % 90;
                     if (phase < 15) {
                         const shimmerX = coin.x - 8 + (phase / 15) * 16;
@@ -2222,11 +2261,12 @@
                 }
 
                 // CYCLE 24: Motion trails behind moving obstacles (direction indicator)
+                // CYCLE 28: Added viewport culling to obstacle rendering
                 for (let t = 3; t >= 1; t--) {
                     ctx.fillStyle = `rgba(255, 150, 0, ${0.04 * t})`;
                     ctx.beginPath();
                     for (const obs of this.obstacles) {
-                        if (obs.vx === 0) continue;
+                        if (obs.vx === 0 || obs.x < viewLeft || obs.x > viewRight) continue;
                         const trailOffset = obs.vx > 0 ? -t * 12 : t * 12;
                         ctx.moveTo(obs.x + trailOffset, obs.y - obs.size/2);
                         ctx.lineTo(obs.x + trailOffset + obs.size/2, obs.y + obs.size/2);
@@ -2240,6 +2280,7 @@
                 ctx.lineWidth = 8;
                 ctx.beginPath();
                 for (const obs of this.obstacles) {
+                    if (obs.x < viewLeft || obs.x > viewRight) continue;
                     ctx.moveTo(obs.x, obs.y - obs.size/2);
                     ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
                     ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
@@ -2251,6 +2292,7 @@
                 ctx.fillStyle = '#ff9500';
                 ctx.beginPath();
                 for (const obs of this.obstacles) {
+                    if (obs.x < viewLeft || obs.x > viewRight) continue;
                     ctx.moveTo(obs.x, obs.y - obs.size/2);
                     ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
                     ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
@@ -2263,6 +2305,7 @@
                 ctx.lineWidth = 2;
                 ctx.beginPath();
                 for (const obs of this.obstacles) {
+                    if (obs.x < viewLeft || obs.x > viewRight) continue;
                     ctx.moveTo(obs.x, obs.y - obs.size/2);
                     ctx.lineTo(obs.x + obs.size/2, obs.y + obs.size/2);
                     ctx.lineTo(obs.x - obs.size/2, obs.y + obs.size/2);
@@ -2401,6 +2444,19 @@
                     ctx.fillRect(0, 0, canvas.width, canvas.height);
                     this.deathFlash *= 0.85; // Rapid fade out
                     if (this.deathFlash < 0.05) this.deathFlash = 0;
+                }
+
+                // CYCLE 28: Momentum vignette - screen edge darkening at high speed
+                if (this.momentum > 1.2 && this.alive) {
+                    const vignetteIntensity = Math.min(0.4, (this.momentum - 1.2) * 0.25);
+                    const gradient = ctx.createRadialGradient(
+                        canvas.width / 2, canvas.height / 2, canvas.height * 0.3,
+                        canvas.width / 2, canvas.height / 2, canvas.height * 0.85
+                    );
+                    gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+                    gradient.addColorStop(1, `rgba(20, 10, 40, ${vignetteIntensity})`);
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(0, 0, canvas.width, canvas.height);
                 }
 
                 ctx.restore(); // CYCLE 2: Screen shake restore
