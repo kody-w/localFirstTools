@@ -978,6 +978,43 @@
         const afterimagePool = new AfterimagePool(8);
 
         // ============================================
+        // CYCLE 22: FLOATING TEXT OBJECT POOL
+        // Eliminates GC pressure from score popup churn
+        // ============================================
+        class FloatingTextPool {
+            constructor(maxSize = 20) {
+                this.pool = [];
+                this.active = [];
+                for (let i = 0; i < maxSize; i++) {
+                    this.pool.push({ x: 0, y: 0, text: '', color: '', vy: 0, alpha: 0 });
+                }
+            }
+
+            acquire(x, y, text, color, vy = -2) {
+                const ft = this.pool.length > 0 ? this.pool.pop() : this.active.shift();
+                ft.x = x; ft.y = y; ft.text = text; ft.color = color; ft.vy = vy; ft.alpha = 1.0;
+                this.active.push(ft);
+                return ft;
+            }
+
+            update() {
+                for (let i = this.active.length - 1; i >= 0; i--) {
+                    const ft = this.active[i];
+                    ft.y += ft.vy;
+                    ft.alpha -= 0.025;
+                    if (ft.alpha <= 0) {
+                        this.pool.push(this.active.splice(i, 1)[0]);
+                    }
+                }
+            }
+
+            getActive() { return this.active; }
+            clear() { while (this.active.length) this.pool.push(this.active.pop()); }
+        }
+
+        const floatingTextPool = new FloatingTextPool(20);
+
+        // ============================================
         // CYCLE 18: HAPTIC FEEDBACK SYSTEM
         // Multi-sensory feedback for mobile touch controls
         // ============================================
@@ -1608,21 +1645,25 @@
                         obs.vx *= -1;
                     }
 
-                    const dist = Math.hypot(
-                        this.player.x + this.player.width/2 - obs.x,
-                        this.player.y + this.player.height/2 - obs.y
-                    );
+                    // CYCLE 22: Squared distance (avoids sqrt per obstacle per frame)
+                    const dx = this.player.x + this.player.width/2 - obs.x;
+                    const dy = this.player.y + this.player.height/2 - obs.y;
+                    const distSq = dx * dx + dy * dy;
+                    const halfSize = obs.size / 2;
+                    const deathThreshSq = (halfSize + 15) * (halfSize + 15);
+                    const closeThreshSq = (halfSize + 40) * (halfSize + 40);
+                    const insaneThreshSq = (halfSize + 20) * (halfSize + 20);
 
-                    if (dist < obs.size/2 + 15) {
+                    if (distSq < deathThreshSq) {
                         this.die('obstacle');
-                    } else if (dist < obs.size/2 + 40 && this.closeCallCooldown <= 0) {
+                    } else if (distSq < closeThreshSq && this.closeCallCooldown <= 0) {
                         // CYCLE 16: Cooldown prevents farming same obstacle
                         this.closeCallCooldown = 30; // 30 frame cooldown (~0.5s)
                         this.closeCallCount++;
                         this.combo++;
                         this.maxCombo = Math.max(this.maxCombo, this.combo);
                         // CYCLE 6: Graduated close-call feedback
-                        if (dist < obs.size/2 + 20) {
+                        if (distSq < insaneThreshSq) {
                             // Ultra-close (5px from death!) - INSANE reward
                             this.momentum = Math.min(3.0, this.momentum + 0.15);
                             // CYCLE 16: INSANE close-call score bonus
@@ -1653,23 +1694,28 @@
 
                 // Coin collection with momentum multiplier
                 // CYCLE 11: Coin magnetism - coins pull toward player when close
+                // CYCLE 22: Squared distance (sqrt only when in magnet zone)
                 for (const coin of this.coins) {
                     if (coin.collected) continue;
                     const playerCenterX = this.player.x + this.player.width / 2;
                     const playerCenterY = this.player.y + this.player.height / 2;
                     const dx = playerCenterX - coin.x;
                     const dy = playerCenterY - coin.y;
-                    const dist = Math.hypot(dx, dy);
+                    const distSq = dx * dx + dy * dy;
 
                     // Magnetic pull zone (larger than collection, scales with momentum)
                     const magnetRange = 60 + (this.momentum - 1) * 15;
-                    if (dist < magnetRange && dist > 25) {
+                    const magnetRangeSq = magnetRange * magnetRange;
+                    const collectSq = 625; // 25 * 25
+                    if (distSq < magnetRangeSq && distSq > collectSq) {
+                        // Only compute sqrt when actually in magnet zone
+                        const dist = Math.sqrt(distSq);
                         const pullStrength = 0.12 * (1 - dist / magnetRange) * this.momentum;
                         coin.x += dx * pullStrength;
                         coin.y += dy * pullStrength;
                     }
 
-                    if (dist < 25) {
+                    if (distSq < collectSq) {
                         coin.collected = true;
                         // CYCLE 1: Score multiplied by momentum
                         const coinScore = Math.round(this.dna.coinValue * this.momentum);
@@ -1903,16 +1949,17 @@
             }
 
             // CYCLE 2: Spawn floating score text
+            // CYCLE 22: Use pool for human player (zero GC), array for AI
             spawnFloatingText(x, y, text, color = '#ffcc00') {
-                // CYCLE 14: Cap array size to prevent memory leak during AI simulation
-                if (this.floatingTexts.length >= 20) {
-                    this.floatingTexts.shift();
+                if (!this.isAI) {
+                    floatingTextPool.acquire(x, y, text, color, -2);
+                } else {
+                    // CYCLE 14: Cap array size to prevent memory leak during AI simulation
+                    if (this.floatingTexts.length >= 20) {
+                        this.floatingTexts.shift();
+                    }
+                    this.floatingTexts.push({ x, y, text, color, vy: -2, alpha: 1.0 });
                 }
-                this.floatingTexts.push({
-                    x, y, text, color,
-                    vy: -2,
-                    alpha: 1.0
-                });
             }
 
             spawnParticles(x, y, color, count) {
@@ -2043,16 +2090,37 @@
                     const px = this.player.x + (this.player.width - pw) / 2;
                     const py = this.player.y + (this.player.height - ph);
 
+                    // CYCLE 22: Speed lines behind player at high momentum
+                    if (this.momentum > 1.5) {
+                        const lineCount = Math.floor((this.momentum - 1) * 4);
+                        ctx.strokeStyle = `rgba(255, 255, 255, ${(this.momentum - 1) * 0.15})`;
+                        ctx.lineWidth = 2;
+                        for (let i = 0; i < lineCount; i++) {
+                            const lineY = this.player.y + 5 + (i * 8) - (lineCount * 4);
+                            const lineLen = 20 + this.momentum * 15;
+                            ctx.beginPath();
+                            ctx.moveTo(this.player.x - 10, lineY);
+                            ctx.lineTo(this.player.x - 10 - lineLen, lineY);
+                            ctx.stroke();
+                        }
+                    }
+
                     // CYCLE 12: Use pre-computed color lookup (no per-frame allocation)
                     const colorIndex = Math.min(20, Math.floor((this.momentum - 1) * 10));
                     ctx.fillStyle = Game.playerColors[colorIndex];
 
-                    ctx.fillRect(px, py, pw, ph);
+                    // CYCLE 22: Player tilt based on vertical velocity
+                    ctx.save();
+                    const tilt = Math.max(-0.2, Math.min(0.2, this.player.vy * 0.015));
+                    ctx.translate(this.player.x + this.player.width / 2, this.player.y + this.player.height / 2);
+                    ctx.rotate(tilt);
+                    ctx.fillRect(-pw / 2, -ph / 2, pw, ph);
                     // Eyes (scaled)
                     ctx.fillStyle = '#000';
                     const eyeScale = Math.min(this.scaleX, this.scaleY);
-                    ctx.fillRect(px + 8 * eyeScale, py + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
-                    ctx.fillRect(px + 18 * eyeScale, py + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
+                    ctx.fillRect(-pw / 2 + 8 * eyeScale, -ph / 2 + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
+                    ctx.fillRect(-pw / 2 + 18 * eyeScale, -ph / 2 + 10 * eyeScale, 5 * eyeScale, 5 * eyeScale);
+                    ctx.restore();
                 }
 
                 // CYCLE 1: Particles from pool
@@ -2064,17 +2132,19 @@
                 ctx.globalAlpha = 1;
 
                 // CYCLE 2: Floating score texts (CYCLE 7: Added text stroke for readability)
+                // CYCLE 22: Use pool for human player, array for AI
                 ctx.font = 'bold 16px system-ui';
                 ctx.textAlign = 'center';
                 ctx.lineWidth = 3;
                 ctx.strokeStyle = '#000';
-                for (let i = this.floatingTexts.length - 1; i >= 0; i--) {
-                    const ft = this.floatingTexts[i];
-                    ft.y += ft.vy;
-                    ft.alpha -= 0.025;
-                    if (ft.alpha <= 0) {
-                        this.floatingTexts.splice(i, 1);
-                        continue;
+                const texts = this.isAI ? this.floatingTexts : floatingTextPool.getActive();
+                if (!this.isAI) floatingTextPool.update();
+                for (let i = texts.length - 1; i >= 0; i--) {
+                    const ft = texts[i];
+                    if (this.isAI) {
+                        ft.y += ft.vy;
+                        ft.alpha -= 0.025;
+                        if (ft.alpha <= 0) { this.floatingTexts.splice(i, 1); continue; }
                     }
                     ctx.globalAlpha = ft.alpha;
                     ctx.strokeText(ft.text, ft.x, ft.y); // CYCLE 7: Dark outline
