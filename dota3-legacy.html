@@ -2335,6 +2335,80 @@
         const _tempVec3 = new THREE.Vector3();
 
         // ==========================================
+        // R3: Spatial Grid - O(n) entity queries instead of O(n²)
+        // Divides map into cells for fast proximity lookups
+        // ==========================================
+        const SpatialGrid = {
+            cellSize: 10,  // 10 unit cells for ~100x100 map
+            grid: new Map(),
+
+            // Rebuild grid each frame (call at start of update)
+            rebuild() {
+                this.grid.clear();
+                for (let i = 0; i < entities.length; i++) {
+                    const e = entities[i];
+                    if (e.dead || !e.mesh) continue;
+
+                    const cellX = Math.floor(e.mesh.position.x / this.cellSize);
+                    const cellZ = Math.floor(e.mesh.position.z / this.cellSize);
+                    const key = (cellX << 16) | (cellZ & 0xFFFF);
+
+                    if (!this.grid.has(key)) {
+                        this.grid.set(key, []);
+                    }
+                    this.grid.get(key).push(e);
+                }
+            },
+
+            // Get entities within radius (checks 3x3 cells around point)
+            getNearby(x, z, radius, excludeEntity = null) {
+                const results = [];
+                const cellRadius = Math.ceil(radius / this.cellSize);
+                const centerCellX = Math.floor(x / this.cellSize);
+                const centerCellZ = Math.floor(z / this.cellSize);
+                const radiusSq = radius * radius;
+
+                for (let dx = -cellRadius; dx <= cellRadius; dx++) {
+                    for (let dz = -cellRadius; dz <= cellRadius; dz++) {
+                        const key = ((centerCellX + dx) << 16) | ((centerCellZ + dz) & 0xFFFF);
+                        const cell = this.grid.get(key);
+                        if (!cell) continue;
+
+                        for (let i = 0; i < cell.length; i++) {
+                            const e = cell[i];
+                            if (e === excludeEntity || e.dead) continue;
+
+                            const ex = e.mesh.position.x;
+                            const ez = e.mesh.position.z;
+                            const distSq = (ex - x) * (ex - x) + (ez - z) * (ez - z);
+
+                            if (distSq <= radiusSq) {
+                                results.push({ entity: e, distSq: distSq });
+                            }
+                        }
+                    }
+                }
+                return results;
+            },
+
+            // Fast nearest enemy lookup
+            getNearestEnemy(x, z, range, myTeam) {
+                const nearby = this.getNearby(x, z, range);
+                let nearest = null;
+                let nearestDistSq = range * range;
+
+                for (let i = 0; i < nearby.length; i++) {
+                    const { entity, distSq } = nearby[i];
+                    if (entity.team !== myTeam && distSq < nearestDistSq) {
+                        nearest = entity;
+                        nearestDistSq = distSq;
+                    }
+                }
+                return nearest;
+            }
+        };
+
+        // ==========================================
         // KILL STREAK SYSTEM
         // ==========================================
         const KILL_STREAK_NAMES = {
@@ -4018,6 +4092,13 @@
 
                 target.takeDamage(dmg, isCrit ? 'crit' : 'physical', this);
 
+                // R3: Show attack slash VFX - color based on crit or team
+                if (typeof createSlashEffect === 'function') {
+                    const slashColor = isCrit ? 0xffff00 :
+                        (this.team === TEAM_RADIANT ? 0x00ffff : 0xff4444);
+                    createSlashEffect(this, target, slashColor);
+                }
+
                 // ROUND 10: Track damage dealt for match stats
                 if (this === player && typeof matchStats !== 'undefined') {
                     matchStats.trackDamageDealt(dmg);
@@ -4038,7 +4119,9 @@
                 // Movement
                 const dist = this.mesh.position.distanceTo(this.targetPos);
                 if (dist > 0.1) {
-                    const dir = this.targetPos.clone().sub(this.mesh.position).normalize();
+                    // R3: Use VecPool instead of .clone() to reduce GC pressure
+                    const dir = VecPool.get();
+                    dir.copy(this.targetPos).sub(this.mesh.position).normalize();
                     this.mesh.position.add(dir.multiplyScalar(this.speed));
                     this.mesh.lookAt(this.targetPos);
 
@@ -4838,7 +4921,9 @@
             }
 
             moveTowardsTarget(dt) {
-                const direction = this.targetPos.clone().sub(this.mesh.position);
+                // R3: Use VecPool instead of .clone()
+                const direction = VecPool.get();
+                direction.copy(this.targetPos).sub(this.mesh.position);
                 const dist = direction.length();
 
                 if (dist > 0.5) {
@@ -5499,22 +5584,17 @@
             update(dt) {
                 if (this.dead) return;
 
-                // Tower AI
+                // Tower AI - R3: Use SpatialGrid for O(n) instead of O(n²)
                 if (clock.getElapsedTime() - this.lastAttack > 1.0) {
-                    let target = null;
-                    let minD = this.range;
-
-                    entities.forEach(e => {
-                        if (e.team !== this.team && !e.dead) {
-                            const d = this.mesh.position.distanceTo(e.mesh.position);
-                            if (d < minD) {
-                                minD = d;
-                                target = e;
-                            }
-                        }
-                    });
+                    const target = SpatialGrid.getNearestEnemy(
+                        this.mesh.position.x,
+                        this.mesh.position.z,
+                        this.range,
+                        this.team
+                    );
 
                     if (target) {
+                        const minD = this.mesh.position.distanceTo(target.mesh.position);
                         target.takeDamage(this.damage, 'physical', this);
                         this.lastAttack = clock.getElapsedTime();
                         AudioManager.playTowerShot();
@@ -5566,13 +5646,15 @@
             }
 
             const dir = targetPoint.sub(start).normalize();
+            // R3: Pre-compute movement delta to avoid clone per frame
+            const moveStep = dir.clone().multiplyScalar(0.8);
             let trailCounter = 0;
 
             let projectileAlive = true;
             const update = () => {
                 if (!projectileAlive) return;
 
-                sphere.position.add(dir.clone().multiplyScalar(0.8));
+                sphere.position.add(moveStep);
 
                 // ROUND 9: Spawn trail particles every 3 frames
                 trailCounter++;
@@ -5774,6 +5856,118 @@
         // Wrapper function for backward compatibility
         function createExplosion(pos, color, count) {
             ExplosionPool.spawn(pos, color, count || 20);
+        }
+
+        // R3: Attack slash VFX for visual feedback
+        function createSlashEffect(attacker, target, color = 0xffffff) {
+            if (!attacker || !attacker.mesh || !target || !target.mesh) return;
+
+            const startPos = attacker.mesh.position;
+            const endPos = target.mesh.position;
+
+            // Calculate direction to target
+            const dir = VecPool.get();
+            dir.copy(endPos).sub(startPos).normalize();
+
+            // Create curved arc geometry
+            const arcRadius = 1.2;
+            const arcSegments = 8;
+            const arcAngle = Math.PI * 0.6; // 108 degree arc
+
+            const points = [];
+            for (let i = 0; i <= arcSegments; i++) {
+                const t = i / arcSegments;
+                const angle = -arcAngle / 2 + arcAngle * t;
+                const x = Math.sin(angle) * arcRadius;
+                const y = 0.5 + Math.cos(angle) * arcRadius * 0.3; // Flatter arc
+                const z = 0;
+                points.push(new THREE.Vector3(x, y, z));
+            }
+
+            const curve = new THREE.CatmullRomCurve3(points);
+            const tubeGeo = new THREE.TubeGeometry(curve, 12, 0.08, 6, false);
+            const tubeMat = new THREE.MeshBasicMaterial({
+                color: color,
+                transparent: true,
+                opacity: 0.9
+            });
+
+            const slashMesh = new THREE.Mesh(tubeGeo, tubeMat);
+
+            // Position at midpoint between attacker and target
+            const midPoint = VecPool.get();
+            midPoint.copy(startPos).add(endPos).multiplyScalar(0.5);
+            slashMesh.position.copy(midPoint);
+            slashMesh.position.y = 1.0;
+
+            // Rotate to face direction of attack
+            slashMesh.rotation.y = Math.atan2(dir.x, dir.z);
+
+            scene.add(slashMesh);
+
+            // Animate slash - scale and fade
+            let frame = 0;
+            const maxFrames = 8;
+
+            const animateSlash = () => {
+                frame++;
+                const progress = frame / maxFrames;
+
+                // Scale up slightly
+                slashMesh.scale.setScalar(1 + progress * 0.5);
+
+                // Fade out
+                tubeMat.opacity = 0.9 * (1 - progress);
+
+                if (frame < maxFrames) {
+                    requestAnimationFrame(animateSlash);
+                } else {
+                    scene.remove(slashMesh);
+                    tubeGeo.dispose();
+                    tubeMat.dispose();
+                }
+            };
+
+            animateSlash();
+
+            // Impact sparks at target position
+            const sparkCount = 6;
+            for (let i = 0; i < sparkCount; i++) {
+                const sparkGeo = new THREE.SphereGeometry(0.05);
+                const sparkMat = new THREE.MeshBasicMaterial({
+                    color: color,
+                    transparent: true,
+                    opacity: 1
+                });
+                const spark = new THREE.Mesh(sparkGeo, sparkMat);
+                spark.position.copy(endPos);
+                spark.position.y = 1;
+
+                // Random velocity
+                const vx = (Math.random() - 0.5) * 0.3;
+                const vy = Math.random() * 0.2 + 0.1;
+                const vz = (Math.random() - 0.5) * 0.3;
+
+                scene.add(spark);
+
+                let sparkFrame = 0;
+                const animateSpark = () => {
+                    sparkFrame++;
+                    spark.position.x += vx;
+                    spark.position.y += vy - sparkFrame * 0.02; // Gravity
+                    spark.position.z += vz;
+                    sparkMat.opacity = 1 - sparkFrame / 12;
+
+                    if (sparkFrame < 12) {
+                        requestAnimationFrame(animateSpark);
+                    } else {
+                        scene.remove(spark);
+                        sparkGeo.dispose();
+                        sparkMat.dispose();
+                    }
+                };
+                animateSpark();
+            }
         }
 
         // ROUND 10: Particle trail system for projectiles
@@ -6324,12 +6518,14 @@
             scene.add(projectile);
 
             const direction = new THREE.Vector3(targetInfo.x, 0, targetInfo.z).sub(startPos).normalize();
+            // R3: Pre-compute move step to avoid clone per frame
+            const fireballMoveStep = direction.clone().multiplyScalar(0.8);
             let traveled = 0;
 
             const moveFireball = () => {
                 if (!projectile.parent) return;
 
-                projectile.position.add(direction.clone().multiplyScalar(0.8));
+                projectile.position.add(fireballMoveStep);
                 traveled += 0.8;
 
                 // Fire trail particles
@@ -6518,6 +6714,8 @@
             for (let i = -2; i <= 2; i++) {
                 const angle = baseAngle + i * 0.3;
                 const knifeDir = new THREE.Vector3(Math.sin(angle), 0, Math.cos(angle));
+                // R3: Pre-compute move step to avoid clone per frame
+                const knifeMoveStep = knifeDir.clone().multiplyScalar(0.6);
 
                 const knife = new THREE.Mesh(
                     new THREE.ConeGeometry(0.1, 0.5, 4),
@@ -6531,7 +6729,7 @@
 
                 let traveled = 0;
                 const moveKnife = () => {
-                    knife.position.add(knifeDir.clone().multiplyScalar(0.6));
+                    knife.position.add(knifeMoveStep);
                     traveled += 0.6;
 
                     entities.forEach(e => {
@@ -9029,6 +9227,8 @@
 
             // R2: Reset vector pool each frame
             VecPool.reset();
+            // R3: Rebuild spatial grid for O(n) entity queries
+            SpatialGrid.rebuild();
 
             const rawDt = clock.getDelta();
             // R2 FIX: Apply HitStop time scaling
@@ -9050,9 +9250,14 @@
             checkWinConditions();
 
             // Camera Follow with screen shake
+            // R3: Use VecPool instead of clone + new Vector3
             if (player && !player.dead && player.mesh) {
                 const shakeOffset = screenShake.update();
-                const targetPos = player.mesh.position.clone().add(new THREE.Vector3(shakeOffset.x, 25 + shakeOffset.y, 20));
+                const targetPos = VecPool.get();
+                targetPos.copy(player.mesh.position);
+                targetPos.x += shakeOffset.x;
+                targetPos.y += 25 + shakeOffset.y;
+                targetPos.z += 20;
                 camera.position.lerp(targetPos, 0.1);
                 camera.lookAt(player.mesh.position);
             }
