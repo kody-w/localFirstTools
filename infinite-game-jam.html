@@ -1087,6 +1087,9 @@
                 return colors;
             })();
 
+            // CYCLE 16: Static milestones array - avoids per-reset allocation
+            static milestones = [100, 250, 500, 1000, 2000, 5000];
+
             constructor(dna, isAI = true) {
                 this.dna = { ...dna };
                 this.isAI = isAI;
@@ -1126,6 +1129,7 @@
                 this.coinsCollected = 0;
                 this.jumpsUsed = 0;
                 this.closeCallCount = 0;
+                this.closeCallCooldown = 0; // CYCLE 16: Cooldown to prevent farming
                 this.idleTime = 0;
                 this.actionVariety = new Set();
 
@@ -1160,7 +1164,7 @@
 
                 // CYCLE 5: Distance milestones
                 this.lastMilestone = 0;
-                this.milestones = [100, 250, 500, 1000, 2000, 5000];
+                // CYCLE 16: milestones now static (Game.milestones)
 
                 // CYCLE 7: Hit freeze for impactful moments
                 this.hitFreezeFrames = 0;
@@ -1248,6 +1252,9 @@
                 this.time++;
                 const dt = 1;
 
+                // CYCLE 16: Decrement close-call cooldown
+                if (this.closeCallCooldown > 0) this.closeCallCooldown--;
+
                 // Apply difficulty scaling
                 this.difficulty = Math.min(
                     this.dna.maxDifficulty,
@@ -1255,12 +1262,17 @@
                 );
 
                 // Player input
+                // CYCLE 16: Turn-around acceleration boost - snappier direction changes
+                const turningLeft = input.left && this.player.vx > 0.5;
+                const turningRight = input.right && this.player.vx < -0.5;
+                const turnBoost = (turningLeft || turningRight) ? 1.6 : 1.0;
+
                 if (input.left) {
-                    this.player.vx -= this.dna.playerSpeed * (this.player.grounded ? 1 : this.dna.airControl);
+                    this.player.vx -= this.dna.playerSpeed * (this.player.grounded ? 1 : this.dna.airControl) * turnBoost;
                     this.actionVariety.add('left');
                 }
                 if (input.right) {
-                    this.player.vx += this.dna.playerSpeed * (this.player.grounded ? 1 : this.dna.airControl);
+                    this.player.vx += this.dna.playerSpeed * (this.player.grounded ? 1 : this.dna.airControl) * turnBoost;
                     this.actionVariety.add('right');
                 }
 
@@ -1411,7 +1423,9 @@
 
                     if (dist < obs.size/2 + 15) {
                         this.die('obstacle');
-                    } else if (dist < obs.size/2 + 40) {
+                    } else if (dist < obs.size/2 + 40 && this.closeCallCooldown <= 0) {
+                        // CYCLE 16: Cooldown prevents farming same obstacle
+                        this.closeCallCooldown = 30; // 30 frame cooldown (~0.5s)
                         this.closeCallCount++;
                         this.combo++;
                         this.maxCombo = Math.max(this.maxCombo, this.combo);
@@ -1419,8 +1433,11 @@
                         if (dist < obs.size/2 + 20) {
                             // Ultra-close (5px from death!) - INSANE reward
                             this.momentum = Math.min(3.0, this.momentum + 0.15);
+                            // CYCLE 16: INSANE close-call score bonus
+                            const insaneBonus = Math.round(50 * this.momentum);
+                            this.score += insaneBonus;
                             if (!this.isAI) {
-                                this.spawnFloatingText(this.player.x, this.player.y - 50, 'INSANE!', '#ff00ff');
+                                this.spawnFloatingText(this.player.x, this.player.y - 50, `+${insaneBonus} INSANE!`, '#ff00ff');
                                 this.shakeIntensity = 8;
                                 Audio.playCloseCall(true); // CYCLE 7: Dramatic whoosh
                                 this.hitFreezeFrames = 3; // CYCLE 7: Brief dramatic pause
@@ -1428,9 +1445,12 @@
                         } else {
                             // Regular close call
                             this.momentum = Math.min(3.0, this.momentum + 0.05);
+                            // CYCLE 16: Regular close-call score bonus
+                            const closeBonus = Math.round(15 * this.momentum);
+                            this.score += closeBonus;
                             if (!this.isAI) {
                                 // CYCLE 8: Changed from orange to cyan for positive/danger color distinction
-                                this.spawnFloatingText(this.player.x, this.player.y - 40, 'CLOSE!', '#00ffd5');
+                                this.spawnFloatingText(this.player.x, this.player.y - 40, `+${closeBonus} CLOSE!`, '#00ffd5');
                                 Audio.playCloseCall(false); // CYCLE 7: Quick whoosh
                             }
                         }
@@ -1479,7 +1499,7 @@
                     this.distance = this.scrollOffset;
 
                     // CYCLE 5: Distance milestone callouts
-                    for (const milestone of this.milestones) {
+                    for (const milestone of Game.milestones) {
                         if (this.distance >= milestone && this.lastMilestone < milestone) {
                             this.lastMilestone = milestone;
                             this.spawnFloatingText(
