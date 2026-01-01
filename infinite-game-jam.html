@@ -932,6 +932,42 @@
         const particlePool = new ParticlePool(200);
 
         // ============================================
+        // CYCLE 19: AFTERIMAGE OBJECT POOL
+        // Eliminates GC pressure from afterimage object churn
+        // ============================================
+        class AfterimagePool {
+            constructor(maxSize = 8) {
+                this.pool = [];
+                this.active = [];
+                for (let i = 0; i < maxSize; i++) {
+                    this.pool.push({ x: 0, y: 0, alpha: 0, scaleX: 1, scaleY: 1 });
+                }
+            }
+
+            acquire(x, y, alpha, scaleX, scaleY) {
+                const img = this.pool.length > 0 ? this.pool.pop() : this.active.shift();
+                img.x = x; img.y = y; img.alpha = alpha;
+                img.scaleX = scaleX; img.scaleY = scaleY;
+                this.active.push(img);
+                return img;
+            }
+
+            update(fadeRate = 0.05) {
+                for (let i = this.active.length - 1; i >= 0; i--) {
+                    this.active[i].alpha -= fadeRate;
+                    if (this.active[i].alpha <= 0) {
+                        this.pool.push(this.active.splice(i, 1)[0]);
+                    }
+                }
+            }
+
+            getActive() { return this.active; }
+            clear() { while (this.active.length) this.pool.push(this.active.pop()); }
+        }
+
+        const afterimagePool = new AfterimagePool(8);
+
+        // ============================================
         // CYCLE 18: HAPTIC FEEDBACK SYSTEM
         // Multi-sensory feedback for mobile touch controls
         // ============================================
@@ -1104,6 +1140,30 @@
                     osc.start(startTime);
                     osc.stop(startTime + 0.18);
                 });
+            },
+
+            // CYCLE 19: Momentum tier breakthrough sound - ethereal ascending chime
+            playMomentumTier(tier) {
+                if (!this.enabled || !this.ctx) return;
+                const baseFreq = 330 * tier; // Scales with tier (1.5, 2.0, 2.5, 3.0)
+                const osc1 = this.ctx.createOscillator();
+                const osc2 = this.ctx.createOscillator();
+                const gain = this.ctx.createGain();
+                osc1.type = 'sine';
+                osc2.type = 'triangle';
+                osc2.detune.value = 7; // Slight detune for shimmer
+                osc1.connect(gain);
+                osc2.connect(gain);
+                gain.connect(this.masterGain);
+                osc1.frequency.setValueAtTime(baseFreq, this.ctx.currentTime);
+                osc2.frequency.setValueAtTime(baseFreq * 2, this.ctx.currentTime);
+                osc1.frequency.exponentialRampToValueAtTime(baseFreq * 1.5, this.ctx.currentTime + 0.15);
+                osc2.frequency.exponentialRampToValueAtTime(baseFreq * 3, this.ctx.currentTime + 0.15);
+                gain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.01, this.ctx.currentTime + 0.2);
+                osc1.start(); osc2.start();
+                osc1.stop(this.ctx.currentTime + 0.2);
+                osc2.stop(this.ctx.currentTime + 0.2);
             }
         };
 
@@ -1205,6 +1265,9 @@
                 // CYCLE 5: Distance milestones
                 this.lastMilestone = 0;
                 // CYCLE 16: milestones now static (Game.milestones)
+
+                // CYCLE 19: Momentum tier tracking for audio cues
+                this.lastMomentumTier = 1.0;
 
                 // CYCLE 7: Hit freeze for impactful moments
                 this.hitFreezeFrames = 0;
@@ -1496,6 +1559,7 @@
                                 this.spawnFloatingText(this.player.x, this.player.y - 50, `+${insaneBonus} INSANE!`, '#ff00ff');
                                 this.shakeIntensity = 8;
                                 Audio.playCloseCall(true); // CYCLE 7: Dramatic whoosh
+                                Haptics.heavy(); // CYCLE 19: Heavy haptic for INSANE
                                 this.hitFreezeFrames = 3; // CYCLE 7: Brief dramatic pause
                             }
                         } else {
@@ -1508,6 +1572,7 @@
                                 // CYCLE 8: Changed from orange to cyan for positive/danger color distinction
                                 this.spawnFloatingText(this.player.x, this.player.y - 40, `+${closeBonus} CLOSE!`, '#00ffd5');
                                 Audio.playCloseCall(false); // CYCLE 7: Quick whoosh
+                                Haptics.medium(); // CYCLE 19: Medium haptic for close call
                             }
                         }
                     }
@@ -1544,7 +1609,8 @@
                         // CYCLE 2: Floating score text
                         this.spawnFloatingText(coin.x, coin.y - 20, `+${coinScore}`, '#ffcc00');
                         // CYCLE 4: Coin sound (pitch increases with momentum)
-                        if (!this.isAI) Audio.playCoin(this.momentum);
+                        // CYCLE 19: Light haptic for coin collection
+                        if (!this.isAI) { Audio.playCoin(this.momentum); Haptics.light(); }
                     }
                 }
 
@@ -1565,6 +1631,7 @@
                             this.spawnFloatingText(this.player.x, this.player.y - 60, text, color);
                             if (!this.isAI) {
                                 Audio.playCoin(2.5); // High-pitch milestone sound
+                                Haptics.medium(); // CYCLE 19: Medium haptic for milestone
                                 // CYCLE 7: Hit freeze for major milestones
                                 if (milestone >= 1000) this.hitFreezeFrames = 4;
                             }
@@ -1650,6 +1717,17 @@
                     this.momentum = Math.max(1.0, this.momentum - 0.005);
                 }
 
+                // CYCLE 19: Momentum tier breakthrough audio cue
+                // Trigger at 1.5, 2.0, 2.5, 3.0 thresholds
+                const currentTier = Math.floor(this.momentum * 2) / 2; // Round to nearest 0.5
+                if (currentTier > this.lastMomentumTier && currentTier >= 1.5 && !this.isAI) {
+                    Audio.playMomentumTier(currentTier);
+                    Haptics.light(); // Subtle haptic for tier up
+                    this.lastMomentumTier = currentTier;
+                } else if (currentTier < this.lastMomentumTier) {
+                    this.lastMomentumTier = currentTier; // Track tier down (no sound)
+                }
+
                 // CYCLE 3: Squash/Stretch interpolation
                 this.scaleX += (this.targetScaleX - this.scaleX) * 0.2;
                 this.scaleY += (this.targetScaleY - this.scaleY) * 0.2;
@@ -1657,17 +1735,24 @@
                 this.targetScaleY += (1.0 - this.targetScaleY) * 0.15;
 
                 // CYCLE 3: Afterimage trail (only when moving fast and high momentum)
+                // CYCLE 19: Use pooled afterimages for human player (zero GC pressure)
                 if (this.momentum > 1.3 && this.time % 3 === 0) {
-                    this.afterimages.push({
-                        x: this.player.x, y: this.player.y,
-                        alpha: 0.4, scaleX: this.scaleX, scaleY: this.scaleY
-                    });
-                    if (this.afterimages.length > 8) this.afterimages.shift();
+                    if (!this.isAI) {
+                        afterimagePool.acquire(this.player.x, this.player.y, 0.4, this.scaleX, this.scaleY);
+                    } else {
+                        // AI still uses simple array (less critical path)
+                        this.afterimages.push({ x: this.player.x, y: this.player.y, alpha: 0.4, scaleX: this.scaleX, scaleY: this.scaleY });
+                        if (this.afterimages.length > 8) this.afterimages.shift();
+                    }
                 }
                 // Fade out afterimages
-                for (let i = this.afterimages.length - 1; i >= 0; i--) {
-                    this.afterimages[i].alpha -= 0.05;
-                    if (this.afterimages[i].alpha <= 0) this.afterimages.splice(i, 1);
+                if (!this.isAI) {
+                    afterimagePool.update(0.05);
+                } else {
+                    for (let i = this.afterimages.length - 1; i >= 0; i--) {
+                        this.afterimages[i].alpha -= 0.05;
+                        if (this.afterimages[i].alpha <= 0) this.afterimages.splice(i, 1);
+                    }
                 }
 
                 // CYCLE 3: Smooth camera following
@@ -1700,8 +1785,8 @@
                 this.spawnParticles(this.player.x, this.player.y, '#ff4444', 15);
                 // CYCLE 2: Screen shake on death
                 this.shakeIntensity = 15;
-                // CYCLE 4: Death sound
-                if (!this.isAI) Audio.playDeath();
+                // CYCLE 4: Death sound + CYCLE 19: Heavy haptic on death
+                if (!this.isAI) { Audio.playDeath(); Haptics.heavy(); }
                 // CYCLE 4: Death flash intensity
                 this.deathFlash = 1.0;
 
@@ -1735,6 +1820,7 @@
                         savePersonalBests();
                         this.spawnFloatingText(this.player.x, this.player.y - 80, 'NEW BEST!', '#ff00ff');
                         Audio.playPersonalBest(); // CYCLE 17: Celebration fanfare
+                        Haptics.heavy(); // CYCLE 19: Celebration haptic
                     }
                 }
             }
@@ -1792,7 +1878,9 @@
                 ctx.translate(-this.cameraX, 0);
 
                 // CYCLE 3: Draw afterimages first (behind player)
-                for (const ghost of this.afterimages) {
+                // CYCLE 19: Use pooled afterimages for human player
+                const ghosts = this.isAI ? this.afterimages : afterimagePool.getActive();
+                for (const ghost of ghosts) {
                     ctx.globalAlpha = ghost.alpha * 0.5;
                     ctx.fillStyle = '#00ff88';
                     const gw = this.player.width * ghost.scaleX;
