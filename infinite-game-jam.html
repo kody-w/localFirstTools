@@ -1363,6 +1363,7 @@
                 this.coyoteTimer = 0;       // Frames of grace after leaving platform
                 this.jumpBufferTimer = 0;   // Frames to remember jump input
                 this.isJumpHeld = false;    // For variable jump height
+                this.jumpReleased = false;  // CYCLE 31: Graded jump dampening state
                 this.wasGrounded = false;   // Track ground state changes
 
                 // CYCLE 2: Visual Juice
@@ -1387,6 +1388,7 @@
 
                 // CYCLE 4: Death flash effect
                 this.deathFlash = 0;
+                this.collectFlash = 0; // CYCLE 31: Collection flash pulse
 
                 // CYCLE 5: Distance milestones
                 this.lastMilestone = 0;
@@ -1609,10 +1611,21 @@
                     }
                 }
 
-                // CYCLE 2: Variable Jump Height - cut jump when button released
-                if (!this.isJumpHeld && this.player.vy < -this.dna.jumpForce * 0.3) {
-                    this.player.vy *= 0.5; // Cut jump height in half
+                // CYCLE 31: Graded jump release dampening - analog-feeling height control
+                if (!this.isJumpHeld && this.player.vy < 0) {
+                    if (!this.jumpReleased) {
+                        // First frame of release: strong initial cut for responsive short hops
+                        this.jumpReleased = true;
+                        if (this.player.vy < -this.dna.jumpForce * 0.5) {
+                            this.player.vy *= 0.6; // Strong initial cut for high-velocity release
+                        }
+                    } else if (this.player.vy < -this.dna.jumpForce * 0.2) {
+                        // Subsequent frames: gentler decay for smooth arc
+                        this.player.vy *= 0.85; // Gradual decay feels more analog
+                    }
                 }
+                // Reset jumpReleased when grounded
+                if (this.player.grounded) this.jumpReleased = false;
 
                 // Physics
                 // CYCLE 13: Asymmetric gravity - apex hang time + weighty falls
@@ -1689,6 +1702,7 @@
                                     this.score += earnedBonus;
                                     this.combo++;
                                     this.maxCombo = Math.max(this.maxCombo, this.combo);
+                                    this.checkComboMilestone(this.combo); // CYCLE 31
                                     this.momentum = Math.min(3.0, this.momentum + 0.1);
                                     // CYCLE 2: Floating chain bonus text
                                     // CYCLE 11: Show actual points earned for scoring clarity
@@ -1786,6 +1800,7 @@
                         this.closeCallCount++;
                         this.combo++;
                         this.maxCombo = Math.max(this.maxCombo, this.combo);
+                        this.checkComboMilestone(this.combo); // CYCLE 31
                         // CYCLE 6: Graduated close-call feedback
                         if (distSq < insaneThreshSq) {
                             // Ultra-close (5px from death!) - INSANE reward
@@ -1846,12 +1861,14 @@
 
                     if (distSq < collectSq) {
                         coin.collected = true;
+                        if (!this.isAI) this.collectFlash = 1.0; // CYCLE 31: Collection flash
                         // CYCLE 1: Score multiplied by momentum
                         const coinScore = Math.round(this.dna.coinValue * this.momentum);
                         this.score += coinScore;
                         this.coinsCollected++;
                         this.combo++;
                         this.maxCombo = Math.max(this.maxCombo, this.combo);
+                        this.checkComboMilestone(this.combo); // CYCLE 31
                         this.momentum = Math.min(3.0, this.momentum + 0.02);
                         this.spawnParticles(coin.x, coin.y, '#ffdd00', 5);
                         // CYCLE 2: Floating score text
@@ -2109,6 +2126,29 @@
                         this.floatingTexts.shift();
                     }
                     this.floatingTexts.push({ x, y, text, color, vy: -2, alpha: 1.0 });
+                }
+            }
+
+            // CYCLE 31: Combo milestone celebrations - reward hitting round numbers
+            checkComboMilestone(newCombo) {
+                if (this.isAI) return;
+                const milestones = [5, 10, 15, 20, 25, 30, 40, 50];
+                if (milestones.includes(newCombo)) {
+                    const tier = milestones.indexOf(newCombo);
+                    this.spawnFloatingText(this.player.x, this.player.y - 50, `COMBO x${newCombo}!`, '#ff44ff');
+                    this.shakeIntensity = 4 + tier * 1.5;
+                    Audio.playChain(Math.min(8, tier + 3));
+                    Haptics.medium();
+                    // Celebration particles
+                    for (let i = 0; i < 6 + tier * 2; i++) {
+                        particlePool.acquire(
+                            this.player.x + this.player.width / 2,
+                            this.player.y,
+                            (Math.random() - 0.5) * 10,
+                            -Math.random() * 8,
+                            '#ff44ff', 25 + Math.random() * 15
+                        );
+                    }
                 }
             }
 
@@ -2429,6 +2469,16 @@
                             ctx.arc(0, 0, ringRadius, 0, Math.PI * 2);
                             ctx.stroke();
                         }
+                    }
+
+                    // CYCLE 31: Collection flash pulse - gold overlay when collecting coins
+                    if (this.collectFlash > 0) {
+                        ctx.globalAlpha = this.collectFlash * 0.6;
+                        ctx.fillStyle = '#ffd700';
+                        ctx.fillRect(-pw / 2, -ph / 2, pw, ph);
+                        ctx.globalAlpha = 1;
+                        this.collectFlash *= 0.8;
+                        if (this.collectFlash < 0.05) this.collectFlash = 0;
                     }
 
                     ctx.restore();
