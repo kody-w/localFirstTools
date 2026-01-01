@@ -2299,6 +2299,42 @@
         let portraitScene, portraitCamera, portraitRenderer, portraitMesh;
 
         // ==========================================
+        // R2: Vector3 Pool - Reduces GC pressure
+        // Reusable temp vectors for per-frame calculations
+        // ==========================================
+        const VecPool = {
+            _pool: [],
+            _index: 0,
+            _size: 20,
+
+            init() {
+                for (let i = 0; i < this._size; i++) {
+                    this._pool.push(new THREE.Vector3());
+                }
+            },
+
+            // Get a temp vector (resets each frame)
+            get() {
+                if (this._index >= this._size) {
+                    // Expand pool if needed
+                    this._pool.push(new THREE.Vector3());
+                    this._size++;
+                }
+                return this._pool[this._index++];
+            },
+
+            // Reset pool index (call at start of each frame)
+            reset() {
+                this._index = 0;
+            }
+        };
+
+        // Pre-allocated temp vectors for common operations
+        const _tempVec1 = new THREE.Vector3();
+        const _tempVec2 = new THREE.Vector3();
+        const _tempVec3 = new THREE.Vector3();
+
+        // ==========================================
         // KILL STREAK SYSTEM
         // ==========================================
         const KILL_STREAK_NAMES = {
@@ -3643,24 +3679,24 @@
         };
 
         // ==========================================
-        // CONSENSUS FEATURE 1: Hit-Stop System
-        // Adds game feel by briefly pausing on impacts
+        // CONSENSUS FEATURE 1: Hit-Stop System (FIXED R2)
+        // Uses manual timeScale since THREE.Clock lacks it
         // ==========================================
+        let gameTimeScale = 1.0; // Global time scale factor
+
         const HitStop = {
             active: false,
             duration: 0,
-            originalTimeScale: 1,
+            realTimeElapsed: 0,
 
             // Trigger a hit-stop freeze frame
             trigger(ms = 50) {
                 if (this.active) return;
                 this.active = true;
                 this.duration = ms;
-                this.originalTimeScale = clock.timeScale || 1;
-                // Slow time dramatically
-                if (clock.timeScale !== undefined) {
-                    clock.timeScale = 0.05;
-                }
+                this.realTimeElapsed = 0;
+                // Apply slow-motion via global timeScale
+                gameTimeScale = 0.05;
             },
 
             // Trigger with screen shake for heavy impacts
@@ -3675,16 +3711,20 @@
                 screenShake.light();
             },
 
-            // Update - call in game loop
-            update(dt) {
+            // Update using real time (not scaled dt)
+            update(realDt) {
                 if (!this.active) return;
-                this.duration -= dt * 1000;
-                if (this.duration <= 0) {
+                // Use real delta time to count down
+                this.realTimeElapsed += realDt * 1000;
+                if (this.realTimeElapsed >= this.duration) {
                     this.active = false;
-                    if (clock.timeScale !== undefined) {
-                        clock.timeScale = this.originalTimeScale;
-                    }
+                    gameTimeScale = 1.0; // Restore normal speed
                 }
+            },
+
+            // Get current time scale for game loop
+            getTimeScale() {
+                return this.active ? gameTimeScale : 1.0;
             }
         };
 
@@ -4229,8 +4269,9 @@
                 this.damage += 5;
                 this.armor += 0.5;
 
-                // XP curve: 100, 200, 400, 800... (doubles each level)
-                this.xpToLevel = Math.floor(100 * Math.pow(1.5, this.level - 1));
+                // R2 FIX: Linear XP curve (was exponential, made late-game impossible)
+                // New curve: 100, 175, 250, 325... (+75 per level)
+                this.xpToLevel = 100 + (this.level - 1) * 75;
 
                 // Visual feedback
                 showMessage(`LEVEL UP! Now Level ${this.level}`);
@@ -8032,6 +8073,9 @@
             // CONSENSUS: Initialize explosion pool
             ExplosionPool.init();
 
+            // R2: Initialize vector pool
+            VecPool.init();
+
             // Setup Scene
             scene = new THREE.Scene();
             scene.fog = new THREE.Fog(0x050508, 20, 80); // Distance fog for atmosphere
@@ -8983,7 +9027,13 @@
                 return;
             }
 
-            const dt = clock.getDelta();
+            // R2: Reset vector pool each frame
+            VecPool.reset();
+
+            const rawDt = clock.getDelta();
+            // R2 FIX: Apply HitStop time scaling
+            HitStop.update(rawDt); // Update with real time
+            const dt = rawDt * HitStop.getTimeScale(); // Scale game time
             gameTime += dt;
 
             // ROUND 2: Respawn timer countdown
@@ -9033,9 +9083,6 @@
                 if (typeof ParticleSystem !== 'undefined' && ParticleSystem.update) {
                     ParticleSystem.update(dt);
                 }
-
-                // CONSENSUS: Update hit-stop system
-                HitStop.update(dt);
 
                 // CONSENSUS: Update explosion pool
                 ExplosionPool.update();
