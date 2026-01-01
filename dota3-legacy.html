@@ -4214,6 +4214,11 @@
             die() {
                 this.dead = true;
 
+                // R5: Call processHeroKill when a hero kills another hero
+                if (this instanceof Hero && this.lastAttacker instanceof Hero) {
+                    processHeroKill(this.lastAttacker, this);
+                }
+
                 // ROUND 6: Clear shield state on death
                 if (this.shieldTimeout) {
                     clearTimeout(this.shieldTimeout);
@@ -4236,9 +4241,25 @@
                     clearInterval(this.regenInterval);
                     this.regenInterval = null;
                 }
+                // R5: Clear DD and Haste timeouts
+                if (this.ddTimeout) {
+                    clearTimeout(this.ddTimeout);
+                    this.ddTimeout = null;
+                }
+                if (this.hasteTimeout) {
+                    clearTimeout(this.hasteTimeout);
+                    this.hasteTimeout = null;
+                }
+                // R5: Clear illusion intervals
+                if (this.illusionIntervals && this.illusionIntervals.length > 0) {
+                    this.illusionIntervals.forEach(id => clearInterval(id));
+                    this.illusionIntervals = [];
+                }
                 // Reset rune effects
                 this.isInvisible = false;
                 this.cooldownMultiplier = 1;
+                this.hasDDRune = false;
+                this.hasHasteRune = false;
 
                 // ROUND 10: Enhanced death visual effect
                 const deathPos = this.mesh.position.clone();
@@ -5170,29 +5191,33 @@
                     }
                 }
 
-                // Collision avoidance with other creeps
-                entities.forEach(e => {
-                    if (e === this || e.dead || !(e instanceof Creep)) return;
-                    const dist = this.mesh.position.distanceTo(e.mesh.position);
+                // R5: Collision avoidance with other creeps - use SpatialGrid for O(n)
+                const nearbyCollision = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 1.5);
+                for (let i = 0; i < nearbyCollision.length; i++) {
+                    const e = nearbyCollision[i].entity;
+                    if (e === this || e.dead || !(e instanceof Creep)) continue;
+                    const dist = nearbyCollision[i].dist;
                     if (dist < 1.2 && dist > 0.01) {
-                        // Push apart
-                        const pushDir = this.mesh.position.clone().sub(e.mesh.position).normalize();
+                        // Push apart - use VecPool to avoid .clone() allocation
+                        const pushDir = VecPool.get().copy(this.mesh.position).sub(e.mesh.position).normalize();
                         this.mesh.position.add(pushDir.multiplyScalar(0.05));
                     }
-                });
+                }
 
-                // AI
+                // R5: AI target finding - use SpatialGrid for O(n) instead of O(n²)
                 let target = null;
                 let minDist = 8;
-                entities.forEach(e => {
+                const nearbyTarget = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 8);
+                for (let i = 0; i < nearbyTarget.length; i++) {
+                    const e = nearbyTarget[i].entity;
                     if (e.team !== this.team && !e.dead) {
-                        const d = this.mesh.position.distanceTo(e.mesh.position);
+                        const d = nearbyTarget[i].dist;
                         if (d < minDist) {
                             minDist = d;
                             target = e;
                         }
                     }
-                });
+                }
 
                 if (target) {
                     if (minDist < this.attackRange) {
@@ -7122,19 +7147,20 @@
             update(dt) {
                 if (this.dead) return;
 
-                // Find nearby enemies to attack
+                // R5: Find nearby enemies to attack - use SpatialGrid for O(n)
                 let target = null;
                 let minDist = 6;
-
-                entities.forEach(e => {
+                const nearbyJungle = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 6);
+                for (let i = 0; i < nearbyJungle.length; i++) {
+                    const e = nearbyJungle[i].entity;
                     if (e.team !== 0 && !e.dead && e.mesh) {
-                        const d = this.mesh.position.distanceTo(e.mesh.position);
+                        const d = nearbyJungle[i].dist;
                         if (d < minDist) {
                             minDist = d;
                             target = e;
                         }
                     }
-                });
+                }
 
                 // Check leash range
                 const distFromHome = this.mesh.position.distanceTo(this.homePos);
@@ -7244,9 +7270,12 @@
                     hero.hasDDRune = true;
                     showMessage('DOUBLE DAMAGE! +100% damage for 30s');
                     AudioManager.playPowerup && AudioManager.playPowerup();
-                    setTimeout(() => {
+                    // R5: Store timeout ID for cleanup on death
+                    if (hero.ddTimeout) clearTimeout(hero.ddTimeout);
+                    hero.ddTimeout = setTimeout(() => {
                         hero.damage = originalDamage;
                         hero.hasDDRune = false;
+                        hero.ddTimeout = null;
                         showMessage('Double Damage expired');
                     }, 30000);
                 }
@@ -7263,9 +7292,12 @@
                     hero.hasHasteRune = true;
                     showMessage('HASTE! +80% movement speed for 20s');
                     AudioManager.playPowerup && AudioManager.playPowerup();
-                    setTimeout(() => {
+                    // R5: Store timeout ID for cleanup on death
+                    if (hero.hasteTimeout) clearTimeout(hero.hasteTimeout);
+                    hero.hasteTimeout = setTimeout(() => {
                         hero.speed = originalSpeed;
                         hero.hasHasteRune = false;
+                        hero.hasteTimeout = null;
                         showMessage('Haste expired');
                     }, 20000);
                 }
@@ -7352,6 +7384,8 @@
                 effect: (hero) => {
                     showMessage('ILLUSION! Creates 2 decoys');
                     AudioManager.playPowerup && AudioManager.playPowerup();
+                    // R5: Initialize illusion intervals array for cleanup on death
+                    if (!hero.illusionIntervals) hero.illusionIntervals = [];
                     // Create 2 illusion clones
                     for (let i = 0; i < 2; i++) {
                         const offsetAngle = (i / 2) * Math.PI * 2 + Math.PI / 4;
@@ -7378,6 +7412,12 @@
                         // Illusion wanders randomly then fades
                         let illusionLife = 60;
                         const illusionUpdate = setInterval(() => {
+                            // R5: Check if hero died - stop interval
+                            if (hero.dead) {
+                                clearInterval(illusionUpdate);
+                                scene.remove(illusionGroup);
+                                return;
+                            }
                             illusionLife--;
                             // Random movement
                             illusionGroup.position.x += (Math.random() - 0.5) * 0.2;
@@ -7389,8 +7429,13 @@
                             if (illusionLife <= 0) {
                                 clearInterval(illusionUpdate);
                                 scene.remove(illusionGroup);
+                                // R5: Remove from tracking array
+                                const idx = hero.illusionIntervals.indexOf(illusionUpdate);
+                                if (idx > -1) hero.illusionIntervals.splice(idx, 1);
                             }
                         }, 1000);
+                        // R5: Track interval ID for cleanup
+                        hero.illusionIntervals.push(illusionUpdate);
                     }
                 }
             },
