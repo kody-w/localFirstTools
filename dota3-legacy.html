@@ -3973,6 +3973,32 @@
             player.hp = player.maxHp;
             player.mp = player.maxMp;
 
+            // R6: Reset combat stats to base hero values (fix stat corruption on death)
+            const heroDef = player.heroDef || HERO_DEFS[player.heroType] || HERO_DEFS.voidwalker;
+            player.speed = heroDef.stats.speed;
+            player.damage = heroDef.stats.damage;
+            player.armor = heroDef.stats.armor || 0;
+
+            // R6: Re-apply permanent item stat bonuses
+            if (player.inventory && player.inventory.length > 0) {
+                player.inventory.forEach(itemId => {
+                    const item = ITEMS[itemId];
+                    if (item && item.stats) {
+                        if (item.stats.damage) player.damage += item.stats.damage;
+                        if (item.stats.armor) player.armor += item.stats.armor;
+                        if (item.stats.speed) player.speed += item.stats.speed;
+                        if (item.stats.hp) {
+                            player.maxHp += item.stats.hp;
+                            player.hp = player.maxHp;
+                        }
+                        if (item.stats.mp) {
+                            player.maxMp += item.stats.mp;
+                            player.mp = player.maxMp;
+                        }
+                    }
+                });
+            }
+
             player.mesh.position.set(-40, 0, -40);
             player.targetPos.set(-40, 0, -40);
             scene.add(player.mesh);
@@ -4249,6 +4275,11 @@
                 if (this.hasteTimeout) {
                     clearTimeout(this.hasteTimeout);
                     this.hasteTimeout = null;
+                }
+                // R6: Clear Earthquake slow timeout
+                if (this.earthquakeSlowTimeout) {
+                    clearTimeout(this.earthquakeSlowTimeout);
+                    this.earthquakeSlowTimeout = null;
                 }
                 // R5: Clear illusion intervals
                 if (this.illusionIntervals && this.illusionIntervals.length > 0) {
@@ -5192,12 +5223,13 @@
                 }
 
                 // R5: Collision avoidance with other creeps - use SpatialGrid for O(n)
+                // R6: Fix - SpatialGrid returns distSq, not dist
                 const nearbyCollision = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 1.5);
                 for (let i = 0; i < nearbyCollision.length; i++) {
                     const e = nearbyCollision[i].entity;
                     if (e === this || e.dead || !(e instanceof Creep)) continue;
-                    const dist = nearbyCollision[i].dist;
-                    if (dist < 1.2 && dist > 0.01) {
+                    const distSq = nearbyCollision[i].distSq;
+                    if (distSq < 1.44 && distSq > 0.0001) {  // 1.2² = 1.44, 0.01² = 0.0001
                         // Push apart - use VecPool to avoid .clone() allocation
                         const pushDir = VecPool.get().copy(this.mesh.position).sub(e.mesh.position).normalize();
                         this.mesh.position.add(pushDir.multiplyScalar(0.05));
@@ -5205,22 +5237,25 @@
                 }
 
                 // R5: AI target finding - use SpatialGrid for O(n) instead of O(n²)
+                // R6: Fix - SpatialGrid returns distSq, not dist
                 let target = null;
-                let minDist = 8;
+                let minDistSq = 64;  // 8² = 64
                 const nearbyTarget = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 8);
                 for (let i = 0; i < nearbyTarget.length; i++) {
                     const e = nearbyTarget[i].entity;
                     if (e.team !== this.team && !e.dead) {
-                        const d = nearbyTarget[i].dist;
-                        if (d < minDist) {
-                            minDist = d;
+                        const distSq = nearbyTarget[i].distSq;
+                        if (distSq < minDistSq) {
+                            minDistSq = distSq;
                             target = e;
                         }
                     }
                 }
 
                 if (target) {
-                    if (minDist < this.attackRange) {
+                    // R6: Use sqrt for final check (only once per frame, not per entity)
+                    const targetDist = Math.sqrt(minDistSq);
+                    if (targetDist < this.attackRange) {
                         // Attack - ROUND 7: Use attackSpeed
                         if (clock.getElapsedTime() - this.lastAttack > this.getAttackInterval()) {
                             this.performAttack(target);
@@ -6536,8 +6571,17 @@
                     nearbyEq.forEach(({entity}) => {
                         if (!entity.dead && entity.team !== player.team) {
                             entity.takeDamage(damage / 3, 'physical');
-                            entity.speed *= 0.5; // Slow
-                            setTimeout(() => { if (entity) entity.speed *= 2; }, 3000);
+                            // R6: Fix - Store original speed and timeout ID (like DD/Haste pattern)
+                            if (entity.earthquakeSlowTimeout) clearTimeout(entity.earthquakeSlowTimeout);
+                            const origSpeed = entity.originalSpeed || entity.speed;
+                            entity.originalSpeed = origSpeed;
+                            entity.speed = origSpeed * 0.5; // Slow to 50%
+                            entity.earthquakeSlowTimeout = setTimeout(() => {
+                                if (entity && !entity.dead) {
+                                    entity.speed = entity.originalSpeed;
+                                    entity.earthquakeSlowTimeout = null;
+                                }
+                            }, 3000);
                         }
                     });
 
@@ -7148,15 +7192,16 @@
                 if (this.dead) return;
 
                 // R5: Find nearby enemies to attack - use SpatialGrid for O(n)
+                // R6: Fix - SpatialGrid returns distSq, not dist
                 let target = null;
-                let minDist = 6;
+                let minDistSq = 36;  // 6² = 36
                 const nearbyJungle = SpatialGrid.getNearby(this.mesh.position.x, this.mesh.position.z, 6);
                 for (let i = 0; i < nearbyJungle.length; i++) {
                     const e = nearbyJungle[i].entity;
                     if (e.team !== 0 && !e.dead && e.mesh) {
-                        const d = nearbyJungle[i].dist;
-                        if (d < minDist) {
-                            minDist = d;
+                        const distSq = nearbyJungle[i].distSq;
+                        if (distSq < minDistSq) {
+                            minDistSq = distSq;
                             target = e;
                         }
                     }
@@ -7173,7 +7218,9 @@
                 }
 
                 if (target) {
-                    if (minDist < this.attackRange) {
+                    // R6: Use sqrt for final check (only once per frame)
+                    const targetDist = Math.sqrt(minDistSq);
+                    if (targetDist < this.attackRange) {
                         if (clock.getElapsedTime() - this.lastAttack > 1.0) {
                             target.takeDamage(this.damage, 'physical');
                             this.lastAttack = clock.getElapsedTime();
