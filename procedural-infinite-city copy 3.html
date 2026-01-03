@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural Infinite Cyberpunk City</title>
+    <meta name="description" content="Infinite procedural cyberpunk city flyover with seeded generation.">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background: #050510;
+            color: #00ffcc;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border: 1px solid #00ffcc;
+            border-radius: 5px;
+            pointer-events: auto;
+            max-width: 300px;
+        }
+        input {
+            background: #000;
+            border: 1px solid #00ffcc;
+            color: #00ffcc;
+            padding: 5px;
+            font-family: inherit;
+            width: 80px;
+        }
+        button {
+            background: #00ffcc;
+            color: #000;
+            border: none;
+            padding: 5px 10px;
+            cursor: pointer;
+            font-weight: bold;
+            font-family: inherit;
+        }
+        button:hover {
+            background: #fff;
+        }
+        .stat {
+            margin-top: 5px;
+            font-size: 12px;
+            color: #aaa;
+        }
+        .controls {
+            margin-top: 10px;
+            padding-top: 10px;
+            border-top: 1px solid #333;
+            font-size: 11px;
+            line-height: 1.4;
+            color: #ddd;
+        }
+        .key {
+            color: #fff;
+            font-weight: bold;
+            background: #333;
+            padding: 1px 4px;
+            border-radius: 3px;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="ui">
+        <h3>CYBERPUNK WALKER</h3>
+        <div>
+            <label>Seed:</label>
+            <input type="number" id="seedInput" value="12345">
+            <button id="updateBtn">Update</button>
+        </div>
+        <div class="stat" id="posDisplay">Pos: 0, 0</div>
+        <div class="controls">
+            <span class="key">W</span> <span class="key">S</span> Move Forward/Back<br>
+            <span class="key">A</span> <span class="key">D</span> Strafe Left/Right<br>
+            <span class="key">←</span> <span class="key">→</span> Turn Camera<br>
+            <span class="key">Shift</span> Run
+        </div>
+    </div>
+
+<script>
+/**
+ * PROCEDURAL INFINITE CITY - WALKER EDITION
+ * -----------------------------------------
+ * A pseudo-3D engine using HTML5 Canvas 2D.
+ * Generates an infinite city based on a seed.
+ * Now with 6DOF-style projection (XZ plane movement + Yaw rotation).
+ */
+
+// --- CONFIGURATION ---
+const CONFIG = {
+    fov: 800,
+    viewDistance: 3000,
+    blockSize: 400, // Bigger blocks for city feel
+    roadWidth: 150,
+    buildingChance: 0.6,
+    baseHeight: 300,
+    heightVariance: 1000,
+    fogColor: '#050510',
+    walkSpeed: 15,
+    runSpeed: 40,
+    turnSpeed: 0.03,
+    cameraHeight: 20 // Eye level (units above ground)
+};
+
+// --- SEEDED RANDOM ---
+class Random {
+    constructor(seed) {
+        this.seed = seed;
+    }
+    
+    // Mulberry32 algorithm
+    next() {
+        var t = this.seed += 0x6D2B79F5;
+        t = Math.imul(t ^ t >>> 15, t | 1);
+        t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+        return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    }
+
+    // Get random for specific coordinates without changing state
+    at(x, z) {
+        let h = 0x811c9dc5;
+        h ^= x;
+        h = Math.imul(h, 0x01000193);
+        h ^= z;
+        h = Math.imul(h, 0x01000193);
+        h ^= this.seed;
+        h = Math.imul(h, 0x01000193);
+        return (h >>> 0) / 4294967296;
+    }
+}
+
+// --- ENGINE ---
+class Engine {
+    constructor() {
+        this.canvas = document.getElementById('canvas');
+        this.ctx = this.canvas.getContext('2d');
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+        
+        // Camera setup
+        this.camera = { 
+            x: 0, 
+            y: -CONFIG.cameraHeight, // Negative is UP in our canvas space 
+            z: 0,
+            yaw: 0 
+        };
+        
+        this.keys = {};
+        this.seed = 12345;
+        this.rng = new Random(this.seed);
+        
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+        window.addEventListener('keydown', e => this.keys[e.key] = true);
+        window.addEventListener('keyup', e => this.keys[e.key] = false);
+        
+        this.lastTime = 0;
+        this.animate = this.animate.bind(this);
+        requestAnimationFrame(this.animate);
+    }
+
+    resize() {
+        this.width = window.innerWidth;
+        this.height = window.innerHeight;
+        this.canvas.width = this.width;
+        this.canvas.height = this.height;
+        this.cx = this.width / 2;
+        this.cy = this.height / 2;
+    }
+
+    // 3D to 2D Projection with Rotation
+    project(x, y, z) {
+        // 1. Translate to camera space
+        const dx = x - this.camera.x;
+        const dy = y - this.camera.y;
+        const dz = z - this.camera.z;
+
+        // 2. Rotate around Y axis (Yaw)
+        // Standard rotation matrix for Y axis
+        const cos = Math.cos(this.camera.yaw);
+        const sin = Math.sin(this.camera.yaw);
+        
+        const rx = dx * cos - dz * sin;
+        const ry = dy;
+        const rz = dx * sin + dz * cos;
+
+        // 3. Project to screen
+        if (rz <= 10) return { visible: false }; // Behind camera or too close
+
+        const scale = CONFIG.fov / rz;
+        const x2d = rx * scale + this.cx;
+        const y2d = ry * scale + this.cy;
+
+        return { x: x2d, y: y2d, scale: scale, dist: rz, visible: true };
+    }
+
+    fadeColor(hex, opacity) {
+        const r = parseInt(hex.substr(1, 2), 16);
+        const g = parseInt(hex.substr(3, 2), 16);
+        const b = parseInt(hex.substr(5, 2), 16);
+        return `rgba(${r},${g},${b},${opacity})`;
+    }
+
+    drawPoly(points, color, strokeColor) {
+        this.ctx.beginPath();
+        this.ctx.moveTo(points[0].x, points[0].y);
+        for (let i = 1; i < points.length; i++) {
+            this.ctx.lineTo(points[i].x, points[i].y);
+        }
+        this.ctx.closePath();
+        if (color) {
+            this.ctx.fillStyle = color;
+            this.ctx.fill();
+        }
+        if (strokeColor) {
+            this.ctx.strokeStyle = strokeColor;
+            this.ctx.stroke();
+        }
+    }
+
+    renderObject(obj) {
+        // obj: { type: 'building'|'road', x, z, w, d, h, color, val }
+        
+        // Calculate corners in world space
+        // Y=0 is ground. Y=-h is top.
+        const groundY = 0;
+        const roofY = -obj.h; // Buildings go UP (negative Y)
+
+        // Vertices
+        const v = [
+            { x: obj.x - obj.w/2, y: roofY, z: obj.z - obj.d/2 },   // 0: TLF (Top Left Front)
+            { x: obj.x + obj.w/2, y: roofY, z: obj.z - obj.d/2 },   // 1: TRF
+            { x: obj.x + obj.w/2, y: groundY, z: obj.z - obj.d/2 }, // 2: BRF
+            { x: obj.x - obj.w/2, y: groundY, z: obj.z - obj.d/2 }, // 3: BLF
+            { x: obj.x - obj.w/2, y: roofY, z: obj.z + obj.d/2 },   // 4: TLB
+            { x: obj.x + obj.w/2, y: roofY, z: obj.z + obj.d/2 },   // 5: TRB
+            { x: obj.x + obj.w/2, y: groundY, z: obj.z + obj.d/2 }, // 6: BRB
+            { x: obj.x - obj.w/2, y: groundY, z: obj.z + obj.d/2 }  // 7: BLB
+        ];
+
+        // Project all vertices
+        const p = v.map(vert => this.project(vert.x, vert.y, vert.z));
+
+        // Check visibility (simple check: if all points are behind camera, skip)
+        if (p.every(pt => !pt.visible)) return;
+
+        // Distance for fog
+        // Use the projected distance of the center (approx)
+        const centerDist = p[0].visible ? p[0].dist : p[5].dist; 
+        const alpha = Math.max(0, Math.min(1, 1 - (centerDist / CONFIG.viewDistance)));
+        if (alpha <= 0) return;
+
+        const fillColor = this.fadeColor('#000000', alpha);
+        const strokeColor = this.fadeColor(obj.color, alpha);
+        const windowColor = this.fadeColor(obj.val > 0.5 ? '#00ffcc' : '#ff00ff', alpha * 0.8);
+
+        this.ctx.lineWidth = 1;
+
+        // Helper to draw a face if it's facing the camera
+        // We can use the cross product of two edges to find normal, but simpler:
+        // Just draw faces based on relative position to camera?
+        // Actually, Painter's algorithm handles the order of objects.
+        // Within an object, we need to draw back faces first?
+        // Since buildings are convex, we can just draw visible faces.
+        // But determining visible faces in 2D projection is tricky without normals.
+        // Simple approach: Draw all faces that are "front facing" relative to camera position?
+        // Or just draw them all and rely on the fact that we fill them with opaque black.
+        // BUT, we need to draw them in back-to-front order relative to camera to handle self-occlusion correctly.
+        
+        // Let's find the center of each face and sort faces by distance? Overkill.
+        // Standard approach for simple cubes:
+        // 1. Draw Back/Side faces
+        // 2. Draw Front/Top faces
+        
+        // Actually, we can just check the signed area of the projected polygon (shoelace formula).
+        // If area is positive (clockwise), it's facing us (or vice versa depending on coord system).
+        
+        const faces = [
+            [0, 1, 2, 3], // Front
+            [1, 5, 6, 2], // Right
+            [5, 4, 7, 6], // Back
+            [4, 0, 3, 7], // Left
+            [4, 5, 1, 0], // Top
+            [3, 2, 6, 7]  // Bottom
+        ];
+
+        // Filter to visible faces (simple backface culling in 2D)
+        const visibleFaces = faces.filter(face => {
+            const p0 = p[face[0]];
+            const p1 = p[face[1]];
+            const p2 = p[face[2]];
+            if (!p0.visible || !p1.visible || !p2.visible) return false;
+            
+            // Cross product z-component (x1*y2 - y1*x2)
+            const val = (p1.x - p0.x) * (p2.y - p1.y) - (p1.y - p0.y) * (p2.x - p1.x);
+            return val > 0; // Assuming clockwise winding for front faces
+        });
+
+        // Draw visible faces
+        visibleFaces.forEach(face => {
+            const points = face.map(i => p[i]);
+            
+            // Special handling for "Top" face (roof)
+            const isRoof = face[0] === 4 && face[1] === 5;
+            const faceFill = isRoof ? this.fadeColor('#111111', alpha) : fillColor;
+
+            this.drawPoly(points, faceFill, strokeColor);
+
+            // Draw windows if it's a side face (not roof/bottom)
+            if (!isRoof && face[0] !== 3) { // 3 is bottom face start index
+                this.drawWindowsOnFace(points, windowColor, obj.val, alpha);
+            }
+        });
+    }
+
+    drawWindowsOnFace(points, color, seed, alpha) {
+        if (alpha < 0.3) return;
+        
+        // points: TL, TR, BR, BL
+        const tl = points[0];
+        const tr = points[1];
+        const bl = points[3];
+        
+        const rows = 8;
+        const cols = 4;
+        const pattern = Math.sin(seed * 100) * 10000;
+
+        this.ctx.fillStyle = color;
+
+        for(let r=1; r<rows; r++) {
+            for(let c=1; c<cols; c++) {
+                if (Math.abs(Math.sin(pattern * r * c)) > 0.5) {
+                    const rRatio = r/rows;
+                    const cRatio = c/cols;
+                    
+                    // Bilinear interpolation for perspective-ish placement
+                    const lx = tl.x + (bl.x - tl.x) * rRatio;
+                    const ly = tl.y + (bl.y - tl.y) * rRatio;
+                    const rx = tr.x + (points[2].x - points[1].x) * rRatio; // using BR and TR
+                    const ry = tr.y + (points[2].y - points[1].y) * rRatio;
+                    
+                    const x = lx + (rx - lx) * cRatio;
+                    const y = ly + (ry - ly) * cRatio;
+                    
+                    const size = 3 * alpha;
+                    this.ctx.fillRect(x, y, size, size*1.5);
+                }
+            }
+        }
+    }
+
+    drawRoad(obj) {
+        // Road is just a flat rect on ground (y=0)
+        const v = [
+            { x: obj.x - obj.w/2, y: 0, z: obj.z - obj.d/2 },
+            { x: obj.x + obj.w/2, y: 0, z: obj.z - obj.d/2 },
+            { x: obj.x + obj.w/2, y: 0, z: obj.z + obj.d/2 },
+            { x: obj.x - obj.w/2, y: 0, z: obj.z + obj.d/2 }
+        ];
+        
+        const p = v.map(vert => this.project(vert.x, vert.y, vert.z));
+        if (p.every(pt => !pt.visible)) return;
+
+        // Distance check
+        const centerDist = p[0].visible ? p[0].dist : p[2].dist;
+        const alpha = Math.max(0, Math.min(1, 1 - (centerDist / CONFIG.viewDistance)));
+        if (alpha <= 0) return;
+
+        this.drawPoly(p, this.fadeColor('#1a1a1a', alpha), null);
+        
+        // Center line
+        this.ctx.strokeStyle = this.fadeColor('#ff00ff', alpha * 0.5);
+        this.ctx.beginPath();
+        this.ctx.moveTo((p[0].x + p[1].x)/2, (p[0].y + p[1].y)/2);
+        this.ctx.lineTo((p[3].x + p[2].x)/2, (p[3].y + p[2].y)/2);
+        this.ctx.stroke();
+    }
+
+    update(dt) {
+        const speed = this.keys['Shift'] ? CONFIG.runSpeed : CONFIG.walkSpeed;
+        
+        // Rotation
+        if (this.keys['ArrowLeft']) this.camera.yaw -= CONFIG.turnSpeed;
+        if (this.keys['ArrowRight']) this.camera.yaw += CONFIG.turnSpeed;
+
+        // Movement (relative to yaw)
+        const cos = Math.cos(this.camera.yaw);
+        const sin = Math.sin(this.camera.yaw);
+        
+        let dx = 0;
+        let dz = 0;
+
+        if (this.keys['w'] || this.keys['W'] || this.keys['ArrowUp']) dz += speed;
+        if (this.keys['s'] || this.keys['S'] || this.keys['ArrowDown']) dz -= speed;
+        if (this.keys['a'] || this.keys['A']) dx -= speed;
+        if (this.keys['d'] || this.keys['D']) dx += speed;
+
+        this.camera.x += dx * cos + dz * sin;
+        this.camera.z += dz * cos - dx * sin;
+
+        document.getElementById('posDisplay').innerText = `Pos: ${Math.floor(this.camera.x)}, ${Math.floor(this.camera.z)}`;
+    }
+
+    render() {
+        // Clear
+        this.ctx.fillStyle = CONFIG.fogColor;
+        this.ctx.fillRect(0, 0, this.width, this.height);
+
+        // Collect visible objects
+        const objects = [];
+        
+        // Determine grid range based on camera position
+        const camGridX = Math.floor(this.camera.x / CONFIG.blockSize);
+        const camGridZ = Math.floor(this.camera.z / CONFIG.blockSize);
+        const range = Math.ceil(CONFIG.viewDistance / CONFIG.blockSize);
+
+        for (let z = camGridZ - range; z <= camGridZ + range; z++) {
+            for (let x = camGridX - range; x <= camGridX + range; x++) {
+                const worldX = x * CONFIG.blockSize;
+                const worldZ = z * CONFIG.blockSize;
+                
+                // Distance check (circle)
+                const dx = worldX - this.camera.x;
+                const dz = worldZ - this.camera.z;
+                const distSq = dx*dx + dz*dz;
+                if (distSq > CONFIG.viewDistance * CONFIG.viewDistance) continue;
+
+                const val = this.rng.at(x, z);
+                
+                // Logic: Roads on grid lines? Or blocks?
+                // Let's say every even coordinate is a road?
+                // Or just random city blocks.
+                // Simple logic: x%2==0 || z%2==0 is road? No, that's too grid-like.
+                // Let's use the seed value.
+                
+                // Always have a road at x=0 for the start?
+                // Let's make a grid of roads.
+                // If x or z is divisible by 3, it's a road.
+                // This creates city blocks of 2x2 buildings.
+                
+                // Actually, let's stick to the previous logic but improved.
+                // Random generation.
+                
+                if (val > CONFIG.buildingChance) {
+                    // Road
+                    objects.push({
+                        type: 'road',
+                        x: worldX,
+                        z: worldZ,
+                        w: CONFIG.roadWidth,
+                        d: CONFIG.blockSize, // Road length
+                        h: 0,
+                        dist: distSq // For sorting
+                    });
+                } else {
+                    // Building
+                    const height = CONFIG.baseHeight + (val * CONFIG.heightVariance);
+                    const color = val > 0.5 ? '#00ffcc' : '#ff00ff';
+                    objects.push({
+                        type: 'building',
+                        x: worldX,
+                        z: worldZ,
+                        w: CONFIG.blockSize * 0.8,
+                        d: CONFIG.blockSize * 0.8,
+                        h: height,
+                        color: color,
+                        val: val,
+                        dist: distSq
+                    });
+                }
+            }
+        }
+
+        // Sort by distance (Painter's Algorithm) - Far to Near
+        objects.sort((a, b) => b.dist - a.dist);
+
+        // Draw
+        objects.forEach(obj => {
+            if (obj.type === 'building') this.renderObject(obj);
+            else this.drawRoad(obj);
+        });
+    }
+
+    animate(time) {
+        const dt = (time - this.lastTime) / 1000;
+        this.lastTime = time;
+
+        this.update(dt);
+        this.render();
+
+        requestAnimationFrame(this.animate);
+    }
+    
+    setSeed(s) {
+        this.seed = s;
+        this.rng = new Random(s);
+    }
+}
+
+// --- INIT ---
+const engine = new Engine();
+
+document.getElementById('updateBtn').addEventListener('click', () => {
+    const seed = parseInt(document.getElementById('seedInput').value);
+    engine.setSeed(seed);
+});
+
+</script>
+</body>
+</html>
