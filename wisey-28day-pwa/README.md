@@ -1,5 +1,6 @@
 # Wisey 28-Day Brain Plan PWA
 
+
 A Progressive Web App for the Wisey 28-day brain training program.
 
 ## Features
