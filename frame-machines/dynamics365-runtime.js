@@ -124,7 +124,7 @@
     var sources = [];
     var rawUrl = rawUrlFor(path);
     if (rawUrl) {
-      sources.push({ url: rawUrl, label: primaryLabel || 'GitHub raw user data' });
+      sources.push({ url: rawUrl, label: primaryLabel || 'GitHub raw user data from the public repo' });
     }
     sources.push({ url: path, label: cacheLabel || 'checked-in cache' });
 
@@ -260,7 +260,7 @@
 
   function sourceMode(state, cards, fallbackReadyLabel, liveLabel, cacheLabel) {
     if (state.status === 'loading') {
-      return { label: 'Hydrating', className: 'is-loading', detail: 'Trying GitHub raw first, then the checked-in cache.' };
+      return { label: 'Hydrating', className: 'is-loading', detail: 'Trying public-repo GitHub raw first, then the checked-in cache.' };
     }
     if (state.status === 'error') {
       return { label: 'Offline', className: 'is-error', detail: state.error || 'Fetch failed.' };
@@ -269,7 +269,7 @@
       return { label: fallbackReadyLabel, className: 'is-cache', detail: 'Using the checked-in cache preserved in the repo.' };
     }
     if (state.status === 'ready') {
-      return { label: liveLabel, className: 'is-live', detail: 'Using GitHub raw user data as the active surface.' };
+      return { label: liveLabel, className: 'is-live', detail: 'Using GitHub raw user data from the public repo as the active surface.' };
     }
     return { label: 'Disabled', className: 'is-disabled', detail: 'No runtime surface configured for this proof.' };
   }
@@ -280,7 +280,7 @@
     if (state.status === 'ready' && cards.length > 0) {
       note = 'Loaded from ' + state.sourceLabel + ' / ' + escapeHtml((state.data && state.data.lastUpdated) || 'unknown timestamp') + '.';
     } else if (state.status === 'loading') {
-      note = 'Hydrating this surface from GitHub raw data.';
+      note = 'Hydrating this surface from raw data in the public repo.';
     } else if (state.status === 'error') {
       note = state.error;
     }
@@ -294,9 +294,9 @@
   function renderResourceLinks() {
     var links = [
       { title: 'Live app URL', url: window.location.href, note: 'The rendered frame machine anyone can open in a browser.' },
-      { title: 'Template repository', url: repoMetadata().url, note: 'Fork this repo and swap the data surfaces while keeping the frame flow.' },
-      { title: 'Machine ledger JSON', url: rawUrlFor(config.machinePath), note: 'Canonical frame-by-frame CRM state.' },
-      { title: 'Active overlay JSON', url: rawUrlFor(config.overlayPath), note: 'Live edge data layered on top of the frame ledger.' },
+      { title: 'Template repository', url: repoMetadata().url, note: 'Fork this public repo and swap the data surfaces while keeping the frame flow.' },
+      { title: 'Machine ledger JSON', url: rawUrlFor(config.machinePath), note: 'Canonical frame-by-frame CRM state published from the public repo.' },
+      { title: 'Active overlay JSON', url: rawUrlFor(config.overlayPath), note: 'Live edge data layered on top of the frame ledger from the public repo.' },
       { title: 'Liquid dimension JSON', url: rawUrlFor(config.liquidPath), note: 'Fork-aware alternative dimension flowing through the same machine.' }
     ].concat((simulation.relatedProofs || []).map(function (item) {
       return { title: item.title, url: item.url, note: item.note };
@@ -312,7 +312,7 @@
   function bundleStatusText() {
     return hasImportedBundle()
       ? 'Imported bundle active. Fork edits are being replayed from local storage until you clear them.'
-      : 'Published GitHub raw state is active. Export bundle to back it up or fork it locally.';
+      : 'Published public-repo raw state is active. Export bundle to back it up or fork it locally.';
   }
 
   function renderBackupCard() {
@@ -427,7 +427,7 @@
     var frame = simulation.frames[index];
     var overlay = overlayCards(frame);
     var liquid = liquidCards(frame);
-    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading GitHub raw data...' : 'Refresh GitHub raw data') + '</button>';
+    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading public-repo raw data...' : 'Refresh public-repo raw data') + '</button>';
     var refreshLiquid = '<button class="frame-machine-button" data-frame-machine-refresh-liquid ' + (liquidDimensionState.status === 'loading' ? 'disabled' : '') + '>' + (liquidDimensionState.status === 'loading' ? 'Loading liquid dimension...' : 'Refresh liquid dimension') + '</button>';
 
     root.innerHTML = '' +
@@ -456,7 +456,7 @@
     }
     liveOverlayState.status = 'loading';
     renderFrame(currentIndex);
-    loadJson(config.overlayPath, 'GitHub raw user data', 'checked-in cache', function (data, label) {
+    loadJson(config.overlayPath, 'GitHub raw user data from the public repo', 'checked-in cache', function (data, label) {
       liveOverlayState = { status: 'ready', data: data, error: '', sourceLabel: label };
       renderFrame(currentIndex);
     }, function (error) {

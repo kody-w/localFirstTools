@@ -33,6 +33,7 @@ def test_dynamics_frame_machine_assets_exist():
     assert './frame-machines/frame-machine.css' in page
     assert machine['repository']['name'] == 'localFirstTools'
     assert machine['relatedProofs'][0]['url'] == './dynamics365-lockstep-twin.html'
+    assert 'public repo' in machine['liveOverlay']['label'].lower()
     frame_ids = [frame['id'] for frame in machine['frames']]
     assert set(frame_ids) == set(overlay['frames'].keys())
     assert set(frame_ids) == set(liquid['frames'].keys())
@@ -62,6 +63,7 @@ def test_runtimes_support_portable_import_export():
     css = FRAME_CSS.read_text(encoding='utf-8')
 
     assert 'raw.githubusercontent.com' in d365_runtime
+    assert 'public repo' in d365_runtime.lower()
     assert 'Export bundle' in d365_runtime
     assert 'Import bundle' in d365_runtime
     assert 'clearImportedBundle' in d365_runtime
@@ -92,5 +94,6 @@ def test_docs_and_workflow_reference_frame_machines():
     assert 'update_hn_content.py' in workflow
     assert 'Frame machine surfaces' in readme
     assert 'backup and reimport' in readme.lower()
+    assert 'public repo' in readme.lower()
     assert 'dynamics365-frame-machine.html' in manifest
     assert 'hacker-news-simulator.html' in manifest
