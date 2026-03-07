@@ -139,6 +139,16 @@ python3 vibe_gallery_organizer.py
 python3 vibe_gallery_organizer.py --dry-run
 ```
 
+
+
+## 🧱 Frame machine surfaces
+
+The repo now includes two frame-pattern tools that treat raw JSON as globally accessible state:
+
+- **`dynamics365-frame-machine.html`** — the Dynamics 365 proof, now living here as a portable frame machine with GitHub raw overlays, liquid fork dimensions, import/export backups, and a lockstep twin console.
+- **`hacker-news-simulator.html`** — a repaired Hacker News simulator that now runs as a frame machine over `data/content/hacker-news-posts.json`, with fork-aware liquid dimensions and bundle backup and reimport flows.
+
+These pages are not just demos. They treat the raw files as the canonical medium, which means forks can export a bundle, change it locally, and import it back without losing the business logic flow carried by the frames. That backup and reimport loop is part of the frame contract, not an afterthought.
 ## 🎯 Auto-Categorization
 
 The gallery automatically categorizes applications based on code analysis:
