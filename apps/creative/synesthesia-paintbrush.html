@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Synesthesia Paintbrush</title>
+    <meta name="description" content="A musical drawing tool where every stroke creates sound based on color, position, and speed.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #111; font-family: sans-serif; user-select: none; }
+        canvas { display: block; touch-action: none; }
+        
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            pointer-events: none;
+        }
+        
+        .control-group {
+            pointer-events: auto;
+            background: rgba(0,0,0,0.5);
+            padding: 10px;
+            border-radius: 8px;
+            border: 1px solid #333;
+        }
+        
+        .color-btn {
+            width: 30px;
+            height: 30px;
+            border-radius: 50%;
+            border: 2px solid #fff;
+            cursor: pointer;
+            display: inline-block;
+            margin: 2px;
+            transition: transform 0.2s;
+        }
+        
+        .color-btn:hover { transform: scale(1.2); }
+        .color-btn.active { border-color: #0ff; box-shadow: 0 0 10px #0ff; }
+        
+        #clear-btn {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+        }
+        
+        #clear-btn:hover { background: #444; }
+        
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            flex-direction: column;
+            color: #fff;
+            z-index: 100;
+        }
+        
+        h1 { margin-bottom: 10px; text-shadow: 0 0 10px #f0f; }
+        
+        #start-btn {
+            background: linear-gradient(45deg, #f0f, #0ff);
+            border: none;
+            padding: 15px 30px;
+            font-size: 1.2rem;
+            color: #fff;
+            border-radius: 30px;
+            cursor: pointer;
+            font-weight: bold;
+            box-shadow: 0 0 20px rgba(255, 0, 255, 0.5);
+            transition: transform 0.2s;
+        }
+        
+        #start-btn:hover { transform: scale(1.05); }
+
+        .hint {
+            color: #888;
+            font-size: 0.8rem;
+            margin-top: 5px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="overlay">
+        <h1>Synesthesia Paintbrush</h1>
+        <p>Draw to create music. Listen to your art.</p>
+        <br>
+        <button id="start-btn">Start Creating</button>
+    </div>
+
+    <div id="ui">
+        <div class="control-group">
+            <div id="palette"></div>
+            <div class="hint">Color = Timbre/Waveform</div>
+        </div>
+        <div class="control-group">
+            <button id="clear-btn">Clear Canvas</button>
+        </div>
+        <div class="control-group" style="color: #aaa; font-size: 12px;">
+            Y-Axis: Pitch<br>
+            X-Axis: Pan<br>
+            Speed: Volume
+        </div>
+    </div>
+
+    <canvas id="canvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Resize
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        // --- Audio Engine ---
+        let audioCtx;
+        let masterGain;
+        let reverb;
+
+        const COLORS = [
+            { hex: '#ff0000', type: 'sine', name: 'Sine (Pure)' },
+            { hex: '#ff8800', type: 'triangle', name: 'Triangle (Soft)' },
+            { hex: '#ffff00', type: 'square', name: 'Square (Retro)' },
+            { hex: '#00ff00', type: 'sawtooth', name: 'Sawtooth (Sharp)' },
+            { hex: '#00ffff', type: 'sine', detune: 10, name: 'Chorus' },
+            { hex: '#0000ff', type: 'triangle', detune: -10, name: 'Deep' },
+            { hex: '#ff00ff', type: 'sawtooth', filter: 1000, name: 'Filtered' }
+        ];
+
+        let activeColor = COLORS[0];
+
+        async function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            masterGain = audioCtx.createGain();
+            masterGain.gain.value = 0.5;
+            
+            // Simple Reverb (Convolver)
+            // We'll generate an impulse response
+            const sampleRate = audioCtx.sampleRate;
+            const length = sampleRate * 2.0; // 2 seconds
+            const impulse = audioCtx.createBuffer(2, length, sampleRate);
+            const left = impulse.getChannelData(0);
+            const right = impulse.getChannelData(1);
+            
+            for (let i = 0; i < length; i++) {
+                const decay = Math.pow(1 - i / length, 2); // Exponential decay
+                left[i] = (Math.random() * 2 - 1) * decay;
+                right[i] = (Math.random() * 2 - 1) * decay;
+            }
+            
+            reverb = audioCtx.createConvolver();
+            reverb.buffer = impulse;
+            
+            const reverbGain = audioCtx.createGain();
+            reverbGain.gain.value = 0.3; // Wet level
+
+            masterGain.connect(audioCtx.destination);
+            masterGain.connect(reverb);
+            reverb.connect(reverbGain);
+            reverbGain.connect(audioCtx.destination);
+        }
+
+        class Voice {
+            constructor(x, y, colorDef) {
+                this.osc = audioCtx.createOscillator();
+                this.gain = audioCtx.createGain();
+                this.panner = audioCtx.createStereoPanner();
+                
+                this.osc.type = colorDef.type;
+                if(colorDef.detune) this.osc.detune.value = colorDef.detune;
+                
+                // Map Y to Pitch (Pentatonic Scale roughly)
+                // Height 0 = High Pitch, Height Max = Low Pitch
+                const minFreq = 100;
+                const maxFreq = 1000;
+                const normY = 1 - (y / canvas.height);
+                const freq = minFreq + Math.pow(normY, 2) * (maxFreq - minFreq);
+                
+                // Snap to scale (optional, sounds better)
+                // Let's just use continuous for "theremin" feel
+                this.osc.frequency.value = freq;
+                
+                // Map X to Pan
+                const pan = (x / canvas.width) * 2 - 1;
+                this.panner.pan.value = pan;
+                
+                this.osc.connect(this.gain);
+                this.gain.connect(this.panner);
+                this.panner.connect(masterGain);
+                
+                this.gain.gain.value = 0;
+                this.osc.start();
+            }
+            
+            update(x, y, speed) {
+                const minFreq = 100;
+                const maxFreq = 1000;
+                const normY = 1 - (y / canvas.height);
+                const freq = minFreq + Math.pow(normY, 2) * (maxFreq - minFreq);
+                
+                this.osc.frequency.setTargetAtTime(freq, audioCtx.currentTime, 0.05);
+                this.panner.pan.setTargetAtTime((x / canvas.width) * 2 - 1, audioCtx.currentTime, 0.05);
+                
+                // Speed to Volume
+                // Speed is pixels per frame. Max usually around 50-100.
+                const normSpeed = Math.min(1, speed / 50);
+                this.gain.gain.setTargetAtTime(normSpeed * 0.5, audioCtx.currentTime, 0.05);
+            }
+            
+            stop() {
+                this.gain.gain.setTargetAtTime(0, audioCtx.currentTime, 0.1);
+                setTimeout(() => this.osc.stop(), 200);
+            }
+        }
+
+        // --- Drawing Logic ---
+        let isDrawing = false;
+        let lastPos = { x: 0, y: 0 };
+        let currentVoice = null;
+
+        function startStroke(x, y) {
+            if(!audioCtx) return;
+            isDrawing = true;
+            lastPos = { x, y };
+            
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.strokeStyle = activeColor.hex;
+            ctx.lineCap = 'round';
+            ctx.lineJoin = 'round';
+            
+            currentVoice = new Voice(x, y, activeColor);
+        }
+
+        function moveStroke(x, y) {
+            if (!isDrawing) return;
+            
+            const dx = x - lastPos.x;
+            const dy = y - lastPos.y;
+            const dist = Math.sqrt(dx*dx + dy*dy);
+            const speed = dist; // Pixels per event (approx speed)
+            
+            // Dynamic line width based on speed
+            ctx.lineWidth = Math.max(2, Math.min(20, speed / 2));
+            
+            // Glow effect
+            ctx.shadowBlur = 10;
+            ctx.shadowColor = activeColor.hex;
+            
+            ctx.lineTo(x, y);
+            ctx.stroke();
+            
+            // Reset shadow for performance? No, keep it for glow.
+            
+            if(currentVoice) {
+                currentVoice.update(x, y, speed);
+            }
+            
+            lastPos = { x, y };
+        }
+
+        function endStroke() {
+            isDrawing = false;
+            ctx.closePath();
+            if(currentVoice) {
+                currentVoice.stop();
+                currentVoice = null;
+            }
+        }
+
+        // Mouse Events
+        canvas.addEventListener('mousedown', e => startStroke(e.clientX, e.clientY));
+        canvas.addEventListener('mousemove', e => moveStroke(e.clientX, e.clientY));
+        window.addEventListener('mouseup', endStroke);
+
+        // Touch Events
+        canvas.addEventListener('touchstart', e => {
+            e.preventDefault();
+            const t = e.touches[0];
+            startStroke(t.clientX, t.clientY);
+        }, { passive: false });
+        
+        canvas.addEventListener('touchmove', e => {
+            e.preventDefault();
+            const t = e.touches[0];
+            moveStroke(t.clientX, t.clientY);
+        }, { passive: false });
+        
+        window.addEventListener('touchend', endStroke);
+
+        // --- UI ---
+        const paletteEl = document.getElementById('palette');
+        COLORS.forEach((c, i) => {
+            const btn = document.createElement('div');
+            btn.className = 'color-btn' + (i === 0 ? ' active' : '');
+            btn.style.backgroundColor = c.hex;
+            btn.title = c.name;
+            btn.onclick = () => {
+                activeColor = c;
+                document.querySelectorAll('.color-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            };
+            paletteEl.appendChild(btn);
+        });
+
+        document.getElementById('clear-btn').onclick = () => {
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+        };
+
+        document.getElementById('start-btn').onclick = () => {
+            initAudio();
+            document.getElementById('overlay').style.display = 'none';
+            if(audioCtx.state === 'suspended') audioCtx.resume();
+        };
+
+    </script>
+</body>
+</html>

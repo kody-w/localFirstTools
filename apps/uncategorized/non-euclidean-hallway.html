@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Non-Euclidean Hallway</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: sans-serif; }
+        #info {
+            position: absolute; top: 10px; left: 10px; color: white;
+            background: rgba(0,0,0,0.5); padding: 10px; pointer-events: none;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 10px; height: 10px;
+            background: white; border-radius: 50%; transform: translate(-50%, -50%);
+            pointer-events: none; mix-blend-mode: difference;
+        }
+    </style>
+    <script src="https://unpkg.com/three@0.128.0/build/three.min.js"></script>
+</head>
+<body>
+    <div id="error-msg" style="color:red; position:absolute; top:50%; width:100%; text-align:center; display:none;">
+        Error: Three.js failed to load. Check internet connection.
+    </div>
+    <script>
+        window.addEventListener('error', function(e) {
+            document.getElementById('error-msg').style.display = 'block';
+            document.getElementById('error-msg').innerText = "Error: " + e.message;
+        });
+        if (typeof THREE === 'undefined') {
+            document.getElementById('error-msg').style.display = 'block';
+        }
+    </script>
+    <div id="info">
+        <strong>Non-Euclidean Geometry Demo</strong><br>
+        WASD to Move | Mouse to Look<br>
+        Walk into the small box to enter the massive hall.
+    </div>
+    <div id="debug" style="position:absolute; top:10px; right:10px; color:lime; font-family:monospace;">Waiting for input...</div>
+    <script>
+        // --- Setup ---
+        const debugEl = document.getElementById('debug');
+        function log(msg) { debugEl.innerText = msg; }
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky Blue Background
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, stencil: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.autoClear = false; // Important for manual clearing
+        document.body.appendChild(renderer.domElement);
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8); // Bright ambient
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(1, 10, 1);
+        scene.add(dirLight);
+
+        // --- Materials ---
+        // Use BasicMaterial to ignore lighting issues for now
+        const matOutside = new THREE.MeshBasicMaterial({ color: 0x44aa88, side: THREE.DoubleSide });
+        const matInside = new THREE.MeshBasicMaterial({ color: 0xaa4444, side: THREE.DoubleSide, wireframe: true }); // Wireframe inside
+        const matDoor = new THREE.MeshBasicMaterial({ color: 0x000000, colorWrite: false, depthWrite: false }); 
+
+        // --- Geometry Groups ---
+        const outsideWorld = new THREE.Group();
+        const insideWorld = new THREE.Group();
+        scene.add(outsideWorld);
+        scene.add(insideWorld);
+
+        // --- 1. The Outside World ---
+        // Ground
+        const groundGeo = new THREE.PlaneGeometry(100, 100);
+        const ground = new THREE.Mesh(groundGeo, new THREE.MeshBasicMaterial({ color: 0x222222 })); // Dark Grey Ground
+        ground.rotation.x = -Math.PI / 2;
+        outsideWorld.add(ground);
+
+        // The "TARDIS" Box (Small on outside)
+        const boxSize = 4;
+        const boxGeo = new THREE.BoxGeometry(boxSize, boxSize, boxSize);
+        // Remove front face for door
+        // We'll build it manually to have a hole
+        const wallGeo = new THREE.PlaneGeometry(boxSize, boxSize);
+        
+        // Back
+        const backWall = new THREE.Mesh(wallGeo, matOutside);
+        backWall.position.z = -boxSize/2;
+        backWall.position.y = boxSize/2;
+        outsideWorld.add(backWall);
+        
+        // Left
+        const leftWall = new THREE.Mesh(wallGeo, matOutside);
+        leftWall.rotation.y = Math.PI/2;
+        leftWall.position.x = -boxSize/2;
+        leftWall.position.y = boxSize/2;
+        outsideWorld.add(leftWall);
+
+        // Right
+        const rightWall = new THREE.Mesh(wallGeo, matOutside);
+        rightWall.rotation.y = -Math.PI/2;
+        rightWall.position.x = boxSize/2;
+        rightWall.position.y = boxSize/2;
+        outsideWorld.add(rightWall);
+
+        // Top
+        const topWall = new THREE.Mesh(wallGeo, matOutside);
+        topWall.rotation.x = Math.PI/2;
+        topWall.position.y = boxSize;
+        outsideWorld.add(topWall);
+
+        // Front (Door Frame) - Simplified as just open for now
+        // We place the "Portal" plane here
+        const portalGeo = new THREE.PlaneGeometry(boxSize - 0.2, boxSize - 0.2);
+        const portalPlane = new THREE.Mesh(portalGeo, matDoor);
+        portalPlane.position.z = boxSize/2 - 0.1; // Slightly inside
+        portalPlane.position.y = boxSize/2;
+        // portalPlane.rotation.y = Math.PI; // Face outward
+        outsideWorld.add(portalPlane);
+
+
+        // --- 2. The Inside World (Massive Hall) ---
+        // This geometry physically overlaps the outside world but is only visible through stencil
+        const hallWidth = 20;
+        const hallLength = 100;
+        const hallHeight = 15;
+
+        const hallGeo = new THREE.BoxGeometry(hallWidth, hallHeight, hallLength);
+        // Invert normals to see inside
+        hallGeo.scale(-1, 1, 1); 
+        
+        // Texture for inside to make it trippy
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#220000'; ctx.fillRect(0,0,512,512);
+        ctx.strokeStyle = '#ff0000'; ctx.lineWidth = 5;
+        for(let i=0; i<20; i++) {
+            ctx.strokeRect(Math.random()*512, Math.random()*512, Math.random()*100, Math.random()*100);
+        }
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
+        tex.repeat.set(4, 20);
+        
+        const matHall = new THREE.MeshBasicMaterial({ 
+            map: tex, 
+            side: THREE.BackSide
+        });
+
+        const hall = new THREE.Mesh(hallGeo, matHall);
+        hall.position.y = hallHeight/2;
+        hall.position.z = -hallLength/2 + boxSize/2; // Extend backwards from door
+        insideWorld.add(hall);
+
+        // Floating objects inside
+        for(let i=0; i<50; i++) {
+            const geo = new THREE.IcosahedronGeometry(1 + Math.random());
+            const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: Math.random() * 0xffffff }));
+            mesh.position.set(
+                (Math.random()-0.5) * (hallWidth-2),
+                Math.random() * (hallHeight-2) + 1,
+                -Math.random() * (hallLength-5) + boxSize/2
+            );
+            insideWorld.add(mesh);
+        }
+
+        // --- Controls ---
+        const keys = {};
+        document.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            log("Key down: " + e.code);
+        });
+        document.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        let pitch = 0;
+        let yaw = 0;
+        
+        // Mouse Look
+        document.body.addEventListener('click', () => {
+            document.body.requestPointerLock();
+            log("Pointer Lock Requested");
+        });
+        
+        document.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement === document.body) {
+                yaw -= e.movementX * 0.002;
+                pitch -= e.movementY * 0.002;
+                pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+                camera.rotation.set(pitch, yaw, 0, 'YXZ');
+            }
+        });
+
+        // Keyboard Look (Fallback)
+        function updateLook() {
+            const turnSpeed = 0.03;
+            if (keys['ArrowLeft']) yaw += turnSpeed;
+            if (keys['ArrowRight']) yaw -= turnSpeed;
+            if (keys['ArrowUp']) pitch += turnSpeed;
+            if (keys['ArrowDown']) pitch -= turnSpeed;
+            
+            if (keys['ArrowLeft'] || keys['ArrowRight'] || keys['ArrowUp'] || keys['ArrowDown']) {
+                pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, pitch));
+                camera.rotation.set(pitch, yaw, 0, 'YXZ');
+            }
+        }
+
+        camera.position.set(0, 1.7, 10);
+
+        // --- Render Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            updateLook();
+
+            // Movement
+            const speed = 0.15; // Faster speed
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            dir.y = 0; dir.normalize();
+            const right = new THREE.Vector3(-dir.z, 0, dir.x);
+
+            if (keys['KeyW']) camera.position.addScaledVector(dir, speed);
+            if (keys['KeyS']) camera.position.addScaledVector(dir, -speed);
+            if (keys['KeyA']) camera.position.addScaledVector(right, -speed);
+            if (keys['KeyD']) camera.position.addScaledVector(right, speed);
+            
+            // Simple collision with ground (stay at height)
+            camera.position.y = 1.7; 
+            
+            // Debug position
+            if (keys['KeyW'] || keys['KeyS'] || keys['KeyA'] || keys['KeyD']) {
+                log(`Pos: ${camera.position.x.toFixed(1)}, ${camera.position.z.toFixed(1)}`);
+            }
+
+            // --- Stencil Logic ---
+            
+            // 1. Clear everything
+            renderer.clear();
+
+            // 2. Render Outside World (Normal)
+            // We want the outside world to be visible everywhere EXCEPT where the portal is?
+            // Actually, simpler: Render Outside World first.
+            renderer.render(outsideWorld, camera);
+
+            // 3. Prepare Stencil for Portal
+            const gl = renderer.domElement.getContext('webgl');
+            renderer.state.buffers.stencil.setTest(true);
+            renderer.state.buffers.stencil.setFunc(THREE.AlwaysStencilFunc, 1, 0xff);
+            renderer.state.buffers.stencil.setOp(THREE.ReplaceStencilOp, THREE.ReplaceStencilOp, THREE.ReplaceStencilOp);
+            
+            // Render Portal Plane to Stencil Buffer ONLY
+            // (matDoor has colorWrite: false, depthWrite: false)
+            // This writes '1' into the stencil buffer where the door is
+            renderer.render(portalPlane, camera);
+
+            // 4. Render Inside World
+            // Only render where Stencil == 1 (Inside the door frame)
+            renderer.state.buffers.stencil.setFunc(THREE.EqualStencilFunc, 1, 0xff);
+            renderer.state.buffers.stencil.setOp(THREE.KeepStencilOp, THREE.KeepStencilOp, THREE.KeepStencilOp);
+            
+            // Clear Depth so inside world draws "on top" of outside world background, 
+            // but clipped to the door frame.
+            renderer.clearDepth(); 
+            
+            renderer.render(insideWorld, camera);
+
+            // 5. Reset Stencil
+            renderer.state.buffers.stencil.setTest(false);
+
+        }
+
+        animate();
+
+        // Handle Resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>

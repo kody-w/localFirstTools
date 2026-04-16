@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvoMon: 3D World Generator</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; color: #fff; }
+        #canvas { width: 100vw; height: 100vh; display: block; }
+        
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        
+        .panel {
+            background: rgba(0, 20, 40, 0.8);
+            border: 1px solid #00ffff;
+            backdrop-filter: blur(10px);
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: auto;
+            position: absolute;
+        }
+        
+        #controls-panel {
+            top: 20px;
+            left: 20px;
+            width: 300px;
+        }
+        
+        h2 { margin: 0 0 10px 0; font-size: 18px; color: #00ffff; text-transform: uppercase; letter-spacing: 1px; }
+        
+        .control-row { margin-bottom: 10px; }
+        label { display: block; color: #aaa; font-size: 12px; margin-bottom: 5px; }
+        input[type="range"] { width: 100%; }
+        
+        button {
+            background: rgba(0, 100, 200, 0.5);
+            border: 1px solid #00ffff;
+            color: #fff;
+            padding: 8px 15px;
+            width: 100%;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.2s;
+            font-weight: bold;
+            margin-top: 10px;
+        }
+        
+        button:hover { background: rgba(0, 150, 255, 0.8); box-shadow: 0 0 10px #00ffff; }
+        
+        #info-panel {
+            bottom: 20px;
+            right: 20px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    
+    <div id="ui-layer">
+        <div id="controls-panel" class="panel">
+            <h2>World Generator</h2>
+            
+            <div class="control-row">
+                <label>Terrain Roughness</label>
+                <input type="range" id="roughness" min="0" max="100" value="50">
+            </div>
+            
+            <div class="control-row">
+                <label>Vegetation Density</label>
+                <input type="range" id="vegetation" min="0" max="100" value="60">
+            </div>
+            
+            <div class="control-row">
+                <label>Building Frequency</label>
+                <input type="range" id="buildings" min="0" max="100" value="30">
+            </div>
+            
+            <div class="control-row">
+                <label>Water Level</label>
+                <input type="range" id="water" min="0" max="100" value="40">
+            </div>
+            
+            <button onclick="generateWorld()">REGENERATE WORLD</button>
+            <button onclick="toggleView()">TOGGLE 2D/3D VIEW</button>
+        </div>
+        
+        <div id="info-panel" class="panel">
+            <h2>Map Stats</h2>
+            <div id="biome-info">Biome: Mixed</div>
+            <div id="object-count">Objects: 0</div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/simplex-noise/2.4.0/simplex-noise.min.js"></script>
+    <script>
+        // --- Configuration ---
+        const WORLD_SIZE = 100; // Tiles
+        const TILE_SIZE = 4;
+        
+        // --- Globals ---
+        let scene, camera, renderer;
+        let controls;
+        let terrainMesh, waterMesh;
+        let objects = [];
+        let simplex = new SimplexNoise();
+        let is2D = false;
+        
+        // --- Three.js Setup ---
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+            scene.fog = new THREE.Fog(0x87CEEB, 50, 300);
+            
+            camera = new THREE.PerspectiveCamera(60, window.innerWidth/window.innerHeight, 1, 1000);
+            camera.position.set(0, 100, 100);
+            camera.lookAt(0, 0, 0);
+            
+            renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('canvas'), antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            
+            // Lights
+            const ambient = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambient);
+            
+            const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+            sun.position.set(100, 200, 50);
+            sun.castShadow = true;
+            sun.shadow.mapSize.width = 2048;
+            sun.shadow.mapSize.height = 2048;
+            sun.shadow.camera.near = 0.5;
+            sun.shadow.camera.far = 500;
+            const d = 200;
+            sun.shadow.camera.left = -d;
+            sun.shadow.camera.right = d;
+            sun.shadow.camera.top = d;
+            sun.shadow.camera.bottom = -d;
+            scene.add(sun);
+            
+            // Initial Generation
+            generateWorld();
+            
+            // Event Listeners
+            window.addEventListener('resize', onResize);
+            
+            animate();
+        }
+        
+        function generateWorld() {
+            // Clear old
+            if(terrainMesh) scene.remove(terrainMesh);
+            if(waterMesh) scene.remove(waterMesh);
+            objects.forEach(o => scene.remove(o));
+            objects = [];
+            
+            // Params
+            const roughness = document.getElementById('roughness').value / 100;
+            const vegDensity = document.getElementById('vegetation').value / 100;
+            const buildFreq = document.getElementById('buildings').value / 100;
+            const waterLevel = (document.getElementById('water').value / 100) * 10 - 5;
+            
+            simplex = new SimplexNoise(Math.random());
+            
+            // --- Terrain Geometry ---
+            const geometry = new THREE.PlaneGeometry(WORLD_SIZE * TILE_SIZE, WORLD_SIZE * TILE_SIZE, WORLD_SIZE, WORLD_SIZE);
+            geometry.rotateX(-Math.PI / 2);
+            
+            const colors = [];
+            const posAttribute = geometry.attributes.position;
+            const count = posAttribute.count;
+            
+            for (let i = 0; i < count; i++) {
+                const x = posAttribute.getX(i);
+                const z = posAttribute.getZ(i);
+                
+                // Height noise
+                let y = 0;
+                y += simplex.noise2D(x * 0.01, z * 0.01) * 10 * roughness;
+                y += simplex.noise2D(x * 0.05, z * 0.05) * 2 * roughness;
+                
+                // Flatten near water level for beaches
+                if (y < waterLevel + 1 && y > waterLevel - 1) {
+                    y = waterLevel + 0.5;
+                }
+                
+                posAttribute.setY(i, y);
+                
+                // Vertex Colors
+                const color = new THREE.Color();
+                if (y < waterLevel) {
+                    color.setHex(0xe0cda4); // Sand (underwater)
+                } else if (y < waterLevel + 1.5) {
+                    color.setHex(0xe0cda4); // Sand beach
+                } else if (y > 15 * roughness) {
+                    color.setHex(0x888888); // Rock/Mountain
+                } else {
+                    // Grass variation
+                    const noise = simplex.noise2D(x * 0.1, z * 0.1);
+                    color.setHSL(0.25 + noise * 0.05, 0.6, 0.4); 
+                }
+                colors.push(color.r, color.g, color.b);
+            }
+            
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geometry.computeVertexNormals();
+            
+            const material = new THREE.MeshStandardMaterial({ 
+                vertexColors: true,
+                roughness: 0.8,
+                metalness: 0.1
+            });
+            
+            terrainMesh = new THREE.Mesh(geometry, material);
+            terrainMesh.receiveShadow = true;
+            terrainMesh.castShadow = true;
+            scene.add(terrainMesh);
+            
+            // --- Water ---
+            const waterGeo = new THREE.PlaneGeometry(WORLD_SIZE * TILE_SIZE, WORLD_SIZE * TILE_SIZE);
+            waterGeo.rotateX(-Math.PI / 2);
+            const waterMat = new THREE.MeshStandardMaterial({
+                color: 0x0077be,
+                transparent: true,
+                opacity: 0.6,
+                roughness: 0.1,
+                metalness: 0.5
+            });
+            waterMesh = new THREE.Mesh(waterGeo, waterMat);
+            waterMesh.position.y = waterLevel;
+            scene.add(waterMesh);
+            
+            // --- Object Placement ---
+            let objCount = 0;
+            
+            for (let i = 0; i < count; i++) {
+                const x = posAttribute.getX(i);
+                const y = posAttribute.getY(i);
+                const z = posAttribute.getZ(i);
+                
+                // Only place on land
+                if (y <= waterLevel + 0.5) continue;
+                
+                // Noise for placement
+                const n = simplex.noise2D(x * 0.1 + 100, z * 0.1 + 100);
+                
+                // Trees
+                if (n > 1.0 - vegDensity && Math.random() < 0.1) {
+                    placeTree(x, y, z);
+                    objCount++;
+                }
+                
+                // Buildings
+                if (n < -1.0 + buildFreq && Math.random() < 0.02) {
+                    placeBuilding(x, y, z);
+                    objCount++;
+                }
+                
+                // Tall Grass / Hedges
+                if (n > 0.2 && n < 0.4 && Math.random() < 0.2) {
+                    placeTallGrass(x, y, z);
+                    objCount++;
+                }
+            }
+            
+            document.getElementById('object-count').textContent = `Objects: ${objCount}`;
+        }
+        
+        function placeTree(x, y, z) {
+            const height = 4 + Math.random() * 4;
+            
+            // Trunk
+            const trunkGeo = new THREE.CylinderGeometry(0.5, 0.7, height/2, 6);
+            const trunkMat = new THREE.MeshStandardMaterial({ color: 0x5c4033 });
+            const trunk = new THREE.Mesh(trunkGeo, trunkMat);
+            trunk.position.set(x, y + height/4, z);
+            trunk.castShadow = true;
+            trunk.receiveShadow = true;
+            scene.add(trunk);
+            objects.push(trunk);
+            
+            // Leaves
+            const leavesGeo = new THREE.ConeGeometry(2 + Math.random(), height/1.5, 8);
+            const leavesMat = new THREE.MeshStandardMaterial({ color: 0x228b22 });
+            const leaves = new THREE.Mesh(leavesGeo, leavesMat);
+            leaves.position.set(x, y + height/2 + height/3, z);
+            leaves.castShadow = true;
+            scene.add(leaves);
+            objects.push(leaves);
+        }
+        
+        function placeBuilding(x, y, z) {
+            const width = 6 + Math.random() * 4;
+            const height = 5 + Math.random() * 5;
+            const depth = 6 + Math.random() * 4;
+            
+            const geo = new THREE.BoxGeometry(width, height, depth);
+            const mat = new THREE.MeshStandardMaterial({ color: 0xcccccc }); // Concrete
+            const building = new THREE.Mesh(geo, mat);
+            building.position.set(x, y + height/2, z);
+            building.castShadow = true;
+            building.receiveShadow = true;
+            scene.add(building);
+            objects.push(building);
+            
+            // Roof
+            const roofGeo = new THREE.ConeGeometry(Math.max(width, depth) * 0.8, 3, 4);
+            roofGeo.rotateY(Math.PI/4);
+            const roofMat = new THREE.MeshStandardMaterial({ color: 0x8b0000 }); // Red roof
+            const roof = new THREE.Mesh(roofGeo, roofMat);
+            roof.position.set(x, y + height + 1.5, z);
+            scene.add(roof);
+            objects.push(roof);
+            
+            // Door
+            const doorGeo = new THREE.PlaneGeometry(2, 3);
+            const doorMat = new THREE.MeshStandardMaterial({ color: 0x4a3c31 });
+            const door = new THREE.Mesh(doorGeo, doorMat);
+            door.position.set(x, y + 1.5, z + depth/2 + 0.1);
+            scene.add(door);
+            objects.push(door);
+        }
+        
+        function placeTallGrass(x, y, z) {
+            // Simple billboard grass
+            const geo = new THREE.PlaneGeometry(2, 2);
+            const mat = new THREE.MeshStandardMaterial({ 
+                color: 0x32cd32, 
+                side: THREE.DoubleSide,
+                transparent: true,
+                opacity: 0.9
+            });
+            
+            // Cross shape
+            const g1 = new THREE.Mesh(geo, mat);
+            g1.position.set(x, y + 1, z);
+            g1.rotation.y = Math.random() * Math.PI;
+            g1.castShadow = false;
+            scene.add(g1);
+            objects.push(g1);
+            
+            const g2 = new THREE.Mesh(geo, mat);
+            g2.position.set(x, y + 1, z);
+            g2.rotation.y = g1.rotation.y + Math.PI/2;
+            g2.castShadow = false;
+            scene.add(g2);
+            objects.push(g2);
+        }
+        
+        function toggleView() {
+            is2D = !is2D;
+            if (is2D) {
+                // Top-down Orthographic-like
+                camera.position.set(0, 200, 0);
+                camera.lookAt(0, 0, 0);
+                camera.zoom = 1;
+            } else {
+                // Perspective
+                camera.position.set(0, 100, 100);
+                camera.lookAt(0, 0, 0);
+            }
+        }
+        
+        function onResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            // Slow rotation if 3D
+            if (!is2D) {
+                const time = Date.now() * 0.0001;
+                camera.position.x = Math.sin(time) * 150;
+                camera.position.z = Math.cos(time) * 150;
+                camera.lookAt(0, 0, 0);
+            }
+            
+            renderer.render(scene, camera);
+        }
+        
+        init();
+    </script>
+</body>
+</html>

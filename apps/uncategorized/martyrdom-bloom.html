@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Martyrdom Bloom</title>
+    <meta name="description" content="Inverted ecosystem where consumed creatures gain power while predators weaken - prey hunt to be devoured">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0812; min-height: 100vh; font-family: 'Georgia', serif; color: #a080c0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(15,10,25,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(150,100,200,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #c090e0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0a0ff; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(80,50,120,0.4); border: 1px solid rgba(150,100,200,0.4);
+            color: #b090d0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+        #stats { position: fixed; top: 20px; right: 20px; background: rgba(15,10,25,0.9); padding: 15px; border-radius: 8px; font-size: 11px; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Martyrdom Bloom</h3>
+        <div class="control-row">
+            <label>Sacrifice Drive <span class="value" id="drive-val">70</span></label>
+            <input type="range" id="drive" min="20" max="100" value="70">
+        </div>
+        <div class="control-row">
+            <label>Bloom Threshold <span class="value" id="bloom-val">3</span></label>
+            <input type="range" id="bloom" min="1" max="5" value="3">
+        </div>
+        <button id="bless-btn">Bless Prey (click canvas)</button>
+        <button id="paradox-btn">Trigger Paradox Zone</button>
+    </div>
+    <div id="stats">
+        <div>Prey: <span id="prey-count">0</span></div>
+        <div>Predators: <span id="pred-count">0</span></div>
+        <div>Blooms: <span id="bloom-count">0</span></div>
+    </div>
+    <div id="info">In this world, being consumed grants power | Predators flee, prey hunt</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let sacrificeDrive = 0.7;
+        let bloomThreshold = 3;
+        let time = 0;
+        let blessMode = false;
+        let paradoxZones = [];
+        let bloomCount = 0;
+        
+        const creatures = [];
+        const ascensions = [];
+        
+        class Creature {
+            constructor(x, y, isPredator) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2;
+                this.isPredator = isPredator;
+                this.size = isPredator ? 15 + Math.random() * 10 : 5 + Math.random() * 5;
+                this.energy = isPredator ? 100 : 20;
+                this.consumptions = 0;
+                this.blessed = false;
+                this.hue = isPredator ? 280 : 50;
+            }
+            
+            update() {
+                const inParadox = paradoxZones.some(z => 
+                    Math.hypot(this.x - z.x, this.y - z.y) < z.radius
+                );
+                
+                let nearestTarget = null;
+                let nearestDist = Infinity;
+                
+                creatures.forEach(other => {
+                    if (other === this) return;
+                    const dx = other.x - this.x;
+                    const dy = other.y - this.y;
+                    const dist = Math.hypot(dx, dy);
+                    
+                    if (inParadox) {
+                        if (this.isPredator && !other.isPredator && dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestTarget = other;
+                        } else if (!this.isPredator && other.isPredator && dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestTarget = other;
+                        }
+                    } else {
+                        if (!this.isPredator && other.isPredator && dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestTarget = other;
+                        } else if (this.isPredator && !other.isPredator && dist < nearestDist) {
+                            nearestDist = dist;
+                            nearestTarget = other;
+                        }
+                    }
+                });
+                
+                if (nearestTarget) {
+                    const dx = nearestTarget.x - this.x;
+                    const dy = nearestTarget.y - this.y;
+                    const dist = Math.hypot(dx, dy);
+                    
+                    let chaseMultiplier = inParadox ? 1 : -1;
+                    if (this.isPredator) chaseMultiplier *= -1;
+                    if (!this.isPredator && this.blessed) chaseMultiplier = 1;
+                    
+                    const speed = (this.isPredator ? 0.08 : 0.12 * sacrificeDrive);
+                    this.vx += (dx / dist) * speed * chaseMultiplier;
+                    this.vy += (dy / dist) * speed * chaseMultiplier;
+                    
+                    if (dist < this.size + nearestTarget.size) {
+                        if ((this.isPredator && !inParadox) || (!this.isPredator && inParadox)) {
+                            if (!nearestTarget.isPredator) {
+                                nearestTarget.consumptions++;
+                                nearestTarget.energy += this.energy * 0.5;
+                                nearestTarget.size = Math.min(25, nearestTarget.size + 2);
+                                this.energy -= 30;
+                                this.size = Math.max(5, this.size - 2);
+                                
+                                ascensions.push({
+                                    x: nearestTarget.x,
+                                    y: nearestTarget.y,
+                                    size: 10,
+                                    life: 1,
+                                    hue: nearestTarget.hue
+                                });
+                                
+                                if (nearestTarget.consumptions >= bloomThreshold) {
+                                    this.triggerBloom(nearestTarget);
+                                }
+                            }
+                        } else if (!this.isPredator) {
+                            this.consumptions++;
+                            this.energy += nearestTarget.energy * 0.3;
+                            this.size = Math.min(25, this.size + 2);
+                            nearestTarget.energy -= 20;
+                            nearestTarget.size = Math.max(8, nearestTarget.size - 1);
+                            
+                            ascensions.push({
+                                x: this.x,
+                                y: this.y,
+                                size: 15,
+                                life: 1,
+                                hue: this.hue
+                            });
+                            
+                            if (this.consumptions >= bloomThreshold) {
+                                this.triggerBloom(this);
+                            }
+                        }
+                    }
+                }
+                
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                if (this.x < 0 || this.x > W) this.vx *= -1;
+                if (this.y < 0 || this.y > H) this.vy *= -1;
+                this.x = Math.max(0, Math.min(W, this.x));
+                this.y = Math.max(0, Math.min(H, this.y));
+                
+                this.energy -= 0.05;
+                if (this.isPredator && this.energy < 30) {
+                    this.energy += 0.1;
+                }
+                
+                return this.energy > 0 && this.size > 3;
+            }
+            
+            triggerBloom(creature) {
+                bloomCount++;
+                for (let i = 0; i < 3; i++) {
+                    creatures.push(new Creature(
+                        creature.x + (Math.random() - 0.5) * 50,
+                        creature.y + (Math.random() - 0.5) * 50,
+                        false
+                    ));
+                }
+                creature.consumptions = 0;
+                creature.size = Math.max(5, creature.size - 5);
+                
+                for (let i = 0; i < 20; i++) {
+                    ascensions.push({
+                        x: creature.x + (Math.random() - 0.5) * 30,
+                        y: creature.y + (Math.random() - 0.5) * 30,
+                        size: 5 + Math.random() * 10,
+                        life: 1,
+                        hue: creature.hue + 30
+                    });
+                }
+            }
+            
+            draw() {
+                const pulse = 1 + Math.sin(time * 3 + this.x * 0.01) * 0.1;
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * 2 * pulse, 0, Math.PI * 2);
+                const glowAlpha = this.isPredator ? 0.1 : (0.2 + this.consumptions * 0.1);
+                ctx.fillStyle = "hsla(" + this.hue + ", 70%, 50%, " + glowAlpha + ")";
+                ctx.fill();
+                
+                ctx.beginPath();
+                if (this.isPredator) {
+                    ctx.arc(this.x, this.y, this.size * pulse, 0, Math.PI * 2);
+                    ctx.strokeStyle = "hsla(" + this.hue + ", 60%, 40%, " + (this.energy / 100) + ")";
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size * 0.5, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + this.hue + ", 50%, 30%, 0.5)";
+                    ctx.fill();
+                } else {
+                    ctx.arc(this.x, this.y, this.size * pulse, 0, Math.PI * 2);
+                    const brightness = 50 + this.consumptions * 10;
+                    ctx.fillStyle = "hsla(" + this.hue + ", 80%, " + brightness + "%, " + (0.7 + this.consumptions * 0.1) + ")";
+                    ctx.fill();
+                    
+                    if (this.blessed) {
+                        ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.size * 1.5, 0, Math.PI * 2);
+                        ctx.strokeStyle = "rgba(255, 220, 100, 0.5)";
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    }
+                }
+            }
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = '#0a0812';
+            ctx.fillRect(0, 0, W, H);
+            
+            for (let i = 0; i < 50; i++) {
+                const x = (i * 97) % W;
+                const y = (i * 61) % H;
+                ctx.beginPath();
+                ctx.arc(x, y, 0.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(150, 100, 200, 0.15)';
+                ctx.fill();
+            }
+        }
+        
+        function drawParadoxZones() {
+            paradoxZones = paradoxZones.filter(z => {
+                z.life -= 0.003;
+                if (z.life <= 0) return false;
+                
+                ctx.beginPath();
+                ctx.arc(z.x, z.y, z.radius, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(255, 100, 100, " + (z.life * 0.1) + ")";
+                ctx.fill();
+                ctx.strokeStyle = "rgba(255, 150, 150, " + (z.life * 0.3) + ")";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                return true;
+            });
+        }
+        
+        function drawAscensions() {
+            for (let i = ascensions.length - 1; i >= 0; i--) {
+                const a = ascensions[i];
+                a.y -= 1;
+                a.life -= 0.02;
+                a.size *= 0.98;
+                
+                if (a.life <= 0) {
+                    ascensions.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(a.x, a.y, a.size, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + a.hue + ", 100%, 70%, " + (a.life * 0.5) + ")";
+                ctx.fill();
+            }
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawParadoxZones();
+            
+            for (let i = creatures.length - 1; i >= 0; i--) {
+                if (!creatures[i].update()) {
+                    creatures.splice(i, 1);
+                }
+            }
+            
+            creatures.forEach(c => c.draw());
+            drawAscensions();
+            
+            const preyCount = creatures.filter(c => !c.isPredator).length;
+            const predCount = creatures.filter(c => c.isPredator).length;
+            
+            if (preyCount < 20 && Math.random() < 0.02) {
+                creatures.push(new Creature(Math.random() * W, Math.random() * H, false));
+            }
+            if (predCount < 5 && Math.random() < 0.01) {
+                creatures.push(new Creature(Math.random() * W, Math.random() * H, true));
+            }
+            
+            document.getElementById('prey-count').textContent = preyCount;
+            document.getElementById('pred-count').textContent = predCount;
+            document.getElementById('bloom-count').textContent = bloomCount;
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (blessMode) {
+                creatures.forEach(c => {
+                    if (!c.isPredator && Math.hypot(c.x - e.clientX, c.y - e.clientY) < 50) {
+                        c.blessed = true;
+                    }
+                });
+            }
+        };
+        
+        document.getElementById('drive').oninput = e => {
+            sacrificeDrive = e.target.value / 100;
+            document.getElementById('drive-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('bloom').oninput = e => {
+            bloomThreshold = parseInt(e.target.value);
+            document.getElementById('bloom-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('bless-btn').onclick = () => {
+            blessMode = !blessMode;
+            document.getElementById('bless-btn').textContent = blessMode ? 'Click prey to bless' : 'Bless Prey (click canvas)';
+        };
+        
+        document.getElementById('paradox-btn').onclick = () => {
+            paradoxZones.push({
+                x: W / 2 + (Math.random() - 0.5) * 300,
+                y: H / 2 + (Math.random() - 0.5) * 200,
+                radius: 100 + Math.random() * 100,
+                life: 1
+            });
+        };
+        
+        for (let i = 0; i < 30; i++) {
+            creatures.push(new Creature(Math.random() * W, Math.random() * H, false));
+        }
+        for (let i = 0; i < 6; i++) {
+            creatures.push(new Creature(Math.random() * W, Math.random() * H, true));
+        }
+        
+        animate();
+    </script>
+</body>
+</html>

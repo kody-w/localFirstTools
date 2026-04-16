@@ -1,0 +1,788 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Garden of Floating Islands</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+            background: linear-gradient(to bottom, #0a0e27, #1a0033);
+        }
+
+        canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            cursor: none;
+        }
+
+        .data-controls {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 1000;
+            display: flex;
+            gap: 10px;
+        }
+
+        .data-controls button {
+            padding: 8px 16px;
+            background: rgba(138, 43, 226, 0.8);
+            color: white;
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            border-radius: 8px;
+            cursor: pointer;
+            font-size: 14px;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s;
+        }
+
+        .data-controls button:hover {
+            background: rgba(165, 55, 253, 0.9);
+            transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(138, 43, 226, 0.5);
+        }
+
+        .hud {
+            position: fixed;
+            top: 10px;
+            left: 10px;
+            color: white;
+            font-size: 16px;
+            text-shadow: 0 0 10px rgba(138, 43, 226, 0.8);
+            z-index: 999;
+        }
+
+        .hud-item {
+            margin-bottom: 10px;
+            background: rgba(0, 0, 0, 0.5);
+            padding: 8px 12px;
+            border-radius: 8px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 43, 226, 0.5);
+        }
+
+        .crosshair {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 30px;
+            height: 30px;
+            z-index: 998;
+            pointer-events: none;
+        }
+
+        .crosshair::before,
+        .crosshair::after {
+            content: '';
+            position: absolute;
+            background: rgba(255, 255, 255, 0.8);
+            box-shadow: 0 0 5px rgba(138, 43, 226, 0.8);
+        }
+
+        .crosshair::before {
+            top: 50%;
+            left: 0;
+            right: 0;
+            height: 2px;
+            transform: translateY(-50%);
+        }
+
+        .crosshair::after {
+            left: 50%;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            transform: translateX(-50%);
+        }
+
+        .controls-help {
+            position: fixed;
+            bottom: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(138, 43, 226, 0.5);
+            font-size: 14px;
+            z-index: 997;
+        }
+
+        .controls-help h3 {
+            margin-bottom: 10px;
+            color: #a537fd;
+        }
+
+        .controls-help div {
+            margin: 5px 0;
+        }
+
+        input[type="file"] {
+            display: none;
+        }
+
+        @media (max-width: 768px) {
+            .data-controls {
+                top: auto;
+                bottom: 10px;
+                right: 10px;
+            }
+
+            .data-controls button {
+                padding: 6px 12px;
+                font-size: 12px;
+            }
+
+            .hud {
+                font-size: 14px;
+            }
+
+            .controls-help {
+                font-size: 12px;
+                padding: 10px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="crosshair"></div>
+
+    <div class="hud">
+        <div class="hud-item">Seeds: <span id="seedCount">5</span></div>
+        <div class="hud-item">Island: <span id="currentIsland">Origin</span></div>
+        <div class="hud-item">Structures: <span id="structureCount">0</span></div>
+    </div>
+
+    <div class="controls-help">
+        <h3>Controls</h3>
+        <div>WASD - Move</div>
+        <div>Mouse - Look around</div>
+        <div>Space - Jump / Float</div>
+        <div>E - Plant seed</div>
+        <div>Shift - Run</div>
+    </div>
+
+    <div class="data-controls">
+        <button onclick="exportData()">Export Garden</button>
+        <button onclick="document.getElementById('importFile').click()">Import Garden</button>
+        <input type="file" id="importFile" accept=".json" onchange="importData(event)">
+    </div>
+
+    <script>
+        const APP_NAME = 'quantum-garden';
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // Game state
+        let appData = JSON.parse(localStorage.getItem(APP_NAME) || '{"structures": [], "seeds": 5}');
+        let gameState = {
+            player: {
+                x: 0,
+                y: 100,
+                z: 0,
+                vx: 0,
+                vy: 0,
+                vz: 0,
+                yaw: 0,
+                pitch: 0,
+                onGround: false,
+                currentIsland: 0
+            },
+            camera: {
+                fov: 75,
+                near: 0.1,
+                far: 1000
+            },
+            keys: {},
+            mouse: {
+                locked: false,
+                sensitivity: 0.002
+            },
+            time: 0,
+            seeds: appData.seeds || 5,
+            structures: appData.structures || [],
+            particles: [],
+            plants: []
+        };
+
+        // Island definitions with quantum states
+        const islands = [
+            {
+                x: 0, y: 0, z: 0,
+                radius: 50,
+                color: '#8a2be2',
+                name: 'Origin',
+                quantumState: 'stable',
+                gravity: 1.0
+            },
+            {
+                x: 150, y: 30, z: 100,
+                radius: 40,
+                color: '#00ffff',
+                name: 'Crystal',
+                quantumState: 'superposition',
+                gravity: 0.5
+            },
+            {
+                x: -120, y: -20, z: 150,
+                radius: 45,
+                color: '#ff1493',
+                name: 'Flux',
+                quantumState: 'entangled',
+                gravity: 0.7
+            },
+            {
+                x: 80, y: 70, z: -100,
+                radius: 35,
+                color: '#00ff00',
+                name: 'Growth',
+                quantumState: 'coherent',
+                gravity: 0.3
+            },
+            {
+                x: -100, y: 50, z: -80,
+                radius: 38,
+                color: '#ffa500',
+                name: 'Energy',
+                quantumState: 'collapsed',
+                gravity: 1.2
+            }
+        ];
+
+        // Initialize canvas
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+
+        // Simple 3D to 2D projection
+        function project3D(x, y, z) {
+            const player = gameState.player;
+
+            // Rotate around Y axis (yaw)
+            const cosY = Math.cos(-player.yaw);
+            const sinY = Math.sin(-player.yaw);
+            let tx = (x - player.x) * cosY - (z - player.z) * sinY;
+            let tz = (x - player.x) * sinY + (z - player.z) * cosY;
+            let ty = y - player.y;
+
+            // Rotate around X axis (pitch)
+            const cosX = Math.cos(-player.pitch);
+            const sinX = Math.sin(-player.pitch);
+            const finalY = ty * cosX - tz * sinX;
+            const finalZ = ty * sinX + tz * cosX;
+
+            if (finalZ <= 0) return null; // Behind camera
+
+            const scale = (canvas.height / 2) / Math.tan(gameState.camera.fov * Math.PI / 360);
+            const screenX = (tx * scale / finalZ) + canvas.width / 2;
+            const screenY = (-finalY * scale / finalZ) + canvas.height / 2;
+
+            return { x: screenX, y: screenY, z: finalZ };
+        }
+
+        // Draw floating island
+        function drawIsland(island) {
+            const points = [];
+            const segments = 32;
+
+            // Generate island points
+            for (let i = 0; i < segments; i++) {
+                const angle = (i / segments) * Math.PI * 2;
+                const x = island.x + Math.cos(angle) * island.radius;
+                const z = island.z + Math.sin(angle) * island.radius;
+                const y = island.y + Math.sin(gameState.time * 0.001 + i * 0.5) * 5;
+
+                const point = project3D(x, y, z);
+                if (point) points.push(point);
+            }
+
+            if (points.length < 3) return;
+
+            // Draw island with quantum glow
+            ctx.fillStyle = island.color + '40';
+            ctx.strokeStyle = island.color;
+            ctx.lineWidth = 2;
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = island.color;
+
+            ctx.beginPath();
+            ctx.moveTo(points[0].x, points[0].y);
+            for (let i = 1; i < points.length; i++) {
+                ctx.lineTo(points[i].x, points[i].y);
+            }
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+
+            // Draw bioluminescent plants
+            for (let i = 0; i < 10; i++) {
+                const angle = (i / 10) * Math.PI * 2;
+                const r = island.radius * 0.7 * Math.random();
+                const px = island.x + Math.cos(angle) * r;
+                const pz = island.z + Math.sin(angle) * r;
+                const py = island.y + 10;
+
+                drawPlant(px, py, pz, island.color);
+            }
+
+            // Draw upward waterfall if it's the Crystal island
+            if (island.name === 'Crystal') {
+                drawWaterfall(island.x, island.y, island.z);
+            }
+        }
+
+        // Draw bioluminescent plant
+        function drawPlant(x, y, z, color) {
+            const point = project3D(x, y, z);
+            if (!point || point.z > 200) return;
+
+            const pulse = Math.sin(gameState.time * 0.003 + x + z) * 0.5 + 0.5;
+            const size = 5 + pulse * 3;
+
+            ctx.fillStyle = color + Math.floor(128 + pulse * 127).toString(16);
+            ctx.shadowBlur = 10 + pulse * 10;
+            ctx.shadowColor = color;
+
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, size / (point.z / 100), 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Draw upward flowing waterfall
+        function drawWaterfall(x, y, z) {
+            for (let i = 0; i < 20; i++) {
+                const py = y + (gameState.time * 0.05 + i * 10) % 100;
+                const px = x + Math.sin(gameState.time * 0.002 + i) * 5;
+                const pz = z + Math.cos(gameState.time * 0.002 + i) * 5;
+
+                const point = project3D(px, py, pz);
+                if (!point) continue;
+
+                ctx.fillStyle = `rgba(100, 200, 255, ${0.5 - i * 0.02})`;
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 3 / (point.z / 100), 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Draw planted structure
+        function drawStructure(structure) {
+            const growthFactor = Math.min(1, (gameState.time - structure.plantTime) / 5000);
+            const height = 30 * growthFactor;
+
+            // Draw glowing crystal structure
+            for (let i = 0; i < 6; i++) {
+                const angle = (i / 6) * Math.PI * 2;
+                const rx = structure.x + Math.cos(angle) * 5;
+                const rz = structure.z + Math.sin(angle) * 5;
+                const ry = structure.y + height * (i / 6);
+
+                const point = project3D(rx, ry, rz);
+                if (!point) continue;
+
+                const pulse = Math.sin(gameState.time * 0.002 + i) * 0.5 + 0.5;
+                ctx.strokeStyle = `hsl(${structure.hue}, 100%, ${50 + pulse * 30}%)`;
+                ctx.lineWidth = 3 / (point.z / 100);
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = ctx.strokeStyle;
+
+                // Connect to center
+                const centerPoint = project3D(structure.x, structure.y + height, structure.z);
+                if (centerPoint) {
+                    ctx.beginPath();
+                    ctx.moveTo(point.x, point.y);
+                    ctx.lineTo(centerPoint.x, centerPoint.y);
+                    ctx.stroke();
+                }
+            }
+
+            // Draw glowing orb at top
+            const topPoint = project3D(structure.x, structure.y + height, structure.z);
+            if (topPoint) {
+                const pulse = Math.sin(gameState.time * 0.004) * 0.5 + 0.5;
+                ctx.fillStyle = `hsl(${structure.hue}, 100%, ${60 + pulse * 30}%)`;
+                ctx.shadowBlur = 20 + pulse * 10;
+                ctx.shadowColor = ctx.fillStyle;
+                ctx.beginPath();
+                ctx.arc(topPoint.x, topPoint.y, (8 + pulse * 3) / (topPoint.z / 100), 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        // Draw particle
+        function drawParticle(particle) {
+            const point = project3D(particle.x, particle.y, particle.z);
+            if (!point) return;
+
+            ctx.fillStyle = particle.color + Math.floor(particle.alpha * 255).toString(16).padStart(2, '0');
+            ctx.beginPath();
+            ctx.arc(point.x, point.y, particle.size / (point.z / 100), 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Create particle effect
+        function createParticles(x, y, z, color, count = 10) {
+            for (let i = 0; i < count; i++) {
+                gameState.particles.push({
+                    x: x + (Math.random() - 0.5) * 10,
+                    y: y + (Math.random() - 0.5) * 10,
+                    z: z + (Math.random() - 0.5) * 10,
+                    vx: (Math.random() - 0.5) * 2,
+                    vy: Math.random() * 2,
+                    vz: (Math.random() - 0.5) * 2,
+                    color: color,
+                    size: Math.random() * 3 + 1,
+                    alpha: 1,
+                    life: 100
+                });
+            }
+        }
+
+        // Update particles
+        function updateParticles(deltaTime) {
+            gameState.particles = gameState.particles.filter(particle => {
+                particle.x += particle.vx * deltaTime * 0.1;
+                particle.y += particle.vy * deltaTime * 0.1;
+                particle.z += particle.vz * deltaTime * 0.1;
+                particle.vy += 0.05 * deltaTime;
+                particle.life -= deltaTime;
+                particle.alpha = particle.life / 100;
+                return particle.life > 0;
+            });
+        }
+
+        // Plant seed
+        function plantSeed() {
+            if (gameState.seeds <= 0) return;
+
+            const player = gameState.player;
+            const structure = {
+                x: player.x + Math.sin(player.yaw) * 20,
+                y: player.y - 10,
+                z: player.z + Math.cos(player.yaw) * 20,
+                plantTime: gameState.time,
+                hue: Math.random() * 360,
+                islandIndex: player.currentIsland
+            };
+
+            gameState.structures.push(structure);
+            gameState.seeds--;
+
+            // Create planting effect
+            createParticles(structure.x, structure.y, structure.z, '#00ff00', 20);
+
+            // Update UI
+            document.getElementById('seedCount').textContent = gameState.seeds;
+            document.getElementById('structureCount').textContent = gameState.structures.length;
+
+            saveData();
+        }
+
+        // Physics update
+        function updatePhysics(deltaTime) {
+            const player = gameState.player;
+            const speed = gameState.keys['Shift'] ? 0.3 : 0.15;
+            const dt = deltaTime * 0.01;
+
+            // Movement
+            if (gameState.keys['w']) {
+                player.vx += Math.sin(player.yaw) * speed;
+                player.vz += Math.cos(player.yaw) * speed;
+            }
+            if (gameState.keys['s']) {
+                player.vx -= Math.sin(player.yaw) * speed;
+                player.vz -= Math.cos(player.yaw) * speed;
+            }
+            if (gameState.keys['a']) {
+                player.vx += Math.sin(player.yaw - Math.PI/2) * speed;
+                player.vz += Math.cos(player.yaw - Math.PI/2) * speed;
+            }
+            if (gameState.keys['d']) {
+                player.vx += Math.sin(player.yaw + Math.PI/2) * speed;
+                player.vz += Math.cos(player.yaw + Math.PI/2) * speed;
+            }
+
+            // Check which island we're on
+            let currentIsland = null;
+            let minDist = Infinity;
+
+            islands.forEach((island, index) => {
+                const dx = player.x - island.x;
+                const dy = player.y - island.y;
+                const dz = player.z - island.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+
+                if (dist < island.radius + 20 && dist < minDist) {
+                    minDist = dist;
+                    currentIsland = island;
+                    player.currentIsland = index;
+                }
+            });
+
+            // Apply gravity based on current island
+            const gravity = currentIsland ? currentIsland.gravity * 0.5 : 0.8;
+
+            // Jump / Float
+            if (gameState.keys[' '] && player.onGround) {
+                player.vy = 8;
+                player.onGround = false;
+                createParticles(player.x, player.y, player.z, '#8a2be2', 5);
+            } else if (gameState.keys[' '] && !player.onGround && currentIsland) {
+                // Floating mechanic on low gravity islands
+                if (currentIsland.gravity < 0.6) {
+                    player.vy += 0.3;
+                }
+            }
+
+            // Apply gravity
+            player.vy -= gravity * dt;
+
+            // Apply velocity
+            player.x += player.vx * dt;
+            player.y += player.vy * dt;
+            player.z += player.vz * dt;
+
+            // Friction
+            player.vx *= 0.9;
+            player.vz *= 0.9;
+
+            // Ground collision for islands
+            if (currentIsland) {
+                const groundY = currentIsland.y + 10;
+                if (player.y < groundY) {
+                    player.y = groundY;
+                    player.vy = 0;
+                    player.onGround = true;
+                }
+
+                // Update UI
+                document.getElementById('currentIsland').textContent = currentIsland.name;
+            } else {
+                player.onGround = false;
+
+                // Teleport back if falling too far
+                if (player.y < -200) {
+                    player.x = 0;
+                    player.y = 100;
+                    player.z = 0;
+                    player.vx = 0;
+                    player.vy = 0;
+                    player.vz = 0;
+                }
+            }
+        }
+
+        // Main render loop
+        function render(currentTime) {
+            const deltaTime = currentTime - gameState.time;
+            gameState.time = currentTime;
+
+            // Clear canvas with gradient background
+            const gradient = ctx.createLinearGradient(0, 0, 0, canvas.height);
+            gradient.addColorStop(0, '#0a0e27');
+            gradient.addColorStop(0.5, '#1a0033');
+            gradient.addColorStop(1, '#2d004d');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Draw stars
+            ctx.fillStyle = 'white';
+            for (let i = 0; i < 100; i++) {
+                const x = (i * 73 + gameState.time * 0.01) % canvas.width;
+                const y = (i * 137) % canvas.height;
+                const size = Math.sin(gameState.time * 0.001 + i) * 0.5 + 1;
+                ctx.beginPath();
+                ctx.arc(x, y, size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Update physics
+            updatePhysics(deltaTime);
+            updateParticles(deltaTime);
+
+            // Sort objects by distance for proper rendering order
+            const renderQueue = [];
+
+            // Add islands to render queue
+            islands.forEach(island => {
+                const dx = island.x - gameState.player.x;
+                const dy = island.y - gameState.player.y;
+                const dz = island.z - gameState.player.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                renderQueue.push({ type: 'island', data: island, dist });
+            });
+
+            // Add structures to render queue
+            gameState.structures.forEach(structure => {
+                const dx = structure.x - gameState.player.x;
+                const dy = structure.y - gameState.player.y;
+                const dz = structure.z - gameState.player.z;
+                const dist = Math.sqrt(dx*dx + dy*dy + dz*dz);
+                renderQueue.push({ type: 'structure', data: structure, dist });
+            });
+
+            // Sort by distance (far to near)
+            renderQueue.sort((a, b) => b.dist - a.dist);
+
+            // Render everything
+            renderQueue.forEach(item => {
+                if (item.type === 'island') {
+                    drawIsland(item.data);
+                } else if (item.type === 'structure') {
+                    drawStructure(item.data);
+                }
+            });
+
+            // Draw particles (always on top)
+            gameState.particles.forEach(particle => drawParticle(particle));
+
+            requestAnimationFrame(render);
+        }
+
+        // Input handling
+        document.addEventListener('keydown', (e) => {
+            gameState.keys[e.key.toLowerCase()] = true;
+
+            if (e.key.toLowerCase() === 'e') {
+                plantSeed();
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            gameState.keys[e.key.toLowerCase()] = false;
+        });
+
+        canvas.addEventListener('click', () => {
+            if (!gameState.mouse.locked) {
+                canvas.requestPointerLock();
+            }
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            gameState.mouse.locked = document.pointerLockElement === canvas;
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (gameState.mouse.locked) {
+                gameState.player.yaw += e.movementX * gameState.mouse.sensitivity;
+                gameState.player.pitch = Math.max(-Math.PI/3, Math.min(Math.PI/3,
+                    gameState.player.pitch - e.movementY * gameState.mouse.sensitivity));
+            }
+        });
+
+        // Touch controls for mobile
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        canvas.addEventListener('touchstart', (e) => {
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            e.preventDefault();
+            const deltaX = e.touches[0].clientX - touchStartX;
+            const deltaY = e.touches[0].clientY - touchStartY;
+
+            gameState.player.yaw += deltaX * 0.01;
+            gameState.player.pitch = Math.max(-Math.PI/3, Math.min(Math.PI/3,
+                gameState.player.pitch - deltaY * 0.01));
+
+            touchStartX = e.touches[0].clientX;
+            touchStartY = e.touches[0].clientY;
+        });
+
+        // Data management
+        function saveData() {
+            appData.structures = gameState.structures;
+            appData.seeds = gameState.seeds;
+            localStorage.setItem(APP_NAME, JSON.stringify(appData));
+        }
+
+        function exportData() {
+            const exportData = {
+                version: '1.0',
+                timestamp: new Date().toISOString(),
+                seeds: gameState.seeds,
+                structures: gameState.structures,
+                stats: {
+                    totalStructures: gameState.structures.length,
+                    islandsVisited: [...new Set(gameState.structures.map(s => s.islandIndex))].length
+                }
+            };
+
+            const dataStr = JSON.stringify(exportData, null, 2);
+            const dataBlob = new Blob([dataStr], {type: 'application/json'});
+            const url = URL.createObjectURL(dataBlob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = `quantum-garden-${new Date().toISOString().split('T')[0]}.json`;
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+
+        function importData(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const imported = JSON.parse(e.target.result);
+
+                    if (imported.structures && Array.isArray(imported.structures)) {
+                        gameState.structures = imported.structures;
+                        gameState.seeds = imported.seeds || 5;
+
+                        // Update UI
+                        document.getElementById('seedCount').textContent = gameState.seeds;
+                        document.getElementById('structureCount').textContent = gameState.structures.length;
+
+                        saveData();
+
+                        // Visual feedback
+                        createParticles(gameState.player.x, gameState.player.y, gameState.player.z, '#00ff00', 30);
+                    }
+                } catch (error) {
+                    alert('Invalid garden data file');
+                }
+            };
+            reader.readAsText(file);
+            event.target.value = ''; // Reset input
+        }
+
+        // Initialize structures from saved data
+        gameState.structures = appData.structures || [];
+        document.getElementById('seedCount').textContent = gameState.seeds;
+        document.getElementById('structureCount').textContent = gameState.structures.length;
+
+        // Start game
+        requestAnimationFrame(render);
+
+        // Initial particles for ambience
+        setInterval(() => {
+            if (Math.random() < 0.3) {
+                const island = islands[Math.floor(Math.random() * islands.length)];
+                createParticles(
+                    island.x + (Math.random() - 0.5) * island.radius,
+                    island.y + Math.random() * 20,
+                    island.z + (Math.random() - 0.5) * island.radius,
+                    island.color,
+                    3
+                );
+            }
+        }, 1000);
+    </script>
+</body>
+</html>

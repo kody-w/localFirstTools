@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Living Fractal: Audio-Reactive Explorer</title>
+    <meta name="description" content="A WebGL fractal explorer that breathes and morphs in sync with your music via microphone input.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', Courier, monospace; }
+        canvas { display: block; width: 100vw; height: 100vh; }
+        
+        #ui {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0,0,0,0.8);
+            color: #fff;
+            transition: opacity 0.5s;
+            z-index: 10;
+        }
+        
+        h1 {
+            font-size: 3rem;
+            text-shadow: 0 0 20px #0ff;
+            margin-bottom: 1rem;
+            text-align: center;
+        }
+        
+        p {
+            max-width: 600px;
+            text-align: center;
+            line-height: 1.6;
+            margin-bottom: 2rem;
+            color: #aaa;
+        }
+        
+        button {
+            background: transparent;
+            color: #0ff;
+            border: 2px solid #0ff;
+            padding: 1rem 2rem;
+            font-size: 1.2rem;
+            font-family: inherit;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            box-shadow: 0 0 10px rgba(0, 255, 255, 0.3);
+        }
+        
+        button:hover {
+            background: #0ff;
+            color: #000;
+            box-shadow: 0 0 30px rgba(0, 255, 255, 0.8);
+        }
+        
+        #hud {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.5);
+            pointer-events: none;
+            font-size: 12px;
+        }
+        
+        .hidden {
+            opacity: 0;
+            pointer-events: none;
+        }
+
+        #controls {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            display: flex;
+            gap: 10px;
+            z-index: 5;
+        }
+
+        .icon-btn {
+            background: rgba(0,0,0,0.5);
+            border: 1px solid #444;
+            color: #fff;
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 18px;
+            transition: all 0.2s;
+        }
+        
+        .icon-btn:hover {
+            border-color: #0ff;
+            color: #0ff;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1>LIVING FRACTAL</h1>
+        <p>
+            This experience uses your microphone to drive a real-time Julia Set simulation.
+            <br><br>
+            The fractal will "breathe" with the bass and morph its geometry based on frequency data.
+            Play some music or speak to see it react.
+        </p>
+        <button id="start-btn">Initialize Audio Core</button>
+    </div>
+
+    <div id="controls" class="hidden">
+        <button class="icon-btn" id="mode-btn" title="Switch Fractal Mode">🌀</button>
+        <button class="icon-btn" id="palette-btn" title="Cycle Palette">🎨</button>
+        <button class="icon-btn" id="reset-btn" title="Reset View">R</button>
+    </div>
+
+    <div id="hud" class="hidden">
+        FPS: <span id="fps">0</span> | ZOOM: <span id="zoom">1.0</span>x | AUDIO: <span id="audio-level">0</span>%
+    </div>
+
+    <canvas id="glcanvas"></canvas>
+
+    <!-- Vertex Shader -->
+    <script id="vs" type="x-shader/x-vertex">
+        attribute vec4 aVertexPosition;
+        void main() {
+            gl_Position = aVertexPosition;
+        }
+    </script>
+
+    <!-- Fragment Shader -->
+    <script id="fs" type="x-shader/x-fragment">
+        precision highp float;
+
+        uniform vec2 uResolution;
+        uniform float uTime;
+        uniform float uAudioLow;    // Bass (0.0 - 1.0)
+        uniform float uAudioMid;    // Mids (0.0 - 1.0)
+        uniform float uAudioHigh;   // Treble (0.0 - 1.0)
+        uniform vec2 uOffset;       // Pan
+        uniform float uZoom;        // Zoom level
+        uniform int uMode;          // 0 = Julia, 1 = Mandelbrot
+        uniform int uPalette;       // Color palette index
+
+        // Color Palettes
+        vec3 palette(float t, vec3 a, vec3 b, vec3 c, vec3 d) {
+            return a + b * cos(6.28318 * (c * t + d));
+        }
+
+        void main() {
+            vec2 uv = (gl_FragCoord.xy - 0.5 * uResolution.xy) / uResolution.y;
+            
+            // Apply Zoom and Pan
+            uv /= uZoom;
+            uv += uOffset;
+
+            // Audio Reactivity
+            // Bass affects zoom/breathing slightly
+            float breath = 1.0 + uAudioLow * 0.1;
+            uv /= breath;
+
+            vec2 z = uv;
+            
+            // Julia Constant morphs with time and audio
+            // Base movement
+            float t = uTime * 0.2;
+            vec2 c = vec2(sin(t), cos(t)) * 0.7885;
+            
+            // Audio modulation of C
+            c += vec2(uAudioMid * 0.5, uAudioHigh * 0.5) * vec2(sin(uTime), cos(uTime));
+
+            if (uMode == 1) {
+                // Mandelbrot: c is the coordinate, z starts at 0
+                c = uv;
+                z = vec2(0.0);
+            }
+
+            float iter = 0.0;
+            const float maxIter = 100.0;
+            float smoothVal = 0.0;
+
+            for (float i = 0.0; i < maxIter; i++) {
+                // z = z^2 + c
+                float x = (z.x * z.x - z.y * z.y) + c.x;
+                float y = (2.0 * z.x * z.y) + c.y;
+                
+                z = vec2(x, y);
+                
+                if (dot(z, z) > 4.0) {
+                    smoothVal = i - log2(log2(dot(z,z))) + 4.0;
+                    break;
+                }
+                iter = i;
+            }
+
+            // Coloring
+            vec3 col = vec3(0.0);
+            
+            if (iter < maxIter - 0.5) {
+                float t_col = smoothVal / 20.0;
+                
+                // Shift color with time and audio
+                t_col += uTime * 0.1 + uAudioLow * 0.5;
+
+                if (uPalette == 0) {
+                    // Neon Cyberpunk
+                    col = palette(t_col, vec3(0.5), vec3(0.5), vec3(1.0), vec3(0.0, 0.33, 0.67));
+                } else if (uPalette == 1) {
+                    // Fire & Ice
+                    col = palette(t_col, vec3(0.5), vec3(0.5), vec3(1.0, 1.0, 0.5), vec3(0.8, 0.9, 0.3));
+                } else if (uPalette == 2) {
+                    // Alien Slime
+                    col = palette(t_col, vec3(0.2, 0.8, 0.2), vec3(0.5), vec3(1.0), vec3(0.0, 0.1, 0.2));
+                } else {
+                    // Monochrome Gold
+                    col = palette(t_col, vec3(0.5), vec3(0.5), vec3(2.0, 1.0, 0.0), vec3(0.5, 0.2, 0.25));
+                }
+                
+                // Glow based on audio high freq
+                col += vec3(uAudioHigh) * 0.5;
+            }
+
+            gl_FragColor = vec4(col, 1.0);
+        }
+    </script>
+
+    <script>
+        // --- WebGL Setup ---
+        const canvas = document.getElementById('glcanvas');
+        const gl = canvas.getContext('webgl');
+
+        if (!gl) {
+            alert('WebGL not supported');
+        }
+
+        // Shader Compilation
+        function createShader(gl, type, source) {
+            const shader = gl.createShader(type);
+            gl.shaderSource(shader, source);
+            gl.compileShader(shader);
+            if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+                console.error(gl.getShaderInfoLog(shader));
+                gl.deleteShader(shader);
+                return null;
+            }
+            return shader;
+        }
+
+        const vsSource = document.getElementById('vs').text;
+        const fsSource = document.getElementById('fs').text;
+        const vertexShader = createShader(gl, gl.VERTEX_SHADER, vsSource);
+        const fragmentShader = createShader(gl, gl.FRAGMENT_SHADER, fsSource);
+
+        const program = gl.createProgram();
+        gl.attachShader(program, vertexShader);
+        gl.attachShader(program, fragmentShader);
+        gl.linkProgram(program);
+
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            console.error(gl.getProgramInfoLog(program));
+        }
+
+        // Buffers
+        const positionBuffer = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
+        const positions = [
+            -1.0,  1.0,
+             1.0,  1.0,
+            -1.0, -1.0,
+             1.0, -1.0,
+        ];
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
+
+        // Uniform Locations
+        const uResolution = gl.getUniformLocation(program, 'uResolution');
+        const uTime = gl.getUniformLocation(program, 'uTime');
+        const uAudioLow = gl.getUniformLocation(program, 'uAudioLow');
+        const uAudioMid = gl.getUniformLocation(program, 'uAudioMid');
+        const uAudioHigh = gl.getUniformLocation(program, 'uAudioHigh');
+        const uOffset = gl.getUniformLocation(program, 'uOffset');
+        const uZoom = gl.getUniformLocation(program, 'uZoom');
+        const uMode = gl.getUniformLocation(program, 'uMode');
+        const uPalette = gl.getUniformLocation(program, 'uPalette');
+
+        const aVertexPosition = gl.getAttribLocation(program, 'aVertexPosition');
+        gl.enableVertexAttribArray(aVertexPosition);
+        gl.vertexAttribPointer(aVertexPosition, 2, gl.FLOAT, false, 0, 0);
+
+        // --- State ---
+        let startTime = Date.now();
+        let offset = { x: 0, y: 0 };
+        let zoom = 1.0;
+        let targetZoom = 1.0;
+        let mode = 0; // 0 = Julia, 1 = Mandelbrot
+        let paletteIdx = 0;
+        
+        // --- Audio Setup ---
+        let audioContext;
+        let analyser;
+        let dataArray;
+        let audioData = { low: 0, mid: 0, high: 0 };
+        let isAudioActive = false;
+
+        async function initAudio() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                const source = audioContext.createMediaStreamSource(stream);
+                analyser = audioContext.createAnalyser();
+                analyser.fftSize = 256;
+                source.connect(analyser);
+                
+                const bufferLength = analyser.frequencyBinCount;
+                dataArray = new Uint8Array(bufferLength);
+                isAudioActive = true;
+                
+                document.getElementById('ui').classList.add('hidden');
+                document.getElementById('hud').classList.remove('hidden');
+                document.getElementById('controls').classList.remove('hidden');
+            } catch (e) {
+                console.error("Audio access denied", e);
+                alert("Microphone access denied. Running in simulation mode.");
+                // Fallback to simulation
+                isAudioActive = true;
+                simulateAudio = true;
+                document.getElementById('ui').classList.add('hidden');
+                document.getElementById('hud').classList.remove('hidden');
+                document.getElementById('controls').classList.remove('hidden');
+            }
+        }
+
+        let simulateAudio = false;
+
+        function updateAudio() {
+            if (!isAudioActive) return;
+
+            if (simulateAudio) {
+                // Fake audio data based on time
+                const t = Date.now() * 0.001;
+                audioData.low = (Math.sin(t * 4) + 1) * 0.5;
+                audioData.mid = (Math.sin(t * 8) + 1) * 0.5;
+                audioData.high = (Math.sin(t * 16) + 1) * 0.5;
+                return;
+            }
+
+            analyser.getByteFrequencyData(dataArray);
+            
+            // Split into 3 bands
+            const third = Math.floor(dataArray.length / 3);
+            let low = 0, mid = 0, high = 0;
+            
+            for(let i=0; i<third; i++) low += dataArray[i];
+            for(let i=third; i<third*2; i++) mid += dataArray[i];
+            for(let i=third*2; i<dataArray.length; i++) high += dataArray[i];
+            
+            audioData.low = (low / third) / 255;
+            audioData.mid = (mid / third) / 255;
+            audioData.high = (high / (dataArray.length - third*2)) / 255;
+            
+            // Smooth decay
+            // (Optional, but raw values are usually fine for this shader)
+        }
+
+        // --- Interaction ---
+        let isDragging = false;
+        let lastMouse = { x: 0, y: 0 };
+
+        canvas.addEventListener('mousedown', e => {
+            isDragging = true;
+            lastMouse = { x: e.clientX, y: e.clientY };
+        });
+
+        window.addEventListener('mouseup', () => isDragging = false);
+
+        window.addEventListener('mousemove', e => {
+            if (isDragging) {
+                const dx = e.clientX - lastMouse.x;
+                const dy = e.clientY - lastMouse.y;
+                
+                // Adjust pan speed based on zoom
+                const speed = 0.002 / zoom;
+                offset.x -= dx * speed;
+                offset.y += dy * speed;
+                
+                lastMouse = { x: e.clientX, y: e.clientY };
+            }
+        });
+
+        canvas.addEventListener('wheel', e => {
+            e.preventDefault();
+            const zoomSpeed = 0.1;
+            if (e.deltaY < 0) targetZoom *= (1 + zoomSpeed);
+            else targetZoom /= (1 + zoomSpeed);
+            
+            targetZoom = Math.max(0.1, Math.min(10000.0, targetZoom));
+        });
+
+        // UI Controls
+        document.getElementById('start-btn').addEventListener('click', () => {
+            initAudio();
+            if (audioContext && audioContext.state === 'suspended') {
+                audioContext.resume();
+            }
+        });
+
+        document.getElementById('mode-btn').addEventListener('click', () => {
+            mode = (mode + 1) % 2;
+            // Reset view for new mode
+            offset = { x: 0, y: 0 };
+            targetZoom = 1.0;
+            zoom = 1.0;
+        });
+
+        document.getElementById('palette-btn').addEventListener('click', () => {
+            paletteIdx = (paletteIdx + 1) % 4;
+        });
+
+        document.getElementById('reset-btn').addEventListener('click', () => {
+            offset = { x: 0, y: 0 };
+            targetZoom = 1.0;
+        });
+
+        // --- Render Loop ---
+        function render() {
+            updateAudio();
+
+            // Smooth zoom
+            zoom += (targetZoom - zoom) * 0.1;
+
+            // Resize
+            if (canvas.width !== window.innerWidth || canvas.height !== window.innerHeight) {
+                canvas.width = window.innerWidth;
+                canvas.height = window.innerHeight;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+            }
+
+            gl.useProgram(program);
+
+            gl.uniform2f(uResolution, canvas.width, canvas.height);
+            gl.uniform1f(uTime, (Date.now() - startTime) * 0.001);
+            gl.uniform1f(uAudioLow, audioData.low);
+            gl.uniform1f(uAudioMid, audioData.mid);
+            gl.uniform1f(uAudioHigh, audioData.high);
+            gl.uniform2f(uOffset, offset.x, offset.y);
+            gl.uniform1f(uZoom, zoom);
+            gl.uniform1i(uMode, mode);
+            gl.uniform1i(uPalette, paletteIdx);
+
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+            // Update HUD
+            document.getElementById('fps').textContent = Math.round(1000 / 16); // Fake FPS for now
+            document.getElementById('zoom').textContent = zoom.toFixed(2);
+            document.getElementById('audio-level').textContent = Math.round(audioData.low * 100);
+
+            requestAnimationFrame(render);
+        }
+
+        render();
+
+    </script>
+</body>
+</html>

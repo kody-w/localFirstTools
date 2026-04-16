@@ -1,0 +1,444 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pocket Universe</title>
+    <meta name="description" content="A procedural 3D space exploration game with trading and combat.">
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; color: #fff; font-family: 'Courier New', Courier, monospace; user-select: none; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+        #hud { position: absolute; bottom: 20px; left: 20px; background: rgba(0, 20, 40, 0.8); padding: 15px; border: 1px solid #00aaff; border-radius: 5px; pointer-events: auto; min-width: 200px; }
+        #target-info { position: absolute; top: 20px; right: 20px; background: rgba(0, 20, 40, 0.8); padding: 15px; border: 1px solid #ffaa00; border-radius: 5px; display: none; pointer-events: auto; width: 200px; }
+        #crosshair { position: absolute; top: 50%; left: 50%; width: 20px; height: 20px; border: 2px solid rgba(0, 255, 0, 0.5); border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; }
+        #crosshair::after { content: ''; position: absolute; top: 50%; left: 50%; width: 2px; height: 2px; background: #0f0; transform: translate(-50%, -50%); }
+        
+        button { background: #00aaff; color: #000; border: none; padding: 8px 12px; cursor: pointer; font-weight: bold; width: 100%; margin-top: 5px; border-radius: 3px; transition: background 0.2s; }
+        button:hover { background: #0088cc; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        
+        .bar-container { width: 100%; height: 8px; background: #333; margin-top: 5px; border-radius: 2px; overflow: hidden; }
+        .bar { height: 100%; background: #00ff00; width: 100%; transition: width 0.2s; }
+        
+        #message-log { position: absolute; top: 20px; left: 20px; width: 300px; height: 200px; overflow-y: hidden; pointer-events: none; display: flex; flex-direction: column-reverse; }
+        .msg { margin-bottom: 5px; padding: 5px; background: rgba(0,0,0,0.5); border-left: 3px solid #00aaff; animation: fadein 0.3s; font-size: 14px; }
+        @keyframes fadein { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+        
+        .label { color: #aaa; font-size: 12px; margin-top: 5px; }
+        .value { font-size: 16px; font-weight: bold; }
+        
+        #start-screen { position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.9); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 100; pointer-events: auto; }
+        h1 { font-size: 48px; color: #00aaff; text-shadow: 0 0 20px #00aaff; margin-bottom: 10px; }
+        p { max-width: 600px; text-align: center; line-height: 1.6; color: #ccc; }
+        #start-btn { width: auto; padding: 15px 40px; font-size: 24px; margin-top: 30px; background: linear-gradient(45deg, #00aaff, #00ffaa); color: #000; border: none; border-radius: 30px; cursor: pointer; box-shadow: 0 0 20px rgba(0, 170, 255, 0.5); }
+        #start-btn:hover { transform: scale(1.05); box-shadow: 0 0 30px rgba(0, 170, 255, 0.8); }
+    </style>
+</head>
+<body>
+    <div id="start-screen">
+        <h1>POCKET UNIVERSE</h1>
+        <p>Explore a procedurally generated solar system. Trade resources between planets, fight pirates, and upgrade your ship.</p>
+        <p>Controls: WASD to Move | Mouse to Steer | Click to Shoot | Shift to Boost</p>
+        <button id="start-btn">LAUNCH SHIP</button>
+    </div>
+
+    <div id="ui-layer">
+        <div id="crosshair"></div>
+        <div id="message-log"></div>
+        
+        <div id="target-info">
+            <h3 id="target-name">Unknown Planet</h3>
+            <div class="label">TYPE</div>
+            <div id="target-type" class="value">Gas Giant</div>
+            <div class="label">ECONOMY</div>
+            <div id="target-economy" class="value">Industrial</div>
+            <div style="margin-top: 15px;">
+                <button id="dock-btn">DOCK & TRADE</button>
+            </div>
+        </div>
+        
+        <div id="hud">
+            <div style="display: flex; justify-content: space-between; align-items: center;">
+                <span style="color: #00aaff; font-weight: bold;">SHIP STATUS</span>
+                <span id="credits-val" style="color: #ffd700;">1000 ₡</span>
+            </div>
+            
+            <div class="label">HULL INTEGRITY</div>
+            <div class="bar-container"><div id="hull-bar" class="bar"></div></div>
+            
+            <div class="label">ENERGY</div>
+            <div class="bar-container"><div id="energy-bar" class="bar" style="background: #00aaff;"></div></div>
+            
+            <div class="label">SPEED</div>
+            <div id="speed-val" class="value">0 m/s</div>
+            
+            <div class="label">CARGO</div>
+            <div id="cargo-val" class="value">0 / 50</div>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- Game State & Config ---
+        const CONFIG = {
+            speed: 0.5,
+            boostSpeed: 1.5,
+            rotationSpeed: 0.002,
+            friction: 0.98,
+            laserSpeed: 5,
+            laserLifetime: 100
+        };
+
+        const STATE = {
+            credits: 1000,
+            hull: 100,
+            maxHull: 100,
+            energy: 100,
+            maxEnergy: 100,
+            cargo: [],
+            maxCargo: 50,
+            velocity: new THREE.Vector3(),
+            input: { w: false, a: false, s: false, d: false, shift: false, space: false, mouseLeft: false },
+            mouse: { x: 0, y: 0 },
+            target: null,
+            docked: false
+        };
+
+        // --- Seeded Random ---
+        class SeededRandom {
+            constructor(seed) { this.seed = seed; }
+            next() {
+                const x = Math.sin(this.seed++) * 10000;
+                return x - Math.floor(x);
+            }
+            range(min, max) { return min + this.next() * (max - min); }
+            int(min, max) { return Math.floor(this.range(min, max)); }
+            pick(arr) { return arr[this.int(0, arr.length)]; }
+        }
+        const rng = new SeededRandom(Date.now()); // Unique universe each time
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.fog = new THREE.FogExp2(0x000000, 0.0002);
+        
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 20000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(window.devicePixelRatio);
+        document.body.appendChild(renderer.domElement);
+
+        // --- Lighting ---
+        const ambientLight = new THREE.AmbientLight(0x333333);
+        scene.add(ambientLight);
+        
+        const sunLight = new THREE.PointLight(0xffffff, 2, 10000);
+        sunLight.position.set(0, 0, 0);
+        scene.add(sunLight);
+        
+        // Sun Mesh
+        const sunGeo = new THREE.SphereGeometry(200, 32, 32);
+        const sunMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+        const sun = new THREE.Mesh(sunGeo, sunMat);
+        scene.add(sun);
+        
+        // Sun Glow (Sprite)
+        const spriteMaterial = new THREE.SpriteMaterial({ 
+            map: new THREE.TextureLoader().load('https://threejs.org/examples/textures/sprites/glow.png'), 
+            color: 0xffaa00, 
+            transparent: true, 
+            blending: THREE.AdditiveBlending 
+        });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        sprite.scale.set(1000, 1000, 1.0);
+        sun.add(sprite);
+
+        // --- Starfield ---
+        const starGeo = new THREE.BufferGeometry();
+        const starCount = 5000;
+        const starPos = new Float32Array(starCount * 3);
+        for(let i=0; i<starCount*3; i++) {
+            starPos[i] = (Math.random() - 0.5) * 10000;
+        }
+        starGeo.setAttribute('position', new THREE.BufferAttribute(starPos, 3));
+        const starMat = new THREE.PointsMaterial({ color: 0xffffff, size: 2, sizeAttenuation: false });
+        const stars = new THREE.Points(starGeo, starMat);
+        scene.add(stars);
+
+        // --- Universe Generation ---
+        const planets = [];
+        const planetTypes = [
+            { name: "Terran", color: 0x2288ff, roughness: 0.8, scale: 1 },
+            { name: "Desert", color: 0xffaa44, roughness: 1, scale: 0.9 },
+            { name: "Ice", color: 0xaaddff, roughness: 0.2, scale: 0.8 },
+            { name: "Volcanic", color: 0xff2200, roughness: 0.9, scale: 1.1 },
+            { name: "Gas Giant", color: 0xcc88ff, roughness: 0.5, scale: 2.5 }
+        ];
+        
+        const economies = ["Agricultural", "Industrial", "Tech", "Mining", "Military"];
+
+        function createPlanet(distance) {
+            const type = rng.pick(planetTypes);
+            const size = rng.range(10, 30) * type.scale;
+            const geometry = new THREE.SphereGeometry(size, 32, 32);
+            const material = new THREE.MeshStandardMaterial({ 
+                color: type.color, 
+                roughness: type.roughness,
+                metalness: 0.1
+            });
+            const planet = new THREE.Mesh(geometry, material);
+            
+            // Orbit
+            const angle = rng.range(0, Math.PI * 2);
+            planet.position.set(Math.cos(angle) * distance, rng.range(-50, 50), Math.sin(angle) * distance);
+            
+            // Data
+            planet.userData = {
+                name: `${rng.pick(['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon'])} ${rng.int(100, 999)}`,
+                type: type.name,
+                economy: rng.pick(economies),
+                radius: size,
+                distance: distance,
+                orbitSpeed: rng.range(0.0001, 0.0005)
+            };
+            
+            // Rings?
+            if (rng.next() > 0.7) {
+                const ringGeo = new THREE.RingGeometry(size * 1.4, size * 2, 32);
+                const ringMat = new THREE.MeshBasicMaterial({ color: type.color, side: THREE.DoubleSide, transparent: true, opacity: 0.4 });
+                const ring = new THREE.Mesh(ringGeo, ringMat);
+                ring.rotation.x = Math.PI / 2 + rng.range(-0.2, 0.2);
+                planet.add(ring);
+            }
+
+            scene.add(planet);
+            planets.push(planet);
+            
+            // Orbit Line
+            const orbitGeo = new THREE.RingGeometry(distance - 1, distance + 1, 128);
+            const orbitMat = new THREE.MeshBasicMaterial({ color: 0x333333, side: THREE.DoubleSide, transparent: true, opacity: 0.2 });
+            const orbit = new THREE.Mesh(orbitGeo, orbitMat);
+            orbit.rotation.x = Math.PI / 2;
+            scene.add(orbit);
+        }
+
+        for (let i = 0; i < 8; i++) {
+            createPlanet(500 + i * 400);
+        }
+
+        // --- Player Ship ---
+        const ship = new THREE.Group();
+        scene.add(ship);
+        ship.position.set(400, 0, 400); // Start near first planet
+        ship.add(camera); // Camera is attached to ship
+
+        // Simple cockpit view (optional, just lines)
+        // const cockpitGeo = new THREE.BufferGeometry().setFromPoints([
+        //     new THREE.Vector3(-1, -1, -2), new THREE.Vector3(1, -1, -2),
+        //     new THREE.Vector3(1, 1, -2), new THREE.Vector3(-1, 1, -2),
+        //     new THREE.Vector3(-1, -1, -2)
+        // ]);
+        // const cockpit = new THREE.Line(cockpitGeo, new THREE.LineBasicMaterial({ color: 0x004400 }));
+        // camera.add(cockpit);
+
+        // --- Projectiles ---
+        const lasers = [];
+        const laserGeo = new THREE.BoxGeometry(0.5, 0.5, 10);
+        const laserMat = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+
+        function shoot() {
+            if (STATE.energy < 10) return;
+            STATE.energy -= 10;
+            updateHUD();
+            
+            const laser = new THREE.Mesh(laserGeo, laserMat);
+            laser.position.copy(ship.position);
+            laser.quaternion.copy(ship.quaternion);
+            laser.translateZ(-5); // Start slightly in front
+            scene.add(laser);
+            
+            lasers.push({
+                mesh: laser,
+                life: CONFIG.laserLifetime,
+                velocity: new THREE.Vector3(0, 0, -CONFIG.laserSpeed).applyQuaternion(ship.quaternion).add(STATE.velocity)
+            });
+            
+            // Sound effect (simulated)
+            // logMessage("Laser fired!");
+        }
+
+        // --- Input Handling ---
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'w') STATE.input.w = true;
+            if (key === 'a') STATE.input.a = true;
+            if (key === 's') STATE.input.s = true;
+            if (key === 'd') STATE.input.d = true;
+            if (key === 'shift') STATE.input.shift = true;
+            if (key === ' ') STATE.input.space = true;
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'w') STATE.input.w = false;
+            if (key === 'a') STATE.input.a = false;
+            if (key === 's') STATE.input.s = false;
+            if (key === 'd') STATE.input.d = false;
+            if (key === 'shift') STATE.input.shift = false;
+            if (key === ' ') STATE.input.space = false;
+        });
+
+        window.addEventListener('mousemove', (e) => {
+            // Normalize mouse position -1 to 1
+            STATE.mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            STATE.mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        window.addEventListener('mousedown', () => {
+            if (!document.pointerLockElement) {
+                document.body.requestPointerLock();
+            } else {
+                shoot();
+            }
+        });
+        
+        document.addEventListener('pointerlockchange', () => {
+            if (!document.pointerLockElement) {
+                // Paused?
+            }
+        });
+        
+        // Handle mouse movement for turning when locked
+        document.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement) {
+                ship.rotateY(-e.movementX * CONFIG.rotationSpeed);
+                ship.rotateX(-e.movementY * CONFIG.rotationSpeed);
+                ship.rotation.z = 0; // Auto-level roll for simplicity, or allow roll with Q/E
+            }
+        });
+
+        // --- UI Logic ---
+        function logMessage(text) {
+            const log = document.getElementById('message-log');
+            const msg = document.createElement('div');
+            msg.className = 'msg';
+            msg.textContent = `> ${text}`;
+            log.prepend(msg);
+            if (log.children.length > 10) log.lastChild.remove();
+        }
+
+        function updateHUD() {
+            document.getElementById('speed-val').textContent = Math.round(STATE.velocity.length() * 10) + ' m/s';
+            document.getElementById('credits-val').textContent = STATE.credits + ' ₡';
+            document.getElementById('hull-bar').style.width = (STATE.hull / STATE.maxHull * 100) + '%';
+            document.getElementById('energy-bar').style.width = (STATE.energy / STATE.maxEnergy * 100) + '%';
+            document.getElementById('cargo-val').textContent = `${STATE.cargo.length} / ${STATE.maxCargo}`;
+        }
+
+        document.getElementById('start-btn').addEventListener('click', () => {
+            document.getElementById('start-screen').style.display = 'none';
+            document.body.requestPointerLock();
+            logMessage("System initialized. Welcome, Commander.");
+            logMessage("Mission: Explore the sector and accumulate wealth.");
+            animate();
+        });
+        
+        document.getElementById('dock-btn').addEventListener('click', () => {
+            if (STATE.target && STATE.target.distanceTo(ship.position) < STATE.target.userData.radius + 50) {
+                logMessage(`Docked at ${STATE.target.userData.name}.`);
+                logMessage(`Trading interface not implemented in this demo.`);
+                STATE.credits += 100;
+                logMessage(`Earned 100 credits for visiting.`);
+                updateHUD();
+            }
+        });
+
+        // --- Game Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // 1. Physics & Movement
+            const speed = STATE.input.shift ? CONFIG.boostSpeed : CONFIG.speed;
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(ship.quaternion);
+            
+            if (STATE.input.w) STATE.velocity.add(forward.multiplyScalar(speed * 0.1));
+            if (STATE.input.s) STATE.velocity.add(forward.multiplyScalar(-speed * 0.1));
+            
+            // Strafe
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(ship.quaternion);
+            if (STATE.input.d) STATE.velocity.add(right.multiplyScalar(speed * 0.1));
+            if (STATE.input.a) STATE.velocity.add(right.multiplyScalar(-speed * 0.1));
+
+            // Friction
+            STATE.velocity.multiplyScalar(CONFIG.friction);
+            ship.position.add(STATE.velocity);
+
+            // 2. Energy Regen
+            if (STATE.energy < STATE.maxEnergy) STATE.energy += 0.1;
+
+            // 3. Projectiles
+            for (let i = lasers.length - 1; i >= 0; i--) {
+                const l = lasers[i];
+                l.mesh.position.add(l.velocity);
+                l.life--;
+                if (l.life <= 0) {
+                    scene.remove(l.mesh);
+                    lasers.splice(i, 1);
+                }
+            }
+
+            // 4. Planet Orbits & Interaction
+            let nearestDist = Infinity;
+            let nearestPlanet = null;
+
+            planets.forEach(p => {
+                // Orbit
+                // p.position.x = Math.cos(Date.now() * p.userData.orbitSpeed) * p.userData.distance;
+                // p.position.z = Math.sin(Date.now() * p.userData.orbitSpeed) * p.userData.distance;
+                // (Disabled for easier docking in demo)
+
+                // Distance check
+                const dist = p.position.distanceTo(ship.position);
+                if (dist < nearestDist) {
+                    nearestDist = dist;
+                    nearestPlanet = p;
+                }
+            });
+
+            // Target System
+            if (nearestPlanet && nearestDist < 1000) {
+                STATE.target = nearestPlanet;
+                const info = document.getElementById('target-info');
+                info.style.display = 'block';
+                document.getElementById('target-name').textContent = nearestPlanet.userData.name;
+                document.getElementById('target-type').textContent = nearestPlanet.userData.type;
+                document.getElementById('target-economy').textContent = nearestPlanet.userData.economy;
+                
+                // Update dock button
+                const dockBtn = document.getElementById('dock-btn');
+                if (nearestDist < nearestPlanet.userData.radius + 50) {
+                    dockBtn.disabled = false;
+                    dockBtn.textContent = "DOCK (PRESS ESC TO CLICK)";
+                } else {
+                    dockBtn.disabled = true;
+                    dockBtn.textContent = `APPROACH TO DOCK (${Math.round(nearestDist - nearestPlanet.userData.radius - 50)}m)`;
+                }
+            } else {
+                document.getElementById('target-info').style.display = 'none';
+                STATE.target = null;
+            }
+
+            // 5. Render
+            updateHUD();
+            renderer.render(scene, camera);
+        }
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>

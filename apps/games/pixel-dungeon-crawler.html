@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pixel Dungeon Crawler</title>
+    <meta name="description" content="Retro-style roguelike dungeon crawler with procedural generation, pixel art graphics, turn-based combat, and classic 8-bit aesthetics">
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Press Start 2P', 'Courier New', monospace;
+            background: #000;
+            color: #00ff00;
+            overflow: hidden;
+            image-rendering: pixelated;
+            image-rendering: -moz-crisp-edges;
+            image-rendering: crisp-edges;
+        }
+
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            align-items: center;
+            justify-content: center;
+            background: linear-gradient(180deg, #0a0a0a 0%, #1a0a1a 100%);
+        }
+
+        #game-header {
+            background: #000;
+            border: 4px solid #00ff00;
+            padding: 10px 20px;
+            margin-bottom: 10px;
+            display: flex;
+            gap: 20px;
+            font-size: 8px;
+            box-shadow: 0 0 20px #00ff00;
+        }
+
+        .stat {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .stat-label {
+            color: #ffff00;
+        }
+
+        .stat-value {
+            color: #00ff00;
+        }
+
+        #game-canvas {
+            border: 4px solid #00ff00;
+            background: #000;
+            box-shadow: 0 0 30px #00ff00, inset 0 0 20px rgba(0, 255, 0, 0.1);
+            image-rendering: pixelated;
+        }
+
+        #game-footer {
+            background: #000;
+            border: 4px solid #00ff00;
+            padding: 15px 20px;
+            margin-top: 10px;
+            max-width: 800px;
+            text-align: center;
+            font-size: 7px;
+            line-height: 1.6;
+            box-shadow: 0 0 20px #00ff00;
+        }
+
+        .controls {
+            color: #ffff00;
+            margin-bottom: 8px;
+        }
+
+        .message {
+            color: #ff0055;
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        .blink {
+            animation: blink 1s infinite;
+        }
+
+        #game-over-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.95);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            flex-direction: column;
+            z-index: 1000;
+        }
+
+        #game-over-screen.show {
+            display: flex;
+        }
+
+        .game-over-text {
+            font-size: 32px;
+            color: #ff0055;
+            text-shadow: 0 0 20px #ff0055;
+            margin-bottom: 30px;
+            animation: blink 1s infinite;
+        }
+
+        .restart-btn {
+            padding: 15px 30px;
+            background: #00ff00;
+            color: #000;
+            border: 4px solid #00ff00;
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            box-shadow: 0 0 20px #00ff00;
+            transition: all 0.3s ease;
+        }
+
+        .restart-btn:hover {
+            background: #000;
+            color: #00ff00;
+            transform: scale(1.1);
+        }
+
+        .score-display {
+            font-size: 16px;
+            color: #ffff00;
+            margin-bottom: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="game-header">
+            <div class="stat">
+                <span class="stat-label">HP:</span>
+                <span class="stat-value" id="hp">100/100</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">FLOOR:</span>
+                <span class="stat-value" id="floor">1</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">GOLD:</span>
+                <span class="stat-value" id="gold">0</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">KILLS:</span>
+                <span class="stat-value" id="kills">0</span>
+            </div>
+        </div>
+
+        <canvas id="game-canvas" width="800" height="600"></canvas>
+
+        <div id="game-footer">
+            <div class="controls">
+                [WASD/ARROWS] MOVE | [SPACE] ATTACK | [R] RESTART | [H] HEAL (10 GOLD)
+            </div>
+            <div class="message" id="game-message">
+                EXPLORE THE DUNGEON. DEFEAT MONSTERS. FIND THE STAIRS. <span class="blink">█</span>
+            </div>
+        </div>
+    </div>
+
+    <div id="game-over-screen">
+        <div class="game-over-text">GAME OVER</div>
+        <div class="score-display">
+            FLOOR REACHED: <span id="final-floor">0</span><br>
+            MONSTERS DEFEATED: <span id="final-kills">0</span><br>
+            GOLD COLLECTED: <span id="final-gold">0</span>
+        </div>
+        <button class="restart-btn" onclick="restartGame()">PRESS TO RESTART</button>
+    </div>
+
+    <script>
+        // ========================================
+        // Canvas Setup
+        // ========================================
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+
+        const TILE_SIZE = 16;
+        const MAP_WIDTH = 50;
+        const MAP_HEIGHT = 37;
+
+        // ========================================
+        // Game State
+        // ========================================
+        let player = {
+            x: 0,
+            y: 0,
+            hp: 100,
+            maxHp: 100,
+            attack: 10,
+            gold: 0,
+            kills: 0,
+            floor: 1
+        };
+
+        let dungeon = [];
+        let monsters = [];
+        let items = [];
+        let stairs = { x: 0, y: 0 };
+        let camera = { x: 0, y: 0 };
+        let gameOver = false;
+        let message = "EXPLORE THE DUNGEON. DEFEAT MONSTERS. FIND THE STAIRS.";
+
+        // ========================================
+        // Procedural Dungeon Generation
+        // ========================================
+        function generateDungeon() {
+            // Initialize with walls
+            dungeon = Array(MAP_HEIGHT).fill().map(() => Array(MAP_WIDTH).fill(1));
+
+            // Create rooms
+            const rooms = [];
+            const numRooms = 8 + Math.floor(Math.random() * 5);
+
+            for (let i = 0; i < numRooms; i++) {
+                const roomWidth = 5 + Math.floor(Math.random() * 8);
+                const roomHeight = 5 + Math.floor(Math.random() * 8);
+                const roomX = Math.floor(Math.random() * (MAP_WIDTH - roomWidth - 2)) + 1;
+                const roomY = Math.floor(Math.random() * (MAP_HEIGHT - roomHeight - 2)) + 1;
+
+                // Carve out room
+                for (let y = roomY; y < roomY + roomHeight; y++) {
+                    for (let x = roomX; x < roomX + roomWidth; x++) {
+                        dungeon[y][x] = 0;
+                    }
+                }
+
+                rooms.push({
+                    x: roomX,
+                    y: roomY,
+                    width: roomWidth,
+                    height: roomHeight,
+                    centerX: roomX + Math.floor(roomWidth / 2),
+                    centerY: roomY + Math.floor(roomHeight / 2)
+                });
+            }
+
+            // Connect rooms with corridors
+            for (let i = 0; i < rooms.length - 1; i++) {
+                const room1 = rooms[i];
+                const room2 = rooms[i + 1];
+
+                if (Math.random() > 0.5) {
+                    // Horizontal then vertical
+                    for (let x = Math.min(room1.centerX, room2.centerX); x <= Math.max(room1.centerX, room2.centerX); x++) {
+                        dungeon[room1.centerY][x] = 0;
+                    }
+                    for (let y = Math.min(room1.centerY, room2.centerY); y <= Math.max(room1.centerY, room2.centerY); y++) {
+                        dungeon[y][room2.centerX] = 0;
+                    }
+                } else {
+                    // Vertical then horizontal
+                    for (let y = Math.min(room1.centerY, room2.centerY); y <= Math.max(room1.centerY, room2.centerY); y++) {
+                        dungeon[y][room1.centerX] = 0;
+                    }
+                    for (let x = Math.min(room1.centerX, room2.centerX); x <= Math.max(room1.centerX, room2.centerX); x++) {
+                        dungeon[room2.centerY][x] = 0;
+                    }
+                }
+            }
+
+            // Place player in first room
+            player.x = rooms[0].centerX;
+            player.y = rooms[0].centerY;
+
+            // Place stairs in last room
+            stairs.x = rooms[rooms.length - 1].centerX;
+            stairs.y = rooms[rooms.length - 1].centerY;
+
+            // Spawn monsters
+            monsters = [];
+            const numMonsters = 5 + player.floor * 2;
+            for (let i = 0; i < numMonsters && i < rooms.length - 2; i++) {
+                const room = rooms[i + 1];
+                const x = room.x + 1 + Math.floor(Math.random() * (room.width - 2));
+                const y = room.y + 1 + Math.floor(Math.random() * (room.height - 2));
+
+                monsters.push({
+                    x,
+                    y,
+                    hp: 20 + player.floor * 5,
+                    maxHp: 20 + player.floor * 5,
+                    attack: 5 + player.floor * 2,
+                    type: Math.random() > 0.7 ? 'strong' : 'weak'
+                });
+            }
+
+            // Spawn gold
+            items = [];
+            const numGold = 3 + Math.floor(Math.random() * 5);
+            for (let i = 0; i < numGold; i++) {
+                const room = rooms[1 + Math.floor(Math.random() * (rooms.length - 1))];
+                const x = room.x + 1 + Math.floor(Math.random() * (room.width - 2));
+                const y = room.y + 1 + Math.floor(Math.random() * (room.height - 2));
+
+                items.push({
+                    x,
+                    y,
+                    type: 'gold',
+                    value: 5 + Math.floor(Math.random() * 15)
+                });
+            }
+        }
+
+        // ========================================
+        // Movement
+        // ========================================
+        function movePlayer(dx, dy) {
+            const newX = player.x + dx;
+            const newY = player.y + dy;
+
+            if (newX < 0 || newX >= MAP_WIDTH || newY < 0 || newY >= MAP_HEIGHT) return;
+            if (dungeon[newY][newX] === 1) return;
+
+            // Check for monster collision
+            const monster = monsters.find(m => m.x === newX && m.y === newY);
+            if (monster) {
+                // Combat
+                monster.hp -= player.attack;
+                message = `HIT MONSTER FOR ${player.attack} DAMAGE!`;
+
+                if (monster.hp <= 0) {
+                    monsters = monsters.filter(m => m !== monster);
+                    player.kills++;
+                    player.gold += 10 + Math.floor(Math.random() * 20);
+                    message = "MONSTER DEFEATED! +GOLD";
+                } else {
+                    // Monster counterattack
+                    player.hp -= monster.attack;
+                    if (player.hp <= 0) {
+                        player.hp = 0;
+                        gameOver = true;
+                        document.getElementById('game-over-screen').classList.add('show');
+                        document.getElementById('final-floor').textContent = player.floor;
+                        document.getElementById('final-kills').textContent = player.kills;
+                        document.getElementById('final-gold').textContent = player.gold;
+                        return;
+                    }
+                }
+                return;
+            }
+
+            // Move player
+            player.x = newX;
+            player.y = newY;
+
+            // Check for items
+            const item = items.find(i => i.x === newX && i.y === newY);
+            if (item) {
+                if (item.type === 'gold') {
+                    player.gold += item.value;
+                    message = `FOUND ${item.value} GOLD!`;
+                    items = items.filter(i => i !== item);
+                }
+            }
+
+            // Check for stairs
+            if (player.x === stairs.x && player.y === stairs.y) {
+                player.floor++;
+                message = `DESCENDED TO FLOOR ${player.floor}!`;
+                generateDungeon();
+            }
+
+            // Monster turn
+            monsters.forEach(m => {
+                const dx = player.x - m.x;
+                const dy = player.y - m.y;
+                const dist = Math.abs(dx) + Math.abs(dy);
+
+                if (dist < 8) {
+                    const moveX = dx > 0 ? 1 : (dx < 0 ? -1 : 0);
+                    const moveY = dy > 0 ? 1 : (dy < 0 ? -1 : 0);
+
+                    const newMX = m.x + (Math.abs(dx) > Math.abs(dy) ? moveX : 0);
+                    const newMY = m.y + (Math.abs(dy) > Math.abs(dx) ? moveY : 0);
+
+                    if (dungeon[newMY] && dungeon[newMY][newMX] === 0 &&
+                        !monsters.some(other => other.x === newMX && other.y === newMY)) {
+                        m.x = newMX;
+                        m.y = newMY;
+                    }
+                }
+            });
+        }
+
+        // ========================================
+        // Rendering
+        // ========================================
+        function render() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Camera follow player
+            camera.x = Math.max(0, Math.min(player.x - Math.floor(canvas.width / TILE_SIZE / 2), MAP_WIDTH - Math.floor(canvas.width / TILE_SIZE)));
+            camera.y = Math.max(0, Math.min(player.y - Math.floor(canvas.height / TILE_SIZE / 2), MAP_HEIGHT - Math.floor(canvas.height / TILE_SIZE)));
+
+            // Draw dungeon
+            for (let y = 0; y < MAP_HEIGHT; y++) {
+                for (let x = 0; x < MAP_WIDTH; x++) {
+                    const screenX = (x - camera.x) * TILE_SIZE;
+                    const screenY = (y - camera.y) * TILE_SIZE;
+
+                    if (screenX < -TILE_SIZE || screenX > canvas.width || screenY < -TILE_SIZE || screenY > canvas.height) continue;
+
+                    if (dungeon[y][x] === 1) {
+                        // Wall
+                        ctx.fillStyle = '#444';
+                        ctx.fillRect(screenX, screenY, TILE_SIZE, TILE_SIZE);
+                        ctx.fillStyle = '#666';
+                        ctx.fillRect(screenX + 2, screenY + 2, TILE_SIZE - 4, TILE_SIZE - 4);
+                    } else {
+                        // Floor
+                        ctx.fillStyle = '#111';
+                        ctx.fillRect(screenX, screenY, TILE_SIZE, TILE_SIZE);
+                        if ((x + y) % 2 === 0) {
+                            ctx.fillStyle = '#0a0a0a';
+                            ctx.fillRect(screenX, screenY, TILE_SIZE, TILE_SIZE);
+                        }
+                    }
+                }
+            }
+
+            // Draw stairs
+            const stairsX = (stairs.x - camera.x) * TILE_SIZE;
+            const stairsY = (stairs.y - camera.y) * TILE_SIZE;
+            ctx.fillStyle = '#ffff00';
+            ctx.fillRect(stairsX + 4, stairsY + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+            ctx.fillRect(stairsX + 2, stairsY + 6, TILE_SIZE - 4, 4);
+
+            // Draw items
+            items.forEach(item => {
+                const itemX = (item.x - camera.x) * TILE_SIZE;
+                const itemY = (item.y - camera.y) * TILE_SIZE;
+                if (item.type === 'gold') {
+                    ctx.fillStyle = '#ffd700';
+                    ctx.beginPath();
+                    ctx.arc(itemX + TILE_SIZE / 2, itemY + TILE_SIZE / 2, 4, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            });
+
+            // Draw monsters
+            monsters.forEach(m => {
+                const monsterX = (m.x - camera.x) * TILE_SIZE;
+                const monsterY = (m.y - camera.y) * TILE_SIZE;
+
+                ctx.fillStyle = m.type === 'strong' ? '#ff0055' : '#ff6600';
+                ctx.fillRect(monsterX + 3, monsterY + 3, TILE_SIZE - 6, TILE_SIZE - 6);
+
+                // Health bar
+                const healthPercent = m.hp / m.maxHp;
+                ctx.fillStyle = '#ff0000';
+                ctx.fillRect(monsterX, monsterY - 4, TILE_SIZE, 2);
+                ctx.fillStyle = '#00ff00';
+                ctx.fillRect(monsterX, monsterY - 4, TILE_SIZE * healthPercent, 2);
+            });
+
+            // Draw player
+            const playerX = (player.x - camera.x) * TILE_SIZE;
+            const playerY = (player.y - camera.y) * TILE_SIZE;
+            ctx.fillStyle = '#00ff00';
+            ctx.fillRect(playerX + 4, playerY + 4, TILE_SIZE - 8, TILE_SIZE - 8);
+            ctx.fillRect(playerX + 6, playerY + 2, TILE_SIZE - 12, 4); // head
+
+            // Update UI
+            document.getElementById('hp').textContent = `${player.hp}/${player.maxHp}`;
+            document.getElementById('floor').textContent = player.floor;
+            document.getElementById('gold').textContent = player.gold;
+            document.getElementById('kills').textContent = player.kills;
+            document.getElementById('game-message').innerHTML = message + ' <span class="blink">█</span>';
+        }
+
+        // ========================================
+        // Input
+        // ========================================
+        document.addEventListener('keydown', (e) => {
+            if (gameOver) return;
+
+            switch(e.key.toLowerCase()) {
+                case 'w':
+                case 'arrowup':
+                    movePlayer(0, -1);
+                    break;
+                case 's':
+                case 'arrowdown':
+                    movePlayer(0, 1);
+                    break;
+                case 'a':
+                case 'arrowleft':
+                    movePlayer(-1, 0);
+                    break;
+                case 'd':
+                case 'arrowright':
+                    movePlayer(1, 0);
+                    break;
+                case 'h':
+                    if (player.gold >= 10) {
+                        player.gold -= 10;
+                        player.hp = Math.min(player.hp + 30, player.maxHp);
+                        message = "HEALED FOR 30 HP!";
+                    } else {
+                        message = "NOT ENOUGH GOLD TO HEAL!";
+                    }
+                    break;
+                case 'r':
+                    restartGame();
+                    break;
+            }
+
+            render();
+        });
+
+        // ========================================
+        // Game Loop
+        // ========================================
+        function gameLoop() {
+            if (!gameOver) {
+                render();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        function restartGame() {
+            player = {
+                x: 0,
+                y: 0,
+                hp: 100,
+                maxHp: 100,
+                attack: 10,
+                gold: 0,
+                kills: 0,
+                floor: 1
+            };
+            gameOver = false;
+            message = "EXPLORE THE DUNGEON. DEFEAT MONSTERS. FIND THE STAIRS.";
+            document.getElementById('game-over-screen').classList.remove('show');
+            generateDungeon();
+            render();
+        }
+
+        window.restartGame = restartGame;
+
+        // Initialize
+        generateDungeon();
+        gameLoop();
+    </script>
+</body>
+</html>

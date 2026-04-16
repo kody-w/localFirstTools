@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Abyssal Symphony</title>
+    <meta name="description" content="Conduct an orchestra of bioluminescent deep-sea creatures in crushing darkness, triggering cascading light signals through schools of lanternfish">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000005; min-height: 100vh; font-family: 'Georgia', serif; color: #304060; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: none; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(0,0,10,0.9);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(50,80,120,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #4080a0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #60a0c0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(30,60,80,0.4); border: 1px solid rgba(50,80,120,0.4);
+            color: #5090b0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #304050; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.4; z-index: 100; color: #4080a0; }
+        #cursor { position: fixed; pointer-events: none; z-index: 50; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="cursor"></div>
+    <div id="controls">
+        <h3>Abyssal Symphony</h3>
+        <div class="control-row">
+            <label>Creature Count <span class="value" id="count-val">80</span></label>
+            <input type="range" id="count" min="30" max="150" value="80">
+        </div>
+        <div class="control-row">
+            <label>Light Sensitivity <span class="value" id="sensitivity-val">50</span></label>
+            <input type="range" id="sensitivity" min="20" max="100" value="50">
+        </div>
+        <button id="spawn-btn">Spawn Creatures</button>
+        <button id="pulse-btn">Global Light Pulse</button>
+    </div>
+    <div id="stats">
+        <div>Creatures: <span id="creature-count">0</span></div>
+        <div>Illuminated: <span id="lit-count">0</span></div>
+        <div>Depth: <span id="depth-state">Midnight Zone</span></div>
+    </div>
+    <div id="info">Move through the abyss | Your presence awakens light in darkness</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let creatureCount = 80;
+        let lightSensitivity = 0.5;
+        let time = 0;
+        let mouseX = W / 2;
+        let mouseY = H / 2;
+        
+        const creatures = [];
+        const particles = [];
+        
+        const CREATURE_TYPES = [
+            { name: 'lanternfish', baseHue: 200, size: 8, speed: 1.5, glowRadius: 30, flashDuration: 0.5 },
+            { name: 'anglerfish', baseHue: 40, size: 20, speed: 0.5, glowRadius: 60, flashDuration: 2 },
+            { name: 'jellyfish', baseHue: 280, size: 15, speed: 0.3, glowRadius: 50, flashDuration: 1.5 },
+            { name: 'comb-jelly', baseHue: 180, size: 12, speed: 0.8, glowRadius: 40, flashDuration: 0.8 }
+        ];
+        
+        class Creature {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type;
+                this.vx = (Math.random() - 0.5) * type.speed;
+                this.vy = (Math.random() - 0.5) * type.speed;
+                this.brightness = 0;
+                this.targetBrightness = 0;
+                this.phase = Math.random() * Math.PI * 2;
+                this.hue = type.baseHue + (Math.random() - 0.5) * 20;
+                this.size = type.size * (0.7 + Math.random() * 0.6);
+                this.pulsePhase = Math.random() * Math.PI * 2;
+            }
+            
+            update() {
+                this.phase += 0.02;
+                this.pulsePhase += 0.05;
+                
+                const dist = Math.hypot(mouseX - this.x, mouseY - this.y);
+                const influence = Math.max(0, 1 - dist / (150 * lightSensitivity));
+                
+                if (influence > 0.3) {
+                    this.targetBrightness = Math.min(1, this.targetBrightness + 0.1);
+                }
+                
+                creatures.forEach(other => {
+                    if (other === this) return;
+                    const d = Math.hypot(other.x - this.x, other.y - this.y);
+                    if (d < 80 && other.brightness > 0.5) {
+                        this.targetBrightness = Math.min(1, this.targetBrightness + 0.05 * other.brightness);
+                    }
+                });
+                
+                this.brightness += (this.targetBrightness - this.brightness) * 0.1;
+                this.targetBrightness *= 0.98;
+                
+                if (this.type.name === 'lanternfish') {
+                    let avgVx = 0, avgVy = 0, count = 0;
+                    creatures.forEach(other => {
+                        if (other.type.name === 'lanternfish' && other !== this) {
+                            const d = Math.hypot(other.x - this.x, other.y - this.y);
+                            if (d < 100) {
+                                avgVx += other.vx;
+                                avgVy += other.vy;
+                                count++;
+                            }
+                        }
+                    });
+                    if (count > 0) {
+                        this.vx += (avgVx / count - this.vx) * 0.02;
+                        this.vy += (avgVy / count - this.vy) * 0.02;
+                    }
+                }
+                
+                this.vx += (Math.random() - 0.5) * 0.1;
+                this.vy += (Math.random() - 0.5) * 0.1;
+                
+                const speed = Math.hypot(this.vx, this.vy);
+                if (speed > this.type.speed) {
+                    this.vx = (this.vx / speed) * this.type.speed;
+                    this.vy = (this.vy / speed) * this.type.speed;
+                }
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                if (this.x < 50) this.vx += 0.1;
+                if (this.x > W - 50) this.vx -= 0.1;
+                if (this.y < 50) this.vy += 0.1;
+                if (this.y > H - 50) this.vy -= 0.1;
+                
+                if (this.brightness > 0.3 && Math.random() < 0.1) {
+                    particles.push({
+                        x: this.x + (Math.random() - 0.5) * this.size,
+                        y: this.y + (Math.random() - 0.5) * this.size,
+                        vx: (Math.random() - 0.5) * 0.5,
+                        vy: -Math.random() * 0.5,
+                        life: 1,
+                        hue: this.hue,
+                        size: 2 + Math.random() * 2
+                    });
+                }
+            }
+            
+            draw() {
+                const pulse = Math.sin(this.pulsePhase) * 0.2 + 0.8;
+                const glowSize = this.type.glowRadius * (0.5 + this.brightness * 0.5) * pulse;
+                
+                if (this.brightness > 0.05) {
+                    const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, glowSize);
+                    gradient.addColorStop(0, "hsla(" + this.hue + ", 80%, 70%, " + (this.brightness * 0.6) + ")");
+                    gradient.addColorStop(0.3, "hsla(" + this.hue + ", 70%, 50%, " + (this.brightness * 0.3) + ")");
+                    gradient.addColorStop(1, "transparent");
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(this.x - glowSize, this.y - glowSize, glowSize * 2, glowSize * 2);
+                }
+                
+                ctx.beginPath();
+                if (this.type.name === 'jellyfish') {
+                    ctx.ellipse(this.x, this.y, this.size, this.size * 0.6, 0, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + this.hue + ", 60%, 40%, " + (0.3 + this.brightness * 0.5) + ")";
+                    ctx.fill();
+                    
+                    for (let i = 0; i < 5; i++) {
+                        const angle = (i / 5) * Math.PI - Math.PI / 2;
+                        const tentacleX = this.x + Math.cos(angle) * this.size * 0.5;
+                        const tentacleY = this.y + this.size * 0.3;
+                        const wave = Math.sin(this.phase + i) * 5;
+                        ctx.beginPath();
+                        ctx.moveTo(tentacleX, tentacleY);
+                        ctx.quadraticCurveTo(tentacleX + wave, tentacleY + this.size, tentacleX, tentacleY + this.size * 1.5);
+                        ctx.strokeStyle = "hsla(" + this.hue + ", 50%, 60%, " + (0.2 + this.brightness * 0.3) + ")";
+                        ctx.lineWidth = 2;
+                        ctx.stroke();
+                    }
+                } else if (this.type.name === 'anglerfish') {
+                    ctx.ellipse(this.x, this.y, this.size, this.size * 0.7, 0, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + this.hue + ", 30%, 15%, 0.8)";
+                    ctx.fill();
+                    
+                    const lureX = this.x + Math.cos(-0.3) * this.size;
+                    const lureY = this.y - this.size;
+                    ctx.beginPath();
+                    ctx.moveTo(this.x, this.y - this.size * 0.5);
+                    ctx.quadraticCurveTo(lureX - 10, lureY - 10, lureX, lureY);
+                    ctx.strokeStyle = "hsla(" + this.hue + ", 40%, 40%, 0.6)";
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                    
+                    if (this.brightness > 0.1) {
+                        const lureGlow = ctx.createRadialGradient(lureX, lureY, 0, lureX, lureY, 20);
+                        lureGlow.addColorStop(0, "hsla(" + this.hue + ", 100%, 80%, " + this.brightness + ")");
+                        lureGlow.addColorStop(1, "transparent");
+                        ctx.fillStyle = lureGlow;
+                        ctx.fillRect(lureX - 20, lureY - 20, 40, 40);
+                    }
+                } else {
+                    ctx.ellipse(this.x, this.y, this.size, this.size * 0.4, Math.atan2(this.vy, this.vx), 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + this.hue + ", 50%, 30%, " + (0.4 + this.brightness * 0.4) + ")";
+                    ctx.fill();
+                    
+                    if (this.brightness > 0.2) {
+                        ctx.beginPath();
+                        ctx.arc(this.x, this.y, this.size * 0.3, 0, Math.PI * 2);
+                        ctx.fillStyle = "hsla(" + this.hue + ", 80%, 70%, " + this.brightness + ")";
+                        ctx.fill();
+                    }
+                }
+            }
+        }
+        
+        function spawnCreatures() {
+            creatures.length = 0;
+            
+            for (let i = 0; i < creatureCount; i++) {
+                const typeIndex = Math.random() < 0.6 ? 0 : Math.floor(Math.random() * CREATURE_TYPES.length);
+                creatures.push(new Creature(
+                    100 + Math.random() * (W - 200),
+                    100 + Math.random() * (H - 200),
+                    CREATURE_TYPES[typeIndex]
+                ));
+            }
+        }
+        
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H);
+            gradient.addColorStop(0, '#000008');
+            gradient.addColorStop(0.5, '#000510');
+            gradient.addColorStop(1, '#000005');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+            
+            for (let i = 0; i < 30; i++) {
+                const x = (i * 97 + time * 0.02) % W;
+                const y = (i * 73 + Math.sin(time * 0.01 + i) * 20) % H;
+                ctx.beginPath();
+                ctx.arc(x, y, 0.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(50, 80, 120, 0.2)';
+                ctx.fill();
+            }
+        }
+        
+        function drawParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.life -= 0.02;
+                
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + p.hue + ", 70%, 70%, " + (p.life * 0.5) + ")";
+                ctx.fill();
+            }
+        }
+        
+        function drawCursor() {
+            const gradient = ctx.createRadialGradient(mouseX, mouseY, 0, mouseX, mouseY, 100);
+            gradient.addColorStop(0, 'rgba(100, 150, 200, 0.05)');
+            gradient.addColorStop(1, 'transparent');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(mouseX - 100, mouseY - 100, 200, 200);
+            
+            ctx.beginPath();
+            ctx.arc(mouseX, mouseY, 3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(100, 150, 200, 0.3)';
+            ctx.fill();
+        }
+        
+        function globalPulse() {
+            creatures.forEach(c => {
+                c.targetBrightness = 1;
+            });
+        }
+        
+        function updateStats() {
+            document.getElementById('creature-count').textContent = creatures.length;
+            document.getElementById('lit-count').textContent = creatures.filter(c => c.brightness > 0.3).length;
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawCursor();
+            drawParticles();
+            
+            creatures.forEach(c => {
+                c.update();
+                c.draw();
+            });
+            
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousemove = e => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        };
+        
+        document.getElementById('count').oninput = e => {
+            creatureCount = parseInt(e.target.value);
+            document.getElementById('count-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('sensitivity').oninput = e => {
+            lightSensitivity = e.target.value / 100;
+            document.getElementById('sensitivity-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('spawn-btn').onclick = spawnCreatures;
+        document.getElementById('pulse-btn').onclick = globalPulse;
+        
+        spawnCreatures();
+        animate();
+    </script>
+</body>
+</html>

@@ -1,0 +1,1253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A deterministic procedural universe generator. Fly from galactic scale to planetary surfaces with consistent, seed-based generation.">
+    <meta name="theme-color" content="#000005">
+    <meta name="color-scheme" content="dark">
+    <!-- 3d, procedural, universe, galaxy, space, simulation, threejs, deterministic -->
+    <title>Deterministic Universe Explorer</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Segoe UI', monospace; color: #fff; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            pointer-events: none;
+        }
+        
+        h1 {
+            font-size: 24px; margin: 0 0 10px 0;
+            text-transform: uppercase; letter-spacing: 4px;
+            text-shadow: 0 0 10px #00ffff;
+        }
+        
+        .panel {
+            background: rgba(0, 10, 20, 0.8);
+            border: 1px solid #00ffff;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            pointer-events: auto;
+            max-width: 300px;
+            backdrop-filter: blur(5px);
+        }
+        
+        .data-row { display: flex; justify-content: space-between; margin-bottom: 5px; font-size: 12px; color: #aaa; }
+        .data-val { color: #fff; font-weight: bold; font-family: monospace; }
+        
+        button {
+            background: rgba(0, 255, 255, 0.1);
+            border: 1px solid #00ffff;
+            color: #00ffff;
+            padding: 8px 12px;
+            cursor: pointer;
+            width: 100%;
+            text-transform: uppercase;
+            font-size: 11px;
+            letter-spacing: 1px;
+            transition: all 0.2s;
+            margin-top: 5px;
+        }
+        button:hover { background: rgba(0, 255, 255, 0.3); box-shadow: 0 0 10px rgba(0, 255, 255, 0.5); }
+        
+        #breadcrumbs {
+            position: absolute; top: 20px; right: 20px;
+            display: flex; gap: 10px;
+        }
+        .crumb {
+            background: rgba(0, 0, 0, 0.5);
+            border: 1px solid #555;
+            padding: 5px 10px;
+            font-size: 12px;
+            cursor: pointer;
+            pointer-events: auto;
+        }
+        .crumb:hover { border-color: #fff; }
+        .crumb.active { border-color: #00ffff; color: #00ffff; }
+        
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 24px; letter-spacing: 5px; text-transform: uppercase;
+            pointer-events: none; opacity: 0; transition: opacity 0.3s;
+        }
+        
+        .scan-line {
+            position: absolute; top: 0; left: 0; width: 100%; height: 2px;
+            background: rgba(0, 255, 255, 0.3);
+            animation: scan 3s linear infinite;
+            pointer-events: none;
+            z-index: 10;
+        }
+        @keyframes scan { 0% { top: 0%; opacity: 0; } 10% { opacity: 1; } 90% { opacity: 1; } 100% { top: 100%; opacity: 0; } }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    <div class="scan-line"></div>
+    
+    <div id="ui">
+        <div class="panel">
+            <h1>Omni-Verse</h1>
+            <div class="data-row"><span>Universe Seed</span> <span id="seed-val" class="data-val">1337</span></div>
+            <div class="data-row"><span>Current Scale</span> <span id="scale-val" class="data-val">GALAXY</span></div>
+            <div class="data-row"><span>Coordinates</span> <span id="coords-val" class="data-val">0, 0, 0</span></div>
+        </div>
+        
+        <div id="info-panel" class="panel" style="display:none;">
+            <h2 id="obj-name" style="margin:0 0 10px 0; font-size:16px; color:#00ffff;">Object Name</h2>
+            <div id="obj-stats"></div>
+            <button id="action-btn">Enter System</button>
+        </div>
+    </div>
+    
+    <div id="breadcrumbs">
+        <div class="crumb active" id="crumb-galaxy">GALAXY</div>
+        <div class="crumb" id="crumb-system" style="display:none;">SYSTEM</div>
+        <div class="crumb" id="crumb-orbit" style="display:none;">ORBIT</div>
+        <div class="crumb" id="crumb-surface" style="display:none;">SURFACE</div>
+    </div>
+    
+    <div id="instructions" style="display:none; position:absolute; bottom:20px; width:100%; text-align:center; color:#fff; text-shadow:0 0 5px #000; pointer-events:none;">
+        WASD to Move | Mouse to Look | ESC to Show Menu
+    </div>
+    
+    <div id="loading">Generating...</div>
+
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        // --- PRNG (Linear Congruential Generator) ---
+        class RNG {
+            constructor(seed) {
+                this.seed = seed;
+            }
+            
+            // Returns 0..1
+            next() {
+                this.seed = (this.seed * 1664525 + 1013904223) % 4294967296;
+                return this.seed / 4294967296;
+            }
+            
+            // Returns min..max
+            range(min, max) {
+                return min + this.next() * (max - min);
+            }
+            
+            // Returns integer min..max-1
+            int(min, max) {
+                return Math.floor(this.range(min, max));
+            }
+            
+            // Pick from array
+            pick(arr) {
+                return arr[this.int(0, arr.length)];
+            }
+        }
+
+        // --- Name Generator ---
+        const SYLLABLES = ["or", "ion", "el", "ar", "cy", "ni", "us", "pro", "cen", "tau", "ri", "bet", "al", "gam", "ma", "del", "ta", "ep", "si", "lon", "ze", "ta", "et", "a", "the", "ta", "io", "ta", "kap", "pa", "lam", "bda", "mu", "nu", "xi", "omi", "cron", "pi", "rho", "sig", "ma", "tau", "up", "si", "lon", "phi", "chi", "psi", "ome", "ga"];
+        
+        function generateName(rng) {
+            const len = rng.int(2, 5);
+            let name = "";
+            for(let i=0; i<len; i++) {
+                name += SYLLABLES[rng.int(0, SYLLABLES.length)];
+            }
+            return name.charAt(0).toUpperCase() + name.slice(1);
+        }
+
+        // --- State ---
+        const STATE = {
+            seed: Math.floor(Math.random() * 100000),
+            view: 'GALAXY', // GALAXY, SYSTEM, ORBIT, SURFACE
+            currentStar: null,
+            currentPlanet: null,
+            cameraTarget: new THREE.Vector3(),
+            transitioning: false,
+            moveForward: false,
+            moveBackward: false,
+            moveLeft: false,
+            moveRight: false,
+            velocity: new THREE.Vector3(),
+            direction: new THREE.Vector3(),
+            player: null, // Player mesh
+            playerMomentum: {
+                vx: 0, vz: 0,
+                accel: 50,      // Units/sec²
+                decel: 30,      // Units/sec²
+                turnSpeed: 10,  // Radians/sec
+                update(inputX, inputZ, targetSpeed, dt) {
+                    const targetVX = inputX * targetSpeed;
+                    const targetVZ = inputZ * targetSpeed;
+                    const hasInput = Math.abs(inputX) > 0.01 || Math.abs(inputZ) > 0.01;
+                    const rate = hasInput ? this.accel : this.decel;
+                    const maxChange = rate * dt;
+                    
+                    const diffX = targetVX - this.vx;
+                    const diffZ = targetVZ - this.vz;
+                    const diffLen = Math.sqrt(diffX * diffX + diffZ * diffZ);
+                    
+                    if (diffLen > 0.01) {
+                        if (diffLen <= maxChange) {
+                            this.vx = targetVX; this.vz = targetVZ;
+                        } else {
+                            this.vx += (diffX / diffLen) * maxChange;
+                            this.vz += (diffZ / diffLen) * maxChange;
+                        }
+                    }
+                    return { x: this.vx * dt, z: this.vz * dt, speed: Math.sqrt(this.vx*this.vx + this.vz*this.vz) };
+                }
+            }
+        };
+
+        const keys = {};
+        document.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; });
+        document.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+        document.getElementById('seed-val').textContent = STATE.seed;
+
+        // --- Three.js Setup ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000005);
+        scene.fog = new THREE.FogExp2(0x000005, 0.0005);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 100000);
+        camera.position.set(0, 200, 400);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.maxDistance = 2000;
+        controls.minDistance = 10;
+
+        // Surface movement handlers replaced by global keys listener
+        
+        // Exit surface view on escape
+        document.addEventListener('keydown', (e) => {
+            if (e.code === 'Escape' && STATE.view === 'SURFACE') {
+                document.getElementById('ui').style.display = 'block';
+                document.getElementById('breadcrumbs').style.display = 'flex';
+                document.getElementById('instructions').style.display = 'none';
+                // Optional: Pause or show menu
+            }
+        });
+
+
+        // Post Processing
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.1;
+        bloomPass.strength = 1.2;
+        bloomPass.radius = 0.5;
+        
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Raycaster ---
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        let hoveredObject = null;
+
+        // --- Galaxy Generation ---
+        const galaxyGroup = new THREE.Group();
+        scene.add(galaxyGroup);
+        
+        let starData = []; // Store data for raycasting
+
+        function generateGalaxy() {
+            // Clear previous
+            while(galaxyGroup.children.length > 0) galaxyGroup.remove(galaxyGroup.children[0]);
+            starData = [];
+
+            const rng = new RNG(STATE.seed);
+            const starCount = 10000;
+            
+            const geometry = new THREE.BufferGeometry();
+            const positions = new Float32Array(starCount * 3);
+            const colors = new Float32Array(starCount * 3);
+            const sizes = new Float32Array(starCount);
+
+            const colorPalette = [
+                new THREE.Color(0x99ccff), // Blue
+                new THREE.Color(0xffffff), // White
+                new THREE.Color(0xffff99), // Yellow
+                new THREE.Color(0xffcc66), // Orange
+                new THREE.Color(0xff6666)  // Red
+            ];
+
+            for(let i=0; i<starCount; i++) {
+                // Spiral Galaxy Logic
+                const branchAngle = (i % 3) * ((Math.PI * 2) / 3);
+                const dist = rng.range(10, 1000);
+                const spin = dist * 0.005; // Twist
+                const angle = branchAngle + spin + rng.range(-0.5, 0.5);
+                
+                // Random offset from arm
+                const spread = rng.range(0, 50) * (dist/1000);
+                
+                const x = Math.cos(angle) * dist + rng.range(-spread, spread);
+                const y = rng.range(-10, 10) * (1 - dist/1000); // Flattened disk
+                const z = Math.sin(angle) * dist + rng.range(-spread, spread);
+
+                positions[i*3] = x;
+                positions[i*3+1] = y;
+                positions[i*3+2] = z;
+
+                // Color based on temp/age (random for now)
+                const color = colorPalette[rng.int(0, colorPalette.length)];
+                colors[i*3] = color.r;
+                colors[i*3+1] = color.g;
+                colors[i*3+2] = color.b;
+
+                sizes[i] = rng.range(1, 3);
+
+                // Store data for interaction
+                starData.push({
+                    id: i,
+                    seed: rng.int(0, 99999999), // Deterministic seed for this star
+                    x, y, z,
+                    color: color.getHex(),
+                    name: generateName(rng) + " " + (rng.next() > 0.5 ? "Major" : "Minor")
+                });
+            }
+
+            geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+            geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+            geometry.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+
+            // Shader Material for Stars
+            const material = new THREE.PointsMaterial({
+                size: 2,
+                vertexColors: true,
+                map: createStarTexture(),
+                transparent: true,
+                alphaTest: 0.1,
+                blending: THREE.AdditiveBlending
+            });
+
+            const points = new THREE.Points(geometry, material);
+            galaxyGroup.add(points);
+        }
+
+        function createStarTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 32;
+            canvas.height = 32;
+            const ctx = canvas.getContext('2d');
+            const grad = ctx.createRadialGradient(16, 16, 0, 16, 16, 16);
+            grad.addColorStop(0, 'rgba(255,255,255,1)');
+            grad.addColorStop(0.2, 'rgba(255,255,255,0.8)');
+            grad.addColorStop(0.5, 'rgba(255,255,255,0.2)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, 32, 32);
+            const tex = new THREE.CanvasTexture(canvas);
+            return tex;
+        }
+
+        // --- System Generation ---
+        const systemGroup = new THREE.Group();
+        scene.add(systemGroup);
+        systemGroup.visible = false;
+
+        function generateSystem(star) {
+            // Clear previous
+            while(systemGroup.children.length > 0) systemGroup.remove(systemGroup.children[0]);
+            
+            const rng = new RNG(star.seed);
+            
+            // Central Star
+            const starGeo = new THREE.SphereGeometry(10, 32, 32);
+            const starMat = new THREE.MeshBasicMaterial({ color: star.color });
+            const starMesh = new THREE.Mesh(starGeo, starMat);
+            systemGroup.add(starMesh);
+            
+            // Star Glow
+            const glowGeo = new THREE.SpriteMaterial({ 
+                map: createStarTexture(), 
+                color: star.color, 
+                transparent: true, 
+                blending: THREE.AdditiveBlending 
+            });
+            const glow = new THREE.Sprite(glowGeo);
+            glow.scale.set(60, 60, 1);
+            systemGroup.add(glow);
+
+            // Planets
+            const planetCount = rng.int(2, 9);
+            const planets = [];
+            
+            for(let i=0; i<planetCount; i++) {
+                const dist = 40 + i * 30 + rng.range(0, 10);
+                let size = rng.range(4, 10);
+                const speed = 0.01 / (i + 1);
+                const angle = rng.range(0, Math.PI * 2);
+                
+                // Planet Type
+                const type = rng.pick(['Rocky', 'Gas Giant', 'Ice', 'Lava', 'Oceanic']);
+                let color = 0xffffff;
+                if(type === 'Rocky') color = 0x886644;
+                if(type === 'Gas Giant') { color = 0xffcc99; size *= 2; }
+                if(type === 'Ice') color = 0xaaddff;
+                if(type === 'Lava') color = 0xff3300;
+                if(type === 'Oceanic') color = 0x2244ff;
+
+                const geo = new THREE.SphereGeometry(size, 32, 32);
+                const mat = new THREE.MeshStandardMaterial({ 
+                    color: color,
+                    roughness: 0.8,
+                    metalness: 0.2
+                });
+                const mesh = new THREE.Mesh(geo, mat);
+                
+                mesh.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+                
+                // Orbit Line
+                const orbitGeo = new THREE.RingGeometry(dist - 0.2, dist + 0.2, 64);
+                const orbitMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1, side: THREE.DoubleSide });
+                const orbit = new THREE.Mesh(orbitGeo, orbitMat);
+                orbit.rotation.x = Math.PI / 2;
+                systemGroup.add(orbit);
+                
+                systemGroup.add(mesh);
+                
+                planets.push({
+                    mesh,
+                    dist,
+                    speed,
+                    angle,
+                    seed: rng.int(0, 99999999),
+                    type,
+                    name: generateName(rng),
+                    size
+                });
+            }
+            
+            // Add light
+            const light = new THREE.PointLight(star.color, 3, 1000);
+            systemGroup.add(light);
+            
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5); // Soft white light
+            systemGroup.add(ambientLight);
+            
+            return planets;
+        }
+
+        // --- Planet Surface Generation ---
+        const orbitGroup = new THREE.Group();
+        scene.add(orbitGroup);
+        orbitGroup.visible = false;
+        
+        const surfaceGroup = new THREE.Group();
+        scene.add(surfaceGroup);
+        surfaceGroup.visible = false;
+
+        function generatePlanetOrbit(planet) {
+            while(orbitGroup.children.length > 0) orbitGroup.remove(orbitGroup.children[0]);
+            
+            const rng = new RNG(planet.seed);
+            
+            // High res sphere
+            const geo = new THREE.IcosahedronGeometry(20, 6); // High detail
+            
+            // Displace vertices for terrain
+            const pos = geo.attributes.position;
+            const colors = [];
+            
+            const noiseOffset = rng.range(0, 100);
+            const roughness = rng.range(0.5, 2.0);
+            
+            for(let i=0; i<pos.count; i++) {
+                const x = pos.getX(i);
+                const y = pos.getY(i);
+                const z = pos.getZ(i);
+                
+                // Simple pseudo-noise
+                const n = Math.sin(x * 0.2 + noiseOffset) * Math.cos(y * 0.2 + noiseOffset) * Math.sin(z * 0.2);
+                const n2 = Math.sin(x * 1.5) * Math.cos(y * 1.5) * 0.2;
+                
+                // Reduced displacement for more spherical planets
+                const h = 1 + (n + n2) * 0.02 * roughness;
+                
+                pos.setXYZ(i, x*h, y*h, z*h);
+                
+                // Vertex Color based on height
+                let c = new THREE.Color();
+                if(planet.type === 'Oceanic') {
+                    if(h < 1.0) c.setHex(0x0000ff); // Ocean
+                    else if(h < 1.05) c.setHex(0xffeeaa); // Sand
+                    else c.setHex(0x228822); // Grass
+                } else if(planet.type === 'Lava') {
+                    if(h < 0.98) c.setHex(0xff3300); // Lava
+                    else c.setHex(0x330000); // Rock
+                } else if(planet.type === 'Ice') {
+                    c.setHex(0xaaddff);
+                } else {
+                    // Rocky
+                    if(h < 1.0) c.setHex(0x554433);
+                    else c.setHex(0x887766);
+                }
+                
+                colors.push(c.r, c.g, c.b);
+            }
+            
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.computeVertexNormals();
+            
+            const mat = new THREE.MeshStandardMaterial({ 
+                vertexColors: true,
+                roughness: 0.9,
+                metalness: 0.1
+            });
+            
+            const mesh = new THREE.Mesh(geo, mat);
+            orbitGroup.add(mesh);
+            
+            // Atmosphere
+            if(planet.type !== 'Rocky' && planet.type !== 'Lava') {
+                const atmoGeo = new THREE.SphereGeometry(22, 64, 64);
+                const atmoMat = new THREE.MeshBasicMaterial({
+                    color: planet.type === 'Oceanic' ? 0x44aaff : 0xffffff,
+                    transparent: true,
+                    opacity: 0.2,
+                    side: THREE.BackSide
+                });
+                const atmo = new THREE.Mesh(atmoGeo, atmoMat);
+                orbitGroup.add(atmo);
+            }
+            
+            // Add directional light simulating sun
+            const sunLight = new THREE.DirectionalLight(0xffffff, 1.5);
+            sunLight.position.set(50, 20, 50);
+            orbitGroup.add(sunLight);
+            
+            // Add ambient
+            const ambient = new THREE.AmbientLight(0x404040);
+            orbitGroup.add(ambient);
+            
+            return "Orbit Established";
+        }
+        
+        // Simplex Noise implementation
+        class SimplexNoise {
+            constructor(seed = 0) {
+                this.grad3 = [[1,1,0],[-1,1,0],[1,-1,0],[-1,-1,0],[1,0,1],[-1,0,1],[1,0,-1],[-1,0,-1],[0,1,1],[0,-1,1],[0,1,-1],[0,-1,-1]];
+                this.p = [];
+                for (let i=0; i<256; i++) this.p[i] = Math.floor(Math.abs(Math.sin(seed+i)*256));
+                this.perm = [];
+                for(let i=0; i<512; i++) this.perm[i]=this.p[i & 255];
+            }
+            dot(g, x, y) { return g[0]*x + g[1]*y; }
+            noise(xin, yin) {
+                let n0, n1, n2;
+                const F2 = 0.5*(Math.sqrt(3.0)-1.0);
+                const s = (xin+yin)*F2;
+                const i = Math.floor(xin+s);
+                const j = Math.floor(yin+s);
+                const G2 = (3.0-Math.sqrt(3.0))/6.0;
+                const t = (i+j)*G2;
+                const X0 = i-t;
+                const Y0 = j-t;
+                const x0 = xin-X0;
+                const y0 = yin-Y0;
+                let i1, j1;
+                if(x0>y0) {i1=1; j1=0;} else {i1=0; j1=1;}
+                const x1 = x0 - i1 + G2;
+                const y1 = y0 - j1 + G2;
+                const x2 = x0 - 1.0 + 2.0 * G2;
+                const y2 = y0 - 1.0 + 2.0 * G2;
+                const ii = i & 255;
+                const jj = j & 255;
+                const gi0 = this.perm[ii+this.perm[jj]] % 12;
+                const gi1 = this.perm[ii+i1+this.perm[jj+j1]] % 12;
+                const gi2 = this.perm[ii+1+this.perm[jj+1]] % 12;
+                let t0 = 0.5 - x0*x0 - y0*y0;
+                if(t0<0) n0 = 0.0; else { t0 *= t0; n0 = t0 * t0 * this.dot(this.grad3[gi0], x0, y0); }
+                let t1 = 0.5 - x1*x1 - y1*y1;
+                if(t1<0) n1 = 0.0; else { t1 *= t1; n1 = t1 * t1 * this.dot(this.grad3[gi1], x1, y1); }
+                let t2 = 0.5 - x2*x2 - y2*y2;
+                if(t2<0) n2 = 0.0; else { t2 *= t2; n2 = t2 * t2 * this.dot(this.grad3[gi2], x2, y2); }
+                return 70.0 * (n0 + n1 + n2);
+            }
+        }
+
+        function generateSurfaceTerrain(planet) {
+            while(surfaceGroup.children.length > 0) surfaceGroup.remove(surfaceGroup.children[0]);
+            
+            const rng = new RNG(planet.seed + 100); 
+            const simplex = new SimplexNoise(planet.seed);
+            
+            // FBM Noise
+            const noise = (x, z, octaves=6, persistence=0.5, lacunarity=2.0, scale=0.005) => {
+                let total = 0;
+                let frequency = scale * 0.05; // Much lower frequency for wider, more realistic features
+                let amplitude = 1;
+                let maxValue = 0;
+                for(let i=0; i<octaves; i++) {
+                    total += simplex.noise(x * frequency, z * frequency) * amplitude;
+                    maxValue += amplitude;
+                    amplitude *= persistence;
+                    frequency *= lacunarity;
+                }
+                return total / maxValue;
+            };
+
+            const size = 20000; // Much larger map
+            const segments = 400; // More detail
+            const geo = new THREE.PlaneGeometry(size, size, segments, segments);
+            geo.rotateX(-Math.PI / 2);
+            
+            const pos = geo.attributes.position;
+            const colors = [];
+            
+            const heightScale = rng.range(150, 400); // Reduced height for more realistic slopes 
+            
+            let waterLevel = -1000; 
+            if(planet.type === 'Oceanic') waterLevel = 0;
+            else if(planet.type === 'Lava') waterLevel = -20;
+            
+            // Generate Height & Color
+            for(let i=0; i<pos.count; i++) {
+                const x = pos.getX(i);
+                const z = pos.getZ(i);
+                
+                let h = noise(x, z) * heightScale;
+                
+                // Biome specific modifications
+                if(planet.type === 'Rocky') {
+                    // Craters
+                    const craterNoise = noise(x, z, 2, 0.5, 2.0, 0.001);
+                    if(craterNoise < -0.2) {
+                        h -= (Math.abs(craterNoise) - 0.2) * 200;
+                    }
+                    h += noise(x, z, 4, 0.5, 2.0, 0.05) * 10; // Roughness
+                } else if(planet.type === 'Ice') {
+                    h = Math.abs(h) * 1.5; // Spiky mountains
+                    h += noise(x, z, 2, 0.5, 2.0, 0.02) * 50; // Glaciers
+                } else if(planet.type === 'Oceanic') {
+                    // Islands
+                    h = h * 1.5 - 50;
+                    if(h < waterLevel) h = Math.max(h, waterLevel - 100); // Seabed floor
+                } else if(planet.type === 'Lava') {
+                    h = Math.abs(h) * 2.0 - 50;
+                    if(h < waterLevel) h = waterLevel - 10;
+                }
+                
+                pos.setY(i, h);
+                
+                // Color
+                let c = new THREE.Color();
+                
+                if(planet.type === 'Oceanic') {
+                    if(h < waterLevel + 5) c.setHex(0xeecfa1); // Beach
+                    else if(h < waterLevel + 50) c.setHex(0x228822).lerp(new THREE.Color(0x004400), (h-waterLevel)/50); // Grass/Forest
+                    else if(h < waterLevel + 150) c.setHex(0x554433).lerp(new THREE.Color(0x332211), (h-waterLevel-50)/100); // Rock
+                    else c.setHex(0xffffff); // Snow
+                } else if(planet.type === 'Lava') {
+                    if(h < waterLevel + 5) c.setHex(0x330000); // Dark Rock
+                    else c.setHex(0x110000).lerp(new THREE.Color(0x550000), noise(x, z, 2, 0.5, 2.0, 0.02)); // Black/Red Rock
+                } else if(planet.type === 'Ice') {
+                    c.setHex(0xaaddff).lerp(new THREE.Color(0xffffff), (h+100)/heightScale);
+                } else if(planet.type === 'Rocky') {
+                    c.setHex(0x885533).lerp(new THREE.Color(0x332211), (h+100)/heightScale);
+                } else {
+                    // Alien
+                    const alienColor1 = new THREE.Color().setHSL(rng.range(0,1), 0.8, 0.5);
+                    const alienColor2 = new THREE.Color().setHSL(rng.range(0,1), 0.8, 0.2);
+                    c.copy(alienColor1).lerp(alienColor2, (h+100)/heightScale);
+                }
+                
+                // Shadow/AO fake
+                if(h < waterLevel) c.multiplyScalar(0.5);
+                
+                colors.push(c.r, c.g, c.b);
+            }
+            
+            geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+            geo.computeVertexNormals();
+            
+            const mat = new THREE.MeshStandardMaterial({ 
+                vertexColors: true,
+                roughness: 0.9,
+                flatShading: true
+            });
+            
+            const mesh = new THREE.Mesh(geo, mat);
+            surfaceGroup.add(mesh);
+            
+            // Water/Lava Plane
+            if(planet.type === 'Oceanic' || planet.type === 'Lava') {
+                const waterGeo = new THREE.PlaneGeometry(size, size);
+                waterGeo.rotateX(-Math.PI / 2);
+                const waterMat = new THREE.MeshStandardMaterial({
+                    color: planet.type === 'Oceanic' ? 0x0066ff : 0xff3300,
+                    transparent: true,
+                    opacity: 0.8,
+                    roughness: 0.1,
+                    emissive: planet.type === 'Lava' ? 0xff1100 : 0x000000,
+                    emissiveIntensity: planet.type === 'Lava' ? 0.8 : 0
+                });
+                const water = new THREE.Mesh(waterGeo, waterMat);
+                water.position.y = waterLevel;
+                surfaceGroup.add(water);
+            }
+            
+            // Details
+            addSurfaceDetails(planet, rng, size, noise, 0, heightScale, waterLevel);
+            
+            // Atmosphere
+            setupSurfaceAtmosphere(planet);
+
+            // Export height function for collision
+            STATE.surfaceHeightFn = (x, z) => {
+                // Replicate height logic
+                let h = noise(x, z) * heightScale;
+                if(planet.type === 'Rocky') {
+                    const craterNoise = noise(x, z, 2, 0.5, 2.0, 0.001);
+                    if(craterNoise < -0.2) {
+                        h -= (Math.abs(craterNoise) - 0.2) * 200;
+                    }
+                    h += noise(x, z, 4, 0.5, 2.0, 0.05) * 10;
+                } else if(planet.type === 'Ice') {
+                    h = Math.abs(h) * 1.5;
+                    h += noise(x, z, 2, 0.5, 2.0, 0.02) * 50;
+                } else if(planet.type === 'Oceanic') {
+                    h = h * 1.5 - 50;
+                    if(h < waterLevel) h = Math.max(h, waterLevel - 100);
+                } else if(planet.type === 'Lava') {
+                    h = Math.abs(h) * 2.0 - 50;
+                    if(h < waterLevel) h = waterLevel - 10;
+                }
+                return h;
+            };
+            STATE.waterLevel = waterLevel;
+        }
+        
+        function addSurfaceDetails(planet, rng, size, noiseFn, offset, scale, waterLevel) {
+            // Trees / Rocks / Crystals
+            const count = 10000; // More objects for larger map
+            const dummy = new THREE.Object3D();
+            
+            let geo, mat;
+            
+            if(planet.type === 'Oceanic') {
+                geo = new THREE.ConeGeometry(1, 4, 5);
+                mat = new THREE.MeshStandardMaterial({ color: 0x005500 });
+            } else if(planet.type === 'Rocky') {
+                geo = new THREE.DodecahedronGeometry(1);
+                mat = new THREE.MeshStandardMaterial({ color: 0x555555 });
+            } else if(planet.type === 'Ice') {
+                geo = new THREE.ConeGeometry(0.5, 3, 4);
+                mat = new THREE.MeshStandardMaterial({ color: 0xccffff, transparent: true, opacity: 0.8 });
+            } else if(planet.type === 'Lava') {
+                geo = new THREE.TetrahedronGeometry(1);
+                mat = new THREE.MeshStandardMaterial({ color: 0x220000 });
+            } else {
+                // Alien
+                geo = new THREE.TorusKnotGeometry(1, 0.3, 16, 3);
+                mat = new THREE.MeshStandardMaterial({ color: 0x8800ff, emissive: 0x220044 });
+            }
+            
+            const mesh = new THREE.InstancedMesh(geo, mat, count);
+            let i = 0;
+            
+            for(let j=0; j<count * 3; j++) { 
+                if(i >= count) break;
+                
+                const x = rng.range(-size/2, size/2);
+                const z = rng.range(-size/2, size/2);
+                
+                // Replicate height logic
+                let h = noiseFn(x, z) * scale;
+                
+                if(planet.type === 'Rocky') {
+                    const craterNoise = noiseFn(x, z, 2, 0.5, 2.0, 0.001);
+                    if(craterNoise < -0.2) {
+                        h -= (Math.abs(craterNoise) - 0.2) * 200;
+                    }
+                    h += noiseFn(x, z, 4, 0.5, 2.0, 0.05) * 10;
+                } else if(planet.type === 'Ice') {
+                    h = Math.abs(h) * 1.5;
+                    h += noiseFn(x, z, 2, 0.5, 2.0, 0.02) * 50;
+                } else if(planet.type === 'Oceanic') {
+                    h = h * 1.5 - 50;
+                    if(h < waterLevel) h = Math.max(h, waterLevel - 100);
+                } else if(planet.type === 'Lava') {
+                    h = Math.abs(h) * 2.0 - 50;
+                    if(h < waterLevel) h = waterLevel - 10;
+                }
+                
+                if(h > waterLevel + 1) {
+                    dummy.position.set(x, h + (planet.type === 'Rocky' ? 0.5 : 2), z);
+                    
+                    const s = rng.range(0.5, 3.0);
+                    dummy.scale.set(s, s, s);
+                    
+                    dummy.rotation.set(rng.range(0, Math.PI), rng.range(0, Math.PI), rng.range(0, Math.PI));
+                    
+                    dummy.updateMatrix();
+                    mesh.setMatrixAt(i++, dummy.matrix);
+                }
+            }
+            mesh.count = i;
+            surfaceGroup.add(mesh);
+        }
+        
+        function setupSurfaceAtmosphere(planet) {
+            let color = 0x000000;
+            let density = 0.01;
+            
+            if(planet.type === 'Oceanic') { color = 0x88ccff; density = 0.0005; }
+            else if(planet.type === 'Rocky') { color = 0xccaa88; density = 0.001; }
+            else if(planet.type === 'Lava') { color = 0x550000; density = 0.002; }
+            else if(planet.type === 'Ice') { color = 0xaaddff; density = 0.001; }
+            else { color = 0x220044; density = 0.002; }
+            
+            scene.fog = new THREE.FogExp2(color, density);
+            scene.background = new THREE.Color(color);
+            
+            // Sun
+            const sun = new THREE.DirectionalLight(0xffffff, 1.5);
+            sun.position.set(100, 200, 100);
+            surfaceGroup.add(sun);
+            
+            const ambient = new THREE.AmbientLight(color, 0.3);
+            surfaceGroup.add(ambient);
+        }
+
+        // --- Interaction Logic ---
+        
+        let currentSystemPlanets = [];
+
+        function onMouseClick(event) {
+            if(STATE.transitioning) return;
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            
+            if(STATE.view === 'GALAXY') {
+                // Raycast against points is hard, use distance check to starData
+                // Project stars to screen space? Too slow for 10k.
+                // Use threshold raycaster
+                raycaster.params.Points.threshold = 5;
+                const intersects = raycaster.intersectObject(galaxyGroup.children[0]);
+                
+                if(intersects.length > 0) {
+                    const index = intersects[0].index;
+                    const star = starData[index];
+                    selectStar(star);
+                }
+            } else if(STATE.view === 'SYSTEM') {
+                const intersects = raycaster.intersectObjects(systemGroup.children);
+                if(intersects.length > 0) {
+                    // Find which planet
+                    const obj = intersects[0].object;
+                    const planet = currentSystemPlanets.find(p => p.mesh === obj);
+                    if(planet) {
+                        selectPlanet(planet);
+                    }
+                }
+            }
+        }
+        
+        function warpToSystem(star) {
+            STATE.transitioning = true;
+            document.getElementById('loading').style.opacity = 1;
+            
+            // Animation simulation
+            setTimeout(() => {
+                STATE.view = 'SYSTEM';
+                galaxyGroup.visible = false;
+                systemGroup.visible = true;
+                orbitGroup.visible = false;
+                surfaceGroup.visible = false;
+                
+                currentSystemPlanets = generateSystem(star);
+                
+                camera.position.set(0, 100, 200);
+                controls.target.set(0, 0, 0);
+                controls.maxDistance = 500;
+                controls.minDistance = 20;
+                
+                document.getElementById('scale-val').textContent = "SOLAR SYSTEM";
+                document.getElementById('crumb-system').style.display = 'block';
+                document.getElementById('crumb-system').classList.add('active');
+                document.getElementById('crumb-galaxy').classList.remove('active');
+                document.getElementById('info-panel').style.display = 'none';
+                document.getElementById('loading').style.opacity = 0;
+                STATE.transitioning = false;
+            }, 1000);
+        }
+
+        function selectStar(star) {
+            STATE.currentStar = star;
+            document.getElementById('obj-name').textContent = star.name;
+            document.getElementById('obj-stats').innerHTML = `
+                Type: Star<br>
+                Class: ${star.color.toString(16)}<br>
+                Coords: ${star.x.toFixed(0)}, ${star.y.toFixed(0)}, ${star.z.toFixed(0)}
+            `;
+            document.getElementById('action-btn').textContent = "Warp to System";
+            document.getElementById('action-btn').onclick = () => warpToSystem(star);
+            document.getElementById('info-panel').style.display = 'block';
+        }
+        
+        function selectPlanet(planet) {
+            STATE.currentPlanet = planet;
+            document.getElementById('obj-name').textContent = planet.name;
+            document.getElementById('obj-stats').innerHTML = `
+                Type: ${planet.type}<br>
+                Size: ${planet.size.toFixed(1)}<br>
+                Orbit: ${planet.dist.toFixed(0)} AU
+            `;
+            document.getElementById('action-btn').textContent = "Enter Orbit";
+            document.getElementById('action-btn').onclick = () => warpToOrbit(planet);
+            document.getElementById('info-panel').style.display = 'block';
+        }
+        
+        function warpToOrbit(planet) {
+            STATE.transitioning = true;
+            document.getElementById('loading').style.opacity = 1;
+            
+            setTimeout(() => {
+                STATE.view = 'ORBIT';
+                systemGroup.visible = false;
+                orbitGroup.visible = true;
+                surfaceGroup.visible = false;
+                
+                generatePlanetOrbit(planet);
+                
+                camera.position.set(0, 0, 60);
+                controls.target.set(0, 0, 0);
+                controls.maxDistance = 100;
+                controls.minDistance = 25;
+                controls.enabled = true;
+                
+                document.getElementById('scale-val').textContent = "PLANET ORBIT";
+                document.getElementById('crumb-orbit').style.display = 'block';
+                document.getElementById('crumb-orbit').classList.add('active');
+                document.getElementById('crumb-system').classList.remove('active');
+                
+                // Update info panel for orbit
+                document.getElementById('obj-name').textContent = planet.name;
+                document.getElementById('obj-stats').innerHTML = `
+                    Status: In Orbit<br>
+                    Gravity: ${(planet.size/3).toFixed(2)} G<br>
+                    Atmosphere: Stable
+                `;
+                
+                // Check habitability - RESTRICTION REMOVED FOR TESTING
+                const isHabitable = true; // (planet.type === 'Rocky' || planet.type === 'Oceanic') && planet.dist > 60 && planet.dist < 150;
+                
+                const actionBtn = document.getElementById('action-btn');
+                actionBtn.style.display = 'block';
+                
+                actionBtn.textContent = "Land on Surface";
+                actionBtn.onclick = () => landOnSurface(planet);
+                actionBtn.style.opacity = 1;
+                actionBtn.style.cursor = 'pointer';
+                
+                document.getElementById('info-panel').style.display = 'block';
+                
+                document.getElementById('loading').style.opacity = 0;
+                STATE.transitioning = false;
+            }, 1000);
+        }
+
+        function landOnSurface(planet) {
+            STATE.transitioning = true;
+            document.getElementById('loading').style.opacity = 1;
+            
+            setTimeout(() => {
+                STATE.view = 'SURFACE';
+                orbitGroup.visible = false;
+                surfaceGroup.visible = true;
+                
+                generateSurfaceTerrain(planet);
+                
+                // Setup 3rd Person Player
+                if (STATE.player) {
+                    surfaceGroup.remove(STATE.player);
+                    STATE.player.geometry.dispose();
+                    STATE.player.material.dispose();
+                }
+                
+                const playerGeo = new THREE.CapsuleGeometry(0.5, 1, 4, 8);
+                const playerMat = new THREE.MeshStandardMaterial({ color: 0x00ffff, roughness: 0.3, metalness: 0.8 });
+                STATE.player = new THREE.Mesh(playerGeo, playerMat);
+                STATE.player.position.set(0, 200, 0); // Start high to avoid falling through initially
+                STATE.player.castShadow = true;
+                surfaceGroup.add(STATE.player);
+                
+                // Setup camera for 3rd person
+                STATE.cameraMode = 'THIRD_PERSON';
+                const startH = STATE.surfaceHeightFn ? STATE.surfaceHeightFn(0, 0) : 0;
+                STATE.player.position.y = Math.max(startH, STATE.waterLevel || -1000) + 5;
+                
+                camera.position.set(0, STATE.player.position.y + 20, -40);
+                controls.target.copy(STATE.player.position);
+                controls.maxDistance = 200;
+                controls.minDistance = 5;
+                
+                // Setup Camera
+                camera.position.set(0, 15, -10);
+                camera.lookAt(STATE.player.position);
+                
+                controls.enabled = true;
+                controls.enableDamping = true;
+                controls.dampingFactor = 0.05;
+                controls.minDistance = 5;
+                controls.maxDistance = 20;
+                controls.maxPolarAngle = Math.PI / 2 - 0.1; // Don't go below ground
+                controls.target.copy(STATE.player.position);
+                
+                document.getElementById('scale-val').textContent = "SURFACE EXPLORATION";
+                document.getElementById('crumb-surface').style.display = 'block';
+                document.getElementById('crumb-surface').classList.add('active');
+                document.getElementById('crumb-orbit').classList.remove('active');
+                
+                // Hide UI for immersion
+                document.getElementById('ui').style.display = 'none';
+                document.getElementById('breadcrumbs').style.display = 'none';
+                document.getElementById('instructions').innerHTML = "WASD to Move<br>Mouse to Look<br>V to Toggle View";
+                document.getElementById('instructions').style.display = 'block';
+                
+                document.getElementById('loading').style.opacity = 0;
+                STATE.transitioning = false;
+            }, 1500);
+        }
+        
+        // Breadcrumb navigation
+        document.getElementById('crumb-galaxy').onclick = () => {
+            if(STATE.view === 'GALAXY' || STATE.transitioning) return;
+            resetToGalaxy();
+        };
+
+        function resetToGalaxy() {
+            STATE.view = 'GALAXY';
+            galaxyGroup.visible = true;
+            systemGroup.visible = false;
+            orbitGroup.visible = false;
+            surfaceGroup.visible = false;
+            
+            scene.fog = new THREE.FogExp2(0x000005, 0.0005);
+            scene.background = new THREE.Color(0x000005);
+            
+            camera.position.set(0, 200, 400);
+            controls.maxDistance = 2000;
+            controls.enabled = true;
+            
+            document.getElementById('scale-val').textContent = "GALAXY";
+            document.getElementById('crumb-system').style.display = 'none';
+            document.getElementById('crumb-orbit').style.display = 'none';
+            document.getElementById('crumb-surface').style.display = 'none';
+            document.getElementById('crumb-galaxy').classList.add('active');
+            document.getElementById('info-panel').style.display = 'none';
+        }
+        
+        document.getElementById('crumb-system').onclick = () => {
+            if(STATE.view === 'SYSTEM' || STATE.transitioning) return;
+            STATE.view = 'SYSTEM';
+            systemGroup.visible = true;
+            orbitGroup.visible = false;
+            surfaceGroup.visible = false;
+            
+            scene.fog = new THREE.FogExp2(0x000005, 0.0005);
+            scene.background = new THREE.Color(0x000005);
+            
+            camera.position.set(0, 100, 200);
+            controls.maxDistance = 500;
+            controls.enabled = true;
+            
+            document.getElementById('scale-val').textContent = "SOLAR SYSTEM";
+            document.getElementById('crumb-orbit').style.display = 'none';
+            document.getElementById('crumb-surface').style.display = 'none';
+            document.getElementById('crumb-system').classList.add('active');
+            document.getElementById('crumb-orbit').classList.remove('active');
+            document.getElementById('info-panel').style.display = 'none';
+            document.getElementById('action-btn').style.display = 'block';
+        };
+        
+        document.getElementById('crumb-orbit').onclick = () => {
+            if(STATE.view === 'ORBIT' || STATE.transitioning) return;
+            STATE.view = 'ORBIT';
+            orbitGroup.visible = true;
+            surfaceGroup.visible = false;
+            
+            scene.fog = new THREE.FogExp2(0x000005, 0.0005);
+            scene.background = new THREE.Color(0x000005);
+            
+            camera.position.set(0, 0, 60);
+            controls.maxDistance = 100;
+            controls.enabled = true;
+            
+            document.getElementById('scale-val').textContent = "PLANET ORBIT";
+            document.getElementById('crumb-surface').style.display = 'none';
+            document.getElementById('crumb-orbit').classList.add('active');
+            document.getElementById('crumb-surface').classList.remove('active');
+            document.getElementById('ui').style.display = 'block';
+            document.getElementById('breadcrumbs').style.display = 'flex';
+            document.getElementById('instructions').style.display = 'none';
+        };
+
+        window.addEventListener('click', onMouseClick);
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        const clock = new THREE.Clock();
+        
+        // --- Main Loop ---
+        function animate() {
+            requestAnimationFrame(animate);
+            
+            const dt = Math.min(clock.getDelta(), 0.1);
+            
+            if(STATE.view === 'SURFACE' && STATE.player) {
+                // Toggle View
+                if (keys['v'] && !keys.vPressed) {
+                    keys.vPressed = true;
+                    STATE.cameraMode = STATE.cameraMode === 'THIRD_PERSON' ? 'FIRST_PERSON' : 'THIRD_PERSON';
+                    
+                    if (STATE.cameraMode === 'FIRST_PERSON') {
+                        STATE.player.visible = false;
+                        controls.minDistance = 0.1;
+                        controls.maxDistance = 0.1;
+                        controls.enableDamping = false;
+                    } else {
+                        STATE.player.visible = true;
+                        controls.minDistance = 5;
+                        controls.maxDistance = 20;
+                        controls.enableDamping = true;
+                    }
+                }
+                if (!keys['v']) keys.vPressed = false;
+
+                // Movement
+                const speed = 100.0;
+                let inputX = 0;
+                let inputZ = 0;
+                
+                if (keys['w']) inputZ += 1;
+                if (keys['s']) inputZ -= 1;
+                if (keys['a']) inputX += 1;
+                if (keys['d']) inputX -= 1;
+                
+                // Camera-relative movement
+                const camDir = new THREE.Vector3();
+                camera.getWorldDirection(camDir);
+                camDir.y = 0;
+                camDir.normalize();
+                
+                const camRight = new THREE.Vector3(-camDir.z, 0, camDir.x);
+                
+                const moveDir = new THREE.Vector3();
+                moveDir.addScaledVector(camDir, inputZ);
+                moveDir.addScaledVector(camRight, inputX);
+                moveDir.normalize();
+                
+                // Apply momentum
+                const momentum = STATE.playerMomentum.update(moveDir.x, moveDir.z, speed, dt);
+                
+                if (Math.abs(momentum.x) > 0.001 || Math.abs(momentum.z) > 0.001) {
+                    const oldPos = STATE.player.position.clone();
+                    
+                    STATE.player.position.x += momentum.x;
+                    STATE.player.position.z += momentum.z;
+                    
+                    // Rotate player to face movement
+                    if (momentum.speed > 0.5) {
+                        const targetRot = Math.atan2(momentum.x, momentum.z);
+                        let diff = targetRot - STATE.player.rotation.y;
+                        while (diff < -Math.PI) diff += Math.PI * 2;
+                        while (diff > Math.PI) diff -= Math.PI * 2;
+                        STATE.player.rotation.y += diff * Math.min(dt * STATE.playerMomentum.turnSpeed, 1);
+                    }
+                    
+                    // Move camera with player
+                    const delta = new THREE.Vector3().subVectors(STATE.player.position, oldPos);
+                    camera.position.add(delta);
+                    
+                }
+                
+                // Terrain collision
+                if(STATE.surfaceHeightFn) {
+                    const terrainH = STATE.surfaceHeightFn(STATE.player.position.x, STATE.player.position.z);
+                    const waterH = STATE.waterLevel || -1000;
+                    const floor = Math.max(terrainH, waterH);
+                    
+                    // Smooth snap to ground
+                    if (STATE.player.position.y < floor) {
+                        STATE.player.position.y = floor + 1; // +1 for half height (capsule is 2 units tall? No, radius 0.5, length 1. Total height 2)
+                    } else {
+                        // Gravity
+                        STATE.player.position.y -= 9.8 * dt;
+                        if (STATE.player.position.y < floor + 1) STATE.player.position.y = floor + 1;
+                    }
+                } else {
+                    STATE.player.position.y = 5;
+                }
+                
+                // Update camera target
+                if (STATE.cameraMode === 'FIRST_PERSON') {
+                    controls.target.copy(STATE.player.position).add(new THREE.Vector3(0, 0.6, 0));
+                } else {
+                    controls.target.copy(STATE.player.position);
+                }
+                
+                controls.update();
+            } else {
+                controls.update();
+            }
+            
+            if(STATE.view === 'GALAXY') {
+                galaxyGroup.rotation.y += 0.0005;
+            } else if(STATE.view === 'SYSTEM') {
+                // Orbit planets
+                currentSystemPlanets.forEach(p => {
+                    p.angle += p.speed;
+                    p.mesh.position.x = Math.cos(p.angle) * p.dist;
+                    p.mesh.position.z = Math.sin(p.angle) * p.dist;
+                });
+            } else if(STATE.view === 'ORBIT') {
+                orbitGroup.rotation.y += 0.001;
+            }
+            
+            composer.render();
+        }
+
+        // Start
+        generateGalaxy();
+        animate();
+
+    </script>
+</body>
+</html>

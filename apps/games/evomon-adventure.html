@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvoMon: Adaptive RPG</title>
+    <meta name="description" content="A 2D RPG where your creature evolves based on battle experience and challenges faced.">
+    <style>
+        :root {
+            --bg: #111;
+            --ui-bg: #222;
+            --text: #eee;
+            --accent: #00ff9d;
+            --danger: #ff5555;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+        #game-container {
+            position: relative;
+            flex-grow: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+        }
+        canvas {
+            image-rendering: pixelated;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .panel {
+            background: rgba(0, 0, 0, 0.8);
+            border: 2px solid #444;
+            padding: 15px;
+            border-radius: 8px;
+            pointer-events: auto;
+            max-width: 300px;
+        }
+        #player-stats {
+            align-self: flex-start;
+        }
+        #log-panel {
+            align-self: flex-end;
+            width: 100%;
+            max-width: 600px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 14px;
+        }
+        .log-entry { margin-bottom: 4px; }
+        .log-entry.battle { color: #ffaa00; }
+        .log-entry.evolve { color: var(--accent); font-weight: bold; }
+        
+        #battle-ui {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.9);
+            border: 2px solid var(--danger);
+            padding: 20px;
+            border-radius: 10px;
+            display: none;
+            text-align: center;
+            pointer-events: auto;
+            min-width: 400px;
+        }
+        .battle-btn {
+            background: #333;
+            color: white;
+            border: 1px solid #666;
+            padding: 10px 20px;
+            margin: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: all 0.2s;
+        }
+        .battle-btn:hover { background: #555; border-color: white; }
+        .battle-btn.attack { border-color: var(--danger); }
+        
+        .stat-bar {
+            width: 100%;
+            height: 8px;
+            background: #333;
+            margin: 5px 0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .stat-fill {
+            height: 100%;
+            background: var(--accent);
+            transition: width 0.3s;
+        }
+        .hp-fill { background: var(--danger); }
+        
+        #evolution-modal {
+            position: absolute;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.95);
+            display: none;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            z-index: 100;
+            pointer-events: auto;
+        }
+        #evo-svg { width: 200px; height: 200px; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { transform: scale(1); } 50% { transform: scale(1.1); } 100% { transform: scale(1); } }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <canvas id="game-canvas"></canvas>
+        <div id="ui-layer">
+            <div id="player-stats" class="panel">
+                <h3 style="margin:0 0 10px 0" id="mon-name">Creature</h3>
+                <div>Lvl <span id="lvl-val">1</span></div>
+                <div class="stat-bar"><div class="stat-fill hp-fill" id="hp-bar" style="width: 100%"></div></div>
+                <div style="font-size: 12px">XP: <span id="xp-val">0</span></div>
+                <div id="traits-list" style="margin-top: 10px; font-size: 12px; color: #aaa;"></div>
+            </div>
+            
+            <div id="battle-ui">
+                <h2 id="enemy-name" style="color: var(--danger)">Enemy</h2>
+                <div id="enemy-visual"></div>
+                <div class="stat-bar"><div class="stat-fill hp-fill" id="enemy-hp-bar" style="width: 100%"></div></div>
+                <div style="margin: 20px 0;">
+                    <button class="battle-btn attack" onclick="battleAction('attack')">Attack</button>
+                    <button class="battle-btn" onclick="battleAction('defend')">Defend</button>
+                    <button class="battle-btn" onclick="battleAction('flee')">Flee</button>
+                </div>
+                <div id="battle-log" style="font-size: 14px; height: 40px;"></div>
+            </div>
+
+            <div id="log-panel" class="panel"></div>
+        </div>
+        
+        <div id="evolution-modal">
+            <h1 style="color: var(--accent)">Adaptation Triggered!</h1>
+            <div id="evo-visual"></div>
+            <p id="evo-desc" style="max-width: 500px; text-align: center; margin: 20px;"></p>
+            <button class="battle-btn" onclick="closeEvolution()">Continue</button>
+        </div>
+    </div>
+
+    <script>
+        // --- Engine Constants ---
+        const TILE_SIZE = 32;
+        const VIEW_WIDTH = 20;
+        const VIEW_HEIGHT = 15;
+        
+        // --- Game State ---
+        const state = {
+            player: {
+                x: 0,
+                y: 0,
+                genome: null, // The core DNA
+                stats: { hp: 100, maxHp: 100, atk: 10, def: 5, spd: 5 },
+                xp: 0,
+                level: 1,
+                history: { // Tracks experiences
+                    damageTaken: 0,
+                    damageDealt: 0,
+                    enemiesDefeated: {},
+                    biomesVisited: {},
+                    timesFled: 0
+                }
+            },
+            world: {}, // Sparse map
+            camera: { x: 0, y: 0 },
+            input: { keys: {} },
+            battle: null
+        };
+
+        // --- Adaptive Evolution Engine ---
+        
+        class Genome {
+            constructor() {
+                // 0-1 values representing core traits
+                this.genes = {
+                    aggression: 0.5, // Spiky vs Round
+                    resilience: 0.5, // Bulk vs Slim
+                    agility: 0.5,    // Limbs/Wings
+                    element: 0.5,    // Color hue
+                    perception: 0.5  // Eye size/count
+                };
+            }
+
+            // "Iron Sharpens Iron" - Modify genes based on experience
+            adapt(experience) {
+                let changes = [];
+                
+                // Took a lot of damage? -> Increase Resilience (Bulk up)
+                if (experience.damageTaken > experience.maxHp * 0.5) {
+                    this.genes.resilience = Math.min(1, this.genes.resilience + 0.05);
+                    changes.push("Skin hardened from impact");
+                }
+                
+                // Dealt a lot of damage? -> Increase Aggression (Sharpen)
+                if (experience.damageDealt > experience.damageTaken * 2) {
+                    this.genes.aggression = Math.min(1, this.genes.aggression + 0.05);
+                    changes.push("Claws sharpened from use");
+                }
+                
+                // Fled often? -> Increase Agility (Grow wings/legs)
+                if (experience.fled) {
+                    this.genes.agility = Math.min(1, this.genes.agility + 0.05);
+                    changes.push("Legs strengthened for speed");
+                }
+
+                // Fought specific elements? -> Shift Element
+                if (experience.enemyType === 'fire') {
+                    this.genes.element = (this.genes.element * 0.9) + (0.6 * 0.1); // Adapt towards Water (0.6)
+                    changes.push("Adapted to heat");
+                }
+
+                return changes;
+            }
+        }
+
+        // --- Visual Renderer ---
+        const canvas = document.getElementById('game-canvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            ctx.imageSmoothingEnabled = false;
+        }
+        window.addEventListener('resize', resize);
+        resize();
+
+        function renderCreature(genome, x, y, size, isEnemy = false) {
+            const g = genome.genes;
+            
+            // Color based on element
+            const hue = Math.floor(g.element * 360);
+            const color = `hsl(${hue}, ${50 + g.aggression * 50}%, ${50 - g.resilience * 20}%)`;
+            
+            ctx.save();
+            ctx.translate(x, y);
+            if (isEnemy) ctx.scale(-1, 1); // Face left
+
+            // Body Shape
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            
+            if (g.resilience > 0.7) {
+                // Blocky/Tanky
+                const s = size * (0.8 + g.resilience * 0.4);
+                ctx.fillRect(-s/2, -s/2, s, s);
+            } else if (g.aggression > 0.7) {
+                // Spiky
+                const s = size;
+                ctx.moveTo(0, -s);
+                ctx.lineTo(s, 0);
+                ctx.lineTo(0, s);
+                ctx.lineTo(-s, 0);
+                ctx.fill();
+            } else {
+                // Round
+                ctx.arc(0, 0, size * (0.8 + g.resilience * 0.2), 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            // Eyes (Perception)
+            ctx.fillStyle = '#fff';
+            const eyeCount = Math.floor(g.perception * 4) + 1;
+            const eyeSize = size * 0.15;
+            for(let i=0; i<eyeCount; i++) {
+                const angle = (i / eyeCount) * Math.PI - Math.PI/2;
+                const ex = Math.cos(angle) * size * 0.4;
+                const ey = Math.sin(angle) * size * 0.4;
+                ctx.beginPath();
+                ctx.arc(ex + size*0.2, ey - size*0.1, eyeSize, 0, Math.PI*2);
+                ctx.fill();
+                ctx.fillStyle = '#000';
+                ctx.beginPath();
+                ctx.arc(ex + size*0.25, ey - size*0.1, eyeSize/2, 0, Math.PI*2);
+                ctx.fill();
+                ctx.fillStyle = '#fff';
+            }
+
+            // Limbs (Agility)
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 4;
+            const limbCount = Math.floor(g.agility * 6);
+            for(let i=0; i<limbCount; i++) {
+                const angle = (i / limbCount) * Math.PI + Math.PI/2;
+                const len = size * (0.5 + g.agility);
+                ctx.beginPath();
+                ctx.moveTo(0, size*0.5);
+                ctx.lineTo(Math.cos(angle)*len, Math.sin(angle)*len + size*0.5);
+                ctx.stroke();
+            }
+
+            // Spikes (Aggression)
+            if (g.aggression > 0.3) {
+                const spikeCount = Math.floor(g.aggression * 8);
+                ctx.fillStyle = `hsl(${hue}, 80%, 30%)`;
+                for(let i=0; i<spikeCount; i++) {
+                    const angle = (i / spikeCount) * Math.PI * 2;
+                    const sx = Math.cos(angle) * size;
+                    const sy = Math.sin(angle) * size;
+                    ctx.beginPath();
+                    ctx.arc(sx, sy, size*0.1, 0, Math.PI*2);
+                    ctx.fill();
+                }
+            }
+
+            ctx.restore();
+        }
+
+        // --- World Logic ---
+        function getTile(x, y) {
+            const key = `${x},${y}`;
+            if (state.world[key]) return state.world[key];
+            
+            // Procedural Gen
+            const noise = Math.sin(x * 0.1) + Math.sin(y * 0.1);
+            const type = noise > 0.5 ? 'water' : (noise < -0.5 ? 'mountain' : 'grass');
+            const hasEnemy = Math.random() < 0.05; // 5% chance per tile step
+            
+            state.world[key] = { type, hasEnemy };
+            return state.world[key];
+        }
+
+        function drawWorld() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            const cx = Math.floor(canvas.width / 2);
+            const cy = Math.floor(canvas.height / 2);
+            
+            // Draw Tiles
+            for (let y = -VIEW_HEIGHT; y <= VIEW_HEIGHT; y++) {
+                for (let x = -VIEW_WIDTH; x <= VIEW_WIDTH; x++) {
+                    const wx = state.player.x + x;
+                    const wy = state.player.y + y;
+                    const tile = getTile(wx, wy);
+                    
+                    let color = '#222';
+                    if (tile.type === 'grass') color = '#1a331a';
+                    if (tile.type === 'water') color = '#1a1a33';
+                    if (tile.type === 'mountain') color = '#33221a';
+                    
+                    ctx.fillStyle = color;
+                    ctx.fillRect(cx + x * TILE_SIZE, cy + y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                    
+                    // Grid lines
+                    ctx.strokeStyle = '#111';
+                    ctx.strokeRect(cx + x * TILE_SIZE, cy + y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                }
+            }
+            
+            // Draw Player
+            renderCreature(state.player.genome, cx + TILE_SIZE/2, cy + TILE_SIZE/2, TILE_SIZE/2);
+        }
+
+        // --- Input Handling ---
+        window.addEventListener('keydown', e => {
+            state.input.keys[e.key] = true;
+            if (!state.battle) handleMovement(e.key);
+        });
+        window.addEventListener('keyup', e => state.input.keys[e.key] = false);
+
+        function handleMovement(key) {
+            let dx = 0, dy = 0;
+            if (key === 'ArrowUp' || key === 'w') dy = -1;
+            if (key === 'ArrowDown' || key === 's') dy = 1;
+            if (key === 'ArrowLeft' || key === 'a') dx = -1;
+            if (key === 'ArrowRight' || key === 'd') dx = 1;
+            
+            if (dx !== 0 || dy !== 0) {
+                state.player.x += dx;
+                state.player.y += dy;
+                
+                const tile = getTile(state.player.x, state.player.y);
+                if (tile.hasEnemy) {
+                    tile.hasEnemy = false; // Consumed
+                    startBattle();
+                }
+                
+                drawWorld();
+            }
+        }
+
+        // --- Battle System ---
+        function startBattle() {
+            state.battle = {
+                enemy: new Genome(), // Random enemy
+                enemyStats: { hp: 50 + state.player.level * 10, maxHp: 50 + state.player.level * 10 },
+                turn: 0,
+                log: []
+            };
+            
+            // Randomize enemy genes
+            for(let k in state.battle.enemy.genes) state.battle.enemy.genes[k] = Math.random();
+            
+            document.getElementById('battle-ui').style.display = 'block';
+            updateBattleUI();
+            log("Encountered a wild creature!", "battle");
+        }
+
+        function battleAction(action) {
+            if (!state.battle) return;
+            
+            const p = state.player;
+            const e = state.battle;
+            const pStats = p.stats;
+            const eStats = e.enemyStats;
+            
+            if (action === 'attack') {
+                // Player Attack
+                const dmg = Math.floor(pStats.atk * (1 + p.genome.genes.aggression));
+                eStats.hp -= dmg;
+                state.player.history.damageDealt += dmg;
+                document.getElementById('battle-log').textContent = `You dealt ${dmg} damage!`;
+                
+                if (eStats.hp <= 0) {
+                    winBattle();
+                    return;
+                }
+                
+                // Enemy Attack
+                const eDmg = Math.max(1, Math.floor(10 * e.enemy.genes.aggression) - pStats.def);
+                pStats.hp -= eDmg;
+                state.player.history.damageTaken += eDmg;
+                
+                if (pStats.hp <= 0) {
+                    alert("Game Over - You fainted!");
+                    location.reload();
+                }
+            } else if (action === 'flee') {
+                if (Math.random() < p.genome.genes.agility) {
+                    state.player.history.timesFled++;
+                    // Adaptation trigger for fleeing
+                    triggerAdaptation({ fled: true });
+                    endBattle();
+                } else {
+                    document.getElementById('battle-log').textContent = "Failed to flee!";
+                    // Take damage
+                    const eDmg = 5;
+                    pStats.hp -= eDmg;
+                }
+            }
+            
+            updateBattleUI();
+            updatePlayerUI();
+        }
+
+        function winBattle() {
+            const xpGain = 20 + state.player.level * 5;
+            state.player.xp += xpGain;
+            log(`Victory! Gained ${xpGain} XP.`, "battle");
+            
+            // Trigger Adaptation based on the fight
+            triggerAdaptation({
+                damageTaken: state.player.history.damageTaken,
+                damageDealt: state.player.history.damageDealt,
+                maxHp: state.player.stats.maxHp,
+                enemyType: state.battle.enemy.genes.element < 0.33 ? 'fire' : 'other'
+            });
+            
+            // Reset battle history for next adaptation cycle
+            state.player.history.damageTaken = 0;
+            state.player.history.damageDealt = 0;
+            
+            if (state.player.xp >= state.player.level * 100) {
+                levelUp();
+            }
+            
+            endBattle();
+        }
+
+        function endBattle() {
+            state.battle = null;
+            document.getElementById('battle-ui').style.display = 'none';
+            drawWorld();
+        }
+
+        function triggerAdaptation(experience) {
+            const changes = state.player.genome.adapt(experience);
+            if (changes.length > 0) {
+                showEvolutionModal(changes);
+            }
+        }
+
+        function showEvolutionModal(changes) {
+            const modal = document.getElementById('evolution-modal');
+            const visual = document.getElementById('evo-visual');
+            const desc = document.getElementById('evo-desc');
+            
+            // Render current creature in modal
+            visual.innerHTML = '';
+            const cvs = document.createElement('canvas');
+            cvs.width = 200; cvs.height = 200;
+            const c = cvs.getContext('2d');
+            
+            // We need to use the render function but on this new canvas
+            // Hacky context swap for reuse
+            const oldCtx = ctx;
+            // ... actually let's just use the main canvas render logic but adapted
+            // Simpler: just clear main canvas and draw big? No, modal overlays.
+            
+            // Let's just use text for now to be safe and fast
+            desc.innerHTML = `Your creature has adapted to its experiences:<br><br><ul>${changes.map(c => `<li>${c}</li>`).join('')}</ul>`;
+            
+            modal.style.display = 'flex';
+        }
+
+        function closeEvolution() {
+            document.getElementById('evolution-modal').style.display = 'none';
+            updatePlayerUI();
+        }
+
+        function levelUp() {
+            state.player.level++;
+            state.player.xp = 0;
+            state.player.stats.maxHp += 10;
+            state.player.stats.hp = state.player.stats.maxHp;
+            state.player.stats.atk += 2;
+            log(`Level Up! You are now level ${state.player.level}.`, "evolve");
+        }
+
+        // --- UI Updates ---
+        function updatePlayerUI() {
+            const p = state.player;
+            document.getElementById('lvl-val').textContent = p.level;
+            document.getElementById('hp-bar').style.width = `${(p.stats.hp / p.stats.maxHp) * 100}%`;
+            document.getElementById('xp-val').textContent = p.xp;
+            
+            // List traits
+            const g = p.genome.genes;
+            let traits = [];
+            if (g.aggression > 0.6) traits.push("Aggressive");
+            if (g.resilience > 0.6) traits.push("Armored");
+            if (g.agility > 0.6) traits.push("Agile");
+            document.getElementById('traits-list').textContent = traits.join(", ");
+        }
+
+        function updateBattleUI() {
+            if (!state.battle) return;
+            const e = state.battle;
+            document.getElementById('enemy-hp-bar').style.width = `${(e.enemyStats.hp / e.enemyStats.maxHp) * 100}%`;
+            
+            // Render enemy in battle box
+            const container = document.getElementById('enemy-visual');
+            container.innerHTML = '';
+            const cvs = document.createElement('canvas');
+            cvs.width = 100; cvs.height = 100;
+            container.appendChild(cvs);
+            
+            // Custom render for enemy
+            const bCtx = cvs.getContext('2d');
+            // We need to replicate renderCreature logic for this context
+            // For brevity in this single file, we'll just draw a simple rect
+            bCtx.fillStyle = 'red';
+            bCtx.fillRect(25, 25, 50, 50); 
+        }
+
+        function log(msg, type = "") {
+            const div = document.createElement('div');
+            div.className = `log-entry ${type}`;
+            div.textContent = msg;
+            const panel = document.getElementById('log-panel');
+            panel.appendChild(div);
+            panel.scrollTop = panel.scrollHeight;
+        }
+
+        // --- Init ---
+        function init() {
+            state.player.genome = new Genome();
+            updatePlayerUI();
+            drawWorld();
+            log("Welcome to EvoMon. Use Arrow Keys to move.", "evolve");
+        }
+
+        init();
+
+    </script>
+</body>
+
+</html>

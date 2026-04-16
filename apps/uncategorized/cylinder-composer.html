@@ -1,0 +1,381 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cylinder Composer</title>
+    <meta name="description" content="Program melodies by placing pins on a rotating music box cylinder">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: linear-gradient(180deg, #2a1a10 0%, #1a0a00 100%); min-height: 100vh; font-family: 'Georgia', serif; color: #d4b896; overflow: hidden; display: flex; align-items: center; justify-content: center; }
+        #container { position: relative; }
+        #canvas { border-radius: 10px; cursor: pointer; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(30,20,10,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(200,160,100,0.3);
+        }
+        h3 { margin-bottom: 15px; color: #e8c896; font-weight: normal; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 8px 0;
+            background: linear-gradient(180deg, #5a4030, #3a2820);
+            border: 1px solid rgba(200,160,100,0.4); color: #d4b896;
+            cursor: pointer; border-radius: 8px; font-family: inherit;
+        }
+        button:hover { background: linear-gradient(180deg, #6a5040, #4a3830); }
+        .control-row { margin: 12px 0; }
+        label { display: block; font-size: 12px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 100%; }
+        select { width: 100%; padding: 8px; background: #2a1a10; border: 1px solid rgba(200,160,100,0.3); color: #d4b896; border-radius: 5px; }
+        #stats {
+            position: fixed; top: 20px; right: 20px; background: rgba(30,20,10,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(200,160,100,0.3);
+            text-align: center;
+        }
+        .stat-value { font-size: 28px; color: #e8c896; }
+        .stat-label { font-size: 11px; opacity: 0.7; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <canvas id="canvas" width="700" height="500"></canvas>
+    </div>
+    <div id="controls">
+        <h3>Music Box</h3>
+        <div class="control-row">
+            <label>Tempo</label>
+            <input type="range" id="tempo" min="40" max="180" value="80">
+        </div>
+        <div class="control-row">
+            <label>Scale</label>
+            <select id="scale">
+                <option value="major">Major</option>
+                <option value="minor">Minor</option>
+                <option value="pentatonic">Pentatonic</option>
+                <option value="chromatic">Chromatic</option>
+            </select>
+        </div>
+        <button id="play-btn">Play</button>
+        <button id="clear-btn">Clear All</button>
+        <button id="random-btn">Random Melody</button>
+    </div>
+    <div id="stats">
+        <div class="stat-value" id="pin-count">0</div>
+        <div class="stat-label">Pins Placed</div>
+        <div style="margin-top:15px">
+            <div class="stat-value" id="note-display">-</div>
+            <div class="stat-label">Current Note</div>
+        </div>
+    </div>
+    <div id="info">Click on cylinder to place pins | Watch them play as it rotates</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        const W = canvas.width, H = canvas.height;
+        
+        let audioCtx = null;
+        let playing = false;
+        let rotation = 0;
+        let tempo = 80;
+        let currentScale = 'major';
+        let pins = [];
+        let lastPlayedCol = -1;
+        
+        const scales = {
+            major: [0, 2, 4, 5, 7, 9, 11, 12],
+            minor: [0, 2, 3, 5, 7, 8, 10, 12],
+            pentatonic: [0, 2, 4, 7, 9, 12, 14, 16],
+            chromatic: [0, 1, 2, 3, 4, 5, 6, 7]
+        };
+        
+        const COLS = 24;
+        const ROWS = 8;
+        const CYL_X = W / 2;
+        const CYL_Y = H / 2 - 20;
+        const CYL_WIDTH = 450;
+        const CYL_HEIGHT = 200;
+        
+        function initAudio() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+        }
+        
+        function playNote(noteIndex) {
+            if (!audioCtx) return;
+            const baseFreq = 523.25;
+            const semitone = scales[currentScale][noteIndex] || 0;
+            const freq = baseFreq * Math.pow(2, semitone / 12);
+            
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            const filter = audioCtx.createBiquadFilter();
+            
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            
+            filter.type = 'lowpass';
+            filter.frequency.setValueAtTime(2000, audioCtx.currentTime);
+            filter.Q.setValueAtTime(5, audioCtx.currentTime);
+            
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialDecayTo = 0.01;
+            gain.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gain.gain.exponentialDecayTo(0.001, audioCtx.currentTime + 0.5);
+            
+            osc.connect(filter);
+            filter.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.5);
+            
+            document.getElementById('note-display').textContent = ['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C+'][noteIndex];
+        }
+        
+        function getGridPos(x, y) {
+            const cylLeft = CYL_X - CYL_WIDTH / 2;
+            const cylTop = CYL_Y - CYL_HEIGHT / 2;
+            const cellW = CYL_WIDTH / COLS;
+            const cellH = CYL_HEIGHT / ROWS;
+            
+            if (x < cylLeft || x > cylLeft + CYL_WIDTH) return null;
+            if (y < cylTop || y > cylTop + CYL_HEIGHT) return null;
+            
+            const col = Math.floor((x - cylLeft) / cellW);
+            const row = Math.floor((y - cylTop) / cellH);
+            
+            return { col, row };
+        }
+        
+        function togglePin(col, row) {
+            const existing = pins.findIndex(p => p.col === col && p.row === row);
+            if (existing >= 0) {
+                pins.splice(existing, 1);
+            } else {
+                pins.push({ col, row, glow: 0 });
+            }
+            document.getElementById('pin-count').textContent = pins.length;
+        }
+        
+        canvas.onclick = (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const y = e.clientY - rect.top;
+            const pos = getGridPos(x, y);
+            if (pos) {
+                togglePin(pos.col, pos.row);
+            }
+        };
+        
+        function drawCylinder() {
+            const cylLeft = CYL_X - CYL_WIDTH / 2;
+            const cylTop = CYL_Y - CYL_HEIGHT / 2;
+            
+            // Draw cylinder body
+            const gradient = ctx.createLinearGradient(cylLeft, 0, cylLeft + CYL_WIDTH, 0);
+            gradient.addColorStop(0, '#5a4a30');
+            gradient.addColorStop(0.3, '#8a7a50');
+            gradient.addColorStop(0.5, '#a08860');
+            gradient.addColorStop(0.7, '#8a7a50');
+            gradient.addColorStop(1, '#5a4a30');
+            
+            ctx.fillStyle = gradient;
+            ctx.fillRect(cylLeft, cylTop, CYL_WIDTH, CYL_HEIGHT);
+            
+            // Draw end caps
+            ctx.fillStyle = '#4a3a20';
+            ctx.beginPath();
+            ctx.ellipse(cylLeft, CYL_Y, 15, CYL_HEIGHT / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.ellipse(cylLeft + CYL_WIDTH, CYL_Y, 15, CYL_HEIGHT / 2, 0, 0, Math.PI * 2);
+            ctx.fill();
+            
+            // Draw grooves
+            const cellW = CYL_WIDTH / COLS;
+            ctx.strokeStyle = 'rgba(60, 40, 20, 0.5)';
+            ctx.lineWidth = 1;
+            for (let i = 1; i < COLS; i++) {
+                ctx.beginPath();
+                ctx.moveTo(cylLeft + i * cellW, cylTop);
+                ctx.lineTo(cylLeft + i * cellW, cylTop + CYL_HEIGHT);
+                ctx.stroke();
+            }
+            
+            // Draw row guides
+            const cellH = CYL_HEIGHT / ROWS;
+            for (let i = 1; i < ROWS; i++) {
+                ctx.beginPath();
+                ctx.moveTo(cylLeft, cylTop + i * cellH);
+                ctx.lineTo(cylLeft + CYL_WIDTH, cylTop + i * cellH);
+                ctx.stroke();
+            }
+            
+            // Draw playhead
+            if (playing) {
+                const playX = cylLeft + ((rotation / (Math.PI * 2)) * COLS % COLS) * cellW;
+                ctx.fillStyle = 'rgba(255, 200, 100, 0.3)';
+                ctx.fillRect(playX, cylTop, cellW, CYL_HEIGHT);
+            }
+        }
+        
+        function drawPins() {
+            const cylLeft = CYL_X - CYL_WIDTH / 2;
+            const cylTop = CYL_Y - CYL_HEIGHT / 2;
+            const cellW = CYL_WIDTH / COLS;
+            const cellH = CYL_HEIGHT / ROWS;
+            
+            pins.forEach(pin => {
+                const x = cylLeft + pin.col * cellW + cellW / 2;
+                const y = cylTop + pin.row * cellH + cellH / 2;
+                
+                // Glow effect
+                if (pin.glow > 0) {
+                    ctx.beginPath();
+                    ctx.arc(x, y, 12 + pin.glow * 5, 0, Math.PI * 2);
+                    ctx.fillStyle = "rgba(255, 220, 150, " + (pin.glow * 0.5) + ")";
+                    ctx.fill();
+                    pin.glow *= 0.9;
+                }
+                
+                // Pin head
+                ctx.beginPath();
+                ctx.arc(x, y, 6, 0, Math.PI * 2);
+                const pinGrad = ctx.createRadialGradient(x - 2, y - 2, 0, x, y, 6);
+                pinGrad.addColorStop(0, '#ffd700');
+                pinGrad.addColorStop(0.7, '#c8a800');
+                pinGrad.addColorStop(1, '#8a7000');
+                ctx.fillStyle = pinGrad;
+                ctx.fill();
+                
+                // Highlight
+                ctx.beginPath();
+                ctx.arc(x - 2, y - 2, 2, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(255, 255, 200, 0.6)';
+                ctx.fill();
+            });
+        }
+        
+        function drawComb() {
+            const combY = CYL_Y + CYL_HEIGHT / 2 + 30;
+            const cylLeft = CYL_X - CYL_WIDTH / 2;
+            const cellH = CYL_HEIGHT / ROWS;
+            
+            // Comb base
+            ctx.fillStyle = '#3a2a15';
+            ctx.fillRect(cylLeft - 20, combY, CYL_WIDTH + 40, 50);
+            
+            // Teeth
+            const cellW = CYL_WIDTH / COLS;
+            const currentCol = Math.floor((rotation / (Math.PI * 2)) * COLS) % COLS;
+            
+            for (let i = 0; i < ROWS; i++) {
+                const toothX = cylLeft + 10;
+                const toothY = combY - 60 + i * (cellH * 0.7);
+                const toothWidth = CYL_WIDTH - 20;
+                const toothHeight = 8;
+                
+                const isPlaying = playing && pins.some(p => p.col === currentCol && p.row === i);
+                
+                ctx.fillStyle = isPlaying ? '#d4a050' : '#8a6a40';
+                ctx.fillRect(toothX, toothY + 80, toothWidth * 0.3, toothHeight);
+                
+                // Note label
+                ctx.fillStyle = '#a08060';
+                ctx.font = '10px Georgia';
+                ctx.textAlign = 'right';
+                ctx.fillText(['C', 'D', 'E', 'F', 'G', 'A', 'B', 'C'][i], cylLeft - 10, CYL_Y - CYL_HEIGHT/2 + i * cellH + cellH/2 + 4);
+            }
+        }
+        
+        function drawFrame() {
+            // Ornate frame around cylinder
+            ctx.strokeStyle = '#6a5a40';
+            ctx.lineWidth = 8;
+            ctx.strokeRect(CYL_X - CYL_WIDTH/2 - 30, CYL_Y - CYL_HEIGHT/2 - 30, CYL_WIDTH + 60, CYL_HEIGHT + 120);
+            
+            // Decorative corners
+            const corners = [
+                [CYL_X - CYL_WIDTH/2 - 30, CYL_Y - CYL_HEIGHT/2 - 30],
+                [CYL_X + CYL_WIDTH/2 + 30, CYL_Y - CYL_HEIGHT/2 - 30],
+                [CYL_X - CYL_WIDTH/2 - 30, CYL_Y + CYL_HEIGHT/2 + 90],
+                [CYL_X + CYL_WIDTH/2 + 30, CYL_Y + CYL_HEIGHT/2 + 90]
+            ];
+            
+            corners.forEach(([cx, cy]) => {
+                ctx.beginPath();
+                ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+                ctx.fillStyle = '#8a7a50';
+                ctx.fill();
+            });
+        }
+        
+        function update() {
+            if (playing) {
+                const speed = (tempo / 60) * 0.02;
+                rotation += speed;
+                
+                const currentCol = Math.floor((rotation / (Math.PI * 2)) * COLS) % COLS;
+                
+                if (currentCol !== lastPlayedCol) {
+                    pins.filter(p => p.col === currentCol).forEach(p => {
+                        playNote(ROWS - 1 - p.row);
+                        p.glow = 1;
+                    });
+                    lastPlayedCol = currentCol;
+                }
+            }
+        }
+        
+        function animate() {
+            ctx.fillStyle = '#1a0a00';
+            ctx.fillRect(0, 0, W, H);
+            
+            drawFrame();
+            drawCylinder();
+            drawPins();
+            drawComb();
+            
+            update();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        document.getElementById('play-btn').onclick = function() {
+            initAudio();
+            playing = !playing;
+            this.textContent = playing ? 'Stop' : 'Play';
+            if (playing) lastPlayedCol = -1;
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            pins = [];
+            document.getElementById('pin-count').textContent = 0;
+        };
+        
+        document.getElementById('random-btn').onclick = () => {
+            pins = [];
+            const numPins = 15 + Math.floor(Math.random() * 20);
+            for (let i = 0; i < numPins; i++) {
+                const col = Math.floor(Math.random() * COLS);
+                const row = Math.floor(Math.random() * ROWS);
+                if (!pins.some(p => p.col === col && p.row === row)) {
+                    pins.push({ col, row, glow: 0 });
+                }
+            }
+            document.getElementById('pin-count').textContent = pins.length;
+        };
+        
+        document.getElementById('tempo').oninput = e => tempo = parseInt(e.target.value);
+        document.getElementById('scale').onchange = e => currentScale = e.target.value;
+        
+        // Fix for exponentialDecayTo not being a function
+        GainNode.prototype.exponentialDecayTo = function(value, time) {
+            this.gain.exponentialRampToValueAtTime(Math.max(0.001, value), time);
+        };
+        
+        animate();
+    </script>
+</body>
+</html>
