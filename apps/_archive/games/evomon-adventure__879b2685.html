@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>EvoMon: Infinite Text Adventure</title>
+    <meta name="description" content="A procedural text adventure with genetic monster breeding and auto-mapping.">
+    <style>
+        :root {
+            --bg: #050505;
+            --term-bg: #0a0a0a;
+            --text: #0f0;
+            --highlight: #00ff9d;
+            --dim: #005533;
+            --border: #003300;
+        }
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+        #left-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            border-right: 1px solid var(--border);
+            padding: 10px;
+            max-width: 60%;
+        }
+        #right-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: #000;
+        }
+        #log {
+            flex-grow: 1;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            padding-bottom: 10px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .entry { margin-bottom: 8px; }
+        .entry.system { color: #888; }
+        .entry.danger { color: #f55; }
+        .entry.success { color: var(--highlight); }
+        .entry.info { color: #55f; }
+        
+        #input-area {
+            display: flex;
+            border-top: 1px solid var(--border);
+            padding-top: 10px;
+        }
+        #cmd-input {
+            flex-grow: 1;
+            background: transparent;
+            border: none;
+            color: var(--text);
+            font-family: inherit;
+            font-size: 16px;
+            outline: none;
+        }
+        #prompt { margin-right: 10px; color: var(--highlight); }
+
+        #visual-display {
+            flex: 1;
+            position: relative;
+            border-bottom: 1px solid var(--border);
+        }
+        #map-canvas {
+            width: 100%;
+            height: 100%;
+            display: block;
+        }
+        #monster-view {
+            position: absolute;
+            bottom: 10px;
+            right: 10px;
+            width: 200px;
+            height: 200px;
+            background: rgba(0, 20, 0, 0.8);
+            border: 1px solid var(--highlight);
+            display: none; /* Hidden until encounter */
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+        #monster-svg {
+            width: 150px;
+            height: 150px;
+        }
+        #monster-stats {
+            font-size: 12px;
+            text-align: center;
+            margin-top: 5px;
+        }
+        
+        #status-bar {
+            padding: 10px;
+            border-top: 1px solid var(--border);
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* Scrollbar */
+        ::-webkit-scrollbar { width: 8px; }
+        ::-webkit-scrollbar-track { background: #000; }
+        ::-webkit-scrollbar-thumb { background: #003300; }
+        ::-webkit-scrollbar-thumb:hover { background: #005500; }
+    </style>
+</head>
+<body>
+    <div id="left-panel">
+        <div id="log"></div>
+        <div id="input-area">
+            <span id="prompt">&gt;</span>
+            <input type="text" id="cmd-input" autofocus autocomplete="off">
+        </div>
+    </div>
+    <div id="right-panel">
+        <div id="visual-display">
+            <canvas id="map-canvas"></canvas>
+            <div id="monster-view">
+                <svg id="monster-svg" viewBox="0 0 100 100"></svg>
+                <div id="monster-stats"></div>
+            </div>
+        </div>
+        <div id="status-bar">
+            <span id="loc-display">Location: 0, 0</span>
+            <span id="team-display">Team: 0/6</span>
+        </div>
+    </div>
+
+    <script>
+        // --- Game State ---
+        const state = {
+            player: {
+                x: 0,
+                y: 0,
+                team: [],
+                inventory: []
+            },
+            world: {}, // Map "x,y" -> Room Object
+            inBattle: false,
+            currentEnemy: null
+        };
+
+        // --- Genetic Engine (Simplified from Art Breeder) ---
+        const GENOME_SIZE = 8;
+        
+        class Genome {
+            constructor(genes) {
+                this.genes = genes || new Float32Array(GENOME_SIZE).map(() => Math.random());
+            }
+            
+            static crossover(p1, p2) {
+                const newGenes = new Float32Array(GENOME_SIZE);
+                const cut = Math.floor(Math.random() * GENOME_SIZE);
+                for(let i=0; i<GENOME_SIZE; i++) newGenes[i] = i < cut ? p1.genes[i] : p2.genes[i];
+                return new Genome(newGenes);
+            }
+            
+            mutate(rate = 0.1) {
+                for(let i=0; i<GENOME_SIZE; i++) {
+                    if(Math.random() < rate) this.genes[i] = Math.max(0, Math.min(1, this.genes[i] + (Math.random()-0.5)*0.3));
+                }
+            }
+        }
+
+        class Monster {
+            constructor(genome, level = 1) {
+                this.genome = genome || new Genome();
+                this.level = level;
+                this.traits = this.decode(this.genome);
+                this.stats = this.calcStats();
+                this.currentHp = this.stats.maxHp;
+                this.name = this.generateName();
+            }
+
+            decode(g) {
+                const v = g.genes;
+                return {
+                    hue: Math.floor(v[0] * 360),
+                    shape: Math.floor(v[1] * 3), // 0:Blob, 1:Spiky, 2:Blocky
+                    limbs: Math.floor(v[2] * 5),
+                    eyes: Math.floor(v[3] * 3) + 1,
+                    type: v[4] < 0.33 ? 'Fire' : (v[4] < 0.66 ? 'Water' : 'Grass'),
+                    aggression: v[5],
+                    speed: v[6],
+                    defense: v[7]
+                };
+            }
+
+            calcStats() {
+                const t = this.traits;
+                const baseHp = 20 + t.defense * 20;
+                const baseAtk = 5 + t.aggression * 10;
+                const baseSpd = 5 + t.speed * 10;
+                
+                return {
+                    maxHp: Math.floor(baseHp * (1 + this.level * 0.1)),
+                    atk: Math.floor(baseAtk * (1 + this.level * 0.1)),
+                    spd: Math.floor(baseSpd * (1 + this.level * 0.1))
+                };
+            }
+
+            generateName() {
+                const prefixes = ['Glo', 'Xyl', 'Mor', 'Krak', 'Vex', 'Lum', 'Pyr', 'Hyd', 'Ter'];
+                const suffixes = ['on', 'ix', 'or', 'ak', 'us', 'a', 'o', 'ex'];
+                const p = prefixes[Math.floor(this.genome.genes[0] * prefixes.length)];
+                const s = suffixes[Math.floor(this.genome.genes[1] * suffixes.length)];
+                return p + s;
+            }
+
+            renderSVG() {
+                const t = this.traits;
+                const color = `hsl(${t.hue}, 70%, 50%)`;
+                let svg = '';
+                
+                // Body
+                if (t.shape === 0) svg += `<circle cx="50" cy="50" r="30" fill="${color}" />`;
+                else if (t.shape === 1) svg += `<polygon points="50,20 80,80 20,80" fill="${color}" />`;
+                else svg += `<rect x="20" y="20" width="60" height="60" fill="${color}" />`;
+
+                // Eyes
+                for(let i=0; i<t.eyes; i++) {
+                    const off = (i - (t.eyes-1)/2) * 15;
+                    svg += `<circle cx="${50+off}" cy="40" r="5" fill="white" /><circle cx="${50+off}" cy="40" r="2" fill="black" />`;
+                }
+                
+                return svg;
+            }
+        }
+
+        // --- World Generation ---
+        const BIOMES = ['Forest', 'Desert', 'Cave', 'Mountain', 'Swamp', 'Ruins'];
+        
+        function getRoom(x, y) {
+            const key = `${x},${y}`;
+            if (state.world[key]) return state.world[key];
+
+            // Procedural Gen
+            // Simple hash for consistency
+            const seed = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+            const rand = seed - Math.floor(seed);
+            
+            const biome = BIOMES[Math.floor(Math.abs(rand) * BIOMES.length)];
+            const hasMonster = Math.abs(Math.sin(x*y)) > 0.3; // 70% chance
+            
+            const room = {
+                x, y,
+                biome,
+                description: `You are in a ${biome.toLowerCase()}.`,
+                visited: false,
+                exits: ['n', 's', 'e', 'w'] // Open world
+            };
+            
+            state.world[key] = room;
+            return room;
+        }
+
+        // --- UI & Input ---
+        const logEl = document.getElementById('log');
+        const inputEl = document.getElementById('cmd-input');
+        const mapCanvas = document.getElementById('map-canvas');
+        const ctx = mapCanvas.getContext('2d');
+
+        function log(msg, type = '') {
+            const div = document.createElement('div');
+            div.className = `entry ${type}`;
+            div.textContent = msg;
+            logEl.appendChild(div);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') {
+                const cmd = inputEl.value.trim();
+                inputEl.value = '';
+                if (cmd) processCommand(cmd);
+            }
+        });
+
+        function processCommand(rawCmd) {
+            log(`> ${rawCmd}`, 'system');
+            const parts = rawCmd.toLowerCase().split(' ');
+            const cmd = parts[0];
+            const args = parts.slice(1);
+
+            if (state.inBattle) {
+                handleBattleCommand(cmd, args);
+                return;
+            }
+
+            switch(cmd) {
+                case 'n': case 'north': move(0, -1); break;
+                case 's': case 'south': move(0, 1); break;
+                case 'e': case 'east': move(1, 0); break;
+                case 'w': case 'west': move(-1, 0); break;
+                case 'look': describeRoom(); break;
+                case 'team': showTeam(); break;
+                case 'breed': breed(args); break;
+                case 'help': log("Commands: north/s/e/w, look, team, breed [id1] [id2]"); break;
+                default: log("Unknown command.");
+            }
+        }
+
+        // --- Gameplay Logic ---
+        function move(dx, dy) {
+            state.player.x += dx;
+            state.player.y += dy;
+            enterRoom();
+        }
+
+        function enterRoom() {
+            const room = getRoom(state.player.x, state.player.y);
+            room.visited = true;
+            drawMap();
+            updateStatus();
+            describeRoom();
+
+            // Encounter?
+            if (Math.random() < 0.4) { // 40% chance
+                startEncounter();
+            }
+        }
+
+        function describeRoom() {
+            const room = getRoom(state.player.x, state.player.y);
+            log(room.description);
+            log(`Exits: N, S, E, W`, 'info');
+        }
+
+        function startEncounter() {
+            const room = getRoom(state.player.x, state.player.y);
+            // Generate monster based on biome/coords?
+            // For now random
+            const mon = new Monster(null, Math.floor(Math.abs(state.player.x + state.player.y)/5) + 1);
+            state.currentEnemy = mon;
+            state.inBattle = true;
+            
+            log(`A wild ${mon.name} (Lvl ${mon.level}) appeared!`, 'danger');
+            showMonster(mon);
+            log("Battle started! Commands: attack, catch, run");
+        }
+
+        function handleBattleCommand(cmd, args) {
+            if (cmd === 'run') {
+                log("You ran away safely.");
+                endBattle();
+            } else if (cmd === 'attack') {
+                // Simple battle logic
+                const myMon = state.player.team[0];
+                if (!myMon) {
+                    log("You have no monsters! You punch it...", 'info');
+                    const dmg = 1;
+                    state.currentEnemy.currentHp -= dmg;
+                    log(`Dealt ${dmg} damage. Enemy HP: ${state.currentEnemy.currentHp}/${state.currentEnemy.stats.maxHp}`);
+                } else {
+                    const dmg = Math.max(1, myMon.stats.atk - state.currentEnemy.stats.spd/2);
+                    state.currentEnemy.currentHp -= dmg;
+                    log(`${myMon.name} attacked for ${Math.floor(dmg)} damage!`);
+                }
+
+                if (state.currentEnemy.currentHp <= 0) {
+                    log(`You defeated ${state.currentEnemy.name}!`, 'success');
+                    // XP logic here
+                    endBattle();
+                } else {
+                    // Enemy turn
+                    log(`${state.currentEnemy.name} attacks!`, 'danger');
+                    if (myMon) {
+                        const dmg = Math.max(1, state.currentEnemy.stats.atk - myMon.stats.spd/2);
+                        myMon.currentHp -= dmg;
+                        log(`Your ${myMon.name} took ${Math.floor(dmg)} damage.`);
+                        if (myMon.currentHp <= 0) {
+                            log(`${myMon.name} fainted!`);
+                            // Switch logic needed
+                        }
+                    } else {
+                        log("Ouch! You took damage.");
+                    }
+                }
+            } else if (cmd === 'catch') {
+                if (state.player.team.length >= 6) {
+                    log("Team full!");
+                } else {
+                    const chance = (state.currentEnemy.stats.maxHp - state.currentEnemy.currentHp) / state.currentEnemy.stats.maxHp + 0.2;
+                    if (Math.random() < chance || state.player.team.length === 0) {
+                        log(`Gotcha! ${state.currentEnemy.name} was caught!`, 'success');
+                        state.player.team.push(state.currentEnemy);
+                        endBattle();
+                    } else {
+                        log("It broke free!");
+                    }
+                }
+            } else {
+                log("Battle commands: attack, catch, run");
+            }
+        }
+
+        function endBattle() {
+            state.inBattle = false;
+            state.currentEnemy = null;
+            hideMonster();
+            updateStatus();
+        }
+
+        function showTeam() {
+            if (state.player.team.length === 0) {
+                log("You have no monsters.");
+                return;
+            }
+            log("Your Team:", 'info');
+            state.player.team.forEach((m, i) => {
+                log(`${i+1}. ${m.name} (Lvl ${m.level}) - HP: ${m.currentHp}/${m.stats.maxHp} - Type: ${m.traits.type}`);
+            });
+        }
+
+        function breed(args) {
+            if (state.player.team.length < 2) {
+                log("Need at least 2 monsters to breed.");
+                return;
+            }
+            const idx1 = parseInt(args[0]) - 1;
+            const idx2 = parseInt(args[1]) - 1;
+            
+            if (isNaN(idx1) || isNaN(idx2) || !state.player.team[idx1] || !state.player.team[idx2]) {
+                log("Usage: breed [index1] [index2] (e.g., breed 1 2)");
+                return;
+            }
+
+            const p1 = state.player.team[idx1];
+            const p2 = state.player.team[idx2];
+            
+            log(`Breeding ${p1.name} and ${p2.name}...`, 'info');
+            
+            const childGenome = Genome.crossover(p1.genome, p2.genome);
+            childGenome.mutate(0.1);
+            
+            const child = new Monster(childGenome, 1);
+            log(`An egg hatched! Welcome ${child.name}!`, 'success');
+            
+            if (state.player.team.length < 6) {
+                state.player.team.push(child);
+            } else {
+                log("Team full, released to the wild.");
+            }
+            updateStatus();
+        }
+
+        // --- Visuals ---
+        function drawMap() {
+            // Auto-mapper
+            const w = mapCanvas.width = mapCanvas.offsetWidth;
+            const h = mapCanvas.height = mapCanvas.offsetHeight;
+            const cellSize = 20;
+            const cx = w/2;
+            const cy = h/2;
+
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, w, h);
+
+            // Draw visited rooms relative to player
+            for (const key in state.world) {
+                const room = state.world[key];
+                if (!room.visited) continue;
+
+                const dx = (room.x - state.player.x) * cellSize;
+                const dy = (room.y - state.player.y) * cellSize;
+
+                // Only draw if visible
+                if (Math.abs(dx) < w/2 && Math.abs(dy) < h/2) {
+                    ctx.fillStyle = room.x === state.player.x && room.y === state.player.y ? '#0f0' : '#005500';
+                    ctx.fillRect(cx + dx - cellSize/2 + 1, cy + dy - cellSize/2 + 1, cellSize - 2, cellSize - 2);
+                }
+            }
+            
+            // Player marker
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 4, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        function showMonster(mon) {
+            const view = document.getElementById('monster-view');
+            const svg = document.getElementById('monster-svg');
+            const stats = document.getElementById('monster-stats');
+            
+            view.style.display = 'flex';
+            svg.innerHTML = mon.renderSVG();
+            stats.innerHTML = `<b>${mon.name}</b><br>Lvl ${mon.level} ${mon.traits.type}<br>HP: ${mon.currentHp}/${mon.stats.maxHp}`;
+        }
+
+        function hideMonster() {
+            document.getElementById('monster-view').style.display = 'none';
+        }
+
+        function updateStatus() {
+            document.getElementById('loc-display').textContent = `Location: ${state.player.x}, ${state.player.y}`;
+            document.getElementById('team-display').textContent = `Team: ${state.player.team.length}/6`;
+        }
+
+        // --- Init ---
+        function init() {
+            // Give starter?
+            const starter = new Monster(null, 5);
+            starter.name = "Starter";
+            state.player.team.push(starter);
+            
+            log("Welcome to EvoMon.", 'system');
+            log("You have a starter monster. Type 'look' to see where you are.", 'system');
+            enterRoom();
+            
+            window.addEventListener('resize', drawMap);
+        }
+
+        init();
+
+    </script>
+</body>
+</html>
