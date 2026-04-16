@@ -68,9 +68,18 @@ def sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-_FINDER_DUP_RE = re.compile(r" \d+$")
+_FINDER_DUP_RE = re.compile(r" (\d+)$")
 _VERSION_SUFFIX_RE = re.compile(r"[_\- ]v?\d+$", re.IGNORECASE)
 _COPY_RE = re.compile(r"(copy|backup|bak|\.orig)", re.IGNORECASE)
+
+# Placeholder / scratch names that almost certainly aren't the canonical version.
+# Matched against the stem case-insensitively.
+_PLACEHOLDER_STEMS = {
+    "new", "untitled", "test", "tmp", "temp", "scratch", "foo", "bar", "baz",
+    "a", "b", "c", "x", "y", "z", "index2", "index_copy", "dummy", "draft",
+    "snapshot", "working", "wip",
+}
+_SHORT_PLACEHOLDER_RE = re.compile(r"^[a-z0-9]$|^\d{1,3}$", re.IGNORECASE)
 
 
 @dataclass(frozen=True, order=True)
@@ -97,19 +106,28 @@ def canonical_score(rel_path: Path) -> CanonScore:
         score = 3000
 
     stem = rel_path.stem
-    if _FINDER_DUP_RE.search(stem):
-        score += 150
+
+    # Placeholder stems are almost never the intended canonical.
+    if stem.lower() in _PLACEHOLDER_STEMS or _SHORT_PLACEHOLDER_RE.match(stem):
+        score += 5000
+
+    m = _FINDER_DUP_RE.search(stem)
+    if m:
+        # Heavier penalty + lower-numbered dup preferred deterministically.
+        score += 150 + int(m.group(1))
     if _COPY_RE.search(stem):
         score += 300
-    if _VERSION_SUFFIX_RE.search(stem) and not _FINDER_DUP_RE.search(stem):
+    if _VERSION_SUFFIX_RE.search(stem) and not m:
         score += 60
     if "." in stem:  # e.g. "foo.html.backup" glued on
         score += 50
 
-    # Shorter wins as a tiebreaker
-    score += len(str(rel_path))
+    # Prefer more descriptive stems (longer) — only kicks in after all the above.
+    score -= min(len(stem), 40)
+    # Shorter full path as a weak final tiebreaker.
+    score += len(str(rel_path)) * 0.1
 
-    return CanonScore(score=score, path_str=str(rel_path))
+    return CanonScore(score=int(score), path_str=str(rel_path))
 
 
 def pick_canonical(rel_paths: list[Path]) -> Path:
