@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless P2P Whiteboard</title>
+    <meta name="description" content="Real-time collaborative whiteboard using serverless WebRTC. No backend, just pure peer-to-peer connection.">
+    <style>
+        :root {
+            --bg: #1a1a1a;
+            --panel: #2a2a2a;
+            --text: #e0e0e0;
+            --accent: #00ff9d;
+            --accent-dim: #00cc7d;
+            --danger: #ff5f5f;
+        }
+        
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+            color: var(--text);
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #canvas-container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            cursor: crosshair;
+            touch-action: none;
+        }
+
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        .panel {
+            background: var(--panel);
+            padding: 15px;
+            border-radius: 8px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.5);
+            pointer-events: auto;
+            max-width: 350px;
+            margin-bottom: 10px;
+            border: 1px solid #444;
+        }
+
+        h1 {
+            margin: 0 0 10px 0;
+            font-size: 18px;
+            color: var(--accent);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        h2 {
+            margin: 10px 0 5px 0;
+            font-size: 14px;
+            color: #aaa;
+        }
+
+        button {
+            background: #444;
+            color: white;
+            border: none;
+            padding: 8px 12px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: background 0.2s;
+            margin-right: 5px;
+            margin-bottom: 5px;
+        }
+
+        button:hover {
+            background: #555;
+        }
+
+        button.primary {
+            background: var(--accent);
+            color: #000;
+            font-weight: bold;
+        }
+
+        button.primary:hover {
+            background: var(--accent-dim);
+        }
+
+        button.danger {
+            background: var(--danger);
+            color: white;
+        }
+
+        textarea {
+            width: 100%;
+            height: 80px;
+            background: #111;
+            color: #0f0;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 10px;
+            resize: none;
+            margin-bottom: 5px;
+        }
+
+        .status-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #555;
+            margin-right: 5px;
+        }
+
+        .status-dot.connected { background: var(--accent); box-shadow: 0 0 5px var(--accent); }
+        .status-dot.connecting { background: #ffaa00; animation: pulse 1s infinite; }
+        .status-dot.error { background: var(--danger); }
+
+        @keyframes pulse { 0% { opacity: 0.5; } 50% { opacity: 1; } 100% { opacity: 0.5; } }
+
+        .tools {
+            display: flex;
+            gap: 5px;
+            align-items: center;
+            margin-top: 10px;
+        }
+
+        input[type="color"] {
+            background: none;
+            border: none;
+            width: 30px;
+            height: 30px;
+            cursor: pointer;
+        }
+
+        input[type="range"] {
+            width: 80px;
+        }
+
+        .hidden { display: none; }
+        
+        .tab-btn {
+            background: transparent;
+            border: 1px solid #444;
+            opacity: 0.6;
+        }
+        .tab-btn.active {
+            background: #444;
+            opacity: 1;
+            border-color: var(--accent);
+        }
+
+        #connection-log {
+            font-size: 10px;
+            color: #888;
+            margin-top: 5px;
+            max-height: 50px;
+            overflow-y: auto;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="canvas-container">
+        <canvas id="whiteboard"></canvas>
+    </div>
+
+    <div id="ui-layer">
+        <div class="panel" id="connection-panel">
+            <h1><span id="status-indicator" class="status-dot"></span> P2P Whiteboard</h1>
+            
+            <div id="setup-phase">
+                <div style="margin-bottom: 10px;">
+                    <button class="tab-btn active" onclick="switchTab('host')">Host (Start)</button>
+                    <button class="tab-btn" onclick="switchTab('join')">Join (Connect)</button>
+                </div>
+
+                <div id="host-tab">
+                    <p style="font-size: 12px; margin-bottom: 10px;">1. Create an Offer and send it to your friend.</p>
+                    <button class="primary" onclick="createOffer()">Generate Offer</button>
+                    <div id="host-step-2" class="hidden">
+                        <h2>Your Offer (Send this):</h2>
+                        <textarea id="local-offer" readonly onclick="this.select()"></textarea>
+                        <button onclick="copyToClipboard('local-offer')">Copy</button>
+                        
+                        <h2>Friend's Answer (Paste here):</h2>
+                        <textarea id="remote-answer" placeholder="Paste the answer code from your friend here..."></textarea>
+                        <button class="primary" onclick="finalizeConnection()">Connect</button>
+                    </div>
+                </div>
+
+                <div id="join-tab" class="hidden">
+                    <p style="font-size: 12px; margin-bottom: 10px;">1. Paste the Offer from the Host.</p>
+                    <h2>Host's Offer (Paste here):</h2>
+                    <textarea id="remote-offer" placeholder="Paste the offer code from the host here..."></textarea>
+                    <button class="primary" onclick="createAnswer()">Generate Answer</button>
+                    
+                    <div id="join-step-2" class="hidden">
+                        <h2>Your Answer (Send this back):</h2>
+                        <textarea id="local-answer" readonly onclick="this.select()"></textarea>
+                        <button onclick="copyToClipboard('local-answer')">Copy</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="connected-phase" class="hidden">
+                <p style="color: var(--accent);">✓ Connected securely via WebRTC</p>
+                <p style="font-size: 12px;">Latency: <span id="latency-display">0</span>ms</p>
+            </div>
+            
+            <div id="connection-log"></div>
+        </div>
+
+        <div class="panel">
+            <div class="tools">
+                <input type="color" id="color-picker" value="#00ff9d">
+                <input type="range" id="size-picker" min="1" max="20" value="3">
+                <button onclick="clearCanvas()">Clear</button>
+                <button class="danger" onclick="disconnect()">Exit</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // --- CONFIGURATION ---
+        const ICE_SERVERS = {
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+                { urls: 'stun:stun1.l.google.com:19302' }
+            ]
+        };
+
+        // --- STATE ---
+        let peerConnection;
+        let dataChannel;
+        let isHost = false;
+        let localStream;
+        
+        // Canvas State
+        const canvas = document.getElementById('whiteboard');
+        const ctx = canvas.getContext('2d');
+        let isDrawing = false;
+        let lastX = 0;
+        let lastY = 0;
+        let myColor = '#00ff9d';
+        let mySize = 3;
+
+        // --- INITIALIZATION ---
+        function init() {
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+            
+            // Canvas Events
+            canvas.addEventListener('mousedown', startDrawing);
+            canvas.addEventListener('mousemove', draw);
+            canvas.addEventListener('mouseup', stopDrawing);
+            canvas.addEventListener('mouseout', stopDrawing);
+            
+            // Touch Events
+            canvas.addEventListener('touchstart', (e) => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const mouseEvent = new MouseEvent('mousedown', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+                canvas.dispatchEvent(mouseEvent);
+            });
+            canvas.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                const touch = e.touches[0];
+                const mouseEvent = new MouseEvent('mousemove', {
+                    clientX: touch.clientX,
+                    clientY: touch.clientY
+                });
+                canvas.dispatchEvent(mouseEvent);
+            });
+            canvas.addEventListener('touchend', () => {
+                const mouseEvent = new MouseEvent('mouseup', {});
+                canvas.dispatchEvent(mouseEvent);
+            });
+
+            // UI Events
+            document.getElementById('color-picker').addEventListener('change', (e) => myColor = e.target.value);
+            document.getElementById('size-picker').addEventListener('input', (e) => mySize = e.target.value);
+        }
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            // Redraw background if needed, or keep transparent
+        }
+
+        // --- WEBRTC LOGIC ---
+
+        async function createPeerConnection() {
+            log("Creating PeerConnection...");
+            peerConnection = new RTCPeerConnection(ICE_SERVERS);
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    // We wait for all candidates to be gathered for simplicity (Vanilla ICE)
+                    // In a real app we'd send them incrementally (Trickle ICE)
+                    // But for copy-paste, we need one big blob.
+                } else {
+                    // All candidates gathered
+                    log("ICE Gathering Complete.");
+                    updateLocalDescriptionOutput();
+                }
+            };
+
+            peerConnection.onconnectionstatechange = () => {
+                log(`Connection State: ${peerConnection.connectionState}`);
+                updateStatus(peerConnection.connectionState);
+            };
+
+            peerConnection.ondatachannel = (event) => {
+                log("Data Channel Received!");
+                setupDataChannel(event.channel);
+            };
+        }
+
+        function setupDataChannel(channel) {
+            dataChannel = channel;
+            dataChannel.onopen = () => {
+                log("Data Channel OPEN!");
+                document.getElementById('setup-phase').classList.add('hidden');
+                document.getElementById('connected-phase').classList.remove('hidden');
+                updateStatus('connected');
+                sendPing();
+            };
+            dataChannel.onmessage = handleMessage;
+        }
+
+        // HOST FLOW
+        async function createOffer() {
+            await createPeerConnection();
+            isHost = true;
+            
+            // Host creates the data channel
+            dataChannel = peerConnection.createDataChannel("chat");
+            setupDataChannel(dataChannel);
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+            
+            log("Generating Offer... waiting for ICE candidates...");
+            // We wait for ICE gathering to complete before showing the offer
+            // The onicecandidate handler will trigger updateLocalDescriptionOutput
+        }
+
+        // JOIN FLOW
+        async function createAnswer() {
+            const remoteOfferStr = document.getElementById('remote-offer').value;
+            if (!remoteOfferStr) return alert("Please paste the Host's offer first.");
+
+            try {
+                const remoteOffer = JSON.parse(atob(remoteOfferStr));
+                
+                await createPeerConnection();
+                isHost = false;
+
+                await peerConnection.setRemoteDescription(remoteOffer);
+                const answer = await peerConnection.createAnswer();
+                await peerConnection.setLocalDescription(answer);
+
+                log("Generating Answer... waiting for ICE candidates...");
+            } catch (e) {
+                log("Error parsing offer: " + e);
+                alert("Invalid Offer Code");
+            }
+        }
+
+        // HOST FINALIZATION
+        async function finalizeConnection() {
+            const remoteAnswerStr = document.getElementById('remote-answer').value;
+            if (!remoteAnswerStr) return alert("Please paste the Friend's answer first.");
+
+            try {
+                const remoteAnswer = JSON.parse(atob(remoteAnswerStr));
+                await peerConnection.setRemoteDescription(remoteAnswer);
+                log("Remote description set. Connecting...");
+            } catch (e) {
+                log("Error parsing answer: " + e);
+                alert("Invalid Answer Code");
+            }
+        }
+
+        function updateLocalDescriptionOutput() {
+            const sdp = JSON.stringify(peerConnection.localDescription);
+            const encoded = btoa(sdp);
+            
+            if (isHost) {
+                document.getElementById('local-offer').value = encoded;
+                document.getElementById('host-step-2').classList.remove('hidden');
+            } else {
+                document.getElementById('local-answer').value = encoded;
+                document.getElementById('join-step-2').classList.remove('hidden');
+            }
+        }
+
+        // --- DATA PROTOCOL ---
+        
+        function handleMessage(event) {
+            const msg = JSON.parse(event.data);
+            
+            if (msg.type === 'draw') {
+                drawRemote(msg.x, msg.y, msg.lx, msg.ly, msg.color, msg.size);
+            } else if (msg.type === 'clear') {
+                ctx.clearRect(0, 0, canvas.width, canvas.height);
+            } else if (msg.type === 'ping') {
+                sendPong(msg.time);
+            } else if (msg.type === 'pong') {
+                const latency = Date.now() - msg.time;
+                document.getElementById('latency-display').innerText = latency;
+                setTimeout(sendPing, 2000);
+            }
+        }
+
+        function sendDraw(x, y, lx, ly, color, size) {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({
+                    type: 'draw',
+                    x: x, y: y, lx: lx, ly: ly,
+                    color: color, size: size
+                }));
+            }
+        }
+
+        function sendClear() {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({ type: 'clear' }));
+            }
+        }
+
+        function sendPing() {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({ type: 'ping', time: Date.now() }));
+            }
+        }
+
+        function sendPong(time) {
+            if (dataChannel && dataChannel.readyState === 'open') {
+                dataChannel.send(JSON.stringify({ type: 'pong', time: time }));
+            }
+        }
+
+        // --- DRAWING LOGIC ---
+
+        function startDrawing(e) {
+            isDrawing = true;
+            [lastX, lastY] = [e.clientX, e.clientY];
+        }
+
+        function draw(e) {
+            if (!isDrawing) return;
+            
+            ctx.beginPath();
+            ctx.moveTo(lastX, lastY);
+            ctx.lineTo(e.clientX, e.clientY);
+            ctx.strokeStyle = myColor;
+            ctx.lineWidth = mySize;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+
+            // Send to peer
+            sendDraw(e.clientX, e.clientY, lastX, lastY, myColor, mySize);
+
+            [lastX, lastY] = [e.clientX, e.clientY];
+        }
+
+        function drawRemote(x, y, lx, ly, color, size) {
+            ctx.beginPath();
+            ctx.moveTo(lx, ly);
+            ctx.lineTo(x, y);
+            ctx.strokeStyle = color;
+            ctx.lineWidth = size;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        function stopDrawing() {
+            isDrawing = false;
+        }
+
+        function clearCanvas() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            sendClear();
+        }
+
+        // --- UI HELPERS ---
+
+        function switchTab(tab) {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            if (tab === 'host') {
+                document.getElementById('host-tab').classList.remove('hidden');
+                document.getElementById('join-tab').classList.add('hidden');
+            } else {
+                document.getElementById('host-tab').classList.add('hidden');
+                document.getElementById('join-tab').classList.remove('hidden');
+            }
+        }
+
+        function copyToClipboard(id) {
+            const el = document.getElementById(id);
+            el.select();
+            document.execCommand('copy');
+            alert("Copied to clipboard!");
+        }
+
+        function updateStatus(state) {
+            const el = document.getElementById('status-indicator');
+            el.className = 'status-dot';
+            if (state === 'connected') el.classList.add('connected');
+            else if (state === 'failed' || state === 'disconnected') el.classList.add('error');
+            else el.classList.add('connecting');
+        }
+
+        function log(msg) {
+            const logEl = document.getElementById('connection-log');
+            const div = document.createElement('div');
+            div.innerText = `> ${msg}`;
+            logEl.prepend(div);
+            console.log(msg);
+        }
+
+        function disconnect() {
+            if (peerConnection) peerConnection.close();
+            location.reload();
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

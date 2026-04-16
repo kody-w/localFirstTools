@@ -1,0 +1,613 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="3D Symbiotic Slime Mold Network simulation. Experience the growth of Physarum polycephalum from the inside as it solves mazes and builds efficient transport networks.">
+    <!-- 3d, simulation, artificial life, slime mold, network, visualization, threejs -->
+    <title>Symbiotic Slime Mold Network</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; overflow: hidden; font-family: 'Courier New', monospace; color: #0f0; }
+        #canvas-container { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+        
+        #ui {
+            position: absolute; top: 20px; left: 20px;
+            background: rgba(0, 10, 0, 0.8);
+            border: 1px solid #0f0;
+            padding: 20px;
+            border-radius: 8px;
+            pointer-events: none;
+            max-width: 300px;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.2);
+        }
+        
+        #ui > * { pointer-events: auto; }
+        
+        h1 { font-size: 18px; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 2px; color: #fff; text-shadow: 0 0 5px #0f0; }
+        
+        .control-group { margin-bottom: 15px; }
+        .control-group label { display: block; font-size: 12px; margin-bottom: 5px; color: #8f8; }
+        
+        input[type="range"] { width: 100%; accent-color: #0f0; background: rgba(0, 255, 0, 0.2); }
+        
+        button {
+            background: #002200; color: #0f0; border: 1px solid #0f0;
+            padding: 8px 12px; cursor: pointer; font-family: inherit;
+            text-transform: uppercase; font-size: 11px; letter-spacing: 1px;
+            transition: all 0.2s; width: 100%; margin-bottom: 5px;
+        }
+        
+        button:hover { background: #004400; box-shadow: 0 0 10px #0f0; }
+        button.active { background: #0f0; color: #000; }
+        
+        .stats { font-size: 11px; color: #8f8; margin-top: 10px; border-top: 1px solid #040; padding-top: 10px; }
+        .stat-row { display: flex; justify-content: space-between; margin-bottom: 3px; }
+        
+        #instructions {
+            position: absolute; bottom: 20px; left: 20px;
+            color: rgba(0, 255, 0, 0.5); font-size: 12px;
+            pointer-events: none;
+        }
+        
+        .loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: #0f0; font-size: 24px; text-transform: uppercase;
+            text-shadow: 0 0 10px #0f0; pointer-events: none;
+            transition: opacity 0.5s;
+        }
+    </style>
+</head>
+<body>
+    <div id="canvas-container"></div>
+    
+    <div id="ui">
+        <h1>Symbiotic Network</h1>
+        
+        <div class="control-group">
+            <label>Simulation Speed</label>
+            <input type="range" id="speed" min="0" max="5" step="0.1" value="1">
+        </div>
+        
+        <div class="control-group">
+            <label>Sensor Angle</label>
+            <input type="range" id="sensorAngle" min="10" max="90" value="45">
+        </div>
+        
+        <div class="control-group">
+            <label>Turn Speed</label>
+            <input type="range" id="turnSpeed" min="0.1" max="2" step="0.1" value="0.5">
+        </div>
+        
+        <div class="control-group">
+            <label>Decay Rate</label>
+            <input type="range" id="decay" min="0.8" max="0.99" step="0.001" value="0.95">
+        </div>
+        
+        <div class="control-group">
+            <button id="btn-tokyo">Load Tokyo Layout</button>
+            <button id="btn-random">Random Cities</button>
+            <button id="btn-clear">Clear Food</button>
+            <button id="btn-reset">Reset Slime</button>
+        </div>
+        
+        <div class="control-group">
+            <label>Interaction Mode</label>
+            <div style="display: flex; gap: 5px;">
+                <button id="mode-view" class="active">View</button>
+                <button id="mode-food">Place Food</button>
+            </div>
+        </div>
+        
+        <div class="stats">
+            <div class="stat-row"><span>Agents:</span> <span id="agent-count">0</span></div>
+            <div class="stat-row"><span>Food Sources:</span> <span id="food-count">0</span></div>
+            <div class="stat-row"><span>FPS:</span> <span id="fps">0</span></div>
+        </div>
+    </div>
+    
+    <div id="instructions">
+        LMB: Rotate | RMB: Pan | Scroll: Zoom (Go INSIDE)
+    </div>
+    
+    <div id="loading">Initializing Bio-Network...</div>
+    <div id="error-msg" style="display:none; position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:red; background:rgba(0,0,0,0.8); padding:20px; border:1px solid red; max-width:80%;"></div>
+
+    <!-- Import Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script>
+        window.onerror = function(msg, url, line, col, error) {
+            const errDiv = document.getElementById('error-msg');
+            errDiv.style.display = 'block';
+            errDiv.innerHTML = `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small>`;
+            document.getElementById('loading').style.display = 'none';
+            return false;
+        };
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+
+        try {
+            // --- Configuration ---
+            const CONFIG = {
+                gridSize: 60, // Reduced from 80 for better performance
+                agentCount: 10000, // Reduced from 20000 for safety
+                sensorAngle: Math.PI / 4,
+                sensorDist: 2,
+                turnSpeed: 0.5,
+                moveSpeed: 0.5,
+                decayRate: 0.95,
+                diffuseRate: 0.1,
+                foodAttraction: 5.0
+            };
+
+        // --- State ---
+        const state = {
+            agents: null, // Float32Array [x, y, z, anglePhi, angleTheta]
+            trailMap: null, // Float32Array
+            foodSources: [],
+            time: 0,
+            frame: 0
+        };
+
+        // --- Three.js Setup ---
+        const container = document.getElementById('canvas-container');
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000500);
+        scene.fog = new THREE.FogExp2(0x000500, 0.02);
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(40, 40, 60);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        container.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 0.1; // Allow going inside
+        controls.maxDistance = 200;
+        controls.target.set(CONFIG.gridSize/2, CONFIG.gridSize/2, CONFIG.gridSize/2);
+
+        // Post-processing for glow
+        const renderScene = new RenderPass(scene, camera);
+        const bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+        bloomPass.threshold = 0.1;
+        bloomPass.strength = 1.2;
+        bloomPass.radius = 0.5;
+
+        const composer = new EffectComposer(renderer);
+        composer.addPass(renderScene);
+        composer.addPass(bloomPass);
+
+        // --- Simulation Data Structures ---
+        
+        // Grid for trails
+        // We use a 1D array to represent 3D volume
+        const totalCells = CONFIG.gridSize * CONFIG.gridSize * CONFIG.gridSize;
+        state.trailMap = new Float32Array(totalCells);
+        
+        // Agents
+        // Each agent needs: x, y, z, heading (phi, theta)
+        // We'll use a Float32Array for compact storage
+        // stride = 5
+        state.agents = new Float32Array(CONFIG.agentCount * 5);
+
+        // --- Visuals ---
+        
+        // Agent Particles
+        const agentGeometry = new THREE.BufferGeometry();
+        const agentPositions = new Float32Array(CONFIG.agentCount * 3);
+        const agentColors = new Float32Array(CONFIG.agentCount * 3);
+        agentGeometry.setAttribute('position', new THREE.BufferAttribute(agentPositions, 3));
+        agentGeometry.setAttribute('color', new THREE.BufferAttribute(agentColors, 3));
+        
+        const agentMaterial = new THREE.PointsMaterial({
+            size: 0.4,
+            vertexColors: true,
+            transparent: true,
+            opacity: 0.8,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        
+        const agentSystem = new THREE.Points(agentGeometry, agentMaterial);
+        scene.add(agentSystem);
+
+        // Food Visuals
+        const foodGroup = new THREE.Group();
+        scene.add(foodGroup);
+        
+        const foodGeometry = new THREE.SphereGeometry(1, 16, 16);
+        const foodMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff });
+
+        // --- Helper Functions ---
+        
+        function getIndex(x, y, z) {
+            x = Math.floor(x);
+            y = Math.floor(y);
+            z = Math.floor(z);
+            // Wrap around
+            if (x < 0) x += CONFIG.gridSize;
+            if (x >= CONFIG.gridSize) x -= CONFIG.gridSize;
+            if (y < 0) y += CONFIG.gridSize;
+            if (y >= CONFIG.gridSize) y -= CONFIG.gridSize;
+            if (z < 0) z += CONFIG.gridSize;
+            if (z >= CONFIG.gridSize) z -= CONFIG.gridSize;
+            
+            return x + y * CONFIG.gridSize + z * CONFIG.gridSize * CONFIG.gridSize;
+        }
+
+        function getTrailValue(x, y, z) {
+            return state.trailMap[getIndex(x, y, z)];
+        }
+
+        function addTrail(x, y, z, amount) {
+            const idx = getIndex(x, y, z);
+            state.trailMap[idx] = Math.min(state.trailMap[idx] + amount, 1.0);
+        }
+
+        function initAgents() {
+            for (let i = 0; i < CONFIG.agentCount; i++) {
+                const idx = i * 5;
+                // Random position in center
+                state.agents[idx] = CONFIG.gridSize / 2 + (Math.random() - 0.5) * 10;
+                state.agents[idx + 1] = CONFIG.gridSize / 2 + (Math.random() - 0.5) * 10;
+                state.agents[idx + 2] = CONFIG.gridSize / 2 + (Math.random() - 0.5) * 10;
+                
+                // Random heading
+                state.agents[idx + 3] = Math.random() * Math.PI * 2; // Theta (horizontal)
+                state.agents[idx + 4] = Math.random() * Math.PI;     // Phi (vertical)
+            }
+            document.getElementById('agent-count').textContent = CONFIG.agentCount;
+        }
+
+        function addFood(x, y, z) {
+            state.foodSources.push({ x, y, z });
+            
+            const mesh = new THREE.Mesh(foodGeometry, foodMaterial);
+            mesh.position.set(x, y, z);
+            foodGroup.add(mesh);
+            
+            // Add a strong burst of trail at food source to attract nearby agents immediately
+            const r = 5;
+            for(let dx=-r; dx<=r; dx++) {
+                for(let dy=-r; dy<=r; dy++) {
+                    for(let dz=-r; dz<=r; dz++) {
+                        if(dx*dx + dy*dy + dz*dz <= r*r) {
+                            addTrail(x+dx, y+dy, z+dz, 1.0);
+                        }
+                    }
+                }
+            }
+            
+            document.getElementById('food-count').textContent = state.foodSources.length;
+        }
+
+        function clearFood() {
+            state.foodSources = [];
+            while(foodGroup.children.length > 0){ 
+                foodGroup.remove(foodGroup.children[0]); 
+            }
+            document.getElementById('food-count').textContent = 0;
+        }
+
+        // --- Simulation Logic ---
+
+        function sense(agentIdx, angleOffsetTheta, angleOffsetPhi) {
+            const x = state.agents[agentIdx];
+            const y = state.agents[agentIdx + 1];
+            const z = state.agents[agentIdx + 2];
+            const theta = state.agents[agentIdx + 3] + angleOffsetTheta;
+            const phi = state.agents[agentIdx + 4] + angleOffsetPhi;
+            
+            const dirX = Math.sin(phi) * Math.cos(theta);
+            const dirY = Math.sin(phi) * Math.sin(theta);
+            const dirZ = Math.cos(phi);
+            
+            const sensorX = x + dirX * CONFIG.sensorDist;
+            const sensorY = y + dirY * CONFIG.sensorDist;
+            const sensorZ = z + dirZ * CONFIG.sensorDist;
+            
+            let value = getTrailValue(sensorX, sensorY, sensorZ);
+            
+            // Add attraction to food
+            for (const food of state.foodSources) {
+                const dx = food.x - sensorX;
+                const dy = food.y - sensorY;
+                const dz = food.z - sensorZ;
+                const distSq = dx*dx + dy*dy + dz*dz;
+                if (distSq < 100) { // Sensing radius for food
+                    value += CONFIG.foodAttraction / (1 + distSq * 0.1);
+                }
+            }
+            
+            return value;
+        }
+
+        function updateAgents() {
+            const positions = agentSystem.geometry.attributes.position.array;
+            const colors = agentSystem.geometry.attributes.color.array;
+            
+            for (let i = 0; i < CONFIG.agentCount; i++) {
+                const idx = i * 5;
+                
+                // Sense
+                const F = sense(idx, 0, 0);
+                const FL = sense(idx, CONFIG.sensorAngle, 0);
+                const FR = sense(idx, -CONFIG.sensorAngle, 0);
+                const FU = sense(idx, 0, CONFIG.sensorAngle); // Up
+                const FD = sense(idx, 0, -CONFIG.sensorAngle); // Down
+                
+                // Turn
+                if (F > FL && F > FR && F > FU && F > FD) {
+                    // Keep straight
+                } else if (F < FL && F < FR && F < FU && F < FD) {
+                    // Random turn if lost
+                    state.agents[idx + 3] += (Math.random() - 0.5) * 2 * CONFIG.turnSpeed;
+                    state.agents[idx + 4] += (Math.random() - 0.5) * 2 * CONFIG.turnSpeed;
+                } else {
+                    // Turn towards strongest
+                    // Simplified 3D steering
+                    if (FL > FR) state.agents[idx + 3] += CONFIG.turnSpeed;
+                    else if (FR > FL) state.agents[idx + 3] -= CONFIG.turnSpeed;
+                    
+                    if (FU > FD) state.agents[idx + 4] += CONFIG.turnSpeed;
+                    else if (FD > FU) state.agents[idx + 4] -= CONFIG.turnSpeed;
+                }
+                
+                // Move
+                const theta = state.agents[idx + 3];
+                const phi = state.agents[idx + 4];
+                
+                const dirX = Math.sin(phi) * Math.cos(theta);
+                const dirY = Math.sin(phi) * Math.sin(theta);
+                const dirZ = Math.cos(phi);
+                
+                let nx = state.agents[idx] + dirX * CONFIG.moveSpeed;
+                let ny = state.agents[idx + 1] + dirY * CONFIG.moveSpeed;
+                let nz = state.agents[idx + 2] + dirZ * CONFIG.moveSpeed;
+                
+                // Boundary wrap
+                if (nx < 0) nx += CONFIG.gridSize;
+                if (nx >= CONFIG.gridSize) nx -= CONFIG.gridSize;
+                if (ny < 0) ny += CONFIG.gridSize;
+                if (ny >= CONFIG.gridSize) ny -= CONFIG.gridSize;
+                if (nz < 0) nz += CONFIG.gridSize;
+                if (nz >= CONFIG.gridSize) nz -= CONFIG.gridSize;
+                
+                state.agents[idx] = nx;
+                state.agents[idx + 1] = ny;
+                state.agents[idx + 2] = nz;
+                
+                // Deposit
+                addTrail(nx, ny, nz, 0.8);
+                
+                // Update Visuals
+                positions[i * 3] = nx;
+                positions[i * 3 + 1] = ny;
+                positions[i * 3 + 2] = nz;
+                
+                // Color based on heading/state
+                // Green/Blue gradient
+                colors[i * 3] = 0.2;
+                colors[i * 3 + 1] = 0.8 + Math.sin(state.time + i * 0.01) * 0.2;
+                colors[i * 3 + 2] = 0.5 + Math.cos(theta) * 0.5;
+            }
+            
+            agentSystem.geometry.attributes.position.needsUpdate = true;
+            agentSystem.geometry.attributes.color.needsUpdate = true;
+        }
+
+        function updateTrails() {
+            // Decay
+            // In a real compute shader we'd diffuse here too.
+            // For JS performance, we just decay. The agents moving effectively "diffuse" the signal by carrying it.
+            // We can do a very cheap random diffusion: pick N random cells and average with neighbors.
+            
+            // Simple decay
+            for (let i = 0; i < totalCells; i++) {
+                state.trailMap[i] *= CONFIG.decayRate;
+            }
+        }
+
+        // --- Presets ---
+        
+        function loadTokyo() {
+            clearFood();
+            initAgents(); // Reset agents to center
+            
+            const scale = CONFIG.gridSize / 100;
+            const center = CONFIG.gridSize / 2;
+            
+            // Approximate relative positions of major Tokyo stations
+            const stations = [
+                { name: "Shinjuku", x: -15, y: 5, z: 0 },
+                { name: "Shibuya", x: -15, y: -10, z: 0 },
+                { name: "Ikebukuro", x: -15, y: 20, z: 0 },
+                { name: "Tokyo", x: 15, y: 0, z: 0 },
+                { name: "Ueno", x: 15, y: 15, z: 0 },
+                { name: "Shinagawa", x: 10, y: -15, z: 0 },
+                { name: "Roppongi", x: 0, y: -5, z: 5 }, // Add some 3D verticality
+                { name: "Akihabara", x: 10, y: 10, z: -5 },
+                { name: "Odaiba", x: 15, y: -25, z: 0 }
+            ];
+            
+            stations.forEach(s => {
+                addFood(center + s.x, center + s.y, center + s.z);
+            });
+            
+            // Move agents to start at "Tokyo Station"
+            for (let i = 0; i < CONFIG.agentCount; i++) {
+                const idx = i * 5;
+                state.agents[idx] = center + 15 + (Math.random()-0.5)*5;
+                state.agents[idx+1] = center + 0 + (Math.random()-0.5)*5;
+                state.agents[idx+2] = center + 0 + (Math.random()-0.5)*5;
+            }
+        }
+        
+        function loadRandom() {
+            clearFood();
+            for(let i=0; i<12; i++) {
+                addFood(
+                    Math.random() * CONFIG.gridSize,
+                    Math.random() * CONFIG.gridSize,
+                    Math.random() * CONFIG.gridSize
+                );
+            }
+        }
+
+        // --- Interaction ---
+        
+        let interactionMode = 'view';
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        
+        window.addEventListener('click', (e) => {
+            if (e.target.closest('#ui')) return;
+            
+            if (interactionMode === 'food') {
+                mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+                mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+                
+                raycaster.setFromCamera(mouse, camera);
+                
+                // Raycast against a virtual plane at the center or existing objects
+                const plane = new THREE.Plane(new THREE.Vector3(0, 0, 1), -CONFIG.gridSize/2);
+                const target = new THREE.Vector3();
+                raycaster.ray.intersectPlane(plane, target);
+                
+                if (target) {
+                    // Clamp to grid
+                    target.x = Math.max(0, Math.min(CONFIG.gridSize, target.x));
+                    target.y = Math.max(0, Math.min(CONFIG.gridSize, target.y));
+                    target.z = Math.max(0, Math.min(CONFIG.gridSize, target.z)); // Z is fixed on plane for simple clicks
+                    
+                    // If we want full 3D placement, we might need a different UI, but this is okay for now
+                    // Let's try to place it at the depth of the orbit target
+                    const dist = controls.target.distanceTo(camera.position);
+                    const pos = new THREE.Vector3();
+                    raycaster.ray.at(dist, pos);
+                    
+                    addFood(pos.x, pos.y, pos.z);
+                }
+            }
+        });
+
+        // --- UI Event Listeners ---
+        
+        document.getElementById('speed').addEventListener('input', (e) => {
+            CONFIG.moveSpeed = parseFloat(e.target.value) * 0.5;
+        });
+        
+        document.getElementById('sensorAngle').addEventListener('input', (e) => {
+            CONFIG.sensorAngle = parseFloat(e.target.value) * Math.PI / 180;
+        });
+        
+        document.getElementById('turnSpeed').addEventListener('input', (e) => {
+            CONFIG.turnSpeed = parseFloat(e.target.value);
+        });
+        
+        document.getElementById('decay').addEventListener('input', (e) => {
+            CONFIG.decayRate = parseFloat(e.target.value);
+        });
+        
+        document.getElementById('btn-tokyo').addEventListener('click', loadTokyo);
+        document.getElementById('btn-random').addEventListener('click', loadRandom);
+        document.getElementById('btn-clear').addEventListener('click', clearFood);
+        document.getElementById('btn-reset').addEventListener('click', initAgents);
+        
+        document.getElementById('mode-view').addEventListener('click', (e) => {
+            interactionMode = 'view';
+            document.getElementById('mode-view').classList.add('active');
+            document.getElementById('mode-food').classList.remove('active');
+            controls.enabled = true;
+        });
+        
+        document.getElementById('mode-food').addEventListener('click', (e) => {
+            interactionMode = 'food';
+            document.getElementById('mode-food').classList.add('active');
+            document.getElementById('mode-view').classList.remove('active');
+            controls.enabled = false; // Disable rotation while placing
+        });
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // --- Main Loop ---
+        
+        let lastTime = 0;
+        let frameCount = 0;
+        let lastFpsTime = 0;
+        let useComposer = true;
+
+        function animate(time) {
+            requestAnimationFrame(animate);
+            
+            const dt = (time - lastTime) / 1000;
+            lastTime = time;
+            state.time = time / 1000;
+            
+            // FPS Counter
+            frameCount++;
+            if (time - lastFpsTime > 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastFpsTime = time;
+            }
+            
+            controls.update();
+            
+            // Simulation steps
+            updateAgents();
+            updateTrails();
+            
+            // Render
+            try {
+                if (useComposer) {
+                    composer.render();
+                } else {
+                    renderer.render(scene, camera);
+                }
+            } catch (e) {
+                console.warn("Composer failed, falling back to standard renderer", e);
+                useComposer = false;
+                renderer.render(scene, camera);
+            }
+        }
+
+        // Start
+        initAgents();
+        loadRandom(); // Start with random cities
+        document.getElementById('loading').style.opacity = 0;
+        animate(0);
+        
+        } catch (err) {
+            console.error(err);
+            const errDiv = document.getElementById('error-msg');
+            errDiv.style.display = 'block';
+            errDiv.innerHTML = `<strong>Error:</strong> ${err.message}<br><small>Check console for details</small>`;
+            document.getElementById('loading').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

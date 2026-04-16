@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Isobar Pressure</title>
+    <meta name="description" content="Create atmospheric pressure zones and watch invisible forces become visible as wind flows between highs and lows">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0d15; min-height: 100vh; font-family: 'Georgia', serif; color: #8090a0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(10,15,25,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(80,120,180,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #90b0d0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #a0c0e0; font-size: 12px; }
+        .mode-btn { display: inline-block; padding: 8px 12px; margin: 2px; border-radius: 4px; cursor: pointer; border: 1px solid rgba(80,120,180,0.4); }
+        .mode-btn.high { background: rgba(255,100,50,0.3); color: #ffaa80; }
+        .mode-btn.low { background: rgba(50,100,255,0.3); color: #80aaff; }
+        .mode-btn.active { border-color: white; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(60,80,120,0.4); border: 1px solid rgba(80,120,180,0.4);
+            color: #90a0c0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #pressure-display { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #607090; z-index: 100; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Isobar Pressure</h3>
+        <div class="control-row">
+            <label>Pressure Mode</label>
+            <div class="mode-btn high active" id="high-mode">High (H)</div>
+            <div class="mode-btn low" id="low-mode">Low (L)</div>
+        </div>
+        <div class="control-row">
+            <label>Wind Speed <span class="value" id="wind-val">50</span></label>
+            <input type="range" id="wind" min="20" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Particle Density <span class="value" id="density-val">60</span></label>
+            <input type="range" id="density" min="30" max="150" value="60">
+        </div>
+        <button id="clear-btn">Clear Pressure Zones</button>
+    </div>
+    <div id="pressure-display">Zones: H:0 L:0</div>
+    <div id="info">Click to place pressure zones | Watch wind flow between highs and lows</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let isHighPressure = true;
+        let windSpeed = 0.5;
+        let particleDensity = 60;
+        let time = 0;
+        
+        const pressureZones = [];
+        const particles = [];
+        
+        class PressureZone {
+            constructor(x, y, isHigh) {
+                this.x = x;
+                this.y = y;
+                this.isHigh = isHigh;
+                this.strength = 0;
+                this.maxStrength = 0.5 + Math.random() * 0.5;
+                this.radius = 80 + Math.random() * 40;
+                this.age = 0;
+            }
+            
+            update() {
+                this.age += 0.016;
+                if (this.strength < this.maxStrength) {
+                    this.strength += 0.01;
+                }
+            }
+            
+            getForceAt(x, y) {
+                const dx = x - this.x;
+                const dy = y - this.y;
+                const dist = Math.hypot(dx, dy);
+                
+                if (dist > this.radius * 3) return { fx: 0, fy: 0 };
+                
+                const force = this.strength * 100 / (dist + 30);
+                const direction = this.isHigh ? 1 : -1;
+                
+                return {
+                    fx: (dx / dist) * force * direction,
+                    fy: (dy / dist) * force * direction
+                };
+            }
+            
+            draw() {
+                const pulse = 1 + Math.sin(time * 2 + this.age) * 0.1;
+                const alpha = Math.min(1, this.strength * 2);
+                
+                for (let r = 0; r < 4; r++) {
+                    const radius = this.radius * (0.3 + r * 0.25) * pulse;
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, radius, 0, Math.PI * 2);
+                    
+                    if (this.isHigh) {
+                        ctx.strokeStyle = "rgba(255, 150, 100, " + (alpha * (0.3 - r * 0.07)) + ")";
+                    } else {
+                        ctx.strokeStyle = "rgba(100, 150, 255, " + (alpha * (0.3 - r * 0.07)) + ")";
+                    }
+                    ctx.lineWidth = 1.5;
+                    ctx.stroke();
+                }
+                
+                ctx.font = '16px Georgia';
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillStyle = this.isHigh ? "rgba(255, 200, 150, " + alpha + ")" : "rgba(150, 200, 255, " + alpha + ")";
+                ctx.fillText(this.isHigh ? 'H' : 'L', this.x, this.y);
+            }
+        }
+        
+        class WindParticle {
+            constructor() {
+                this.reset();
+            }
+            
+            reset() {
+                this.x = Math.random() * W;
+                this.y = Math.random() * H;
+                this.vx = 0;
+                this.vy = 0;
+                this.size = 1 + Math.random() * 1.5;
+                this.life = 1;
+                this.trail = [];
+            }
+            
+            update() {
+                let totalFx = 0;
+                let totalFy = 0;
+                
+                pressureZones.forEach(zone => {
+                    const force = zone.getForceAt(this.x, this.y);
+                    totalFx += force.fx;
+                    totalFy += force.fy;
+                });
+                
+                this.vx += totalFx * 0.0001 * windSpeed;
+                this.vy += totalFy * 0.0001 * windSpeed;
+                
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                this.trail.push({ x: this.x, y: this.y });
+                if (this.trail.length > 20) this.trail.shift();
+                
+                if (this.x < 0 || this.x > W || this.y < 0 || this.y > H) {
+                    this.reset();
+                }
+                
+                this.life -= 0.002;
+                if (this.life <= 0) {
+                    this.reset();
+                }
+            }
+            
+            draw() {
+                let closestZone = null;
+                let minDist = Infinity;
+                
+                pressureZones.forEach(zone => {
+                    const dist = Math.hypot(zone.x - this.x, zone.y - this.y);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        closestZone = zone;
+                    }
+                });
+                
+                let hue = 200;
+                if (closestZone && minDist < closestZone.radius * 2) {
+                    hue = closestZone.isHigh ? 30 : 220;
+                }
+                
+                if (this.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                    for (let i = 1; i < this.trail.length; i++) {
+                        ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                    }
+                    ctx.strokeStyle = "hsla(" + hue + ", 60%, 60%, 0.2)";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + hue + ", 60%, 70%, " + this.life + ")";
+                ctx.fill();
+            }
+        }
+        
+        function initParticles() {
+            particles.length = 0;
+            for (let i = 0; i < particleDensity; i++) {
+                particles.push(new WindParticle());
+            }
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = '#0a0d15';
+            ctx.fillRect(0, 0, W, H);
+            
+            for (let i = 0; i < 50; i++) {
+                const x = (i * 137) % W;
+                const y = (i * 89) % H;
+                ctx.beginPath();
+                ctx.arc(x, y, 0.5, 0, Math.PI * 2);
+                ctx.fillStyle = 'rgba(100, 120, 160, 0.2)';
+                ctx.fill();
+            }
+        }
+        
+        function drawIsobars() {
+            if (pressureZones.length < 2) return;
+            
+            const gridSize = 30;
+            for (let x = 0; x < W; x += gridSize) {
+                for (let y = 0; y < H; y += gridSize) {
+                    let totalPressure = 0;
+                    
+                    pressureZones.forEach(zone => {
+                        const dist = Math.hypot(zone.x - x, zone.y - y);
+                        const influence = zone.strength / (dist / 100 + 1);
+                        totalPressure += zone.isHigh ? influence : -influence;
+                    });
+                    
+                    const alpha = Math.abs(totalPressure) * 0.1;
+                    if (alpha > 0.02) {
+                        ctx.beginPath();
+                        ctx.arc(x, y, 2, 0, Math.PI * 2);
+                        ctx.fillStyle = totalPressure > 0 ? 
+                            "rgba(255, 150, 100, " + alpha + ")" : 
+                            "rgba(100, 150, 255, " + alpha + ")";
+                        ctx.fill();
+                    }
+                }
+            }
+        }
+        
+        function updateDisplay() {
+            const highCount = pressureZones.filter(z => z.isHigh).length;
+            const lowCount = pressureZones.filter(z => !z.isHigh).length;
+            document.getElementById('pressure-display').textContent = 
+                'Zones: H:' + highCount + ' L:' + lowCount;
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawIsobars();
+            
+            pressureZones.forEach(z => z.update());
+            pressureZones.forEach(z => z.draw());
+            
+            while (particles.length < particleDensity) {
+                particles.push(new WindParticle());
+            }
+            
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+            });
+            
+            updateDisplay();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 280) return;
+            pressureZones.push(new PressureZone(e.clientX, e.clientY, isHighPressure));
+        };
+        
+        document.getElementById('high-mode').onclick = () => {
+            isHighPressure = true;
+            document.getElementById('high-mode').classList.add('active');
+            document.getElementById('low-mode').classList.remove('active');
+        };
+        
+        document.getElementById('low-mode').onclick = () => {
+            isHighPressure = false;
+            document.getElementById('low-mode').classList.add('active');
+            document.getElementById('high-mode').classList.remove('active');
+        };
+        
+        document.getElementById('wind').oninput = e => {
+            windSpeed = e.target.value / 100;
+            document.getElementById('wind-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('density').oninput = e => {
+            particleDensity = parseInt(e.target.value);
+            document.getElementById('density-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            pressureZones.length = 0;
+        };
+        
+        initParticles();
+        animate();
+    </script>
+</body>
+</html>

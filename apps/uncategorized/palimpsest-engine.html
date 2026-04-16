@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Palimpsest Engine</title>
+    <meta name="description" content="Draw across dissolved timelines where strokes ripple through past and future layers, bleeding between temporal states">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #100a08; min-height: 100vh; font-family: 'Georgia', serif; color: #a09080; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(25,20,15,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(160,140,120,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #c0a080; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0b090; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,60,0.4); border: 1px solid rgba(160,140,120,0.4);
+            color: #a09080; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #layer-indicator {
+            position: fixed; right: 20px; top: 50%; transform: translateY(-50%);
+            display: flex; flex-direction: column; gap: 5px; z-index: 100;
+        }
+        .layer-bar { width: 15px; height: 30px; border-radius: 3px; opacity: 0.5; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Palimpsest Engine</h3>
+        <div class="control-row">
+            <label>Temporal Bleed <span class="value" id="bleed-val">50</span></label>
+            <input type="range" id="bleed" min="10" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Echo Decay <span class="value" id="decay-val">30</span></label>
+            <input type="range" id="decay" min="10" max="80" value="30">
+        </div>
+        <button id="scrape-btn">Scrape Canvas</button>
+        <button id="clear-btn">Dissolve All Layers</button>
+    </div>
+    <div id="layer-indicator"></div>
+    <div id="info">Draw to create marks across time | Watch strokes echo through past and future</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        const NUM_LAYERS = 7;
+        const PRESENT_LAYER = 3;
+        
+        let temporalBleed = 0.5;
+        let echoDecay = 0.3;
+        let time = 0;
+        let isDrawing = false;
+        let lastX = 0, lastY = 0;
+        
+        const layers = [];
+        for (let i = 0; i < NUM_LAYERS; i++) {
+            layers.push({
+                strokes: [],
+                age: i - PRESENT_LAYER,
+                hue: i < PRESENT_LAYER ? 30 + i * 10 : 200 + (i - PRESENT_LAYER) * 20
+            });
+        }
+        
+        function createLayerIndicator() {
+            const container = document.getElementById('layer-indicator');
+            container.innerHTML = '';
+            for (let i = 0; i < NUM_LAYERS; i++) {
+                const bar = document.createElement('div');
+                bar.className = 'layer-bar';
+                bar.style.background = i === PRESENT_LAYER ? '#f0d0a0' : 
+                    (i < PRESENT_LAYER ? "hsl(" + (30 + i * 10) + ", 40%, 40%)" : 
+                    "hsl(" + (200 + (i - PRESENT_LAYER) * 20) + ", 40%, 40%)");
+                bar.title = i < PRESENT_LAYER ? 'Past ' + (PRESENT_LAYER - i) : 
+                    (i === PRESENT_LAYER ? 'Present' : 'Future ' + (i - PRESENT_LAYER));
+                container.appendChild(bar);
+            }
+        }
+        createLayerIndicator();
+        
+        class Stroke {
+            constructor(points, layerIndex, isEcho = false) {
+                this.points = points;
+                this.layerIndex = layerIndex;
+                this.isEcho = isEcho;
+                this.age = 0;
+                this.maxAge = 500;
+                this.opacity = isEcho ? 0.4 : 0.8;
+                this.width = isEcho ? 2 : 4;
+                this.decay = 0;
+            }
+            
+            update() {
+                this.age += 1;
+                
+                if (this.isEcho) {
+                    this.decay += echoDecay * 0.001;
+                    this.opacity = Math.max(0, 0.4 - this.decay);
+                }
+                
+                return this.opacity > 0.01 && this.age < this.maxAge;
+            }
+            
+            draw(baseHue) {
+                if (this.points.length < 2) return;
+                
+                ctx.beginPath();
+                ctx.moveTo(this.points[0].x, this.points[0].y);
+                
+                for (let i = 1; i < this.points.length; i++) {
+                    ctx.lineTo(this.points[i].x, this.points[i].y);
+                }
+                
+                const ageBlend = this.layerIndex < PRESENT_LAYER ? 
+                    (PRESENT_LAYER - this.layerIndex) * 0.1 : 
+                    (this.layerIndex - PRESENT_LAYER) * 0.1;
+                
+                const bleedOffset = Math.sin(time * 2 + this.age * 0.01) * temporalBleed * 10;
+                
+                ctx.strokeStyle = "hsla(" + (baseHue + bleedOffset) + ", " + 
+                    (40 + this.opacity * 30) + "%, " + 
+                    (30 + this.opacity * 30) + "%, " + 
+                    this.opacity + ")";
+                ctx.lineWidth = this.width * (1 - ageBlend * 0.3);
+                ctx.lineCap = 'round';
+                ctx.lineJoin = 'round';
+                ctx.stroke();
+            }
+        }
+        
+        function addStroke(points) {
+            layers[PRESENT_LAYER].strokes.push(new Stroke([...points], PRESENT_LAYER));
+            
+            for (let i = 0; i < NUM_LAYERS; i++) {
+                if (i === PRESENT_LAYER) continue;
+                
+                const delay = Math.abs(i - PRESENT_LAYER);
+                const distortion = delay * 5 * temporalBleed;
+                
+                setTimeout(() => {
+                    const echoPoints = points.map(p => ({
+                        x: p.x + (Math.random() - 0.5) * distortion,
+                        y: p.y + (Math.random() - 0.5) * distortion
+                    }));
+                    layers[i].strokes.push(new Stroke(echoPoints, i, true));
+                }, delay * 100);
+            }
+        }
+        
+        function scrapeCanvas() {
+            layers.forEach((layer, i) => {
+                if (i < PRESENT_LAYER - 1) {
+                    layer.strokes.forEach(stroke => {
+                        stroke.opacity *= 1.5;
+                    });
+                }
+            });
+        }
+        
+        function drawBackground() {
+            const gradient = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.7);
+            gradient.addColorStop(0, '#1a1510');
+            gradient.addColorStop(1, '#100a08');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+            
+            ctx.fillStyle = 'rgba(180, 160, 140, 0.02)';
+            for (let i = 0; i < 100; i++) {
+                const x = (i * 73) % W;
+                const y = (i * 47) % H;
+                ctx.fillRect(x, y, 2, 1);
+            }
+        }
+        
+        function drawDissolutionEvents() {
+            layers.forEach((layer, i) => {
+                if (i === PRESENT_LAYER) return;
+                
+                layer.strokes.forEach(stroke => {
+                    const presentStrokes = layers[PRESENT_LAYER].strokes;
+                    presentStrokes.forEach(ps => {
+                        stroke.points.forEach(sp => {
+                            ps.points.forEach(pp => {
+                                const dist = Math.hypot(sp.x - pp.x, sp.y - pp.y);
+                                if (dist < 20) {
+                                    ctx.beginPath();
+                                    ctx.arc((sp.x + pp.x) / 2, (sp.y + pp.y) / 2, 10 - dist / 2, 0, Math.PI * 2);
+                                    ctx.fillStyle = "rgba(255, 220, 180, " + (0.1 * (1 - dist / 20)) + ")";
+                                    ctx.fill();
+                                }
+                            });
+                        });
+                    });
+                });
+            });
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawDissolutionEvents();
+            
+            for (let i = 0; i < NUM_LAYERS; i++) {
+                layers[i].strokes = layers[i].strokes.filter(s => s.update());
+                layers[i].strokes.forEach(s => s.draw(layers[i].hue));
+            }
+            
+            requestAnimationFrame(animate);
+        }
+        
+        let currentPoints = [];
+        
+        canvas.onmousedown = e => {
+            isDrawing = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            currentPoints = [{ x: lastX, y: lastY }];
+        };
+        
+        canvas.onmousemove = e => {
+            if (!isDrawing) return;
+            
+            const x = e.clientX;
+            const y = e.clientY;
+            
+            if (Math.hypot(x - lastX, y - lastY) > 5) {
+                currentPoints.push({ x, y });
+                lastX = x;
+                lastY = y;
+            }
+        };
+        
+        canvas.onmouseup = () => {
+            if (currentPoints.length > 2) {
+                addStroke(currentPoints);
+            }
+            isDrawing = false;
+            currentPoints = [];
+        };
+        
+        canvas.onmouseleave = () => {
+            if (isDrawing && currentPoints.length > 2) {
+                addStroke(currentPoints);
+            }
+            isDrawing = false;
+            currentPoints = [];
+        };
+        
+        document.getElementById('bleed').oninput = e => {
+            temporalBleed = e.target.value / 100;
+            document.getElementById('bleed-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('decay').oninput = e => {
+            echoDecay = e.target.value / 100;
+            document.getElementById('decay-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('scrape-btn').onclick = scrapeCanvas;
+        
+        document.getElementById('clear-btn').onclick = () => {
+            layers.forEach(layer => layer.strokes = []);
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

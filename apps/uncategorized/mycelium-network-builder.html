@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mycelium Network Builder</title>
+    <meta name="description" content="Grow and nurture fungal networks across a substrate, watching hyphae branch and connect">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0a0806; min-height: 100vh; font-family: 'Courier New', monospace; color: #c0b090; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(20,15,10,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(180,150,100,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #e0c090; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0a060; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,40,0.4); border: 1px solid rgba(180,150,100,0.4);
+            color: #c0b090; cursor: pointer; border-radius: 6px;
+        }
+        .species-btn { display: inline-block; width: 30px; height: 30px; margin: 3px; border-radius: 50%; cursor: pointer; border: 2px solid transparent; }
+        .species-btn.active { border-color: #fff; }
+        #stats {
+            position: fixed; top: 20px; right: 20px; background: rgba(20,15,10,0.95);
+            padding: 15px 20px; border-radius: 10px; border: 1px solid rgba(180,150,100,0.3);
+            z-index: 100; font-size: 12px;
+        }
+        .stat-row { margin: 5px 0; }
+        .stat-val { color: #e0c090; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Mycelium Lab</h3>
+        <div class="control-row">
+            <label>Growth Rate <span class="value" id="growth-val">50</span></label>
+            <input type="range" id="growth" min="10" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Branching <span class="value" id="branch-val">30</span></label>
+            <input type="range" id="branch" min="5" max="60" value="30">
+        </div>
+        <div class="control-row">
+            <label>Nutrients <span class="value" id="nutrient-val">70%</span></label>
+            <input type="range" id="nutrient" min="20" max="100" value="70">
+        </div>
+        <div class="control-row">
+            <label>Species</label>
+            <div>
+                <span class="species-btn active" style="background:#f0e0c0" data-species="oyster"></span>
+                <span class="species-btn" style="background:#90e090" data-species="bioluminescent"></span>
+                <span class="species-btn" style="background:#d080d0" data-species="cordyceps"></span>
+                <span class="species-btn" style="background:#80c0e0" data-species="ice"></span>
+            </div>
+        </div>
+        <button id="spore-btn">Release Spores</button>
+        <button id="clear-btn">Clear Substrate</button>
+    </div>
+    <div id="stats">
+        <div class="stat-row">Hyphae: <span class="stat-val" id="hyphae-count">0</span></div>
+        <div class="stat-row">Nodes: <span class="stat-val" id="node-count">0</span></div>
+        <div class="stat-row">Coverage: <span class="stat-val" id="coverage">0%</span></div>
+        <div class="stat-row">Fruit Bodies: <span class="stat-val" id="fruit-count">0</span></div>
+    </div>
+    <div id="info">Click to plant spores | Watch networks grow and connect</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        let growthRate = 0.5;
+        let branchChance = 0.3;
+        let nutrients = 0.7;
+        let currentSpecies = 'oyster';
+        let hyphae = [];
+        let nodes = [];
+        let fruitBodies = [];
+        let substrate = [];
+        
+        const speciesColors = {
+            oyster: { main: '#f0e0c0', glow: '#fffaf0', fruit: '#f5deb3' },
+            bioluminescent: { main: '#60ff60', glow: '#00ff00', fruit: '#90ff90' },
+            cordyceps: { main: '#d080d0', glow: '#ff80ff', fruit: '#e0a0e0' },
+            ice: { main: '#80c0e0', glow: '#a0e0ff', fruit: '#b0d0e0' }
+        };
+        
+        class Hypha {
+            constructor(x, y, angle, species, generation = 0) {
+                this.x = x;
+                this.y = y;
+                this.angle = angle;
+                this.species = species;
+                this.generation = generation;
+                this.length = 0;
+                this.maxLength = 50 + Math.random() * 100;
+                this.speed = 0.3 + Math.random() * 0.4;
+                this.thickness = Math.max(0.5, 3 - generation * 0.5);
+                this.alive = true;
+                this.trail = [{x, y}];
+                this.wander = 0;
+            }
+            update() {
+                if (!this.alive) return;
+                
+                this.wander += (Math.random() - 0.5) * 0.1;
+                this.angle += this.wander * 0.1;
+                
+                const speed = this.speed * growthRate * nutrients;
+                this.x += Math.cos(this.angle) * speed;
+                this.y += Math.sin(this.angle) * speed;
+                this.length += speed;
+                
+                if (this.trail.length === 0 || 
+                    Math.hypot(this.x - this.trail[this.trail.length-1].x, 
+                               this.y - this.trail[this.trail.length-1].y) > 3) {
+                    this.trail.push({x: this.x, y: this.y});
+                }
+                
+                if (this.x < 0 || this.x > W || this.y < 0 || this.y > H) {
+                    this.alive = false;
+                    return;
+                }
+                
+                if (this.length > this.maxLength) {
+                    this.alive = false;
+                    nodes.push({x: this.x, y: this.y, species: this.species, size: 3 + Math.random() * 2});
+                    
+                    if (Math.random() < 0.01 * nutrients && fruitBodies.length < 20) {
+                        fruitBodies.push(new FruitBody(this.x, this.y, this.species));
+                    }
+                    return;
+                }
+                
+                if (Math.random() < branchChance * 0.02 && this.generation < 4) {
+                    const branchAngle = this.angle + (Math.random() > 0.5 ? 1 : -1) * (0.3 + Math.random() * 0.5);
+                    hyphae.push(new Hypha(this.x, this.y, branchAngle, this.species, this.generation + 1));
+                }
+            }
+            draw() {
+                const colors = speciesColors[this.species];
+                
+                ctx.beginPath();
+                ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                for (let i = 1; i < this.trail.length; i++) {
+                    ctx.lineTo(this.trail[i].x, this.trail[i].y);
+                }
+                ctx.strokeStyle = colors.main;
+                ctx.lineWidth = this.thickness;
+                ctx.lineCap = 'round';
+                ctx.globalAlpha = 0.6;
+                ctx.stroke();
+                ctx.globalAlpha = 1;
+                
+                if (this.alive && this.species === 'bioluminescent') {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 5, 0, Math.PI * 2);
+                    ctx.fillStyle = colors.glow;
+                    ctx.globalAlpha = 0.3;
+                    ctx.fill();
+                    ctx.globalAlpha = 1;
+                }
+            }
+        }
+        
+        class FruitBody {
+            constructor(x, y, species) {
+                this.x = x;
+                this.y = y;
+                this.species = species;
+                this.size = 0;
+                this.maxSize = 8 + Math.random() * 12;
+                this.growth = 0.05 + Math.random() * 0.05;
+                this.phase = Math.random() * Math.PI * 2;
+            }
+            update() {
+                if (this.size < this.maxSize) {
+                    this.size += this.growth * nutrients;
+                }
+                this.phase += 0.02;
+            }
+            draw() {
+                const colors = speciesColors[this.species];
+                const pulse = 1 + Math.sin(this.phase) * 0.1;
+                const size = this.size * pulse;
+                
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y - size * 0.5, size * 0.8, size, 0, 0, Math.PI * 2);
+                
+                const gradient = ctx.createRadialGradient(this.x, this.y - size * 0.5, 0, this.x, this.y - size * 0.5, size);
+                gradient.addColorStop(0, colors.fruit);
+                gradient.addColorStop(0.7, colors.main);
+                gradient.addColorStop(1, 'rgba(0,0,0,0.5)');
+                ctx.fillStyle = gradient;
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y);
+                ctx.lineTo(this.x, this.y + size * 0.3);
+                ctx.strokeStyle = colors.main;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                if (this.species === 'bioluminescent') {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y - size * 0.5, size * 1.5, 0, Math.PI * 2);
+                    ctx.fillStyle = 'rgba(100, 255, 100, ' + (0.1 + Math.sin(this.phase * 2) * 0.05) + ')';
+                    ctx.fill();
+                }
+            }
+        }
+        
+        function initSubstrate() {
+            substrate = [];
+            for (let i = 0; i < 100; i++) {
+                substrate.push({
+                    x: Math.random() * W,
+                    y: Math.random() * H,
+                    size: 20 + Math.random() * 40,
+                    hue: 20 + Math.random() * 20
+                });
+            }
+        }
+        
+        function drawSubstrate() {
+            ctx.fillStyle = '#0a0806';
+            ctx.fillRect(0, 0, W, H);
+            
+            substrate.forEach(s => {
+                ctx.beginPath();
+                ctx.arc(s.x, s.y, s.size, 0, Math.PI * 2);
+                ctx.fillStyle = 'hsl(' + s.hue + ', 30%, 8%)';
+                ctx.fill();
+            });
+            
+            const overlay = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.7);
+            overlay.addColorStop(0, 'transparent');
+            overlay.addColorStop(1, 'rgba(0, 0, 0, 0.4)');
+            ctx.fillStyle = overlay;
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function plantSpore(x, y) {
+            const numHyphae = 3 + Math.floor(Math.random() * 4);
+            for (let i = 0; i < numHyphae; i++) {
+                const angle = (i / numHyphae) * Math.PI * 2 + Math.random() * 0.5;
+                hyphae.push(new Hypha(x, y, angle, currentSpecies));
+            }
+            nodes.push({x, y, species: currentSpecies, size: 5});
+        }
+        
+        function releaseSpores() {
+            for (let i = 0; i < 5; i++) {
+                plantSpore(Math.random() * W, Math.random() * H);
+            }
+        }
+        
+        function updateStats() {
+            const aliveHyphae = hyphae.filter(h => h.alive).length;
+            const totalTrailLength = hyphae.reduce((sum, h) => sum + h.trail.length, 0);
+            const coverage = Math.min(100, Math.floor(totalTrailLength / (W * H / 10000) * 100));
+            
+            document.getElementById('hyphae-count').textContent = aliveHyphae;
+            document.getElementById('node-count').textContent = nodes.length;
+            document.getElementById('coverage').textContent = coverage + '%';
+            document.getElementById('fruit-count').textContent = fruitBodies.length;
+        }
+        
+        function animate() {
+            drawSubstrate();
+            
+            hyphae.forEach(h => {
+                h.update();
+                h.draw();
+            });
+            
+            nodes.forEach(n => {
+                ctx.beginPath();
+                ctx.arc(n.x, n.y, n.size, 0, Math.PI * 2);
+                ctx.fillStyle = speciesColors[n.species].main;
+                ctx.globalAlpha = 0.8;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            });
+            
+            fruitBodies.forEach(f => {
+                f.update();
+                f.draw();
+            });
+            
+            if (hyphae.filter(h => h.alive).length > 0) {
+                hyphae = hyphae.filter(h => h.alive || h.trail.length > 2);
+            }
+            
+            updateStats();
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => plantSpore(e.clientX, e.clientY);
+        
+        canvas.ontouchmove = e => {
+            e.preventDefault();
+            if (Math.random() < 0.1) {
+                plantSpore(e.touches[0].clientX, e.touches[0].clientY);
+            }
+        };
+        
+        document.getElementById('growth').oninput = e => {
+            growthRate = e.target.value / 100;
+            document.getElementById('growth-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('branch').oninput = e => {
+            branchChance = e.target.value / 100;
+            document.getElementById('branch-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('nutrient').oninput = e => {
+            nutrients = e.target.value / 100;
+            document.getElementById('nutrient-val').textContent = e.target.value + '%';
+        };
+        
+        document.querySelectorAll('.species-btn').forEach(btn => {
+            btn.onclick = () => {
+                document.querySelectorAll('.species-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                currentSpecies = btn.dataset.species;
+            };
+        });
+        
+        document.getElementById('spore-btn').onclick = releaseSpores;
+        
+        document.getElementById('clear-btn').onclick = () => {
+            hyphae = [];
+            nodes = [];
+            fruitBodies = [];
+        };
+        
+        initSubstrate();
+        animate();
+    </script>
+</body>
+</html>

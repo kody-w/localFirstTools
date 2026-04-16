@@ -1,0 +1,461 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quantum Chess</title>
+    <meta name="description" content="Chess with superposition. Split your pieces, collapse wave functions, and play with probability.">
+    <style>
+        body {
+            background: #1a1a2e;
+            color: #e0e0e0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+
+        h1 {
+            margin: 20px 0;
+            text-shadow: 0 0 10px #4a4e69;
+        }
+
+        #game-container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+
+        #board {
+            display: grid;
+            grid-template-columns: repeat(8, 60px);
+            grid-template-rows: repeat(8, 60px);
+            border: 5px solid #4a4e69;
+            user-select: none;
+        }
+
+        .square {
+            width: 60px;
+            height: 60px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            position: relative;
+            cursor: pointer;
+        }
+
+        .white { background-color: #f0d9b5; color: #b58863; }
+        .black { background-color: #b58863; color: #f0d9b5; }
+        
+        .highlight { box-shadow: inset 0 0 0 4px rgba(255, 255, 0, 0.5); }
+        .quantum-highlight { box-shadow: inset 0 0 0 4px rgba(0, 255, 255, 0.8); }
+
+        .piece {
+            font-size: 40px;
+            cursor: grab;
+            transition: opacity 0.2s;
+            pointer-events: none; /* Let clicks pass to square */
+        }
+
+        .piece.white-piece { color: #fff; text-shadow: 0 0 2px #000; }
+        .piece.black-piece { color: #000; text-shadow: 0 0 2px #fff; }
+
+        .probability-badge {
+            position: absolute;
+            bottom: 2px;
+            right: 2px;
+            font-size: 10px;
+            background: rgba(0,0,0,0.7);
+            color: #0ff;
+            padding: 1px 3px;
+            border-radius: 3px;
+        }
+
+        #sidebar {
+            width: 300px;
+            background: #16213e;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        }
+
+        #log {
+            height: 300px;
+            overflow-y: auto;
+            background: #0f3460;
+            padding: 10px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            border: 1px solid #4a4e69;
+        }
+
+        .log-entry { margin-bottom: 5px; border-bottom: 1px solid #1a1a2e; padding-bottom: 2px; }
+        .log-collapse { color: #ff4444; }
+        .log-split { color: #00ffff; }
+
+        button {
+            background: #e94560;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin-top: 10px;
+            width: 100%;
+        }
+
+        button:hover { background: #d1364e; }
+
+        .turn-indicator {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            padding: 10px;
+            background: #0f3460;
+            text-align: center;
+            border-radius: 4px;
+        }
+        
+        .quantum-mode {
+            background: #00ffff !important;
+            color: #000 !important;
+        }
+
+    </style>
+</head>
+<body>
+
+    <h1>Quantum Chess</h1>
+
+    <div id="game-container">
+        <div id="board"></div>
+        
+        <div id="sidebar">
+            <div id="turn-display" class="turn-indicator">White's Turn</div>
+            
+            <div style="margin-bottom: 10px;">
+                <label>
+                    <input type="checkbox" id="quantum-mode-check"> 
+                    <strong>Quantum Move (Split)</strong>
+                </label>
+                <div style="font-size: 12px; color: #aaa; margin-top: 5px;">
+                    Check this (or hold Shift) to split a piece into two squares (50% probability each).
+                </div>
+            </div>
+
+            <div><strong>Quantum Log</strong></div>
+            <div id="log"></div>
+            
+            <button onclick="resetGame()">Reset Game</button>
+        </div>
+    </div>
+
+    <script>
+        const boardEl = document.getElementById('board');
+        const logEl = document.getElementById('log');
+        const turnDisplay = document.getElementById('turn-display');
+        const quantumCheck = document.getElementById('quantum-mode-check');
+
+        const PIECES = {
+            'r': '♜', 'n': '♞', 'b': '♝', 'q': '♛', 'k': '♚', 'p': '♟',
+            'R': '♖', 'N': '♘', 'B': '♗', 'Q': '♕', 'K': '♔', 'P': '♙'
+        };
+
+        let board = []; // 8x8 array of Square objects
+        let turn = 'white';
+        let selectedSquare = null;
+        let quantumMove = false;
+
+        class Square {
+            constructor(r, c) {
+                this.r = r;
+                this.c = c;
+                this.pieces = []; // Array of { type, color, id, prob }
+            }
+        }
+
+        function initBoard() {
+            board = [];
+            for(let r=0; r<8; r++) {
+                const row = [];
+                for(let c=0; c<8; c++) {
+                    row.push(new Square(r, c));
+                }
+                board.push(row);
+            }
+
+            // Setup initial pieces
+            const setup = [
+                ['r','n','b','q','k','b','n','r'],
+                ['p','p','p','p','p','p','p','p'],
+                [],[],[],[],
+                ['P','P','P','P','P','P','P','P'],
+                ['R','N','B','Q','K','B','N','R']
+            ];
+
+            for(let r=0; r<8; r++) {
+                if(!setup[r]) continue;
+                for(let c=0; c<8; c++) {
+                    const char = setup[r][c];
+                    if(char) {
+                        const color = char === char.toUpperCase() ? 'white' : 'black';
+                        const type = char.toLowerCase();
+                        board[r][c].pieces.push({
+                            type, color, 
+                            id: `${color}-${type}-${r}-${c}`, // Unique ID for tracking splits
+                            prob: 1.0
+                        });
+                    }
+                }
+            }
+            
+            turn = 'white';
+            log("Game Started");
+            render();
+        }
+
+        function render() {
+            boardEl.innerHTML = '';
+            
+            for(let r=0; r<8; r++) {
+                for(let c=0; c<8; c++) {
+                    const sq = document.createElement('div');
+                    sq.className = `square ${(r+c)%2===0 ? 'white' : 'black'}`;
+                    sq.dataset.r = r;
+                    sq.dataset.c = c;
+                    
+                    if(selectedSquare && selectedSquare.r === r && selectedSquare.c === c) {
+                        sq.classList.add('highlight');
+                    }
+
+                    const squareData = board[r][c];
+                    
+                    // Render pieces
+                    squareData.pieces.forEach(p => {
+                        const pEl = document.createElement('div');
+                        pEl.className = `piece ${p.color}-piece`;
+                        pEl.textContent = PIECES[p.color === 'white' ? p.type.toUpperCase() : p.type];
+                        pEl.style.opacity = p.prob;
+                        
+                        if(p.prob < 1.0) {
+                            const badge = document.createElement('div');
+                            badge.className = 'probability-badge';
+                            badge.textContent = Math.round(p.prob * 100) + '%';
+                            sq.appendChild(badge);
+                        }
+                        
+                        sq.appendChild(pEl);
+                    });
+
+                    sq.onclick = (e) => handleClick(r, c, e);
+                    boardEl.appendChild(sq);
+                }
+            }
+            
+            turnDisplay.textContent = `${turn.charAt(0).toUpperCase() + turn.slice(1)}'s Turn`;
+            turnDisplay.style.background = turn === 'white' ? '#e0e0e0' : '#333';
+            turnDisplay.style.color = turn === 'white' ? '#000' : '#fff';
+        }
+
+        function handleClick(r, c, e) {
+            const isShift = e.shiftKey || quantumCheck.checked;
+            
+            if(selectedSquare) {
+                // Move attempt
+                if(selectedSquare.r === r && selectedSquare.c === c) {
+                    selectedSquare = null; // Deselect
+                    render();
+                    return;
+                }
+                
+                if(isShift) {
+                    // Quantum Split Attempt
+                    // Need to select a second target
+                    if(quantumMove) {
+                        // Second target selected
+                        executeQuantumMove(selectedSquare, quantumMove, {r, c});
+                        selectedSquare = null;
+                        quantumMove = null;
+                    } else {
+                        // First target selected
+                        quantumMove = {r, c};
+                        log("Select second target for split...");
+                        // Highlight first target?
+                        // For simplicity, just wait for second click
+                        return; 
+                    }
+                } else {
+                    // Standard Move
+                    executeMove(selectedSquare, {r, c});
+                    selectedSquare = null;
+                }
+                render();
+            } else {
+                // Select
+                const sq = board[r][c];
+                const piece = sq.pieces.find(p => p.color === turn);
+                if(piece) {
+                    selectedSquare = {r, c};
+                    render();
+                }
+            }
+        }
+
+        function executeMove(from, to) {
+            const fromSq = board[from.r][from.c];
+            const toSq = board[to.r][to.c];
+            
+            // Find the piece to move (simplification: take the first of current turn color)
+            const pieceIdx = fromSq.pieces.findIndex(p => p.color === turn);
+            if(pieceIdx === -1) return;
+            
+            const piece = fromSq.pieces[pieceIdx];
+            
+            // Basic validation (very simplified)
+            // In a real game, we'd check valid moves for each piece type
+            
+            // Check for capture/collapse
+            if(toSq.pieces.length > 0) {
+                // Measurement!
+                const target = toSq.pieces[0]; // Assume one piece for now
+                
+                log(`Attack on ${target.color} ${target.type} (${Math.round(target.prob*100)}%)`);
+                
+                // Collapse Target
+                const roll = Math.random();
+                if(roll < target.prob) {
+                    // Hit! Target exists here.
+                    log(`<span class="log-collapse">Target CONFIRMED at ${to.r},${to.c}. Captured!</span>`);
+                    
+                    // Remove target from here
+                    toSq.pieces = [];
+                    
+                    // Remove target from other location (if split)
+                    collapsePiece(target.id, to.r, to.c, true); // true = exists here (so remove others)
+                    
+                    // Move attacker
+                    // Attacker also collapses if it was split?
+                    // Rule: Interaction causes mutual collapse.
+                    collapsePiece(piece.id, from.r, from.c, true);
+                    
+                    // Move
+                    piece.prob = 1.0;
+                    toSq.pieces.push(piece);
+                    fromSq.pieces.splice(pieceIdx, 1);
+                    
+                } else {
+                    // Miss! Target is NOT here.
+                    log(`<span class="log-collapse">Target ABSENT at ${to.r},${to.c}. Attack failed.</span>`);
+                    
+                    // Target must be at the other location
+                    collapsePiece(target.id, to.r, to.c, false); // false = does not exist here
+                    
+                    // Attacker stays? Or moves to empty square?
+                    // If target is not here, square is empty. Attacker moves in.
+                    // But wait, if target is not here, it's like moving to empty square.
+                    
+                    // Attacker collapses too
+                    collapsePiece(piece.id, from.r, from.c, true);
+                    piece.prob = 1.0;
+                    
+                    toSq.pieces.push(piece);
+                    fromSq.pieces.splice(pieceIdx, 1);
+                }
+            } else {
+                // Move to empty square
+                // If piece is split, does it drag the other half?
+                // Rule: Standard move of a split piece moves ONLY that instance.
+                // The other instance stays.
+                // Probability mass moves.
+                
+                toSq.pieces.push(piece);
+                fromSq.pieces.splice(pieceIdx, 1);
+                log(`Moved ${piece.type} to ${to.r},${to.c}`);
+            }
+            
+            endTurn();
+        }
+
+        function executeQuantumMove(from, to1, to2) {
+            const fromSq = board[from.r][from.c];
+            const pieceIdx = fromSq.pieces.findIndex(p => p.color === turn);
+            if(pieceIdx === -1) return;
+            
+            const piece = fromSq.pieces[pieceIdx];
+            
+            // Can only split if prob is 1.0 (simplification)
+            if(piece.prob < 0.99) {
+                log("Cannot split an already split piece!");
+                return;
+            }
+            
+            // Create two instances with 0.5 prob
+            const p1 = { ...piece, prob: 0.5 };
+            const p2 = { ...piece, prob: 0.5 };
+            
+            board[to1.r][to1.c].pieces.push(p1);
+            board[to2.r][to2.c].pieces.push(p2);
+            
+            fromSq.pieces.splice(pieceIdx, 1);
+            
+            log(`<span class="log-split">Quantum Split: ${piece.type} to (${to1.r},${to1.c}) and (${to2.r},${to2.c})</span>`);
+            endTurn();
+        }
+
+        function collapsePiece(id, r, c, existsHere) {
+            // Find all instances of this piece ID on the board
+            for(let i=0; i<8; i++) {
+                for(let j=0; j<8; j++) {
+                    const sq = board[i][j];
+                    for(let k=sq.pieces.length-1; k>=0; k--) {
+                        const p = sq.pieces[k];
+                        if(p.id === id) {
+                            if(existsHere) {
+                                // If it exists at (r,c), remove all OTHER instances
+                                if(i !== r || j !== c) {
+                                    sq.pieces.splice(k, 1);
+                                } else {
+                                    p.prob = 1.0; // Collapse to 100%
+                                }
+                            } else {
+                                // If it does NOT exist at (r,c)
+                                if(i === r && j === c) {
+                                    sq.pieces.splice(k, 1); // Remove this one
+                                } else {
+                                    // The other one becomes 100% (assuming 2-way split)
+                                    // If 3-way, math is harder. We assume 2-way.
+                                    p.prob = 1.0;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function endTurn() {
+            turn = turn === 'white' ? 'black' : 'white';
+            render();
+        }
+
+        function log(msg) {
+            const div = document.createElement('div');
+            div.className = 'log-entry';
+            div.innerHTML = msg;
+            logEl.appendChild(div);
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        function resetGame() {
+            initBoard();
+        }
+
+        initBoard();
+
+    </script>
+</body>
+</html>

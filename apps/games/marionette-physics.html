@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Marionette Physics Playground</title>
+    <meta name="description" content="Control a wooden marionette with realistic string physics through coordinated movements">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: linear-gradient(180deg, #1a1520 0%, #2a2030 100%); min-height: 100vh; overflow: hidden; font-family: monospace; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(30,25,40,0.9);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(180,150,120,0.3);
+            color: #c0a080;
+        }
+        h3 { margin-bottom: 15px; color: #e0c0a0; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 8px 0;
+            background: rgba(120,90,60,0.4); border: 1px solid rgba(180,150,120,0.4);
+            color: #c0a080; cursor: pointer; border-radius: 8px;
+        }
+        #info {
+            position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+            color: rgba(180,150,120,0.6); font-size: 12px;
+        }
+        #crossbar-indicator {
+            position: fixed; top: 20px; right: 20px; background: rgba(30,25,40,0.9);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(180,150,120,0.3);
+            color: #c0a080; text-align: center;
+        }
+        .key-hint { font-size: 10px; opacity: 0.6; margin-top: 5px; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Marionette Control</h3>
+        <button id="wave-btn">Wave Hand</button>
+        <button id="bow-btn">Take a Bow</button>
+        <button id="walk-btn">Walk</button>
+        <button id="dance-btn">Dance</button>
+        <button id="collapse-btn">Cut All Strings</button>
+        <div class="key-hint">Or drag the crossbar with mouse</div>
+    </div>
+    <div id="crossbar-indicator">
+        <div>CROSSBAR POSITION</div>
+        <div id="pos-display">X: 0 Y: 0</div>
+        <div class="key-hint">Arrow keys or mouse drag</div>
+    </div>
+    <div id="info">Move the crossbar to control the marionette | Physics simulation with verlet integration</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+
+        const gravity = 0.3;
+        const damping = 0.98;
+        const stringStiffness = 0.1;
+
+        class Point {
+            constructor(x, y, pinned = false) {
+                this.x = x; this.y = y;
+                this.oldX = x; this.oldY = y;
+                this.pinned = pinned;
+                this.mass = 1;
+            }
+            update() {
+                if (this.pinned) return;
+                const vx = (this.x - this.oldX) * damping;
+                const vy = (this.y - this.oldY) * damping;
+                this.oldX = this.x;
+                this.oldY = this.y;
+                this.x += vx;
+                this.y += vy + gravity;
+            }
+        }
+
+        class Stick {
+            constructor(p1, p2, length, isString = false) {
+                this.p1 = p1; this.p2 = p2;
+                this.length = length || Math.hypot(p2.x - p1.x, p2.y - p1.y);
+                this.isString = isString;
+            }
+            update() {
+                const dx = this.p2.x - this.p1.x;
+                const dy = this.p2.y - this.p1.y;
+                const dist = Math.hypot(dx, dy);
+                const diff = this.length - dist;
+                const percent = diff / dist / 2;
+                const offsetX = dx * percent;
+                const offsetY = dy * percent;
+                if (!this.p1.pinned) { this.p1.x -= offsetX; this.p1.y -= offsetY; }
+                if (!this.p2.pinned) { this.p2.x += offsetX; this.p2.y += offsetY; }
+            }
+            draw() {
+                ctx.beginPath();
+                ctx.moveTo(this.p1.x, this.p1.y);
+                ctx.lineTo(this.p2.x, this.p2.y);
+                if (this.isString) {
+                    ctx.strokeStyle = 'rgba(200, 180, 150, 0.6)';
+                    ctx.lineWidth = 1;
+                } else {
+                    ctx.strokeStyle = '#8B4513';
+                    ctx.lineWidth = 8;
+                    ctx.lineCap = 'round';
+                }
+                ctx.stroke();
+            }
+        }
+
+        let crossbarX = W / 2;
+        let crossbarY = 100;
+        const crossbarWidth = 120;
+
+        const crossbar = [
+            new Point(crossbarX - crossbarWidth/2, crossbarY, true),
+            new Point(crossbarX + crossbarWidth/2, crossbarY, true),
+            new Point(crossbarX - crossbarWidth/4, crossbarY, true),
+            new Point(crossbarX + crossbarWidth/4, crossbarY, true),
+            new Point(crossbarX, crossbarY, true)
+        ];
+
+        const puppet = {
+            head: new Point(W/2, 200),
+            neck: new Point(W/2, 230),
+            shoulder: new Point(W/2, 250),
+            leftElbow: new Point(W/2 - 30, 290),
+            rightElbow: new Point(W/2 + 30, 290),
+            leftHand: new Point(W/2 - 50, 330),
+            rightHand: new Point(W/2 + 50, 330),
+            hip: new Point(W/2, 350),
+            leftKnee: new Point(W/2 - 20, 420),
+            rightKnee: new Point(W/2 + 20, 420),
+            leftFoot: new Point(W/2 - 25, 490),
+            rightFoot: new Point(W/2 + 25, 490)
+        };
+
+        const points = [...crossbar, ...Object.values(puppet)];
+
+        const bodySticks = [
+            new Stick(puppet.head, puppet.neck, 30),
+            new Stick(puppet.neck, puppet.shoulder, 20),
+            new Stick(puppet.shoulder, puppet.leftElbow, 40),
+            new Stick(puppet.shoulder, puppet.rightElbow, 40),
+            new Stick(puppet.leftElbow, puppet.leftHand, 40),
+            new Stick(puppet.rightElbow, puppet.rightHand, 40),
+            new Stick(puppet.shoulder, puppet.hip, 100),
+            new Stick(puppet.hip, puppet.leftKnee, 70),
+            new Stick(puppet.hip, puppet.rightKnee, 70),
+            new Stick(puppet.leftKnee, puppet.leftFoot, 70),
+            new Stick(puppet.rightKnee, puppet.rightFoot, 70)
+        ];
+
+        let strings = [
+            new Stick(crossbar[4], puppet.head, 100, true),
+            new Stick(crossbar[0], puppet.leftHand, 230, true),
+            new Stick(crossbar[1], puppet.rightHand, 230, true),
+            new Stick(crossbar[2], puppet.leftFoot, 390, true),
+            new Stick(crossbar[3], puppet.rightFoot, 390, true)
+        ];
+
+        const sticks = [...bodySticks, ...strings];
+
+        function updateCrossbar() {
+            crossbar[0].x = crossbarX - crossbarWidth/2;
+            crossbar[0].y = crossbarY;
+            crossbar[1].x = crossbarX + crossbarWidth/2;
+            crossbar[1].y = crossbarY;
+            crossbar[2].x = crossbarX - crossbarWidth/4;
+            crossbar[2].y = crossbarY;
+            crossbar[3].x = crossbarX + crossbarWidth/4;
+            crossbar[3].y = crossbarY;
+            crossbar[4].x = crossbarX;
+            crossbar[4].y = crossbarY;
+        }
+
+        function drawCrossbar() {
+            ctx.beginPath();
+            ctx.moveTo(crossbar[0].x, crossbar[0].y);
+            ctx.lineTo(crossbar[1].x, crossbar[1].y);
+            ctx.strokeStyle = '#654321';
+            ctx.lineWidth = 12;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+        }
+
+        function drawPuppetParts() {
+            ctx.beginPath();
+            ctx.arc(puppet.head.x, puppet.head.y, 25, 0, Math.PI * 2);
+            ctx.fillStyle = '#DEB887';
+            ctx.fill();
+            ctx.strokeStyle = '#8B4513';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            ctx.fillStyle = '#4a3728';
+            ctx.beginPath();
+            ctx.arc(puppet.head.x - 8, puppet.head.y - 5, 4, 0, Math.PI * 2);
+            ctx.arc(puppet.head.x + 8, puppet.head.y - 5, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(puppet.head.x, puppet.head.y + 8, 8, 0, Math.PI);
+            ctx.strokeStyle = '#8B4513';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+            [puppet.leftHand, puppet.rightHand].forEach(h => {
+                ctx.beginPath();
+                ctx.arc(h.x, h.y, 10, 0, Math.PI * 2);
+                ctx.fillStyle = '#DEB887';
+                ctx.fill();
+            });
+            [puppet.leftFoot, puppet.rightFoot].forEach(f => {
+                ctx.beginPath();
+                ctx.ellipse(f.x, f.y, 15, 8, 0, 0, Math.PI * 2);
+                ctx.fillStyle = '#4a3728';
+                ctx.fill();
+            });
+        }
+
+        function animate() {
+            ctx.fillStyle = 'rgba(26, 21, 32, 0.3)';
+            ctx.fillRect(0, 0, W, H);
+            updateCrossbar();
+            points.forEach(p => p.update());
+            for (let i = 0; i < 5; i++) sticks.forEach(s => s.update());
+            strings.forEach(s => s.draw());
+            bodySticks.forEach(s => s.draw());
+            drawCrossbar();
+            drawPuppetParts();
+            document.getElementById('pos-display').textContent = 
+                'X: ' + Math.round(crossbarX - W/2) + ' Y: ' + Math.round(crossbarY - 100);
+            requestAnimationFrame(animate);
+        }
+
+        let dragging = false;
+        canvas.onmousedown = () => dragging = true;
+        canvas.onmouseup = () => dragging = false;
+        canvas.onmousemove = e => {
+            if (dragging) {
+                crossbarX = e.clientX;
+                crossbarY = Math.max(50, Math.min(H/2, e.clientY));
+            }
+        };
+
+        document.onkeydown = e => {
+            const speed = 10;
+            if (e.key === 'ArrowLeft') crossbarX -= speed;
+            if (e.key === 'ArrowRight') crossbarX += speed;
+            if (e.key === 'ArrowUp') crossbarY = Math.max(50, crossbarY - speed);
+            if (e.key === 'ArrowDown') crossbarY = Math.min(H/2, crossbarY + speed);
+        };
+
+        document.getElementById('wave-btn').onclick = () => {
+            let t = 0;
+            const wave = setInterval(() => {
+                crossbar[1].x = crossbarX + crossbarWidth/2 + Math.sin(t) * 40;
+                crossbar[1].y = crossbarY + Math.cos(t) * 20;
+                t += 0.3;
+                if (t > Math.PI * 4) clearInterval(wave);
+            }, 30);
+        };
+
+        document.getElementById('bow-btn').onclick = () => {
+            let t = 0;
+            const bow = setInterval(() => {
+                crossbarY = 100 + Math.sin(t) * 50;
+                t += 0.05;
+                if (t > Math.PI) { crossbarY = 100; clearInterval(bow); }
+            }, 30);
+        };
+
+        document.getElementById('walk-btn').onclick = () => {
+            let t = 0;
+            const walk = setInterval(() => {
+                crossbar[2].y = crossbarY + Math.sin(t) * 30;
+                crossbar[3].y = crossbarY + Math.sin(t + Math.PI) * 30;
+                crossbarX += 2;
+                t += 0.2;
+                if (t > Math.PI * 6) clearInterval(walk);
+            }, 30);
+        };
+
+        document.getElementById('dance-btn').onclick = () => {
+            let t = 0;
+            const dance = setInterval(() => {
+                crossbarX = W/2 + Math.sin(t * 2) * 50;
+                crossbarY = 100 + Math.abs(Math.sin(t * 3)) * 30;
+                t += 0.1;
+                if (t > Math.PI * 4) clearInterval(dance);
+            }, 30);
+        };
+
+        document.getElementById('collapse-btn').onclick = () => {
+            strings.forEach(s => s.length = 1000);
+        };
+
+        animate();
+    </script>
+</body>
+</html>

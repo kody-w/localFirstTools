@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Abelian Sandpile Fractal Generator</title>
+    <meta name="description" content="Interactive Abelian Sandpile Model simulator. Drop sand grains and watch fractal avalanches emerge from simple rules.">
+    <style>
+        body {
+            margin: 0;
+            background-color: #111;
+            color: #eee;
+            font-family: system-ui, -apple-system, sans-serif;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        #canvas-container {
+            flex-grow: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+            cursor: crosshair;
+            background-color: #000;
+        }
+        canvas {
+            image-rendering: pixelated;
+            box-shadow: 0 0 30px rgba(0,0,0,0.8);
+            border: 1px solid #333;
+        }
+        #controls {
+            padding: 15px 20px;
+            background: #1a1a1a;
+            display: flex;
+            gap: 20px;
+            align-items: center;
+            border-bottom: 1px solid #333;
+            flex-wrap: wrap;
+            z-index: 10;
+        }
+        button {
+            background: #333;
+            color: white;
+            border: 1px solid #444;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.2s;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #444;
+            border-color: #666;
+        }
+        button:active {
+            transform: translateY(1px);
+        }
+        .stat-group {
+            display: flex;
+            gap: 15px;
+            margin-left: auto;
+            background: #222;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #333;
+        }
+        .stat {
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            color: #aaa;
+        }
+        .stat span {
+            color: #fff;
+            font-weight: bold;
+        }
+        h1 {
+            margin: 0;
+            font-size: 18px;
+            margin-right: 10px;
+            background: linear-gradient(45deg, #00ff00, #0000ff, #ff0000);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            font-weight: 800;
+        }
+        .legend {
+            display: flex;
+            gap: 12px;
+            font-size: 12px;
+            align-items: center;
+            background: #222;
+            padding: 5px 10px;
+            border-radius: 4px;
+            border: 1px solid #333;
+        }
+        .legend-item {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .color-box {
+            width: 12px;
+            height: 12px;
+            border-radius: 2px;
+        }
+        .instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #666;
+            font-size: 14px;
+            pointer-events: none;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h1>Abelian Sandpile</h1>
+        <div class="legend">
+            <div class="legend-item"><span class="color-box" style="background:black; border:1px solid #444"></span>0</div>
+            <div class="legend-item"><span class="color-box" style="background:#00ff00"></span>1</div>
+            <div class="legend-item"><span class="color-box" style="background:#0000ff"></span>2</div>
+            <div class="legend-item"><span class="color-box" style="background:#ff0000"></span>3</div>
+        </div>
+        <button id="btn-center">Drop 10,000 (Center)</button>
+        <button id="btn-clear">Reset</button>
+        
+        <div class="stat-group">
+            <div class="stat">Status: <span id="avalanche-status">Stable</span></div>
+            <div class="stat">Topples: <span id="topple-count">0</span></div>
+        </div>
+    </div>
+    
+    <div id="canvas-container">
+        <canvas id="simCanvas"></canvas>
+        <div class="instructions">Click anywhere to drop 1,000 grains of sand</div>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const statusEl = document.getElementById('avalanche-status');
+        const toppleEl = document.getElementById('topple-count');
+        
+        // Configuration
+        const WIDTH = 300; // Simulation grid width
+        const HEIGHT = 300; // Simulation grid height
+        const SCALE = 2; // Display scale (zoom)
+        
+        // State
+        let grid = new Int32Array(WIDTH * HEIGHT);
+        let unstable = []; // Stack of unstable indices
+        let totalTopples = 0;
+        let isProcessing = false;
+        
+        // Colors
+        // 0: Black, 1: Green, 2: Blue, 3: Red, >=4: White (Active)
+        const COLORS = {
+            0: [0, 0, 0],
+            1: [0, 255, 0],
+            2: [0, 0, 255],
+            3: [255, 0, 0],
+            4: [255, 255, 255] 
+        };
+
+        // Initialize
+        function init() {
+            canvas.width = WIDTH;
+            canvas.height = HEIGHT;
+            canvas.style.width = `${WIDTH * SCALE}px`;
+            canvas.style.height = `${HEIGHT * SCALE}px`;
+            
+            // Fill black
+            ctx.fillStyle = 'black';
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+            
+            render();
+            loop();
+        }
+
+        // Core Logic
+        function addSand(x, y, amount) {
+            if (x < 0 || x >= WIDTH || y < 0 || y >= HEIGHT) return;
+            
+            const idx = y * WIDTH + x;
+            grid[idx] += amount;
+            
+            if (grid[idx] >= 4) {
+                unstable.push(idx);
+            }
+            
+            if (!isProcessing) {
+                isProcessing = true;
+                statusEl.textContent = "Avalanching...";
+                statusEl.style.color = "#ffaa00";
+            }
+        }
+
+        function processAvalanche(timeBudgetMs) {
+            const startTime = performance.now();
+            let topples = 0;
+            
+            // Process until stable or time budget exceeded
+            while (unstable.length > 0) {
+                // Check time budget every 2000 iterations
+                if (topples % 2000 === 0 && (performance.now() - startTime > timeBudgetMs)) {
+                    return true; // Still working
+                }
+
+                const idx = unstable.pop();
+                
+                // Double check it's still unstable
+                if (grid[idx] < 4) continue;
+                
+                const grains = grid[idx];
+                const numTopples = Math.floor(grains / 4); // Optimization: handle multiple topples at once if huge pile
+                const remainder = grains % 4;
+                
+                grid[idx] = remainder;
+                totalTopples += numTopples;
+                topples++;
+                
+                const x = idx % WIDTH;
+                const y = Math.floor(idx / WIDTH);
+                
+                // Neighbors
+                // Up
+                if (y > 0) {
+                    const nIdx = (y - 1) * WIDTH + x;
+                    grid[nIdx] += numTopples;
+                    if (grid[nIdx] >= 4) unstable.push(nIdx);
+                }
+                // Down
+                if (y < HEIGHT - 1) {
+                    const nIdx = (y + 1) * WIDTH + x;
+                    grid[nIdx] += numTopples;
+                    if (grid[nIdx] >= 4) unstable.push(nIdx);
+                }
+                // Left
+                if (x > 0) {
+                    const nIdx = y * WIDTH + (x - 1);
+                    grid[nIdx] += numTopples;
+                    if (grid[nIdx] >= 4) unstable.push(nIdx);
+                }
+                // Right
+                if (x < WIDTH - 1) {
+                    const nIdx = y * WIDTH + (x + 1);
+                    grid[nIdx] += numTopples;
+                    if (grid[nIdx] >= 4) unstable.push(nIdx);
+                }
+            }
+            
+            return false; // Done
+        }
+
+        // Rendering
+        const imgData = ctx.createImageData(WIDTH, HEIGHT);
+        const data = imgData.data; // Uint8ClampedArray
+
+        function render() {
+            // Update ImageData based on grid
+            // We iterate through all pixels. For 300x300 = 90k pixels, this is very fast in JS.
+            for (let i = 0; i < grid.length; i++) {
+                const val = grid[i];
+                // Clamp color selection
+                const colorKey = val > 3 ? 4 : val;
+                const color = COLORS[colorKey];
+                
+                const pxIndex = i * 4;
+                data[pxIndex] = color[0];     // R
+                data[pxIndex + 1] = color[1]; // G
+                data[pxIndex + 2] = color[2]; // B
+                data[pxIndex + 3] = 255;      // A
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+            toppleEl.textContent = totalTopples.toLocaleString();
+        }
+
+        function loop() {
+            if (isProcessing) {
+                // Give it a good chunk of time (16ms) to process as much as possible per frame
+                const stillWorking = processAvalanche(16); 
+                render();
+                
+                if (!stillWorking) {
+                    isProcessing = false;
+                    statusEl.textContent = "Stable";
+                    statusEl.style.color = "#00ff00";
+                }
+            }
+            requestAnimationFrame(loop);
+        }
+
+        // Interaction
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            // Calculate position relative to canvas, accounting for CSS scaling
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            const x = Math.floor((e.clientX - rect.left) * scaleX);
+            const y = Math.floor((e.clientY - rect.top) * scaleY);
+            
+            addSand(x, y, 1000); // Drop 1000 grains
+            render();
+        });
+
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            grid.fill(0);
+            unstable = [];
+            totalTopples = 0;
+            isProcessing = false;
+            statusEl.textContent = "Stable";
+            statusEl.style.color = "#00ff00";
+            render();
+        });
+
+        document.getElementById('btn-center').addEventListener('click', () => {
+            addSand(Math.floor(WIDTH/2), Math.floor(HEIGHT/2), 10000);
+        });
+
+        // Start
+        init();
+        
+        // Initial drop to show something cool immediately
+        setTimeout(() => {
+             addSand(Math.floor(WIDTH/2), Math.floor(HEIGHT/2), 5000);
+        }, 500);
+    </script>
+</body>
+</html>

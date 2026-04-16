@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Webcam Theremin</title>
+    <meta name="description" content="A musical instrument you play with your hands in the air using your webcam.">
+    <style>
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            background: #111;
+            color: #eee;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+        }
+        h1 { margin-bottom: 10px; font-weight: 300; letter-spacing: 2px; }
+        .container {
+            position: relative;
+            border: 2px solid #333;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 0 20px rgba(0,0,0,0.5);
+            background: #000;
+        }
+        video {
+            transform: scaleX(-1); /* Mirror the video */
+            display: block;
+            opacity: 0.6;
+        }
+        canvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            transform: scaleX(-1); /* Mirror the canvas to match video */
+        }
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        .axis-label {
+            font-size: 14px;
+            text-transform: uppercase;
+            color: rgba(255,255,255,0.5);
+            text-shadow: 0 1px 2px rgba(0,0,0,0.8);
+        }
+        .top-label { text-align: center; }
+        .bottom-label { text-align: center; }
+        .left-label { position: absolute; top: 50%; left: 20px; transform: translateY(-50%) rotate(-90deg); transform-origin: left center; }
+        .right-label { position: absolute; top: 50%; right: 20px; transform: translateY(-50%) rotate(90deg); transform-origin: right center; }
+        
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+            z-index: 10;
+        }
+        button {
+            background: #333;
+            color: white;
+            border: 1px solid #555;
+            padding: 10px 20px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #444; }
+        button.active { background: #007bff; border-color: #0056b3; }
+        
+        #status {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #aaa;
+            height: 20px;
+        }
+
+        .hud-value {
+            position: absolute;
+            font-family: monospace;
+            font-size: 24px;
+            color: #0f0;
+            text-shadow: 0 0 5px #0f0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+            opacity: 0;
+        }
+        .hud-value.visible { opacity: 1; }
+    </style>
+</head>
+<body>
+
+    <h1>Webcam Theremin</h1>
+    
+    <div class="container">
+        <video id="video" width="640" height="480" autoplay playsinline></video>
+        <canvas id="canvas" width="640" height="480"></canvas>
+        
+        <div id="overlay">
+            <div class="axis-label top-label">High Pitch</div>
+            <div class="axis-label bottom-label">Low Pitch</div>
+            <div class="axis-label left-label">Low Volume</div> <!-- Mirrored: Left on screen is Right in reality due to mirror effect, but let's keep it intuitive for the viewer looking at the screen -->
+            <div class="axis-label right-label">High Volume</div>
+        </div>
+        
+        <div id="cursor" class="hud-value"></div>
+    </div>
+
+    <div id="controls">
+        <button id="startBtn">Start Camera & Audio</button>
+        <select id="waveform">
+            <option value="sine">Sine</option>
+            <option value="triangle">Triangle</option>
+            <option value="sawtooth">Sawtooth</option>
+            <option value="square">Square</option>
+        </select>
+    </div>
+    
+    <div id="status">Click Start to begin. Ensure you have good lighting.</div>
+
+<script>
+/**
+ * WEBCAM THEREMIN
+ * Uses pixel differencing to track motion and control audio.
+ */
+
+const video = document.getElementById('video');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const startBtn = document.getElementById('startBtn');
+const statusEl = document.getElementById('status');
+const waveformSel = document.getElementById('waveform');
+const cursor = document.getElementById('cursor');
+
+// Audio Context
+let audioCtx;
+let oscillator;
+let gainNode;
+let isPlaying = false;
+
+// Motion Detection
+let prevFrame = null;
+// We process at a lower resolution for performance
+const procWidth = 64;
+const procHeight = 48;
+const procCanvas = document.createElement('canvas');
+procCanvas.width = procWidth;
+procCanvas.height = procHeight;
+const procCtx = procCanvas.getContext('2d', { willReadFrequently: true });
+
+// Smoothing
+let targetX = 0.5;
+let targetY = 0.5;
+let currentX = 0.5;
+let currentY = 0.5;
+const smoothing = 0.15; // 0 to 1, lower is smoother but laggier
+
+// Configuration
+const minFreq = 100;
+const maxFreq = 1000;
+const threshold = 20; // Pixel difference threshold (0-255)
+
+async function init() {
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+            video: { 
+                width: { ideal: 640 }, 
+                height: { ideal: 480 },
+                facingMode: "user"
+            }, 
+            audio: false 
+        });
+        video.srcObject = stream;
+        
+        // Wait for video to be ready
+        video.onloadedmetadata = () => {
+            statusEl.innerText = "Camera active. Move your hand!";
+            startAudio();
+            requestAnimationFrame(loop);
+        };
+    } catch (err) {
+        console.error(err);
+        statusEl.innerText = "Error accessing camera: " + err.message;
+    }
+}
+
+function startAudio() {
+    if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+
+    oscillator = audioCtx.createOscillator();
+    gainNode = audioCtx.createGain();
+
+    oscillator.type = waveformSel.value;
+    oscillator.frequency.value = 440;
+    
+    // Start with 0 volume
+    gainNode.gain.value = 0;
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    
+    oscillator.start();
+    isPlaying = true;
+    startBtn.innerText = "Stop";
+    startBtn.classList.add('active');
+}
+
+function stopAudio() {
+    if (oscillator) {
+        oscillator.stop();
+        oscillator.disconnect();
+        gainNode.disconnect();
+        oscillator = null;
+        gainNode = null;
+    }
+    isPlaying = false;
+    startBtn.innerText = "Start Camera & Audio";
+    startBtn.classList.remove('active');
+}
+
+function toggle() {
+    if (!isPlaying) {
+        init();
+    } else {
+        stopAudio();
+        // Stop video stream
+        const stream = video.srcObject;
+        if (stream) {
+            const tracks = stream.getTracks();
+            tracks.forEach(track => track.stop());
+            video.srcObject = null;
+        }
+    }
+}
+
+function loop() {
+    if (!isPlaying || !video.srcObject) return;
+
+    // Draw current video frame to processing canvas
+    procCtx.drawImage(video, 0, 0, procWidth, procHeight);
+    
+    const frame = procCtx.getImageData(0, 0, procWidth, procHeight);
+    const data = frame.data;
+    const length = data.length;
+    
+    let sumX = 0;
+    let sumY = 0;
+    let count = 0;
+
+    // If we have a previous frame, compare
+    if (prevFrame) {
+        const prevData = prevFrame.data;
+        
+        // Loop through pixels (step by 4 for RGBA)
+        for (let i = 0; i < length; i += 4) {
+            // Simple grayscale difference
+            // r=0, g=1, b=2
+            const rDiff = Math.abs(data[i] - prevData[i]);
+            const gDiff = Math.abs(data[i+1] - prevData[i+1]);
+            const bDiff = Math.abs(data[i+2] - prevData[i+2]);
+            
+            const diff = (rDiff + gDiff + bDiff) / 3;
+            
+            if (diff > threshold) {
+                // Calculate x, y coordinate of this pixel
+                const pixelIndex = i / 4;
+                const x = pixelIndex % procWidth;
+                const y = Math.floor(pixelIndex / procWidth);
+                
+                sumX += x;
+                sumY += y;
+                count++;
+                
+                // Visual debug: highlight motion on main canvas
+                // We'll do this later in the draw step
+            }
+        }
+    }
+    
+    // Save current frame for next loop
+    // We need to clone the data, otherwise we just reference the same array
+    prevFrame = new ImageData(new Uint8ClampedArray(frame.data), procWidth, procHeight);
+
+    // Update target position if significant motion detected
+    if (count > 10) { // Noise filter
+        targetX = (sumX / count) / procWidth;
+        targetY = (sumY / count) / procHeight;
+        
+        // Visual feedback on main canvas
+        // Clear canvas
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        
+        // Draw motion pixels (optional, maybe too heavy? let's just draw the tracker)
+        
+    } else {
+        // Decay to center or stay put? Let's stay put but fade volume
+        // targetX = 0.5; 
+        // targetY = 0.5;
+    }
+
+    // Smooth interpolation
+    currentX += (targetX - currentX) * smoothing;
+    currentY += (targetY - currentY) * smoothing;
+
+    // Update Audio
+    if (oscillator && gainNode) {
+        // Y controls Pitch (Up = High Freq, Down = Low Freq)
+        // Canvas Y is 0 at top, 1 at bottom.
+        // We want 0 (top) -> High Freq, 1 (bottom) -> Low Freq
+        // Actually, standard theremin: hand up = high pitch.
+        // So Y=0 (top) should be High Freq.
+        const pitch = minFreq + (1 - currentY) * (maxFreq - minFreq);
+        oscillator.frequency.setTargetAtTime(pitch, audioCtx.currentTime, 0.05);
+        
+        // X controls Volume (Left = Low, Right = High)
+        // Canvas X is 0 left, 1 right.
+        // Note: Video is mirrored via CSS, but logic sees raw video.
+        // If I move my hand to the right of the screen (my right), that is the left side of the camera image if not mirrored.
+        // But we mirrored the video element with CSS.
+        // Let's just map 0..1 to volume.
+        // If I move right (screen right), X increases.
+        const vol = currentX; 
+        gainNode.gain.setTargetAtTime(vol, audioCtx.currentTime, 0.05);
+        
+        // Update Visuals
+        const drawX = currentX * canvas.width;
+        const drawY = currentY * canvas.height;
+        
+        ctx.strokeStyle = '#0f0';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(drawX, drawY, 20, 0, Math.PI * 2);
+        ctx.stroke();
+        
+        // Crosshairs
+        ctx.strokeStyle = 'rgba(0, 255, 0, 0.3)';
+        ctx.beginPath();
+        ctx.moveTo(drawX, 0);
+        ctx.lineTo(drawX, canvas.height);
+        ctx.moveTo(0, drawY);
+        ctx.lineTo(canvas.width, drawY);
+        ctx.stroke();
+        
+        // Text feedback
+        cursor.style.left = (drawX + 20) + 'px';
+        cursor.style.top = (drawY - 20) + 'px';
+        cursor.innerText = `${Math.round(pitch)}Hz`;
+        cursor.classList.add('visible');
+    }
+
+    requestAnimationFrame(loop);
+}
+
+startBtn.addEventListener('click', toggle);
+
+waveformSel.addEventListener('change', (e) => {
+    if (oscillator) {
+        oscillator.type = e.target.value;
+    }
+});
+
+</script>
+</body>
+</html>

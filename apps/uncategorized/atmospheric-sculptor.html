@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Atmospheric Sculptor</title>
+    <meta name="description" content="Control temperature and humidity gradients to form clouds, watching vapor condense into cirrus wisps or cumulus puffs">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a2a40; min-height: 100vh; font-family: 'Georgia', serif; color: #8090a0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(20,30,50,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(100,150,200,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #a0c0e0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #b0d0f0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(60,100,140,0.4); border: 1px solid rgba(100,150,200,0.4);
+            color: #90b0d0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #607090; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Atmospheric Sculptor</h3>
+        <div class="control-row">
+            <label>Humidity <span class="value" id="humid-val">60</span>%</label>
+            <input type="range" id="humid" min="20" max="100" value="60">
+        </div>
+        <div class="control-row">
+            <label>Wind Speed <span class="value" id="wind-val">30</span></label>
+            <input type="range" id="wind" min="0" max="80" value="30">
+        </div>
+        <button id="seed-btn">Seed Cloud (click sky)</button>
+        <button id="clear-btn">Clear Atmosphere</button>
+    </div>
+    <div id="stats">
+        <div>Particles: <span id="particle-count">0</span></div>
+        <div>Clouds: <span id="cloud-count">0</span></div>
+    </div>
+    <div id="info">Click to seed condensation nuclei | Watch vapor form into clouds</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initParticles(); }
+        
+        let humidity = 0.6;
+        let windSpeed = 0.3;
+        let time = 0;
+        let seedMode = false;
+        
+        const particles = [];
+        const clouds = [];
+        const seeds = [];
+        
+        function getTemperatureAt(y) {
+            return 1 - (y / H);
+        }
+        
+        function getDewPointAt(y) {
+            const temp = getTemperatureAt(y);
+            return temp * humidity;
+        }
+        
+        class VaporParticle {
+            constructor(x, y) {
+                this.x = x || Math.random() * W;
+                this.y = y || H - Math.random() * 100;
+                this.vx = 0;
+                this.vy = -0.5 - Math.random() * 0.5;
+                this.size = 2 + Math.random() * 2;
+                this.condensed = false;
+                this.alpha = 0.3 + Math.random() * 0.3;
+                this.cloud = null;
+            }
+            
+            update() {
+                const temp = getTemperatureAt(this.y);
+                const dewPoint = getDewPointAt(this.y);
+                
+                this.vx += (Math.random() - 0.5) * 0.1;
+                this.vx += windSpeed * 0.02;
+                this.vx *= 0.98;
+                
+                if (!this.condensed) {
+                    this.vy = -0.3 - (1 - temp) * 0.5;
+                    
+                    if (temp < dewPoint) {
+                        const nearSeed = seeds.find(s => Math.hypot(s.x - this.x, s.y - this.y) < 50);
+                        if (nearSeed || Math.random() < 0.01 * humidity) {
+                            this.condense();
+                        }
+                    }
+                } else {
+                    this.vy *= 0.95;
+                    if (this.cloud) {
+                        const dx = this.cloud.x - this.x;
+                        const dy = this.cloud.y - this.y;
+                        this.vx += dx * 0.001;
+                        this.vy += dy * 0.001;
+                    }
+                }
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                if (this.x < 0) this.x = W;
+                if (this.x > W) this.x = 0;
+                if (this.y < 0) {
+                    this.y = H;
+                    this.condensed = false;
+                    this.cloud = null;
+                }
+                if (this.y > H) this.y = 0;
+            }
+            
+            condense() {
+                this.condensed = true;
+                this.size *= 1.5;
+                this.alpha = 0.6;
+                
+                let nearestCloud = null;
+                let minDist = 100;
+                
+                clouds.forEach(cloud => {
+                    const dist = Math.hypot(cloud.x - this.x, cloud.y - this.y);
+                    if (dist < minDist) {
+                        minDist = dist;
+                        nearestCloud = cloud;
+                    }
+                });
+                
+                if (nearestCloud) {
+                    this.cloud = nearestCloud;
+                    nearestCloud.particles.push(this);
+                } else {
+                    const newCloud = new Cloud(this.x, this.y);
+                    newCloud.particles.push(this);
+                    this.cloud = newCloud;
+                    clouds.push(newCloud);
+                }
+            }
+            
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+                
+                if (this.condensed) {
+                    ctx.fillStyle = "rgba(255, 255, 255, " + this.alpha + ")";
+                } else {
+                    const temp = getTemperatureAt(this.y);
+                    const hue = 200 + temp * 20;
+                    ctx.fillStyle = "hsla(" + hue + ", 50%, 70%, " + (this.alpha * 0.5) + ")";
+                }
+                ctx.fill();
+            }
+        }
+        
+        class Cloud {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.particles = [];
+                this.type = this.determineType(y);
+            }
+            
+            determineType(y) {
+                const altitude = 1 - (y / H);
+                if (altitude > 0.7) return 'cirrus';
+                if (altitude > 0.4) return 'cumulus';
+                return 'stratus';
+            }
+            
+            update() {
+                if (this.particles.length === 0) return false;
+                
+                let sumX = 0, sumY = 0;
+                this.particles.forEach(p => {
+                    sumX += p.x;
+                    sumY += p.y;
+                });
+                this.x = sumX / this.particles.length;
+                this.y = sumY / this.particles.length;
+                
+                this.type = this.determineType(this.y);
+                
+                return true;
+            }
+            
+            draw() {
+                if (this.particles.length < 3) return;
+                
+                const radius = Math.sqrt(this.particles.length) * 10;
+                const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, radius);
+                
+                if (this.type === 'cirrus') {
+                    gradient.addColorStop(0, 'rgba(220, 240, 255, 0.2)');
+                    gradient.addColorStop(1, 'transparent');
+                } else if (this.type === 'cumulus') {
+                    gradient.addColorStop(0, 'rgba(255, 255, 255, 0.3)');
+                    gradient.addColorStop(0.5, 'rgba(240, 245, 255, 0.15)');
+                    gradient.addColorStop(1, 'transparent');
+                } else {
+                    gradient.addColorStop(0, 'rgba(200, 210, 220, 0.25)');
+                    gradient.addColorStop(1, 'transparent');
+                }
+                
+                ctx.fillStyle = gradient;
+                ctx.fillRect(this.x - radius, this.y - radius, radius * 2, radius * 2);
+            }
+        }
+        
+        function initParticles() {
+            particles.length = 0;
+            const count = Math.floor((W * H) / 3000);
+            for (let i = 0; i < count; i++) {
+                particles.push(new VaporParticle());
+            }
+        }
+        
+        resize(); window.onresize = resize;
+        
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H);
+            gradient.addColorStop(0, '#0a1525');
+            gradient.addColorStop(0.3, '#1a3050');
+            gradient.addColorStop(0.7, '#3a5070');
+            gradient.addColorStop(1, '#7090a0');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+            
+            ctx.fillStyle = 'rgba(255, 200, 100, 0.8)';
+            ctx.beginPath();
+            ctx.arc(W * 0.85, H - 50, 30, 0, Math.PI, true);
+            ctx.fill();
+            
+            const sunGlow = ctx.createRadialGradient(W * 0.85, H, 0, W * 0.85, H, 150);
+            sunGlow.addColorStop(0, 'rgba(255, 180, 100, 0.3)');
+            sunGlow.addColorStop(1, 'transparent');
+            ctx.fillStyle = sunGlow;
+            ctx.fillRect(W * 0.6, H - 150, W * 0.5, 150);
+        }
+        
+        function drawTemperatureGuide() {
+            ctx.globalAlpha = 0.3;
+            for (let y = 0; y < H; y += 50) {
+                const temp = getTemperatureAt(y);
+                const dewPoint = getDewPointAt(y);
+                
+                if (temp < dewPoint) {
+                    ctx.fillStyle = 'rgba(200, 220, 255, 0.1)';
+                    ctx.fillRect(0, y, W, 50);
+                }
+            }
+            ctx.globalAlpha = 1;
+        }
+        
+        function drawSeeds() {
+            seeds.forEach(seed => {
+                seed.life -= 0.005;
+                
+                ctx.beginPath();
+                ctx.arc(seed.x, seed.y, 5 * seed.life, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(200, 255, 255, " + seed.life + ")";
+                ctx.fill();
+            });
+            
+            for (let i = seeds.length - 1; i >= 0; i--) {
+                if (seeds[i].life <= 0) seeds.splice(i, 1);
+            }
+        }
+        
+        function updateStats() {
+            document.getElementById('particle-count').textContent = particles.length;
+            document.getElementById('cloud-count').textContent = clouds.filter(c => c.particles.length > 2).length;
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawTemperatureGuide();
+            
+            for (let i = clouds.length - 1; i >= 0; i--) {
+                if (!clouds[i].update()) {
+                    clouds.splice(i, 1);
+                } else {
+                    clouds[i].draw();
+                }
+            }
+            
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+            });
+            
+            drawSeeds();
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 250) return;
+            
+            if (seedMode) {
+                seeds.push({ x: e.clientX, y: e.clientY, life: 1 });
+                
+                for (let i = 0; i < 10; i++) {
+                    particles.push(new VaporParticle(
+                        e.clientX + (Math.random() - 0.5) * 50,
+                        e.clientY + (Math.random() - 0.5) * 50
+                    ));
+                }
+            }
+        };
+        
+        document.getElementById('humid').oninput = e => {
+            humidity = e.target.value / 100;
+            document.getElementById('humid-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('wind').oninput = e => {
+            windSpeed = e.target.value / 100;
+            document.getElementById('wind-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('seed-btn').onclick = () => {
+            seedMode = !seedMode;
+            document.getElementById('seed-btn').textContent = seedMode ? 
+                'Seeding... (click to stop)' : 'Seed Cloud (click sky)';
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            particles.forEach(p => {
+                p.condensed = false;
+                p.cloud = null;
+            });
+            clouds.length = 0;
+            seeds.length = 0;
+        };
+        
+        seedMode = true;
+        animate();
+    </script>
+</body>
+</html>
