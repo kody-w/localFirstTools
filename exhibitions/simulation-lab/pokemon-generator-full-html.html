@@ -762,24 +762,95 @@ Pokemon concept: ${name}
 RESPOND ONLY WITH VALID JSON. DO NOT INCLUDE ANY OTHER TEXT.`;
 
                 try {
-                    const response = await fetch("https://api.anthropic.com/v1/messages", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                        },
-                        body: JSON.stringify({
-                            model: "claude-sonnet-4-20250514",
-                            max_tokens: 2000,
-                            messages: [{ role: "user", content: prompt }]
-                        })
+                    // Talk to local openrappter gateway via its WebSocket
+                    // RPC (openclaw protocol v3). Endpoint is configurable via
+                    // localStorage so you can point at a remote tunnel if you
+                    // like.  Default: ws://127.0.0.1:18790
+                    //
+                    // Note: when this page is served over https (e.g. GitHub
+                    // Pages), the browser will block ws:// as mixed content.
+                    // Serve locally — `python3 -m http.server 8000` — or set
+                    // localStorage.openrappterUrl to a wss:// tunnel.
+                    const wsUrl = localStorage.getItem('openrappterUrl') ||
+                                  `ws://${location.hostname === 'localhost' ? 'localhost' : '127.0.0.1'}:18790`;
+
+                    let responseText = await new Promise((resolve, reject) => {
+                        let ws;
+                        try { ws = new WebSocket(wsUrl); }
+                        catch (e) { reject(e); return; }
+
+                        let rid = 0;
+                        const pending = new Map();
+                        let collected = "";
+                        let settled = false;
+                        const settle = (fn, v) => { if (settled) return; settled = true; fn(v); try { ws.close(); } catch {} };
+
+                        const call = (method, params) => {
+                            const id = `r_${++rid}_${Date.now()}`;
+                            return new Promise((res, rej) => {
+                                pending.set(id, { res, rej });
+                                ws.send(JSON.stringify({ type: 'req', id, method, params }));
+                            });
+                        };
+
+                        const timeout = setTimeout(
+                            () => settle(reject, new Error('openrappter timed out (60s)')),
+                            60000
+                        );
+
+                        ws.addEventListener('open', async () => {
+                            try {
+                                await call('connect', {
+                                    minProtocol: 3, maxProtocol: 3,
+                                    client: { id: 'pokemon-gen', displayName: 'Pokemon Generator', version: '1.0.0', platform: 'web', mode: 'webchat' },
+                                    caps: [],
+                                });
+                                await call('chat.send', {
+                                    sessionKey: `pokemon_${Date.now()}`,
+                                    message: prompt,
+                                    idempotencyKey: `idem_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+                                });
+                                // chat.send ACKs; text arrives via broadcast events below.
+                            } catch (err) {
+                                settle(reject, err);
+                            }
+                        });
+
+                        ws.addEventListener('message', (ev) => {
+                            let msg;
+                            try { msg = JSON.parse(ev.data); } catch { return; }
+
+                            if (msg.type === 'res' && pending.has(msg.id)) {
+                                const p = pending.get(msg.id);
+                                pending.delete(msg.id);
+                                msg.error ? p.rej(new Error(msg.error.message || 'RPC error')) : p.res(msg.result);
+                                return;
+                            }
+
+                            if (msg.type === 'broadcast' || msg.type === 'event' || msg.event === 'chat') {
+                                const payload = msg.params || msg.data || msg;
+                                // Accumulate any text delta/content fields we can find
+                                const delta = payload.delta || payload.content || payload.text || payload.chunk;
+                                if (typeof delta === 'string') collected += delta;
+                                if (payload.done || payload.complete || payload.status === 'complete') {
+                                    clearTimeout(timeout);
+                                    settle(resolve, collected);
+                                }
+                            }
+                        });
+
+                        ws.addEventListener('close', () => {
+                            clearTimeout(timeout);
+                            if (!settled) {
+                                if (collected) settle(resolve, collected);
+                                else settle(reject, new Error('openrappter closed before replying — is the gateway running on ' + wsUrl + '?'));
+                            }
+                        });
+                        ws.addEventListener('error', () => {
+                            clearTimeout(timeout);
+                            settle(reject, new Error('could not connect to openrappter at ' + wsUrl + ' (is the gateway running? mixed-content blocked if page served over https)'));
+                        });
                     });
-                    
-                    if (!response.ok) {
-                        throw new Error(`API request failed: ${response.status}`);
-                    }
-                    
-                    const data = await response.json();
-                    let responseText = data.content[0].text;
                     
                     // Clean up the response
                     responseText = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
