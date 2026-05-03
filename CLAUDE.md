@@ -9,17 +9,22 @@ localFirstTools is a collection of self-contained HTML applications that follow 
 ## Key Architecture Principles
 
 1. **Self-Contained HTML Files**: Every application is a single HTML file with all CSS and JavaScript inline. Never split these into separate files.
-2. **No External Dependencies**: Applications must work offline. Do not add CDN links or npm packages.
-3. **Gallery System**: The index.html serves as a launcher. New applications are automatically discovered by the Python updater scripts.
-4. **JSON Configuration**: Applications are registered in `data/config/utility_apps_config.json` with metadata including title, category, description, and filename.
+2. **No External Dependencies for new apps**: New productivity/utility/business apps must work fully offline (no CDN links, no npm packages). A small set of legacy 3D/P2P apps and three showcase apps (`apps/ai-tools/local-llm.html`, `apps/productivity/mesh-board.html`, `apps/development/sql-time-capsule.html`) load Three.js / PeerJS / WebLLM / Yjs / sql.js from CDN — leave those alone, but don't introduce CDNs in new apps.
+3. **Gallery System**: Root `index.html` IS the gallery launcher. (Earlier in this repo's history root `index.html` was a P2P world; that has been moved to `apps/p2p-world/networked-world.html` with a `?room=…` redirect shim at root for backwards compatibility.)
+4. **JSON Configuration**: Applications are registered in `data/config/utility_apps_config.json` with `{id, title, description, tags, path, icon, category, aliases}`. IDs are path-based (`category__filename-stem`) to guarantee uniqueness.
 
 ## Commands
 
 ### Update Gallery Configuration
 ```bash
-python3 archive/app-store-updater.py
+python3 scripts/regenerate_registry.py
+# Optional flags:
+python3 scripts/regenerate_registry.py --dry-run   # preview, no write
+python3 scripts/regenerate_registry.py --check     # exit 1 on duplicate IDs
 ```
-Updates the `data/config/utility_apps_config.json` file by scanning for HTML applications.
+Regenerates `data/config/utility_apps_config.json` by walking `apps/**/*.html`. Read-only — never moves files. Extracts `<title>`, `<meta name="description">`, `<meta name="keywords">`, `<meta name="icon">` from each HTML; falls back to first `<h1>`/`<p>` then a category-based default.
+
+The two older organizers (`intelligent_organizer.py`, `organize_files.py`) are now in `archive/*.deprecated` — do not run them. Their `--execute` mode reshuffles files based on filename heuristics regardless of current placement.
 
 ### Build Xbox Extension
 ```bash
@@ -69,32 +74,37 @@ Testing is done manually in the browser. When modifying applications:
 ### Core Structure
 ```
 localFirstTools/
-├── index.html                       # Main gallery/launcher (DO NOT MOVE)
-├── apps/                           # All HTML applications by category
-│   ├── games/                      # Games and entertainment
-│   ├── productivity/               # Productivity tools
-│   ├── business/                   # Business applications
-│   ├── development/                # Developer tools
-│   ├── media/                      # Media and music tools
-│   ├── education/                  # Educational tools
-│   ├── ai-tools/                   # AI-powered tools
+├── index.html                       # The gallery launcher (DO NOT MOVE)
+├── apps/                            # All HTML applications by category
+│   ├── games/                       # Games and entertainment
+│   ├── productivity/                # Productivity tools
+│   ├── business/                    # Business applications
+│   ├── development/                 # Developer tools
+│   ├── media/                       # Media and music tools
+│   ├── education/                   # Educational tools
+│   ├── ai-tools/                    # AI-powered tools
 │   ├── health/                     # Health and wellness
-│   ├── utilities/                  # General utilities
-│   └── index-variants/             # Alternative index pages
-├── data/                           
+│   ├── utilities/                   # General utilities (incl. recommender, telepathy bus, NL patcher)
+│   ├── p2p-world/                   # Three.js + PeerJS networked worlds (incl. networked-world.html)
+│   ├── quantum-worlds/              # 3D collaborative experiences (incl. portal-hub.html)
+│   └── index-variants/              # Alternative gallery snapshots
+├── data/
 │   ├── config/
 │   │   └── utility_apps_config.json  # Auto-generated app registry
 │   └── games/                        # Game configuration files
-├── scripts/                          # Utility shell scripts
-├── archive/                          # Archived versions and updater script
-└── edgeAddons/                       
+├── scripts/
+│   ├── regenerate_registry.py        # The ONE registry generator (read-only)
+│   ├── forge-bridge.py               # Local NL→app forge HTTP server (port 7711)
+│   └── *.sh                          # Various one-off setup scripts
+├── archive/                          # Deprecated experiments + provenance
+└── edgeAddons/
     └── xbox-mkb-extension/           # Xbox controller support
 ```
 
 ### Important Files
-- **index.html**: Main gallery launcher (must remain in root)
-- **data/config/utility_apps_config.json**: Application registry used by gallery
-- **archive/app-store-updater.py**: Python script for updating app configuration
+- **index.html**: The gallery launcher (root). Old `apps/utilities/index_sorting.html` is now a redirect stub that forwards to root.
+- **data/config/utility_apps_config.json**: Application registry consumed by the gallery
+- **scripts/regenerate_registry.py**: The canonical registry generator (replaces the deprecated `intelligent_organizer.py` and `organize_files.py`)
 
 ## File Naming Conventions
 
