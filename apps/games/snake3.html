@@ -586,5 +586,112 @@
         // Start the game
         const wormGame = new MinecraftWormGame();
     </script>
+
+    <!-- === Telepathy bus integration: publish on 'score' channel === -->
+    <!-- Graceful: feature-detects BroadcastChannel, falls back to localStorage,
+         and is fully wrapped in try/catch so the game still runs if anything fails. -->
+    <script>
+    (function () {
+        try {
+            // --- Idempotent bus snippet ---
+            if (!(window.bus && window.bus.__telepathy)) {
+                var subs = Object.create(null), seen = Object.create(null), bc = null;
+                try {
+                    if (typeof BroadcastChannel !== 'undefined') {
+                        bc = new BroadcastChannel('telepathy');
+                        bc.onmessage = function (ev) {
+                            var m = ev && ev.data;
+                            if (!m || !m.id || seen[m.id]) return;
+                            seen[m.id] = 1; dispatch(m);
+                        };
+                    }
+                } catch (e) { bc = null; }
+                function dispatch(m) {
+                    var l = (subs[m.channel] || []).concat(subs['*'] || []);
+                    l.forEach(function (fn) { try { fn(m.payload, m); } catch (_){} });
+                }
+                try {
+                    window.addEventListener('storage', function (ev) {
+                        if (!ev.key || ev.key.indexOf('telepathy:msg:') !== 0 || !ev.newValue) return;
+                        try {
+                            var m = JSON.parse(ev.newValue);
+                            if (!m || !m.id || seen[m.id]) return;
+                            seen[m.id] = 1; dispatch(m);
+                        } catch (_) {}
+                    });
+                } catch (_) {}
+                window.bus = {
+                    __telepathy: true,
+                    transport: bc ? 'BroadcastChannel' : 'storage',
+                    publish: function (channel, payload) {
+                        var msg = {
+                            id: Date.now() + '-' + Math.random().toString(36).slice(2, 8),
+                            channel: String(channel), payload: payload, ts: Date.now(),
+                            src: (location && location.pathname) || ''
+                        };
+                        seen[msg.id] = 1;
+                        try {
+                            var k = 'telepathy:history:' + msg.channel;
+                            var h = JSON.parse(localStorage.getItem(k)) || [];
+                            h.push(msg); while (h.length > 50) h.shift();
+                            localStorage.setItem(k, JSON.stringify(h));
+                        } catch (_) {}
+                        dispatch(msg);
+                        try { if (bc) bc.postMessage(msg); } catch (_) {}
+                        try { localStorage.setItem('telepathy:msg:' + msg.channel, JSON.stringify(msg)); } catch (_) {}
+                        return msg;
+                    },
+                    subscribe: function (c, f) {
+                        if (typeof f !== 'function') return function(){};
+                        (subs[c] = subs[c] || []).push(f);
+                        return function () { subs[c] = (subs[c] || []).filter(function (g) { return g !== f; }); };
+                    },
+                    history: function (c, n) {
+                        try {
+                            var h = JSON.parse(localStorage.getItem('telepathy:history:' + c)) || [];
+                            return (typeof n === 'number' && n > 0) ? h.slice(-n) : h;
+                        } catch (_) { return []; }
+                    }
+                };
+            }
+
+            // --- Snake-specific publishing ---
+            if (!window.wormGame) return;
+            function publish(score) {
+                try {
+                    window.bus.publish('score', {
+                        game: 'snake',
+                        score: Number(score) || 0,
+                        timestamp: Date.now()
+                    });
+                } catch (_) {}
+            }
+
+            // 1) Wrap gameOver() so we publish a final-score event on game over.
+            try {
+                var origGameOver = wormGame.gameOver.bind(wormGame);
+                wormGame.gameOver = function () {
+                    var s = this.score;
+                    var r = origGameOver();
+                    publish(s);
+                    return r;
+                };
+            } catch (_) {}
+
+            // 2) Watch score for in-game changes (snake increments score on food).
+            //    Polling avoids modifying the existing game-loop code.
+            var lastScore = (typeof wormGame.score === 'number') ? wormGame.score : 0;
+            setInterval(function () {
+                try {
+                    var s = wormGame.score;
+                    if (typeof s === 'number' && s !== lastScore) {
+                        lastScore = s;
+                        publish(s);
+                    }
+                } catch (_) {}
+            }, 250);
+        } catch (_) { /* bus integration is best-effort; game still works */ }
+    })();
+    </script>
 </body>
 </html>
