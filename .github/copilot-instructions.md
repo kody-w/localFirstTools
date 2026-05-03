@@ -19,9 +19,13 @@ The launcher reads metadata directly from the registry. `generateArtworkMetadata
 
 The old path `apps/utilities/index_sorting.html` is now a thin redirect stub that forwards to `../../index.html`. Don't restore real launcher code there.
 
-## "Local-first" — the rule and the real exceptions
+## CDNs are welcome
 
-`CLAUDE.md` states "no CDN links, no npm packages." That holds for the **vast majority** of apps and any new productivity/utility/business app you add. However, a handful of 3D/P2P apps in this repo (`apps/p2p-world/*`, `apps/quantum-worlds/quantum-worlds-store.html`, `apps/quantum-worlds/portal-hub.html`, several `apps/games/*` worlds, plus three new showcase apps that depend on WebGPU/Yjs/sql.js: `apps/ai-tools/local-llm.html`, `apps/productivity/mesh-board.html`, `apps/development/sql-time-capsule.html`) **do** load Three.js, PeerJS, jsQR, qrcodejs, WebLLM, Yjs, or sql.js from CDNs because there is no practical inline alternative. When editing those files, leave the existing `<script src="https://cdn.jsdelivr.net/...">` tags alone; when creating a new generic app, do **not** add CDN links.
+External libraries via CDN are fine. When a library makes the app dramatically better — Three.js for 3D scenes, PeerJS for P2P data channels, jsQR / qrcodejs for camera/QR plumbing, WebLLM for in-browser inference, Yjs for CRDTs, sql.js for embedded SQLite, HTMX for snappy interactions — just `<script src="https://cdn.jsdelivr.net/...">` it.
+
+Apps that already do this include `apps/p2p-world/*`, `apps/quantum-worlds/*`, several `apps/games/*` worlds, `apps/ai-tools/local-llm.html`, `apps/productivity/mesh-board.html`, `apps/development/sql-time-capsule.html`, and the gallery launcher itself. Don't strip their CDN links; don't be afraid to add new ones in new apps.
+
+The "local-first" name describes where the user's *data* lives (in their browser, not a server) — not a doctrine about libraries.
 
 ## Adding or moving an app
 

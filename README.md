@@ -1,6 +1,6 @@
 # localFirstTools
 
-A growing collection of **single-file HTML applications** that run entirely in your browser, with no servers, no build step, and no external dependencies (with a few clearly-marked exceptions for 3D/P2P apps that need Three.js or WebLLM).
+A growing collection of **single-file HTML applications** that run entirely in your browser, with no servers and no build step. Plenty of apps freely use external libraries via CDN (Three.js, PeerJS, sql.js, WebLLM, qrcodejs, Yjs, HTMX, etc.) — that's exactly what CDNs are for. The "local-first" name describes where your *data* lives (in your browser, not on a server), not a ban on libraries.
 
 Open the gallery, pick an app, and press **Save** to download the HTML for fully-offline use. Your data stays in `localStorage`; every app exposes JSON import/export so you can move it between devices.
 

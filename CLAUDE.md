@@ -4,12 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-localFirstTools is a collection of self-contained HTML applications that follow a "local-first" philosophy. Each HTML file is a complete application with inline CSS and JavaScript, requiring no build process or external dependencies.
+localFirstTools is a collection of self-contained HTML applications. Each HTML file is a complete application with inline CSS and JavaScript and no build step — open it in any browser and it just runs.
+
+The "local-first" name describes the *philosophy* (your data stays in your browser; the app keeps working when you're offline), not a religion about dependencies. **CDNs are completely fine.** Plenty of apps in this repo pull Three.js, PeerJS, qrcodejs, WebLLM, Yjs, sql.js, HTMX, etc. from CDNs because there's no practical inline alternative — and that's exactly what CDNs are for.
 
 ## Key Architecture Principles
 
-1. **Self-Contained HTML Files**: Every application is a single HTML file with all CSS and JavaScript inline. Never split these into separate files.
-2. **No External Dependencies for new apps**: New productivity/utility/business apps must work fully offline (no CDN links, no npm packages). A small set of legacy 3D/P2P apps and three showcase apps (`apps/ai-tools/local-llm.html`, `apps/productivity/mesh-board.html`, `apps/development/sql-time-capsule.html`) load Three.js / PeerJS / WebLLM / Yjs / sql.js from CDN — leave those alone, but don't introduce CDNs in new apps.
+1. **Self-Contained HTML Files**: Every application is a single HTML file with its CSS and JavaScript inline. Don't split an app into companion `.css` / `.js` files; keep it as one shippable artifact.
+2. **External Libraries via CDN are Welcome**: When a library makes the app dramatically better (Three.js for 3D, PeerJS for P2P, sql.js for embedded SQLite, WebLLM for in-browser AI, etc.), pull it from a CDN. No npm, no bundlers, no build step.
 3. **Gallery System**: Root `index.html` IS the gallery launcher. (Earlier in this repo's history root `index.html` was a P2P world; that has been moved to `apps/p2p-world/networked-world.html` with a `?room=…` redirect shim at root for backwards compatibility.)
 4. **JSON Configuration**: Applications are registered in `data/config/utility_apps_config.json` with `{id, title, description, tags, path, icon, category, aliases}`. IDs are path-based (`category__filename-stem`) to guarantee uniqueness.
 
