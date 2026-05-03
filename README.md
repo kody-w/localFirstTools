@@ -22,6 +22,35 @@ https://kody-w.github.io/localFirstTools/index.html
 - **📥 Import/Export**: Full JSON import/export for data portability
 - **🎮 100+ Tools**: Games, creative tools, productivity apps, P2P experiments, AI tools, and more
 
+## 🆕 Recently added (May 2026)
+
+A sister fork's parallel-build session landed in [PR #11](https://github.com/kody-w/localFirstTools/pull/11) with 16 new showcase apps + a systematic bug fix for 60 occurrences of an `<a href="../../${url}">` href construction bug across 26 existing apps.
+
+**Showcase apps:**
+
+| Try it | What it is |
+|---|---|
+| [🌀 Portal Hub](https://kody-w.github.io/localFirstTools/apps/quantum-worlds/portal-hub.html) | Three.js + PeerJS meta-universe linking 10 quantum worlds. Walk through portals, see other peers as glowing capsules, share rooms via QR. |
+| [🤖 Local LLM](https://kody-w.github.io/localFirstTools/apps/ai-tools/local-llm.html) | WebGPU + WebLLM. First load downloads & caches the model in OPFS (~1.5GB, takes a few minutes); after that it's fully offline. |
+| [🛠️ App-Forge](https://kody-w.github.io/localFirstTools/apps/ai-tools/app-forge.html) | Natural language → single-file app. Pair with `scripts/forge-bridge.py` (run on `127.0.0.1:7711`) for end-to-end agent build. |
+| [🎨 Mesh-Board](https://kody-w.github.io/localFirstTools/apps/productivity/mesh-board.html) | Yjs CRDT over PeerJS — infinite canvas with embedded iframe widgets. Two browsers, one shared whiteboard, no server. |
+| [📼 Session Recorder](https://kody-w.github.io/localFirstTools/apps/development/session-recorder.html) | Records any iframe-loaded app at 30Hz mutation deltas; replays frame-by-frame. |
+| [🔐 SQL Time-Capsule](https://kody-w.github.io/localFirstTools/apps/development/sql-time-capsule.html) | sql.js + SHA-256 Merkle-chained query log. Tamper-evident replayable database history. |
+| [🎵 Symphonic Defense](https://kody-w.github.io/localFirstTools/apps/games/symphonic-defense.html) | Tower defense where waves and tower abilities are driven by audio-synth tracks. |
+| [⚔️ P2P Battle Arena](https://kody-w.github.io/localFirstTools/apps/p2p-world/p2p-battle-arena.html) | Real-time browser-to-browser battle game over PeerJS, no server required. |
+| [🎉 Party Planner Network](https://kody-w.github.io/localFirstTools/apps/p2p-world/party-planner-network.html) | Distributed party planning with shared state synced over PeerJS. |
+| [👁️ Synesthesia](https://kody-w.github.io/localFirstTools/apps/media/synesthesia.html) | Webcam → Web Audio synth; 750 B–1.5 KB per minute streamed audio-visual feed. |
+| [🏆 Unified Leaderboard](https://kody-w.github.io/localFirstTools/apps/business/unified-leaderboard.html) | Subscribes to the `'score'` telepathy channel (BroadcastChannel + localStorage fallback) and persists best scores cross-tab. |
+| [🎯 Gallery — For You](https://kody-w.github.io/localFirstTools/apps/utilities/gallery-foryou.html) | TF-IDF + dwell-time-weighted recommender. Surfaces relevant apps as you browse. |
+| [🪄 NL Patcher](https://kody-w.github.io/localFirstTools/apps/utilities/nl-patcher.html) | Natural-language → CSS/text patches persisted to localStorage; live re-apply. |
+| [📡 Telepathy Bus](https://kody-w.github.io/localFirstTools/apps/utilities/telepathy-bus.html) | Cross-app pub/sub demo via BroadcastChannel + localStorage fallback. |
+| [🗄️ DB Viewer](https://kody-w.github.io/localFirstTools/apps/development/db-viewer.html) | Browse/query in-browser databases (IndexedDB, OPFS, sql.js). |
+| [🎨 Vibe Coding Gallery](https://kody-w.github.io/localFirstTools/apps/index-variants/vibe-coding-gallery.html) | Alternative experimental gallery layout with a vibe-driven discovery flow. |
+
+**Try the cross-app pub/sub demo:** open [`/snake3.html`](https://kody-w.github.io/localFirstTools/snake3.html) and [`/apps/business/unified-leaderboard.html`](https://kody-w.github.io/localFirstTools/apps/business/unified-leaderboard.html) side-by-side. Play snake; the leaderboard updates live via `BroadcastChannel('score')` with no shared backend.
+
+**Backwards-compat:** old `?room=<id>` P2P share links (`/index.html?room=abc`) still work — the gallery has a JS shim that redirects them to `apps/p2p-world/networked-world.html` with the room param preserved.
+
 ## 🚀 Quick Start
 
 ### Option 1: Use Online
