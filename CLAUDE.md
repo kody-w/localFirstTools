@@ -4,15 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-localFirstTools is a collection of self-contained HTML applications following a "local-first" philosophy. Each HTML file is a complete application with inline CSS and JavaScript, requiring no build process or external dependencies. The project includes 100+ interactive tools, games, and creative applications accessible through a gallery launcher.
+localFirstTools is a collection of self-contained HTML applications. Each HTML file is a complete application with inline CSS and JavaScript and no build step — open it in any browser and it just runs. The project includes 100+ interactive tools, games, and creative applications discoverable through a gallery launcher.
+
+The "local-first" name describes the *philosophy* (your data stays in your browser; the app keeps working when you're offline), not a religion about dependencies. **CDNs are completely fine.** Plenty of apps in this repo pull Three.js, PeerJS, qrcodejs, WebLLM, Yjs, sql.js, HTMX, etc. from CDNs because there's no practical inline alternative — and that's exactly what CDNs are for.
 
 ## Key Architecture Principles
 
-1. **Self-Contained HTML Files**: Every application is a single HTML file with all CSS and JavaScript inline. Never split these into separate files.
-2. **No External Dependencies**: Applications must work offline. Do not add CDN links or npm packages.
-3. **Gallery System**: The index.html serves as a launcher that reads from vibe_gallery_config.json for application discovery.
-4. **Auto-Discovery**: Python scripts automatically scan HTML files and extract metadata for categorization.
-5. **Flat File Structure**: Currently, all HTML applications reside in the root directory (not in subdirectories).
+1. **Self-Contained HTML Files**: Every application is a single HTML file with its CSS and JavaScript inline. Don't split an app into separate `.css` / `.js` companion files; keep it as one shippable artifact.
+2. **External Libraries via CDN are Welcome**: When a library makes the app dramatically better (Three.js for 3D, PeerJS for P2P, sql.js for embedded SQLite, WebLLM for in-browser AI, etc.), pull it from a CDN. No npm, no bundlers, no build step.
+3. **Gallery System**: The root `index.html` is a launcher that reads `vibe_gallery_config.json` for application discovery and metadata.
+4. **Auto-Discovery**: Python scripts (`vibe_gallery_updater.py` and friends) scan HTML files and extract metadata.
+5. **Local Persistence**: Apps store user data in `localStorage` / IndexedDB / OPFS. Every app should expose a JSON import/export so users can move state between devices.
 
 ## Commands
 

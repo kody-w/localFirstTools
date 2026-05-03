@@ -1,6 +1,8 @@
 # Local First Tools 🛠️
 
-A curated collection of **100+ self-contained HTML applications** following the "local-first" philosophy. Every tool works completely offline, with no external dependencies, no build process, and no tracking.
+A curated collection of **100+ self-contained HTML applications**. Every tool is one HTML file you can open directly in your browser, with no build step. Data stays local in your browser; everything keeps working when you're offline.
+
+**CDNs are welcome.** "Local-first" describes where your *data* lives — not a ban on libraries. Apps freely pull Three.js, PeerJS, sql.js, WebLLM, qrcodejs, HTMX, etc. from CDNs when those libraries make the app dramatically better.
 
 https://kody-w.github.io/localFirstTools/index.html
 
@@ -11,14 +13,14 @@ https://kody-w.github.io/localFirstTools/index.html
 
 ## ✨ Features
 
-- **🔒 Offline-First**: Every application works completely offline
-- **🎯 Zero Dependencies**: No CDN links, no npm packages, no build process
-- **📦 Self-Contained**: Each HTML file is a complete application
+- **🔒 Local-First Data**: Every app stores your data in your browser, not on a server
+- **📦 Self-Contained**: Each HTML file is a complete application — open and go
+- **⚡ Zero Build Step**: No npm, no webpack, no compilation
+- **🌐 CDN-Powered When Useful**: Three.js, PeerJS, WebLLM, sql.js, etc. via CDN when they make the app better
 - **🎨 Beautiful Gallery**: Browse tools in a modern, animated gallery interface
-- **🌐 3D Experience**: Explore tools in an immersive 3D virtual gallery
-- **💾 Data Privacy**: All data stays local in your browser
+- **🪐 3D Experience**: Walk through the collection in an immersive Three.js gallery
 - **📥 Import/Export**: Full JSON import/export for data portability
-- **🎮 100+ Tools**: Games, creative tools, productivity apps, and more
+- **🎮 100+ Tools**: Games, creative tools, productivity apps, P2P experiments, AI tools, and more
 
 ## 🚀 Quick Start
 
@@ -107,12 +109,12 @@ python3 vibe_gallery_updater.py
 
 ### Key Principles
 
-- ✅ **Self-Contained**: All CSS and JavaScript must be inline
-- ✅ **No External Dependencies**: No CDN links, no npm packages
-- ✅ **Offline-First**: Must work without internet connection
-- ✅ **Data Import/Export**: Include JSON import/export functionality
+- ✅ **Self-Contained**: Each app is one HTML file (CSS and JavaScript inline)
+- ✅ **No Build Step**: Open in any browser; no npm install, no webpack
+- ✅ **External Libraries via CDN are fine**: Use Three.js, PeerJS, WebLLM, sql.js, qrcodejs, HTMX, etc. when they help
+- ✅ **Local-First Data**: User data lives in localStorage / IndexedDB / OPFS — not on a server
+- ✅ **Data Import/Export**: Include JSON import/export so users can move state between devices
 - ✅ **Responsive Design**: Works on desktop and mobile devices
-- ✅ **Local Storage**: Use browser localStorage for persistence
 
 ### Development Commands
 
@@ -178,12 +180,12 @@ Or use specific technologies in your code:
 
 ### Local-First Philosophy
 
-Every application in this collection adheres to these principles:
+Every application in this collection follows these principles:
 
-1. **Privacy by Design**: No data leaves your browser
-2. **Offline Functionality**: Works without internet connection
-3. **No External Dependencies**: Self-contained and portable
-4. **Data Ownership**: You control your data through import/export
+1. **Privacy by Design**: User data lives in your browser, not on a server
+2. **Offline Functionality**: Apps keep working when you're offline (after the first load)
+3. **CDN-Powered When It Helps**: External libraries (Three.js, PeerJS, sql.js, WebLLM, etc.) are loaded from CDNs when they make the app dramatically better
+4. **Data Ownership**: You control your data through JSON import/export
 5. **No Build Process**: Open in any browser, no compilation needed
 
 ### Gallery System
