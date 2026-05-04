@@ -1,1 +1,0 @@
-scripts/shell/update-gallery.sh
