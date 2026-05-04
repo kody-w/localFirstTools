@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Memory Layers</title>
+    <meta name="description" content="Excavate through translucent wax layers to reveal frozen memories beneath, watching new wax slowly drip and obscure the past">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1510; min-height: 100vh; font-family: 'Georgia', serif; color: #c0a080; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32"><circle cx="16" cy="16" r="12" fill="none" stroke="%23ffa050" stroke-width="2"/></svg>') 16 16, crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(26,21,16,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(200,150,100,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #e0c090; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #f0d0a0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(120,80,40,0.4); border: 1px solid rgba(200,150,100,0.4);
+            color: #c0a070; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #806040; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Memory Layers</h3>
+        <div class="control-row">
+            <label>Excavation Size <span class="value" id="size-val">30</span></label>
+            <input type="range" id="size" min="15" max="60" value="30">
+        </div>
+        <div class="control-row">
+            <label>Drip Rate <span class="value" id="drip-val">50</span></label>
+            <input type="range" id="drip" min="0" max="100" value="50">
+        </div>
+        <button id="add-btn">Add Memory Layer</button>
+        <button id="reset-btn">Reset Layers</button>
+    </div>
+    <div id="stats">
+        <div>Layers: <span id="layer-count">0</span></div>
+        <div>Revealed: <span id="revealed-pct">0</span>%</div>
+        <div>Drips: <span id="drip-count">0</span></div>
+    </div>
+    <div id="info">Click and drag to excavate | Reveal memories frozen in wax</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initLayers(); }
+        resize(); window.onresize = resize;
+        
+        let excavationSize = 30;
+        let dripRate = 0.5;
+        let time = 0;
+        let dripCount = 0;
+        let isExcavating = false;
+        
+        const MEMORIES = [
+            'summer of 1998', 'first bicycle', 'grandmothers kitchen', 'old photographs',
+            'birthday candles', 'rainy afternoon', 'forgotten song', 'fading laughter',
+            'childhood home', 'letters never sent', 'promises made', 'distant voices',
+            'autumn leaves', 'midnight conversations', 'first heartbreak', 'healing wounds',
+            'lost friends', 'found treasures', 'quiet moments', 'endless dreams'
+        ];
+        
+        const layers = [];
+        const drips = [];
+        
+        class WaxLayer {
+            constructor(depth) {
+                this.depth = depth;
+                this.opacity = 0.15 + depth * 0.1;
+                this.hue = 30 + depth * 5;
+                this.waxGrid = [];
+                this.memories = [];
+                
+                const cols = Math.ceil(W / 4);
+                const rows = Math.ceil(H / 4);
+                for (let y = 0; y < rows; y++) {
+                    this.waxGrid[y] = [];
+                    for (let x = 0; x < cols; x++) {
+                        this.waxGrid[y][x] = 1;
+                    }
+                }
+                
+                const memoryCount = 3 + Math.floor(Math.random() * 4);
+                for (let i = 0; i < memoryCount; i++) {
+                    this.memories.push({
+                        x: 200 + Math.random() * (W - 400),
+                        y: 100 + Math.random() * (H - 200),
+                        text: MEMORIES[Math.floor(Math.random() * MEMORIES.length)],
+                        revealed: false
+                    });
+                }
+            }
+            
+            excavate(x, y, radius) {
+                const cols = Math.ceil(W / 4);
+                const rows = Math.ceil(H / 4);
+                const gx = Math.floor(x / 4);
+                const gy = Math.floor(y / 4);
+                const gridRadius = Math.ceil(radius / 4);
+                
+                for (let dy = -gridRadius; dy <= gridRadius; dy++) {
+                    for (let dx = -gridRadius; dx <= gridRadius; dx++) {
+                        const nx = gx + dx;
+                        const ny = gy + dy;
+                        if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                            const dist = Math.sqrt(dx * dx + dy * dy);
+                            if (dist <= gridRadius) {
+                                const falloff = 1 - (dist / gridRadius);
+                                this.waxGrid[ny][nx] = Math.max(0, this.waxGrid[ny][nx] - 0.1 * falloff);
+                            }
+                        }
+                    }
+                }
+                
+                this.memories.forEach(mem => {
+                    const dist = Math.hypot(mem.x - x, mem.y - y);
+                    if (dist < radius * 1.5) {
+                        const mgx = Math.floor(mem.x / 4);
+                        const mgy = Math.floor(mem.y / 4);
+                        if (mgy >= 0 && mgy < rows && mgx >= 0 && mgx < cols) {
+                            if (this.waxGrid[mgy][mgx] < 0.3) {
+                                mem.revealed = true;
+                            }
+                        }
+                    }
+                });
+            }
+            
+            addDrip(x, y) {
+                const cols = Math.ceil(W / 4);
+                const rows = Math.ceil(H / 4);
+                const gx = Math.floor(x / 4);
+                const gy = Math.floor(y / 4);
+                
+                if (gx >= 0 && gx < cols && gy >= 0 && gy < rows) {
+                    this.waxGrid[gy][gx] = Math.min(1, this.waxGrid[gy][gx] + 0.3);
+                    
+                    for (let d = 1; d <= 2; d++) {
+                        for (let dx = -d; dx <= d; dx++) {
+                            for (let dy = -d; dy <= d; dy++) {
+                                const nx = gx + dx;
+                                const ny = gy + dy;
+                                if (nx >= 0 && nx < cols && ny >= 0 && ny < rows) {
+                                    this.waxGrid[ny][nx] = Math.min(1, this.waxGrid[ny][nx] + 0.1 / d);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            getRevealedPercent() {
+                let total = 0;
+                let excavated = 0;
+                const rows = this.waxGrid.length;
+                
+                for (let y = 0; y < rows; y++) {
+                    for (let x = 0; x < this.waxGrid[y].length; x++) {
+                        total++;
+                        if (this.waxGrid[y][x] < 0.5) excavated++;
+                    }
+                }
+                
+                return Math.floor((excavated / total) * 100);
+            }
+            
+            draw() {
+                const rows = this.waxGrid.length;
+                const cols = this.waxGrid[0] ? this.waxGrid[0].length : 0;
+                
+                for (let y = 0; y < rows; y++) {
+                    for (let x = 0; x < cols; x++) {
+                        const wax = this.waxGrid[y][x];
+                        if (wax > 0.05) {
+                            const px = x * 4;
+                            const py = y * 4;
+                            const alpha = wax * this.opacity;
+                            ctx.fillStyle = "hsla(" + this.hue + ", 50%, " + (40 + this.depth * 5) + "%, " + alpha + ")";
+                            ctx.fillRect(px, py, 4, 4);
+                        }
+                    }
+                }
+                
+                this.memories.forEach(mem => {
+                    if (mem.revealed) {
+                        ctx.font = 'italic 14px Georgia';
+                        ctx.textAlign = 'center';
+                        ctx.fillStyle = "hsla(" + (this.hue - 10) + ", 30%, 70%, 0.9)";
+                        ctx.fillText(mem.text, mem.x, mem.y);
+                        
+                        const glow = ctx.createRadialGradient(mem.x, mem.y, 0, mem.x, mem.y, 40);
+                        glow.addColorStop(0, "hsla(" + this.hue + ", 40%, 60%, 0.2)");
+                        glow.addColorStop(1, "transparent");
+                        ctx.fillStyle = glow;
+                        ctx.fillRect(mem.x - 40, mem.y - 40, 80, 80);
+                    }
+                });
+            }
+        }
+        
+        class Drip {
+            constructor(x) {
+                this.x = x;
+                this.y = 0;
+                this.speed = 1 + Math.random() * 2;
+                this.size = 3 + Math.random() * 4;
+                this.hue = 35 + Math.random() * 15;
+            }
+            
+            update() {
+                this.y += this.speed;
+                this.speed += 0.1;
+                
+                if (this.y > H) {
+                    return true;
+                }
+                
+                if (Math.random() < 0.02 && layers.length > 0) {
+                    const targetLayer = layers[Math.floor(Math.random() * layers.length)];
+                    targetLayer.addDrip(this.x, this.y);
+                }
+                
+                return false;
+            }
+            
+            draw() {
+                ctx.beginPath();
+                ctx.ellipse(this.x, this.y, this.size * 0.6, this.size, 0, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + this.hue + ", 60%, 55%, 0.8)";
+                ctx.fill();
+            }
+        }
+        
+        function initLayers() {
+            layers.length = 0;
+            for (let i = 0; i < 3; i++) {
+                layers.push(new WaxLayer(i));
+            }
+        }
+        
+        function drawBackground() {
+            const gradient = ctx.createLinearGradient(0, 0, 0, H);
+            gradient.addColorStop(0, '#1a1510');
+            gradient.addColorStop(1, '#251a12');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function updateStats() {
+            document.getElementById('layer-count').textContent = layers.length;
+            
+            let totalRevealed = 0;
+            layers.forEach(l => totalRevealed += l.getRevealedPercent());
+            const avgRevealed = layers.length > 0 ? Math.floor(totalRevealed / layers.length) : 0;
+            document.getElementById('revealed-pct').textContent = avgRevealed;
+            
+            document.getElementById('drip-count').textContent = dripCount;
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            if (Math.random() < 0.02 * dripRate && dripRate > 0) {
+                drips.push(new Drip(Math.random() * W));
+                dripCount++;
+            }
+            
+            drawBackground();
+            
+            for (let i = layers.length - 1; i >= 0; i--) {
+                layers[i].draw();
+            }
+            
+            for (let i = drips.length - 1; i >= 0; i--) {
+                if (drips[i].update()) {
+                    drips.splice(i, 1);
+                } else {
+                    drips[i].draw();
+                }
+            }
+            
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousedown = e => {
+            if (e.clientX < 200 && e.clientY < 320) return;
+            isExcavating = true;
+        };
+        
+        canvas.onmouseup = () => isExcavating = false;
+        canvas.onmouseleave = () => isExcavating = false;
+        
+        canvas.onmousemove = e => {
+            if (!isExcavating) return;
+            if (e.clientX < 200 && e.clientY < 320) return;
+            
+            layers.forEach(layer => {
+                layer.excavate(e.clientX, e.clientY, excavationSize);
+            });
+        };
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 320) return;
+            
+            layers.forEach(layer => {
+                layer.excavate(e.clientX, e.clientY, excavationSize);
+            });
+        };
+        
+        document.getElementById('size').oninput = e => {
+            excavationSize = parseInt(e.target.value);
+            document.getElementById('size-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('drip').oninput = e => {
+            dripRate = e.target.value / 100;
+            document.getElementById('drip-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('add-btn').onclick = () => {
+            layers.push(new WaxLayer(layers.length));
+        };
+        
+        document.getElementById('reset-btn').onclick = () => {
+            initLayers();
+            drips.length = 0;
+            dripCount = 0;
+        };
+        
+        initLayers();
+        animate();
+    </script>
+</body>
+</html>

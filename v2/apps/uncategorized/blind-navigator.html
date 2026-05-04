@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blind Navigator</title>
+    <meta name="description" content="Navigate through invisible spaces using sonar pulses that briefly illuminate geometry as they bounce off surfaces">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #000; min-height: 100vh; font-family: 'Georgia', serif; color: #408080; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(0,10,10,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(0,180,180,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #00c0c0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #40e0e0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(0,80,80,0.4); border: 1px solid rgba(0,180,180,0.4);
+            color: #40a0a0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #stats { position: fixed; top: 20px; right: 20px; font-size: 12px; color: #306060; z-index: 100; text-align: right; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; color: #40a0a0; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Blind Navigator</h3>
+        <div class="control-row">
+            <label>Pulse Speed <span class="value" id="speed-val">60</span></label>
+            <input type="range" id="speed" min="30" max="100" value="60">
+        </div>
+        <div class="control-row">
+            <label>Echo Decay <span class="value" id="decay-val">40</span></label>
+            <input type="range" id="decay" min="10" max="80" value="40">
+        </div>
+        <button id="regenerate-btn">New Environment</button>
+        <button id="reveal-btn">Reveal All (cheat)</button>
+    </div>
+    <div id="stats">
+        <div>Pulses: <span id="pulse-count">0</span></div>
+        <div>Surfaces Found: <span id="surface-count">0</span></div>
+    </div>
+    <div id="info">Click to emit sonar pulses | Map the invisible world through sound</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; generateEnvironment(); }
+        
+        let pulseSpeed = 0.6;
+        let echoDecay = 0.4;
+        let time = 0;
+        let pulseCount = 0;
+        let revealMode = false;
+        
+        const walls = [];
+        const pulses = [];
+        const echoes = [];
+        const discoveredPoints = [];
+        
+        function generateEnvironment() {
+            walls.length = 0;
+            discoveredPoints.length = 0;
+            
+            walls.push({ x1: 0, y1: 0, x2: W, y2: 0 });
+            walls.push({ x1: W, y1: 0, x2: W, y2: H });
+            walls.push({ x1: W, y1: H, x2: 0, y2: H });
+            walls.push({ x1: 0, y1: H, x2: 0, y2: 0 });
+            
+            const structures = 5 + Math.floor(Math.random() * 5);
+            for (let i = 0; i < structures; i++) {
+                const cx = 200 + Math.random() * (W - 400);
+                const cy = 100 + Math.random() * (H - 200);
+                const type = Math.floor(Math.random() * 3);
+                
+                if (type === 0) {
+                    const size = 50 + Math.random() * 100;
+                    walls.push({ x1: cx - size/2, y1: cy - size/2, x2: cx + size/2, y2: cy - size/2 });
+                    walls.push({ x1: cx + size/2, y1: cy - size/2, x2: cx + size/2, y2: cy + size/2 });
+                    walls.push({ x1: cx + size/2, y1: cy + size/2, x2: cx - size/2, y2: cy + size/2 });
+                    walls.push({ x1: cx - size/2, y1: cy + size/2, x2: cx - size/2, y2: cy - size/2 });
+                } else if (type === 1) {
+                    const sides = 5 + Math.floor(Math.random() * 4);
+                    const radius = 40 + Math.random() * 60;
+                    for (let j = 0; j < sides; j++) {
+                        const a1 = (j / sides) * Math.PI * 2;
+                        const a2 = ((j + 1) / sides) * Math.PI * 2;
+                        walls.push({
+                            x1: cx + Math.cos(a1) * radius,
+                            y1: cy + Math.sin(a1) * radius,
+                            x2: cx + Math.cos(a2) * radius,
+                            y2: cy + Math.sin(a2) * radius
+                        });
+                    }
+                } else {
+                    const length = 80 + Math.random() * 120;
+                    const angle = Math.random() * Math.PI;
+                    walls.push({
+                        x1: cx - Math.cos(angle) * length/2,
+                        y1: cy - Math.sin(angle) * length/2,
+                        x2: cx + Math.cos(angle) * length/2,
+                        y2: cy + Math.sin(angle) * length/2
+                    });
+                }
+            }
+        }
+        
+        resize(); window.onresize = resize;
+        
+        class Pulse {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 0;
+                this.maxRadius = Math.max(W, H) * 1.5;
+                this.speed = 3 + pulseSpeed * 5;
+                this.alpha = 1;
+            }
+            
+            update() {
+                this.radius += this.speed;
+                this.alpha = 1 - (this.radius / this.maxRadius);
+                
+                walls.forEach(wall => {
+                    const hits = this.getWallIntersections(wall);
+                    hits.forEach(hit => {
+                        if (!this.pointDiscovered(hit.x, hit.y)) {
+                            discoveredPoints.push({
+                                x: hit.x,
+                                y: hit.y,
+                                alpha: 1,
+                                wall: wall
+                            });
+                            
+                            echoes.push({
+                                x: hit.x,
+                                y: hit.y,
+                                alpha: 1,
+                                size: 10
+                            });
+                        }
+                    });
+                });
+                
+                return this.radius < this.maxRadius;
+            }
+            
+            pointDiscovered(x, y) {
+                return discoveredPoints.some(p => Math.hypot(p.x - x, p.y - y) < 5);
+            }
+            
+            getWallIntersections(wall) {
+                const hits = [];
+                const dx = wall.x2 - wall.x1;
+                const dy = wall.y2 - wall.y1;
+                const length = Math.hypot(dx, dy);
+                const steps = Math.ceil(length / 5);
+                
+                for (let i = 0; i <= steps; i++) {
+                    const t = i / steps;
+                    const px = wall.x1 + dx * t;
+                    const py = wall.y1 + dy * t;
+                    const dist = Math.hypot(px - this.x, py - this.y);
+                    
+                    if (Math.abs(dist - this.radius) < 5) {
+                        hits.push({ x: px, y: py });
+                    }
+                }
+                
+                return hits;
+            }
+            
+            draw() {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.strokeStyle = "rgba(0, 255, 255, " + (this.alpha * 0.3) + ")";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, W, H);
+        }
+        
+        function drawDiscoveredGeometry() {
+            discoveredPoints.forEach(point => {
+                point.alpha -= 0.002 * echoDecay;
+                if (point.alpha < 0.1) point.alpha = 0.1;
+                
+                ctx.beginPath();
+                ctx.arc(point.x, point.y, 3, 0, Math.PI * 2);
+                ctx.fillStyle = "rgba(0, 255, 255, " + point.alpha + ")";
+                ctx.fill();
+            });
+            
+            const segments = {};
+            discoveredPoints.forEach(point => {
+                if (point.wall) {
+                    const key = point.wall.x1 + "," + point.wall.y1 + "-" + point.wall.x2 + "," + point.wall.y2;
+                    if (!segments[key]) {
+                        segments[key] = { wall: point.wall, points: [] };
+                    }
+                    segments[key].points.push(point);
+                }
+            });
+            
+            Object.values(segments).forEach(seg => {
+                if (seg.points.length > 1) {
+                    seg.points.sort((a, b) => {
+                        const ta = (a.x - seg.wall.x1) / (seg.wall.x2 - seg.wall.x1 || 1);
+                        const tb = (b.x - seg.wall.x1) / (seg.wall.x2 - seg.wall.x1 || 1);
+                        return ta - tb;
+                    });
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(seg.points[0].x, seg.points[0].y);
+                    for (let i = 1; i < seg.points.length; i++) {
+                        ctx.lineTo(seg.points[i].x, seg.points[i].y);
+                    }
+                    const avgAlpha = seg.points.reduce((sum, p) => sum + p.alpha, 0) / seg.points.length;
+                    ctx.strokeStyle = "rgba(0, 200, 200, " + (avgAlpha * 0.5) + ")";
+                    ctx.lineWidth = 1;
+                    ctx.stroke();
+                }
+            });
+        }
+        
+        function drawEchoes() {
+            for (let i = echoes.length - 1; i >= 0; i--) {
+                const echo = echoes[i];
+                echo.alpha -= 0.02;
+                echo.size += 0.5;
+                
+                if (echo.alpha <= 0) {
+                    echoes.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(echo.x, echo.y, echo.size, 0, Math.PI * 2);
+                ctx.strokeStyle = "rgba(100, 255, 255, " + echo.alpha + ")";
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+        }
+        
+        function drawRevealMode() {
+            if (!revealMode) return;
+            
+            ctx.globalAlpha = 0.2;
+            walls.forEach(wall => {
+                ctx.beginPath();
+                ctx.moveTo(wall.x1, wall.y1);
+                ctx.lineTo(wall.x2, wall.y2);
+                ctx.strokeStyle = '#004040';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            });
+            ctx.globalAlpha = 1;
+        }
+        
+        function updateStats() {
+            document.getElementById('pulse-count').textContent = pulseCount;
+            
+            const uniqueWalls = new Set();
+            discoveredPoints.forEach(p => {
+                if (p.wall) {
+                    uniqueWalls.add(p.wall);
+                }
+            });
+            document.getElementById('surface-count').textContent = uniqueWalls.size + " / " + walls.length;
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawRevealMode();
+            drawDiscoveredGeometry();
+            
+            for (let i = pulses.length - 1; i >= 0; i--) {
+                if (!pulses[i].update()) {
+                    pulses.splice(i, 1);
+                } else {
+                    pulses[i].draw();
+                }
+            }
+            
+            drawEchoes();
+            updateStats();
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 250) return;
+            
+            pulses.push(new Pulse(e.clientX, e.clientY));
+            pulseCount++;
+        };
+        
+        document.getElementById('speed').oninput = e => {
+            pulseSpeed = e.target.value / 100;
+            document.getElementById('speed-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('decay').oninput = e => {
+            echoDecay = e.target.value / 100;
+            document.getElementById('decay-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('regenerate-btn').onclick = () => {
+            generateEnvironment();
+            pulses.length = 0;
+            echoes.length = 0;
+            pulseCount = 0;
+        };
+        
+        document.getElementById('reveal-btn').onclick = () => {
+            revealMode = !revealMode;
+            document.getElementById('reveal-btn').textContent = revealMode ? 
+                'Hide Geometry' : 'Reveal All (cheat)';
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

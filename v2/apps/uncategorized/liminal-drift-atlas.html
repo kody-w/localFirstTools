@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Liminal Drift Atlas</title>
+    <meta name="description" content="Interactive topographical map generated from your cursor hesitation patterns, velocity, and micro-movements">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #0f0d08; min-height: 100vh; font-family: 'Georgia', serif; color: #8a7a60; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(20,18,12,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(140,120,80,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #b09060; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #c0a070; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,50,0.4); border: 1px solid rgba(140,120,80,0.4);
+            color: #a08060; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Liminal Drift Atlas</h3>
+        <div class="control-row">
+            <label>Sensitivity <span class="value" id="sens-val">70</span></label>
+            <input type="range" id="sensitivity" min="30" max="100" value="70">
+        </div>
+        <div class="control-row">
+            <label>Erosion Rate <span class="value" id="erosion-val">30</span></label>
+            <input type="range" id="erosion" min="0" max="100" value="30">
+        </div>
+        <button id="clear-btn">Clear Atlas</button>
+        <button id="contour-btn">Toggle Contours</button>
+    </div>
+    <div id="info">Move cursor to shape terrain | Hesitation creates valleys, speed creates peaks</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H, gridW, gridH, cellSize;
+        const heightMap = [];
+        const dwellMap = [];
+        
+        function resize() { 
+            W = canvas.width = innerWidth; 
+            H = canvas.height = innerHeight;
+            cellSize = 8;
+            gridW = Math.ceil(W / cellSize);
+            gridH = Math.ceil(H / cellSize);
+            
+            heightMap.length = 0;
+            dwellMap.length = 0;
+            for (let i = 0; i < gridW * gridH; i++) {
+                heightMap.push(0.5);
+                dwellMap.push(0);
+            }
+        }
+        resize(); window.onresize = resize;
+        
+        let sensitivity = 0.7;
+        let erosionRate = 0.3;
+        let showContours = true;
+        let time = 0;
+        
+        let lastX = 0, lastY = 0;
+        let lastTime = Date.now();
+        let velocity = 0;
+        let dwellTimer = 0;
+        let tremor = 0;
+        let tremorHistory = [];
+        
+        const placeNames = [];
+        const rivers = [];
+        
+        function getIndex(gx, gy) {
+            if (gx < 0 || gx >= gridW || gy < 0 || gy >= gridH) return -1;
+            return gy * gridW + gx;
+        }
+        
+        function updateTerrain(mx, my, vel, dwell, trem) {
+            const gx = Math.floor(mx / cellSize);
+            const gy = Math.floor(my / cellSize);
+            const radius = 5;
+            
+            for (let dy = -radius; dy <= radius; dy++) {
+                for (let dx = -radius; dx <= radius; dx++) {
+                    const dist = Math.hypot(dx, dy);
+                    if (dist > radius) continue;
+                    
+                    const idx = getIndex(gx + dx, gy + dy);
+                    if (idx < 0) continue;
+                    
+                    const falloff = 1 - dist / radius;
+                    const influence = falloff * sensitivity * 0.02;
+                    
+                    const speedContribution = vel * 0.005 * influence;
+                    heightMap[idx] = Math.min(1, heightMap[idx] + speedContribution);
+                    
+                    const dwellContribution = dwell * 0.01 * influence;
+                    heightMap[idx] = Math.max(0, heightMap[idx] - dwellContribution);
+                    
+                    dwellMap[idx] += dwell * falloff * 0.1;
+                    
+                    if (trem > 2) {
+                        heightMap[idx] += (Math.random() - 0.5) * trem * 0.002;
+                    }
+                }
+            }
+            
+            if (dwell > 50 && Math.random() < 0.01) {
+                maybeNamePlace(gx, gy, 'valley');
+            } else if (vel > 15 && Math.random() < 0.005) {
+                maybeNamePlace(gx, gy, 'peak');
+            }
+        }
+        
+        function maybeNamePlace(gx, gy, type) {
+            const existing = placeNames.find(p => 
+                Math.hypot(p.gx - gx, p.gy - gy) < 10
+            );
+            if (existing) return;
+            
+            const valleyNames = ['Lake Indecision', 'Hesitation Bay', 'The Pondering Pool', 'Stillwater Hollow', 'Doubt Basin'];
+            const peakNames = ['Mount Urgency', 'Swift Ridge', 'Haste Peak', 'Momentum Crest', 'The Rushing Heights'];
+            
+            const names = type === 'valley' ? valleyNames : peakNames;
+            const name = names[Math.floor(Math.random() * names.length)];
+            
+            placeNames.push({
+                gx: gx,
+                gy: gy,
+                name: name,
+                type: type,
+                age: 0
+            });
+            
+            if (placeNames.length > 8) {
+                placeNames.shift();
+            }
+        }
+        
+        function erode() {
+            if (erosionRate === 0) return;
+            
+            for (let i = 0; i < heightMap.length; i++) {
+                heightMap[i] += (0.5 - heightMap[i]) * erosionRate * 0.0001;
+                dwellMap[i] *= 0.999;
+            }
+        }
+        
+        function drawTerrain() {
+            for (let gy = 0; gy < gridH; gy++) {
+                for (let gx = 0; gx < gridW; gx++) {
+                    const idx = getIndex(gx, gy);
+                    const h = heightMap[idx];
+                    const d = dwellMap[idx];
+                    
+                    let r, g, b;
+                    if (h < 0.3) {
+                        r = 30 + h * 60;
+                        g = 50 + h * 100;
+                        b = 80 + h * 120;
+                    } else if (h < 0.5) {
+                        const t = (h - 0.3) / 0.2;
+                        r = 50 + t * 40;
+                        g = 80 + t * 50;
+                        b = 60 + t * 20;
+                    } else if (h < 0.7) {
+                        const t = (h - 0.5) / 0.2;
+                        r = 90 + t * 60;
+                        g = 130 - t * 30;
+                        b = 80 - t * 30;
+                    } else {
+                        const t = (h - 0.7) / 0.3;
+                        r = 150 + t * 80;
+                        g = 100 + t * 60;
+                        b = 50 + t * 50;
+                    }
+                    
+                    const dwellTint = Math.min(1, d * 0.1);
+                    b += dwellTint * 40;
+                    
+                    ctx.fillStyle = "rgb(" + Math.floor(r) + "," + Math.floor(g) + "," + Math.floor(b) + ")";
+                    ctx.fillRect(gx * cellSize, gy * cellSize, cellSize, cellSize);
+                }
+            }
+        }
+        
+        function drawContours() {
+            if (!showContours) return;
+            
+            ctx.strokeStyle = 'rgba(60, 50, 40, 0.4)';
+            ctx.lineWidth = 1;
+            
+            const levels = [0.2, 0.35, 0.5, 0.65, 0.8];
+            
+            levels.forEach(level => {
+                for (let gy = 0; gy < gridH - 1; gy++) {
+                    for (let gx = 0; gx < gridW - 1; gx++) {
+                        const h00 = heightMap[getIndex(gx, gy)];
+                        const h10 = heightMap[getIndex(gx + 1, gy)];
+                        const h01 = heightMap[getIndex(gx, gy + 1)];
+                        const h11 = heightMap[getIndex(gx + 1, gy + 1)];
+                        
+                        const crossings = [];
+                        
+                        if ((h00 < level) !== (h10 < level)) {
+                            const t = (level - h00) / (h10 - h00);
+                            crossings.push({x: gx + t, y: gy});
+                        }
+                        if ((h10 < level) !== (h11 < level)) {
+                            const t = (level - h10) / (h11 - h10);
+                            crossings.push({x: gx + 1, y: gy + t});
+                        }
+                        if ((h01 < level) !== (h11 < level)) {
+                            const t = (level - h01) / (h11 - h01);
+                            crossings.push({x: gx + t, y: gy + 1});
+                        }
+                        if ((h00 < level) !== (h01 < level)) {
+                            const t = (level - h00) / (h01 - h00);
+                            crossings.push({x: gx, y: gy + t});
+                        }
+                        
+                        if (crossings.length >= 2) {
+                            ctx.beginPath();
+                            ctx.moveTo(crossings[0].x * cellSize, crossings[0].y * cellSize);
+                            ctx.lineTo(crossings[1].x * cellSize, crossings[1].y * cellSize);
+                            ctx.stroke();
+                        }
+                    }
+                }
+            });
+        }
+        
+        function drawPlaceNames() {
+            ctx.font = '10px Georgia';
+            
+            placeNames.forEach(p => {
+                p.age += 0.016;
+                const alpha = Math.min(1, p.age * 0.5);
+                
+                ctx.fillStyle = "rgba(200, 180, 140, " + alpha + ")";
+                ctx.fillText(p.name, p.gx * cellSize, p.gy * cellSize);
+            });
+        }
+        
+        function drawCursor(mx, my) {
+            ctx.beginPath();
+            ctx.arc(mx, my, 3, 0, Math.PI * 2);
+            ctx.fillStyle = 'rgba(255, 240, 200, 0.8)';
+            ctx.fill();
+            
+            ctx.beginPath();
+            ctx.arc(mx, my, 8 + tremor, 0, Math.PI * 2);
+            ctx.strokeStyle = 'rgba(255, 240, 200, 0.3)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        }
+        
+        let mouseX = W/2, mouseY = H/2;
+        
+        function animate() {
+            time += 0.016;
+            
+            const now = Date.now();
+            const dt = now - lastTime;
+            lastTime = now;
+            
+            const dx = mouseX - lastX;
+            const dy = mouseY - lastY;
+            const dist = Math.hypot(dx, dy);
+            
+            velocity = velocity * 0.8 + (dist / Math.max(dt, 1)) * 50 * 0.2;
+            
+            if (dist < 2) {
+                dwellTimer += dt;
+            } else {
+                dwellTimer = Math.max(0, dwellTimer - dt * 0.5);
+            }
+            
+            tremorHistory.push(dist);
+            if (tremorHistory.length > 10) tremorHistory.shift();
+            const avgMove = tremorHistory.reduce((a, b) => a + b, 0) / tremorHistory.length;
+            tremor = tremorHistory.reduce((sum, m) => sum + Math.abs(m - avgMove), 0) / tremorHistory.length;
+            
+            updateTerrain(mouseX, mouseY, velocity, dwellTimer, tremor);
+            erode();
+            
+            lastX = mouseX;
+            lastY = mouseY;
+            
+            drawTerrain();
+            drawContours();
+            drawPlaceNames();
+            drawCursor(mouseX, mouseY);
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousemove = e => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        };
+        
+        canvas.ontouchmove = e => {
+            e.preventDefault();
+            mouseX = e.touches[0].clientX;
+            mouseY = e.touches[0].clientY;
+        };
+        
+        document.getElementById('sensitivity').oninput = e => {
+            sensitivity = e.target.value / 100;
+            document.getElementById('sens-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('erosion').oninput = e => {
+            erosionRate = e.target.value / 100;
+            document.getElementById('erosion-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            for (let i = 0; i < heightMap.length; i++) {
+                heightMap[i] = 0.5;
+                dwellMap[i] = 0;
+            }
+            placeNames.length = 0;
+        };
+        
+        document.getElementById('contour-btn').onclick = () => {
+            showContours = !showContours;
+            document.getElementById('contour-btn').textContent = showContours ? 'Hide Contours' : 'Show Contours';
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

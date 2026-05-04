@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fabric Sculptor</title>
+    <meta name="description" content="Interactive cloth physics simulator with wind, gravity, and real-time manipulation">
+    <link rel="icon" href="data:;base64,iVBORw0KGgo=">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: linear-gradient(180deg, #1a1520 0%, #0a0810 100%); min-height: 100vh; font-family: monospace; color: #c0a0d0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: grab; }
+        #canvas:active { cursor: grabbing; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(30,20,40,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(180,120,220,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #e0c0ff; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #d0a0f0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 8px; margin: 8px 0;
+            background: rgba(100,60,140,0.5); border: 1px solid rgba(180,120,220,0.4);
+            color: #c0a0d0; cursor: pointer; border-radius: 6px;
+        }
+        button:hover { background: rgba(120,80,160,0.6); }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Fabric Sculptor</h3>
+        <div class="control-row">
+            <label>Gravity <span class="value" id="grav-val">0.5</span></label>
+            <input type="range" id="gravity" min="0" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Wind <span class="value" id="wind-val">0</span></label>
+            <input type="range" id="wind" min="-50" max="50" value="0">
+        </div>
+        <div class="control-row">
+            <label>Stiffness <span class="value" id="stiff-val">50</span></label>
+            <input type="range" id="stiffness" min="10" max="100" value="50">
+        </div>
+        <button id="reset-btn">Reset Cloth</button>
+        <button id="drop-btn">Drop Corners</button>
+        <button id="wave-btn">Create Wave</button>
+    </div>
+    <div id="info">Click and drag the fabric | Watch physics in action</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initCloth(); }
+        
+        let gravity = 0.5;
+        let wind = 0;
+        let stiffness = 50;
+        
+        const COLS = 30;
+        const ROWS = 20;
+        let points = [];
+        let constraints = [];
+        
+        class Point {
+            constructor(x, y, pinned) {
+                this.x = x; this.y = y;
+                this.oldX = x; this.oldY = y;
+                this.pinned = pinned;
+            }
+        }
+        
+        class Constraint {
+            constructor(p1, p2, length) {
+                this.p1 = p1; this.p2 = p2;
+                this.length = length;
+            }
+        }
+        
+        function initCloth() {
+            points = [];
+            constraints = [];
+            
+            const spacingX = W * 0.6 / COLS;
+            const spacingY = H * 0.5 / ROWS;
+            const startX = W * 0.2;
+            const startY = 80;
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const x = startX + c * spacingX;
+                    const y = startY + r * spacingY;
+                    const pinned = r === 0 && (c === 0 || c === COLS - 1 || c === Math.floor(COLS / 2));
+                    points.push(new Point(x, y, pinned));
+                }
+            }
+            
+            for (let r = 0; r < ROWS; r++) {
+                for (let c = 0; c < COLS; c++) {
+                    const i = r * COLS + c;
+                    if (c < COLS - 1) {
+                        constraints.push(new Constraint(points[i], points[i + 1], spacingX));
+                    }
+                    if (r < ROWS - 1) {
+                        constraints.push(new Constraint(points[i], points[i + COLS], spacingY));
+                    }
+                }
+            }
+        }
+        
+        function updatePhysics() {
+            const iterations = Math.floor(stiffness / 10);
+            
+            points.forEach(p => {
+                if (p.pinned) return;
+                
+                const vx = (p.x - p.oldX) * 0.99;
+                const vy = (p.y - p.oldY) * 0.99;
+                
+                p.oldX = p.x;
+                p.oldY = p.y;
+                
+                p.x += vx + wind * 0.01 + (Math.random() - 0.5) * 0.2;
+                p.y += vy + gravity * 0.1;
+                
+                if (p.y > H - 50) {
+                    p.y = H - 50;
+                    p.oldY = p.y + vy * 0.5;
+                }
+                if (p.x < 10) p.x = 10;
+                if (p.x > W - 10) p.x = W - 10;
+            });
+            
+            for (let i = 0; i < iterations; i++) {
+                constraints.forEach(c => {
+                    const dx = c.p2.x - c.p1.x;
+                    const dy = c.p2.y - c.p1.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+                    const diff = (c.length - dist) / dist;
+                    const offsetX = dx * diff * 0.5;
+                    const offsetY = dy * diff * 0.5;
+                    
+                    if (!c.p1.pinned) {
+                        c.p1.x -= offsetX;
+                        c.p1.y -= offsetY;
+                    }
+                    if (!c.p2.pinned) {
+                        c.p2.x += offsetX;
+                        c.p2.y += offsetY;
+                    }
+                });
+            }
+        }
+        
+        function drawCloth() {
+            ctx.fillStyle = '#0a0810';
+            ctx.fillRect(0, 0, W, H);
+            
+            for (let r = 0; r < ROWS - 1; r++) {
+                for (let c = 0; c < COLS - 1; c++) {
+                    const i = r * COLS + c;
+                    const p1 = points[i];
+                    const p2 = points[i + 1];
+                    const p3 = points[i + COLS];
+                    const p4 = points[i + COLS + 1];
+                    
+                    const avgY = (p1.y + p2.y + p3.y + p4.y) / 4;
+                    const depth = Math.min(1, avgY / H);
+                    const hue = 270 + (c / COLS) * 30;
+                    const lightness = 40 + depth * 20;
+                    
+                    ctx.beginPath();
+                    ctx.moveTo(p1.x, p1.y);
+                    ctx.lineTo(p2.x, p2.y);
+                    ctx.lineTo(p4.x, p4.y);
+                    ctx.lineTo(p3.x, p3.y);
+                    ctx.closePath();
+                    ctx.fillStyle = "hsla(" + hue + ", 60%, " + lightness + "%, 0.9)";
+                    ctx.fill();
+                    
+                    ctx.strokeStyle = "hsla(" + hue + ", 40%, " + (lightness + 10) + "%, 0.3)";
+                    ctx.lineWidth = 0.5;
+                    ctx.stroke();
+                }
+            }
+            
+            points.forEach(p => {
+                if (p.pinned) {
+                    ctx.beginPath();
+                    ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+                    ctx.fillStyle = '#ffd700';
+                    ctx.fill();
+                }
+            });
+        }
+        
+        let dragging = null;
+        let mouseX = 0, mouseY = 0;
+        
+        canvas.onmousedown = e => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            let minDist = 50;
+            points.forEach(p => {
+                const dist = Math.hypot(p.x - mouseX, p.y - mouseY);
+                if (dist < minDist) {
+                    minDist = dist;
+                    dragging = p;
+                }
+            });
+        };
+        
+        canvas.onmousemove = e => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+            if (dragging) {
+                dragging.x = mouseX;
+                dragging.y = mouseY;
+            }
+        };
+        
+        canvas.onmouseup = () => dragging = null;
+        canvas.onmouseleave = () => dragging = null;
+        
+        function animate() {
+            updatePhysics();
+            drawCloth();
+            requestAnimationFrame(animate);
+        }
+        
+        document.getElementById('gravity').oninput = e => {
+            gravity = e.target.value / 100;
+            document.getElementById('grav-val').textContent = gravity.toFixed(2);
+        };
+        document.getElementById('wind').oninput = e => {
+            wind = parseInt(e.target.value);
+            document.getElementById('wind-val').textContent = wind;
+        };
+        document.getElementById('stiffness').oninput = e => {
+            stiffness = parseInt(e.target.value);
+            document.getElementById('stiff-val').textContent = stiffness;
+        };
+        
+        document.getElementById('reset-btn').onclick = initCloth;
+        
+        document.getElementById('drop-btn').onclick = () => {
+            points.forEach((p, i) => {
+                if (p.pinned && i !== Math.floor(COLS / 2)) {
+                    p.pinned = false;
+                }
+            });
+        };
+        
+        document.getElementById('wave-btn').onclick = () => {
+            const time = Date.now();
+            points.forEach((p, i) => {
+                if (!p.pinned) {
+                    const col = i % COLS;
+                    p.y -= Math.sin(col * 0.5) * 30;
+                }
+            });
+        };
+        
+        resize();
+        window.onresize = resize;
+        animate();
+    </script>
+</body>
+</html>

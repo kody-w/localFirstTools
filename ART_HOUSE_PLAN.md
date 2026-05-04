@@ -1,0 +1,150 @@
+# The "Art House" Transformation Plan
+## *Reorganizing LocalFirstTools into a Digital Museum*
+
+### 🏛️ Philosophy: "Curated Chaos"
+The goal is to transform the repository from a "cluttered workshop" into a "high-end gallery" without losing the raw, experimental energy of the tools. We will treat every HTML file not just as code, but as an **Exhibit**.
+
+The repository will function like a physical museum:
+1.  **The Grand Halls (Directories):** Clean, thematic spaces for finished works.
+2.  **The Workshop (Staging):** A messy space for active development.
+3.  **The Archives (Storage):** A preserved history of previous iterations.
+
+---
+
+### 🏗️ Phase 1: The Physical Renovation (Directory Structure)
+
+Currently, the root directory is overcrowded. We will move files into "Wings" based on the existing categories in `vibe_gallery_config.json`.
+
+**Proposed Structure:**
+
+```text
+localFirstTools/
+├── index.html                  # The Museum Entrance (Lobby)
+├── vibe_gallery_config.json    # The Exhibition Catalog
+├── assets/                     # Shared resources (icons, global styles)
+├── scripts/                    # The Museum Staff (Automation)
+│
+├── Exhibition_Halls/           # The Main Galleries (Moved from root)
+│   ├── Visual_Arts/            # Canvas, SVG, Generative Art
+│   ├── Simulation_Lab/         # Physics, Particles, Math
+│   ├── The_Arcade/             # Games, Puzzles
+│   ├── Sound_Studio/           # Audio, Music, Synesthesia
+│   ├── Productivity_Suite/     # Tools, Utilities, Text
+│   └── AI_Research/            # Neural Nets, Agents, LLM tools
+│
+├── The_Workshop/               # (New) "Mad Science" Zone
+│   ├── _prototypes/            # Half-finished ideas
+│   └── _incoming/              # New drops before categorization
+│
+└── The_Archives/               # (New) Historical Preservation
+    ├── v1_classics/            # Old versions of tools
+    └── deprecated/             # Broken or superseded experiments
+```
+
+**Action Items:**
+- [ ] Create the `Exhibition_Halls` directory structure.
+- [ ] Run a "Migration Script" (to be written) that moves HTML files based on their current category in `vibe_gallery_config.json`.
+- [ ] **Crucial:** The migration script must auto-update relative links (e.g., `<a href="index.html">` becomes `<a href="../../index.html">`) inside the HTML files to prevent breaking navigation.
+
+---
+
+### 🖼️ Phase 2: The "Plaque" System (Metadata Standardization)
+
+In a museum, every piece has a plaque. Currently, we scrape messy HTML tags. We will standardize metadata to treat code as art.
+
+**The Standard:**
+Every HTML file will include a standardized JSON-LD block in its `<head>`.
+
+```html
+<script type="application/ld+json" id="gallery-metadata">
+{
+  "title": "Particle Life Simulator",
+  "artist": "Claude & User",
+  "curator_note": "A study in emergent behavior using simple rules.",
+  "year": 2024,
+  "medium": ["Canvas", "JavaScript", "Physics"],
+  "category": "Simulation_Lab",
+  "complexity": "Advanced",
+  "controls": ["Mouse", "Touch"]
+}
+</script>
+```
+
+**Action Items:**
+- [ ] Update `vibe_gallery_updater.py` to prioritize this JSON block over regex scraping.
+- [ ] Create a "Librarian Script" that auto-injects this template into existing files (populating what it can) for the user to fill out later.
+
+---
+
+### 🎨 Phase 3: The Gallery Experience (UI Overhaul)
+
+The `index.html` is the lobby. It needs to feel like one.
+
+1.  **The Map View:**
+    *   Replace the long list with a visual "Museum Map" (SVG/Canvas).
+    *   Clicking a "Wing" (e.g., "The Arcade") zooms into that section.
+    *   *Why:* It handles scale better than a list of 200 items.
+
+2.  **"Curator's Choice" (Featured Rotations):**
+    *   Instead of static "Featured" items, implement a weekly rotation based on the `lastUpdated` date or random selection from the "High Complexity" tier.
+
+3.  **The "White Cube" Mode:**
+    *   When a tool is opened, it currently just opens.
+    *   **New Feature:** Wrap opened tools in a subtle "Museum Frame" UI (optional iframe wrapper) that provides a "Back to Gallery" button, the "Plaque" info, and a "Like/Vote" button, keeping the user immersed in the ecosystem.
+
+---
+
+### 🤖 Phase 4: The Curator Agent (Automation)
+
+We need an automated curator to maintain order as the repo scales to 1000+ tools.
+
+**New Scripts:**
+*   `curator.py`:
+    *   **Intake:** Scans `The_Workshop/_incoming`.
+    *   **Analysis:** Analyzes code content to suggest a "Wing" (Category).
+    *   **Accession:** Moves the file to the correct `Exhibition_Hall`, adds the JSON plaque, and updates the config.
+    *   **Preservation:** If a file is being overwritten, automatically moves the old version to `The_Archives` with a timestamp.
+
+---
+
+### 🔗 Phase 5: The "Ghost" Protocol (Preserving Links)
+
+**The Problem:** Moving files breaks external links and bookmarks.
+**The Solution:** We will leave behind "Ghost" files (Redirect Stubs) in the root directory.
+
+When `organize_museum.py` moves `game.html` to `Exhibition_Halls/The_Arcade/game.html`, it will immediately create a new `game.html` in the root with this content:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="refresh" content="0; url=Exhibition_Halls/The_Arcade/game.html">
+    <script>window.location.replace("Exhibition_Halls/The_Arcade/game.html");</script>
+    <title>Redirecting...</title>
+</head>
+<body>
+    <p>This artwork has been moved to the <a href="Exhibition_Halls/The_Arcade/game.html">Arcade Wing</a>.</p>
+</body>
+</html>
+```
+
+**Why this works:**
+1.  **Zero Broken Links:** Any API or user accessing the old path gets instantly redirected.
+2.  **Clean "Source":** The *real* code lives in the clean subdirectories. The root files are just disposable signposts.
+3.  **Git History:** Git handles renames well. The new root file is a "new" file, the moved file preserves history if done with `git mv`.
+
+**Optional Cleanup:**
+To keep the root directory visually clean for *you* (the developer), we can write a script to toggle the visibility of these ghost files (e.g., move them to a `_redirects/` folder and symlink them back, or just accept them as necessary infrastructure).
+
+---
+
+### 🚀 Execution Strategy (How to do this safely)
+
+1.  **Freeze:** Stop adding new tools for 1 hour.
+2.  **Backup:** `cp -r localFirstTools localFirstTools_BACKUP`.
+3.  **Scripted Move:** Do *not* move files manually. Write a python script `scripts/maintenance/organize_museum.py` to handle the move + link updating simultaneously.
+4.  **Verify:** Run the `tests/test_gallery_updater.py` (updated for new paths) to ensure the gallery still builds.
+5.  **Launch:** Push the new structure.
+
+This plan transforms the repo from a "folder of files" into a **Self-Curating Digital Institution**.

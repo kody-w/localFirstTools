@@ -1,0 +1,80 @@
+version: '3.8'
+
+services:
+  agent_function:
+    image: kodywf/copilot-agent-365:latest
+    build:
+      context: ./azure_function_app
+      dockerfile: Dockerfile
+    ports:
+      - "${FUNCTION_APP_PORT:-7071}:7071"
+    environment:
+      # Azure settings (optional - for Azure OpenAI mode)
+      AZURE_WEBJOBS_STORAGE: ${AZURE_WEBJOBS_STORAGE:-}
+      FUNCTIONS_WORKER_RUNTIME: python
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-sk-not-used-for-ollama}
+      AZURE_OPENAI_API_VERSION: ${AZURE_OPENAI_API_VERSION:-2024-02-01}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-http://localhost:8000}
+      AZURE_OPENAI_DEPLOYMENT_NAME: ${AZURE_OPENAI_DEPLOYMENT_NAME:-gpt-deployment}
+      # Agent configuration
+      ASSISTANT_NAME: ${ASSISTANT_NAME:-CopilotAgent365}
+      CHARACTERISTIC_DESCRIPTION: ${CHARACTERISTIC_DESCRIPTION:-a helpful enterprise AI assistant}
+      # Ollama Integration (default mode)
+      USE_OLLAMA: ${USE_OLLAMA:-true}
+      OLLAMA_API_BASE_URL: ${OLLAMA_API_BASE_URL:-http://ollama:11434/v1}
+      OLLAMA_MODEL_NAME: ${OLLAMA_MODEL_NAME:-llama3.1}
+      # Storage configuration
+      USE_AZURE_STORAGE: ${USE_AZURE_STORAGE:-false}
+      AZURE_FILES_SHARE_NAME: ${AZURE_FILES_SHARE_NAME:-my-local-agent-share}
+      LOCAL_STORAGE_BASE_PATH: ${LOCAL_STORAGE_BASE_PATH:-/app/local_storage}
+    volumes:
+      - ./local_data:/app/local_storage
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: >
+      bash -c "
+      ollama serve &
+      echo 'Waiting for Ollama server to be ready...'
+      while ! curl -s http://localhost:11434/api/tags > /dev/null; do sleep 2; done
+      echo 'Ollama server ready. Pulling llama3.1 model...'
+      ollama pull ${OLLAMA_MODEL_NAME:-llama3.1}
+      echo 'Model ready!'
+      wait -n
+      "
+    networks:
+      - agent_network
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+volumes:
+  ollama_models:
+    name: copilot-agent-365-ollama-models
+
+networks:
+  agent_network:
+    driver: bridge
+    name: copilot-agent-365-network

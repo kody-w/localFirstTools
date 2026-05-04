@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Aurora Veil Composer</title>
+    <meta name="description" content="Shape invisible magnetic field lines and watch solar wind particles create shimmering aurora curtains with reactive sound">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #000;
+            overflow: hidden;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+        }
+        #canvas {
+            display: block;
+        }
+        .controls {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 15px;
+            z-index: 100;
+        }
+        button {
+            background: rgba(100, 200, 150, 0.2);
+            border: 1px solid rgba(100, 200, 150, 0.5);
+            color: #7fdbca;
+            padding: 10px 20px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        button:hover {
+            background: rgba(100, 200, 150, 0.4);
+        }
+        .info {
+            position: fixed;
+            top: 20px;
+            left: 20px;
+            color: rgba(255,255,255,0.6);
+            font-size: 12px;
+            max-width: 250px;
+            line-height: 1.6;
+        }
+        .stats {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            color: rgba(100, 200, 150, 0.8);
+            font-size: 12px;
+            text-align: right;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div class="info">
+        Drag to shape magnetic field lines.<br>
+        Click to trigger solar flares.<br>
+        Watch aurora curtains dance.
+    </div>
+    <div class="stats" id="stats">
+        Particles: 0<br>
+        Field Strength: 0%
+    </div>
+    <div class="controls">
+        <button id="flareBtn">Solar Flare</button>
+        <button id="clearBtn">Reset Field</button>
+        <button id="soundBtn">Enable Sound</button>
+    </div>
+
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        let width, height;
+        function resize() {
+            width = canvas.width = window.innerWidth;
+            height = canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Audio context
+        let audioCtx = null;
+        let soundEnabled = false;
+        let oscillators = [];
+        let gainNodes = [];
+
+        function initAudio() {
+            audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            
+            // Create multiple oscillators for layered sound
+            const frequencies = [110, 165, 220, 330, 440];
+            frequencies.forEach((freq, i) => {
+                const osc = audioCtx.createOscillator();
+                const gain = audioCtx.createGain();
+                const filter = audioCtx.createBiquadFilter();
+                
+                osc.type = 'sine';
+                osc.frequency.value = freq;
+                
+                filter.type = 'lowpass';
+                filter.frequency.value = 500;
+                filter.Q.value = 5;
+                
+                gain.gain.value = 0;
+                
+                osc.connect(filter);
+                filter.connect(gain);
+                gain.connect(audioCtx.destination);
+                
+                osc.start();
+                
+                oscillators.push(osc);
+                gainNodes.push(gain);
+            });
+        }
+
+        function updateSound(intensity, altitude) {
+            if (!soundEnabled || !audioCtx) return;
+            
+            gainNodes.forEach((gain, i) => {
+                const targetGain = intensity * 0.02 * (1 - i * 0.15);
+                gain.gain.linearRampToValueAtTime(
+                    Math.max(0, targetGain),
+                    audioCtx.currentTime + 0.1
+                );
+            });
+            
+            oscillators.forEach((osc, i) => {
+                const baseFreq = [110, 165, 220, 330, 440][i];
+                osc.frequency.linearRampToValueAtTime(
+                    baseFreq + altitude * 0.5,
+                    audioCtx.currentTime + 0.1
+                );
+            });
+        }
+
+        // Magnetic field points
+        let fieldPoints = [];
+        let particles = [];
+        let auroraLines = [];
+        let isDragging = false;
+        let dragStart = null;
+
+        class FieldPoint {
+            constructor(x, y, strength = 1) {
+                this.x = x;
+                this.y = y;
+                this.strength = strength;
+                this.polarity = Math.random() > 0.5 ? 1 : -1;
+            }
+        }
+
+        class Particle {
+            constructor() {
+                this.reset();
+            }
+            
+            reset() {
+                this.x = Math.random() * width;
+                this.y = -20;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = Math.random() * 2 + 1;
+                this.life = 1;
+                this.altitude = 0;
+                this.trail = [];
+                this.glowing = false;
+                this.color = this.getColor(0);
+            }
+            
+            getColor(altitude) {
+                // Aurora colors based on altitude
+                if (altitude > 200) {
+                    return { r: 255, g: 50, b: 50 }; // Red at high altitude
+                } else if (altitude > 100) {
+                    return { r: 150, g: 50, b: 200 }; // Purple
+                } else {
+                    return { r: 50, g: 255, b: 100 }; // Green at low altitude
+                }
+            }
+            
+            update() {
+                // Apply magnetic field influence
+                let fx = 0, fy = 0;
+                fieldPoints.forEach(fp => {
+                    const dx = fp.x - this.x;
+                    const dy = fp.y - this.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy) + 10;
+                    const force = fp.strength * fp.polarity * 500 / (dist * dist);
+                    fx += dx / dist * force;
+                    fy += dy / dist * force;
+                });
+                
+                this.vx += fx * 0.1;
+                this.vy += fy * 0.1 + 0.05; // Gravity toward Earth
+                
+                // Damping
+                this.vx *= 0.99;
+                this.vy *= 0.99;
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                // Calculate altitude (distance from bottom)
+                this.altitude = height - this.y;
+                this.color = this.getColor(this.altitude);
+                
+                // Store trail
+                this.trail.push({ x: this.x, y: this.y, color: { ...this.color } });
+                if (this.trail.length > 30) this.trail.shift();
+                
+                // Check if in aurora zone (lower atmosphere)
+                if (this.y > height * 0.3 && this.y < height * 0.9) {
+                    this.glowing = true;
+                } else {
+                    this.glowing = false;
+                }
+                
+                // Life decay
+                this.life -= 0.002;
+                
+                // Reset if off screen or dead
+                if (this.x < -50 || this.x > width + 50 || this.y > height + 50 || this.life <= 0) {
+                    this.reset();
+                }
+            }
+            
+            draw() {
+                // Draw trail
+                if (this.trail.length > 1) {
+                    for (let i = 1; i < this.trail.length; i++) {
+                        const t1 = this.trail[i - 1];
+                        const t2 = this.trail[i];
+                        const alpha = (i / this.trail.length) * this.life * (this.glowing ? 0.8 : 0.2);
+                        
+                        ctx.beginPath();
+                        ctx.moveTo(t1.x, t1.y);
+                        ctx.lineTo(t2.x, t2.y);
+                        ctx.strokeStyle = `rgba(${t2.color.r}, ${t2.color.g}, ${t2.color.b}, ${alpha})`;
+                        ctx.lineWidth = this.glowing ? 3 : 1;
+                        ctx.stroke();
+                    }
+                }
+                
+                // Draw particle
+                if (this.glowing) {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, 4, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${this.life})`;
+                    ctx.fill();
+                    
+                    // Glow
+                    const gradient = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, 15);
+                    gradient.addColorStop(0, `rgba(${this.color.r}, ${this.color.g}, ${this.color.b}, ${this.life * 0.5})`);
+                    gradient.addColorStop(1, 'transparent');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(this.x - 15, this.y - 15, 30, 30);
+                }
+            }
+        }
+
+        // Initialize particles
+        for (let i = 0; i < 200; i++) {
+            particles.push(new Particle());
+        }
+
+        // Aurora curtain effect
+        class AuroraCurtain {
+            constructor() {
+                this.points = [];
+                this.baseY = height * 0.5;
+                for (let i = 0; i <= 50; i++) {
+                    this.points.push({
+                        x: (i / 50) * width,
+                        y: this.baseY,
+                        offset: Math.random() * Math.PI * 2,
+                        amplitude: Math.random() * 50 + 20
+                    });
+                }
+            }
+            
+            update(time) {
+                this.points.forEach((p, i) => {
+                    p.y = this.baseY + Math.sin(time * 0.001 + p.offset + i * 0.1) * p.amplitude;
+                    
+                    // Influence from field points
+                    fieldPoints.forEach(fp => {
+                        const dx = fp.x - p.x;
+                        const dy = fp.y - p.y;
+                        const dist = Math.sqrt(dx * dx + dy * dy) + 1;
+                        p.y += fp.polarity * fp.strength * 100 / dist;
+                    });
+                });
+            }
+            
+            draw(time) {
+                // Draw multiple layers of aurora
+                for (let layer = 0; layer < 5; layer++) {
+                    ctx.beginPath();
+                    ctx.moveTo(this.points[0].x, this.points[0].y + layer * 40);
+                    
+                    for (let i = 1; i < this.points.length; i++) {
+                        const p = this.points[i];
+                        const yOffset = layer * 40 + Math.sin(time * 0.002 + i * 0.2 + layer) * 20;
+                        ctx.lineTo(p.x, p.y + yOffset);
+                    }
+                    
+                    ctx.lineTo(width, height);
+                    ctx.lineTo(0, height);
+                    ctx.closePath();
+                    
+                    const altitude = (5 - layer) * 50;
+                    let color;
+                    if (altitude > 200) {
+                        color = `rgba(255, 50, 80, ${0.1 - layer * 0.015})`;
+                    } else if (altitude > 100) {
+                        color = `rgba(150, 80, 200, ${0.15 - layer * 0.02})`;
+                    } else {
+                        color = `rgba(50, 255, 120, ${0.2 - layer * 0.03})`;
+                    }
+                    
+                    ctx.fillStyle = color;
+                    ctx.fill();
+                }
+            }
+        }
+
+        const auroraCurtain = new AuroraCurtain();
+
+        // Input handling
+        canvas.addEventListener('mousedown', (e) => {
+            isDragging = true;
+            dragStart = { x: e.clientX, y: e.clientY };
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            if (isDragging && dragStart) {
+                const dx = e.clientX - dragStart.x;
+                const dy = e.clientY - dragStart.y;
+                if (Math.sqrt(dx * dx + dy * dy) > 30) {
+                    fieldPoints.push(new FieldPoint(e.clientX, e.clientY, 0.5 + Math.random() * 0.5));
+                    dragStart = { x: e.clientX, y: e.clientY };
+                    if (fieldPoints.length > 20) fieldPoints.shift();
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseup', () => {
+            isDragging = false;
+            dragStart = null;
+        });
+
+        canvas.addEventListener('click', (e) => {
+            // Trigger mini solar flare at click position
+            for (let i = 0; i < 30; i++) {
+                const p = new Particle();
+                p.x = e.clientX + (Math.random() - 0.5) * 50;
+                p.y = e.clientY + (Math.random() - 0.5) * 50;
+                p.vx = (Math.random() - 0.5) * 5;
+                p.vy = Math.random() * 3;
+                particles.push(p);
+            }
+            if (particles.length > 500) {
+                particles = particles.slice(-300);
+            }
+        });
+
+        function solarFlare() {
+            for (let i = 0; i < 100; i++) {
+                const p = new Particle();
+                p.x = width / 2 + (Math.random() - 0.5) * 200;
+                p.y = -50;
+                p.vx = (Math.random() - 0.5) * 8;
+                p.vy = Math.random() * 5 + 3;
+                particles.push(p);
+            }
+            if (particles.length > 600) {
+                particles = particles.slice(-400);
+            }
+        }
+
+        function clearField() {
+            fieldPoints = [];
+        }
+
+        function toggleSound() {
+            if (!audioCtx) {
+                initAudio();
+            }
+            soundEnabled = !soundEnabled;
+            document.getElementById('soundBtn').textContent = soundEnabled ? 'Disable Sound' : 'Enable Sound';
+        }
+
+        document.getElementById('flareBtn').addEventListener('click', solarFlare);
+        document.getElementById('clearBtn').addEventListener('click', clearField);
+        document.getElementById('soundBtn').addEventListener('click', toggleSound);
+
+        // Stars background
+        const stars = [];
+        for (let i = 0; i < 200; i++) {
+            stars.push({
+                x: Math.random() * width,
+                y: Math.random() * height * 0.6,
+                size: Math.random() * 1.5,
+                twinkle: Math.random() * Math.PI * 2
+            });
+        }
+
+        function drawStars(time) {
+            stars.forEach(star => {
+                const alpha = 0.5 + Math.sin(time * 0.003 + star.twinkle) * 0.3;
+                ctx.beginPath();
+                ctx.arc(star.x, star.y, star.size, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+                ctx.fill();
+            });
+        }
+
+        // Main animation loop
+        let time = 0;
+        function animate() {
+            time++;
+            
+            // Clear with fade effect
+            ctx.fillStyle = 'rgba(0, 5, 15, 0.1)';
+            ctx.fillRect(0, 0, width, height);
+            
+            // Draw stars
+            drawStars(time);
+            
+            // Update and draw aurora curtain
+            auroraCurtain.update(time);
+            auroraCurtain.draw(time);
+            
+            // Draw field lines
+            fieldPoints.forEach((fp, i) => {
+                // Visualize field
+                for (let angle = 0; angle < Math.PI * 2; angle += 0.3) {
+                    const radius = 30 + Math.sin(time * 0.05 + angle) * 10;
+                    const x = fp.x + Math.cos(angle) * radius;
+                    const y = fp.y + Math.sin(angle) * radius;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 1, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(100, 150, 255, 0.3)`;
+                    ctx.fill();
+                }
+                
+                // Field point center
+                ctx.beginPath();
+                ctx.arc(fp.x, fp.y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = fp.polarity > 0 ? 'rgba(255, 100, 100, 0.5)' : 'rgba(100, 100, 255, 0.5)';
+                ctx.fill();
+            });
+            
+            // Update and draw particles
+            let glowingCount = 0;
+            let avgAltitude = 0;
+            particles.forEach(p => {
+                p.update();
+                p.draw();
+                if (p.glowing) {
+                    glowingCount++;
+                    avgAltitude += p.altitude;
+                }
+            });
+            
+            // Update sound based on aurora activity
+            if (glowingCount > 0) {
+                updateSound(glowingCount, avgAltitude / glowingCount);
+            } else {
+                updateSound(0, 0);
+            }
+            
+            // Update stats
+            document.getElementById('stats').innerHTML = `
+                Particles: ${particles.length}<br>
+                Field Points: ${fieldPoints.length}<br>
+                Aurora Intensity: ${Math.round(glowingCount / particles.length * 100)}%
+            `;
+            
+            requestAnimationFrame(animate);
+        }
+
+        animate();
+    </script>
+</body>
+</html>

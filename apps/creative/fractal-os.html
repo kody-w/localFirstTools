@@ -1,0 +1,716 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fractal Operating System</title>
+    <meta name="description" content="An infinite, zoomable Mandelbrot-based operating system where files are hidden in the fractal's depth.">
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', Courier, monospace;
+            color: #0f0;
+        }
+        canvas {
+            display: block;
+        }
+        #ui-layer {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+        }
+        .window {
+            position: absolute;
+            background: rgba(0, 20, 0, 0.9);
+            border: 1px solid #0f0;
+            box-shadow: 0 0 10px #0f0;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            min-width: 300px;
+            min-height: 200px;
+        }
+        .title-bar {
+            background: #0f0;
+            color: #000;
+            padding: 5px;
+            cursor: move;
+            display: flex;
+            justify-content: space-between;
+            font-weight: bold;
+        }
+        .close-btn {
+            cursor: pointer;
+            font-weight: bold;
+        }
+        .content {
+            flex-grow: 1;
+            padding: 10px;
+            overflow: auto;
+            position: relative;
+        }
+        textarea {
+            width: 100%;
+            height: 100%;
+            background: transparent;
+            border: none;
+            color: #0f0;
+            font-family: inherit;
+            resize: none;
+            outline: none;
+        }
+        button {
+            background: #000;
+            color: #0f0;
+            border: 1px solid #0f0;
+            padding: 5px 10px;
+            cursor: pointer;
+            margin-right: 5px;
+        }
+        button:hover {
+            background: #0f0;
+            color: #000;
+        }
+        .file-marker {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            background: rgba(0, 255, 0, 0.3);
+            border: 1px solid #0f0;
+            border-radius: 50%;
+            transform: translate(-50%, -50%);
+            cursor: pointer;
+            pointer-events: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+            color: #fff;
+            transition: all 0.2s;
+        }
+        .file-marker:hover {
+            background: rgba(0, 255, 0, 0.8);
+            width: 30px;
+            height: 30px;
+            z-index: 100;
+        }
+        .file-label {
+            position: absolute;
+            top: 25px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 2px 5px;
+            border-radius: 3px;
+            white-space: nowrap;
+            pointer-events: none;
+        }
+        #status-bar {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            width: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            border-top: 1px solid #0f0;
+            padding: 5px;
+            font-size: 12px;
+            display: flex;
+            justify-content: space-between;
+        }
+        #context-menu {
+            position: absolute;
+            background: #000;
+            border: 1px solid #0f0;
+            display: none;
+            flex-direction: column;
+            z-index: 1000;
+            pointer-events: auto;
+        }
+        #context-menu div {
+            padding: 5px 15px;
+            cursor: pointer;
+        }
+        #context-menu div:hover {
+            background: #0f0;
+            color: #000;
+        }
+        .terminal-output {
+            height: 80%;
+            overflow-y: auto;
+            margin-bottom: 5px;
+            white-space: pre-wrap;
+        }
+        .terminal-input {
+            width: 100%;
+            background: transparent;
+            border: none;
+            border-top: 1px solid #333;
+            color: #0f0;
+            font-family: inherit;
+            outline: none;
+        }
+        .synth-controls {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        input[type="range"] {
+            width: 100%;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="fractal-canvas"></canvas>
+    <div id="ui-layer"></div>
+    <div id="status-bar">
+        <span id="coords">X: 0.00000000 Y: 0.00000000 Zoom: 1.0</span>
+        <span>Fractal OS v1.0</span>
+    </div>
+    <div id="context-menu">
+        <div onclick="createFile('text')">New Text File</div>
+        <div onclick="createFile('terminal')">New Terminal</div>
+        <div onclick="createFile('synth')">New Synthesizer</div>
+    </div>
+
+    <script>
+        // --- Core System State ---
+        const canvas = document.getElementById('fractal-canvas');
+        const ctx = canvas.getContext('2d', { alpha: false });
+        const uiLayer = document.getElementById('ui-layer');
+        const coordsDisplay = document.getElementById('coords');
+        const contextMenu = document.getElementById('context-menu');
+
+        let width, height;
+        let view = {
+            x: -0.5,
+            y: 0,
+            zoom: 1, // Higher number = zoomed out (coordinate width)
+            maxIter: 100
+        };
+        
+        // File System
+        let fileSystem = [];
+        const STORAGE_KEY = 'fractalOS_fs';
+        
+        const seedFiles = [
+            {
+                id: 'welcome',
+                type: 'text',
+                name: 'README.txt',
+                x: -0.5,
+                y: 0,
+                content: "Welcome to Fractal OS.\n\nThis is an infinite operating system.\nZoom in to find more space.\nRight-click to create files.\n\nFiles are persisted in your browser's LocalStorage."
+            },
+            {
+                id: 'seahorse_term',
+                type: 'terminal',
+                name: 'Seahorse Outpost',
+                x: -0.745,
+                y: 0.1,
+                content: null
+            },
+            {
+                id: 'elephant_synth',
+                type: 'synth',
+                name: 'Elephant Bass',
+                x: 0.28,
+                y: 0.01,
+                content: null
+            },
+            {
+                id: 'minibrot_secret',
+                type: 'text',
+                name: 'Deep Secret',
+                x: -1.75,
+                y: 0,
+                content: "You found the mini-brot!\nThis is a safe place for secrets."
+            },
+            {
+                id: 'spiral_hub',
+                type: 'terminal',
+                name: 'Spiral Hub',
+                x: -0.088,
+                y: 0.654,
+                content: null
+            }
+        ];
+
+        // --- Initialization ---
+        function init() {
+            resize();
+            window.addEventListener('resize', resize);
+            loadFileSystem();
+            
+            // Input handling
+            canvas.addEventListener('wheel', handleWheel);
+            canvas.addEventListener('mousedown', handleMouseDown);
+            window.addEventListener('mousemove', handleMouseMove);
+            window.addEventListener('mouseup', handleMouseUp);
+            canvas.addEventListener('contextmenu', handleContextMenu);
+            
+            // Initial render
+            requestAnimationFrame(render);
+        }
+
+        function resize() {
+            width = window.innerWidth;
+            height = window.innerHeight;
+            canvas.width = width;
+            canvas.height = height;
+            // Adjust zoom to maintain aspect ratio if needed, or just re-render
+            view.zoom = 4.0 / Math.min(width, height) * height / 2; // Rough initial scale
+            render();
+        }
+
+        function loadFileSystem() {
+            const stored = localStorage.getItem(STORAGE_KEY);
+            if (stored) {
+                try {
+                    fileSystem = JSON.parse(stored);
+                    // Merge seeds
+                    seedFiles.forEach(seed => {
+                        if (!fileSystem.find(f => f.id === seed.id)) {
+                            fileSystem.push(seed);
+                        }
+                    });
+                } catch (e) {
+                    console.error("Failed to load FS", e);
+                    fileSystem = seedFiles;
+                }
+            } else {
+                fileSystem = seedFiles;
+                saveFileSystem();
+            }
+            updateFileMarkers();
+        }
+
+        function saveFileSystem() {
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(fileSystem));
+        }
+
+        // --- Fractal Rendering ---
+        // Using a simple pixel-by-pixel Mandelbrot renderer
+        // For performance, we render at lower resolution while moving
+        let isDragging = false;
+        let dragStart = { x: 0, y: 0 };
+        let viewStart = { x: 0, y: 0 };
+
+        function render() {
+            const imgData = ctx.createImageData(width, height);
+            const data = imgData.data;
+            
+            // Calculate view bounds
+            // view.zoom represents the height of the view in complex plane coordinates
+            const scale = view.zoom / height;
+            const xMin = view.x - (width / 2) * scale;
+            const yMin = view.y - (height / 2) * scale;
+
+            // Dynamic iteration count based on zoom depth
+            // As we zoom in, we need more iterations to see detail
+            // view.zoom gets smaller as we zoom in
+            const zoomFactor = 2 / view.zoom;
+            const maxIter = Math.floor(50 + 20 * Math.log(zoomFactor));
+
+            for (let py = 0; py < height; py++) {
+                const y0 = yMin + py * scale;
+                for (let px = 0; px < width; px++) {
+                    const x0 = xMin + px * scale;
+                    
+                    // Mandelbrot calculation
+                    let x = 0;
+                    let y = 0;
+                    let iter = 0;
+                    let x2 = 0;
+                    let y2 = 0;
+
+                    while (x2 + y2 <= 4 && iter < maxIter) {
+                        y = 2 * x * y + y0;
+                        x = x2 - y2 + x0;
+                        x2 = x * x;
+                        y2 = y * y;
+                        iter++;
+                    }
+
+                    // Color mapping
+                    const pIndex = (py * width + px) * 4;
+                    if (iter === maxIter) {
+                        // Inside set - Black
+                        data[pIndex] = 0;
+                        data[pIndex + 1] = 0;
+                        data[pIndex + 2] = 0;
+                        data[pIndex + 3] = 255;
+                    } else {
+                        // Outside set - Green gradient
+                        const c = Math.floor(255 * Math.sqrt(iter / maxIter));
+                        data[pIndex] = 0;
+                        data[pIndex + 1] = c; // Green channel
+                        data[pIndex + 2] = c * 0.2;
+                        data[pIndex + 3] = 255;
+                    }
+                }
+            }
+            
+            ctx.putImageData(imgData, 0, 0);
+            updateFileMarkers();
+            updateStatusBar();
+        }
+
+        // --- Interaction ---
+        function handleWheel(e) {
+            e.preventDefault();
+            const zoomFactor = e.deltaY > 0 ? 1.1 : 0.9;
+            
+            // Zoom towards mouse pointer
+            const scale = view.zoom / height;
+            const mouseX = view.x + (e.clientX - width / 2) * scale;
+            const mouseY = view.y + (e.clientY - height / 2) * scale;
+
+            view.zoom *= zoomFactor;
+            
+            // Adjust center so mouse point stays stable
+            const newScale = view.zoom / height;
+            view.x = mouseX - (e.clientX - width / 2) * newScale;
+            view.y = mouseY - (e.clientY - height / 2) * newScale;
+
+            requestAnimationFrame(render);
+            contextMenu.style.display = 'none';
+        }
+
+        function handleMouseDown(e) {
+            if (e.button === 0) { // Left click
+                isDragging = true;
+                dragStart = { x: e.clientX, y: e.clientY };
+                viewStart = { x: view.x, y: view.y };
+                contextMenu.style.display = 'none';
+            }
+        }
+
+        function handleMouseMove(e) {
+            if (isDragging) {
+                const dx = e.clientX - dragStart.x;
+                const dy = e.clientY - dragStart.y;
+                
+                const scale = view.zoom / height;
+                view.x = viewStart.x - dx * scale;
+                view.y = viewStart.y - dy * scale;
+                
+                requestAnimationFrame(render);
+            }
+        }
+
+        function handleMouseUp() {
+            isDragging = false;
+        }
+
+        function handleContextMenu(e) {
+            e.preventDefault();
+            contextMenu.style.display = 'flex';
+            contextMenu.style.left = e.clientX + 'px';
+            contextMenu.style.top = e.clientY + 'px';
+            
+            // Store click coordinates in complex plane for file creation
+            const scale = view.zoom / height;
+            contextMenu.dataset.x = view.x + (e.clientX - width / 2) * scale;
+            contextMenu.dataset.y = view.y + (e.clientY - height / 2) * scale;
+        }
+
+        function updateStatusBar() {
+            coordsDisplay.textContent = `X: ${view.x.toFixed(8)} Y: ${view.y.toFixed(8)} Zoom: ${view.zoom.toExponential(2)}`;
+        }
+
+        // --- File System UI ---
+        function updateFileMarkers() {
+            // Remove existing markers
+            const existing = document.querySelectorAll('.file-marker');
+            existing.forEach(el => el.remove());
+
+            const scale = view.zoom / height;
+
+            fileSystem.forEach(file => {
+                // Project file coords to screen coords
+                const rawScreenX = (file.x - view.x) / scale + width / 2;
+                const rawScreenY = (file.y - view.y) / scale + height / 2;
+
+                const margin = 30;
+                let screenX = rawScreenX;
+                let screenY = rawScreenY;
+                let isOffscreen = false;
+
+                // Clamp to screen bounds for offscreen indicators
+                if (screenX < margin) { screenX = margin; isOffscreen = true; }
+                if (screenX > width - margin) { screenX = width - margin; isOffscreen = true; }
+                if (screenY < margin) { screenY = margin; isOffscreen = true; }
+                if (screenY > height - margin) { screenY = height - margin; isOffscreen = true; }
+
+                const marker = document.createElement('div');
+                marker.className = 'file-marker';
+                marker.style.left = screenX + 'px';
+                marker.style.top = screenY + 'px';
+                
+                if (isOffscreen) {
+                    marker.style.opacity = '0.5';
+                    marker.style.transform = 'translate(-50%, -50%) scale(0.8)';
+                    marker.innerHTML = '•'; // Small dot for offscreen
+                    marker.title = file.name + " (Off-screen)";
+                    marker.style.border = '1px solid #0f0';
+                    marker.style.backgroundColor = '#000';
+                } else {
+                    marker.innerHTML = getIconForType(file.type);
+                    const label = document.createElement('div');
+                    label.className = 'file-label';
+                    label.textContent = file.name;
+                    marker.appendChild(label);
+                }
+
+                marker.onclick = (e) => {
+                    e.stopPropagation();
+                    if (isOffscreen) {
+                        // Jump to file
+                        animateViewTo(file.x, file.y);
+                    } else {
+                        openWindow(file);
+                    }
+                };
+
+                uiLayer.appendChild(marker);
+            });
+        }
+
+        function animateViewTo(targetX, targetY) {
+            const startX = view.x;
+            const startY = view.y;
+            const startTime = performance.now();
+            const duration = 1000;
+
+            function step(time) {
+                const progress = Math.min((time - startTime) / duration, 1);
+                const ease = 1 - Math.pow(1 - progress, 3); // Cubic ease out
+                
+                view.x = startX + (targetX - startX) * ease;
+                view.y = startY + (targetY - startY) * ease;
+                
+                render();
+                
+                if (progress < 1) {
+                    requestAnimationFrame(step);
+                }
+            }
+            requestAnimationFrame(step);
+        }
+
+        function getIconForType(type) {
+            switch(type) {
+                case 'text': return '📄';
+                case 'terminal': return '>_';
+                case 'synth': return '🎵';
+                default: return '?';
+            }
+        }
+
+        function createFile(type) {
+            const x = parseFloat(contextMenu.dataset.x);
+            const y = parseFloat(contextMenu.dataset.y);
+            
+            const newFile = {
+                id: Date.now().toString(),
+                type: type,
+                name: `New ${type}`,
+                x: x,
+                y: y,
+                content: type === 'text' ? '' : null
+            };
+            
+            fileSystem.push(newFile);
+            saveFileSystem();
+            updateFileMarkers();
+            contextMenu.style.display = 'none';
+            openWindow(newFile);
+        }
+
+        // --- Window Management ---
+        function openWindow(file) {
+            // Check if window already open
+            if (document.getElementById(`win-${file.id}`)) return;
+
+            const win = document.createElement('div');
+            win.className = 'window';
+            win.id = `win-${file.id}`;
+            win.style.left = '100px';
+            win.style.top = '100px';
+            
+            // Header
+            const header = document.createElement('div');
+            header.className = 'title-bar';
+            header.innerHTML = `<span>${file.name}</span><span class="close-btn" onclick="closeWindow('${file.id}')">X</span>`;
+            
+            // Dragging logic for window
+            let isWinDragging = false;
+            let winDragStart = { x: 0, y: 0 };
+            
+            header.addEventListener('mousedown', (e) => {
+                isWinDragging = true;
+                winDragStart = { x: e.clientX - win.offsetLeft, y: e.clientY - win.offsetTop };
+                // Bring to front
+                uiLayer.appendChild(win); 
+            });
+            
+            window.addEventListener('mousemove', (e) => {
+                if (isWinDragging) {
+                    win.style.left = (e.clientX - winDragStart.x) + 'px';
+                    win.style.top = (e.clientY - winDragStart.y) + 'px';
+                }
+            });
+            
+            window.addEventListener('mouseup', () => {
+                isWinDragging = false;
+            });
+
+            win.appendChild(header);
+
+            // Content
+            const content = document.createElement('div');
+            content.className = 'content';
+            
+            if (file.type === 'text') {
+                const textarea = document.createElement('textarea');
+                textarea.value = file.content || '';
+                textarea.addEventListener('input', (e) => {
+                    file.content = e.target.value;
+                    saveFileSystem();
+                });
+                content.appendChild(textarea);
+            } else if (file.type === 'terminal') {
+                const output = document.createElement('div');
+                output.className = 'terminal-output';
+                output.textContent = "Fractal OS Terminal\nType 'help' for commands.\n";
+                
+                const input = document.createElement('input');
+                input.className = 'terminal-input';
+                input.type = 'text';
+                input.addEventListener('keydown', (e) => {
+                    if (e.key === 'Enter') {
+                        const cmd = input.value;
+                        output.textContent += `> ${cmd}\n`;
+                        processCommand(cmd, output, file);
+                        input.value = '';
+                        output.scrollTop = output.scrollHeight;
+                    }
+                });
+                
+                content.appendChild(output);
+                content.appendChild(input);
+            } else if (file.type === 'synth') {
+                content.innerHTML = `
+                    <div class="synth-controls">
+                        <button onclick="playTone(440)">Play A4</button>
+                        <label>Frequency: <span id="freq-val-${file.id}">440</span>Hz</label>
+                        <input type="range" min="100" max="1000" value="440" oninput="updateFreq('${file.id}', this.value)">
+                        <button onclick="playOsc('${file.id}')">Start Oscillator</button>
+                        <button onclick="stopOsc('${file.id}')">Stop Oscillator</button>
+                    </div>
+                `;
+            }
+
+            win.appendChild(content);
+            uiLayer.appendChild(win);
+        }
+
+        function closeWindow(id) {
+            const win = document.getElementById(`win-${id}`);
+            if (win) win.remove();
+        }
+
+        // --- App Logic ---
+        
+        // Terminal
+        function processCommand(cmd, output, file) {
+            const args = cmd.split(' ');
+            const command = args[0].toLowerCase();
+            
+            switch(command) {
+                case 'help':
+                    output.textContent += "Commands: help, clear, date, echo, coords, ls\n";
+                    break;
+                case 'clear':
+                    output.textContent = "";
+                    break;
+                case 'date':
+                    output.textContent += new Date().toString() + "\n";
+                    break;
+                case 'echo':
+                    output.textContent += args.slice(1).join(' ') + "\n";
+                    break;
+                case 'coords':
+                    output.textContent += `Current View: X=${view.x}, Y=${view.y}\n`;
+                    break;
+                case 'ls':
+                    output.textContent += "Files in current view:\n";
+                    fileSystem.forEach(f => {
+                        output.textContent += `- ${f.name} (${f.type})\n`;
+                    });
+                    break;
+                case 'reset':
+                    localStorage.removeItem(STORAGE_KEY);
+                    location.reload();
+                    break;
+                default:
+                    output.textContent += `Unknown command: ${command}\n`;
+            }
+        }
+
+        // Synth
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillators = {};
+
+        window.playTone = function(freq) {
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            osc.frequency.value = freq;
+            gain.gain.value = 0.1;
+            osc.start();
+            gain.gain.exponentialRampToValueAtTime(0.00001, audioCtx.currentTime + 0.5);
+            osc.stop(audioCtx.currentTime + 0.5);
+        };
+
+        window.updateFreq = function(id, val) {
+            document.getElementById(`freq-val-${id}`).textContent = val;
+            if (oscillators[id]) {
+                oscillators[id].frequency.value = val;
+            }
+        };
+
+        window.playOsc = function(id) {
+            if (oscillators[id]) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(audioCtx.destination);
+            
+            const freq = document.querySelector(`#win-${id} input[type="range"]`).value;
+            osc.frequency.value = freq;
+            gain.gain.value = 0.1;
+            osc.start();
+            oscillators[id] = osc;
+        };
+
+        window.stopOsc = function(id) {
+            if (oscillators[id]) {
+                oscillators[id].stop();
+                delete oscillators[id];
+            }
+        };
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

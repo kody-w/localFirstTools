@@ -1,0 +1,894 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Azure VM + Docker + Live HackerNews API</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Berkeley Mono', 'JetBrains Mono', 'SF Mono', monospace;
+            background: #0a0a0a;
+            color: #00ff41;
+            min-height: 100vh;
+            overflow: hidden;
+        }
+
+        .matrix-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            opacity: 0.1;
+            background: linear-gradient(0deg, transparent 24%, rgba(0, 255, 65, 0.05) 25%, rgba(0, 255, 65, 0.05) 26%, transparent 27%, transparent 74%, rgba(0, 255, 65, 0.05) 75%, rgba(0, 255, 65, 0.05) 76%, transparent 77%, transparent);
+            background-size: 50px 50px;
+            animation: matrix-rain 10s linear infinite;
+        }
+
+        @keyframes matrix-rain {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(50px); }
+        }
+
+        .container {
+            position: relative;
+            z-index: 1;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        .header {
+            background: rgba(0, 0, 0, 0.95);
+            border-bottom: 2px solid #00ff41;
+            padding: 15px 20px;
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.5);
+        }
+
+        .header h1 {
+            font-size: 24px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            text-shadow: 0 0 10px #00ff41;
+        }
+
+        .status-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-weight: bold;
+            animation: pulse-glow 2s infinite;
+        }
+
+        .status-badge.live {
+            background: #00ff41;
+            color: #000;
+            box-shadow: 0 0 20px #00ff41;
+        }
+
+        @keyframes pulse-glow {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .main-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: 1fr 450px;
+            gap: 20px;
+            padding: 20px;
+            overflow: hidden;
+        }
+
+        .left-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+
+        .right-section {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-y: auto;
+        }
+
+        .panel {
+            background: rgba(0, 0, 0, 0.9);
+            border: 1px solid #00ff41;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 0 30px rgba(0, 255, 65, 0.2);
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid rgba(0, 255, 65, 0.3);
+        }
+
+        .panel-title {
+            font-size: 14px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            color: #00ff41;
+            text-shadow: 0 0 5px #00ff41;
+        }
+
+        .vm-terminal {
+            background: #000;
+            height: 400px;
+            padding: 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            overflow-y: auto;
+            border: 1px solid #00ff41;
+            box-shadow: inset 0 0 20px rgba(0, 255, 65, 0.1);
+        }
+
+        .terminal-line {
+            margin: 2px 0;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            animation: terminal-fade-in 0.3s;
+        }
+
+        @keyframes terminal-fade-in {
+            from { opacity: 0; transform: translateX(-10px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+
+        .terminal-line.system {
+            color: #00ffff;
+        }
+
+        .terminal-line.docker {
+            color: #0db7ed;
+        }
+
+        .terminal-line.azure {
+            color: #0078d4;
+        }
+
+        .terminal-line.success {
+            color: #00ff41;
+        }
+
+        .terminal-line.error {
+            color: #ff0041;
+        }
+
+        .terminal-line.api {
+            color: #ffa500;
+        }
+
+        .code-editor {
+            background: #1a1a1a;
+            border: 1px solid #00ff41;
+            border-radius: 4px;
+            padding: 10px;
+            min-height: 300px;
+        }
+
+        .code-editor textarea {
+            width: 100%;
+            min-height: 280px;
+            background: transparent;
+            border: none;
+            color: #00ff41;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            outline: none;
+            resize: none;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        button {
+            background: linear-gradient(45deg, #00ff41, #00cc33);
+            color: #000;
+            border: none;
+            padding: 10px;
+            border-radius: 4px;
+            font-weight: bold;
+            cursor: pointer;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            transition: all 0.3s;
+            position: relative;
+            overflow: hidden;
+        }
+
+        button::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
+            transition: left 0.5s;
+        }
+
+        button:hover::before {
+            left: 100%;
+        }
+
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(0, 255, 65, 0.5);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.danger {
+            background: linear-gradient(45deg, #ff0041, #cc0033);
+        }
+
+        .api-response {
+            background: #0a0a0a;
+            border: 1px solid #00ff41;
+            border-radius: 4px;
+            padding: 10px;
+            max-height: 350px;
+            overflow-y: auto;
+            font-size: 11px;
+            font-family: monospace;
+        }
+
+        .api-response pre {
+            color: #00ff41;
+            margin: 0;
+            white-space: pre-wrap;
+        }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+
+        .metric-box {
+            background: rgba(0, 255, 65, 0.1);
+            border: 1px solid #00ff41;
+            padding: 10px;
+            text-align: center;
+            border-radius: 4px;
+            transition: all 0.3s;
+        }
+
+        .metric-box:hover {
+            transform: scale(1.05);
+            box-shadow: 0 0 20px rgba(0, 255, 65, 0.3);
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #00ff41;
+            text-shadow: 0 0 10px #00ff41;
+        }
+
+        .metric-label {
+            font-size: 10px;
+            color: #888;
+            text-transform: uppercase;
+            margin-top: 5px;
+        }
+
+        .live-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            background: #00ff41;
+            border-radius: 50%;
+            margin-left: 10px;
+            animation: live-pulse 1s infinite;
+        }
+
+        @keyframes live-pulse {
+            0%, 100% {
+                box-shadow: 0 0 0 0 rgba(0, 255, 65, 0.7);
+            }
+            50% {
+                box-shadow: 0 0 0 10px rgba(0, 255, 65, 0);
+            }
+        }
+
+        .loading-spinner {
+            width: 40px;
+            height: 40px;
+            border: 3px solid rgba(0, 255, 65, 0.2);
+            border-top-color: #00ff41;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .notification {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            padding: 15px 20px;
+            background: #00ff41;
+            color: #000;
+            border-radius: 4px;
+            font-weight: bold;
+            box-shadow: 0 4px 20px rgba(0, 255, 65, 0.5);
+            animation: slide-in 0.3s;
+            z-index: 1000;
+        }
+
+        @keyframes slide-in {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        .hn-story {
+            padding: 10px;
+            border-bottom: 1px solid rgba(0, 255, 65, 0.3);
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .hn-story:hover {
+            background: rgba(0, 255, 65, 0.1);
+            padding-left: 15px;
+        }
+
+        .hn-title {
+            color: #00ff41;
+            font-size: 12px;
+            margin-bottom: 5px;
+        }
+
+        .hn-meta {
+            color: #888;
+            font-size: 10px;
+        }
+
+        .terminal-input-wrapper {
+            display: flex;
+            align-items: center;
+            margin-top: 10px;
+            border-top: 1px solid #00ff41;
+            padding-top: 10px;
+        }
+
+        .terminal-prompt {
+            color: #00ff41;
+            margin-right: 10px;
+        }
+
+        #vmInput {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: #00ff41;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            outline: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="matrix-bg"></div>
+    <div class="container">
+        <div class="header">
+            <h1>
+                🔥 Azure VM + Docker + Live HackerNews API
+                <span class="status-badge live" id="statusBadge">LIVE</span>
+                <span class="live-indicator"></span>
+            </h1>
+        </div>
+
+        <div class="main-grid">
+            <div class="left-section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">🖥️ Linux VM Terminal</div>
+                        <button onclick="vm.reset()" style="padding: 5px 10px; font-size: 11px;">RESET</button>
+                    </div>
+                    <div class="vm-terminal" id="vmTerminal"></div>
+                    <div class="terminal-input-wrapper">
+                        <span class="terminal-prompt">root@azure:~$</span>
+                        <input type="text" id="vmInput" placeholder="Enter command...">
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">📝 Azure Function Code</div>
+                    </div>
+                    <div class="code-editor">
+                        <textarea id="functionCode">// Azure Function that fetches LIVE HackerNews data
+async function hackerNewsFunction(context, req) {
+    const https = require('https');
+    
+    // Helper function to make HTTPS requests
+    function httpsGet(url) {
+        return new Promise((resolve, reject) => {
+            https.get(url, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => resolve(JSON.parse(data)));
+                res.on('error', reject);
+            }).on('error', reject);
+        });
+    }
+    
+    try {
+        // Fetch top stories from HackerNews
+        const topStories = await httpsGet('https://hacker-news.firebaseio.com/v0/topstories.json');
+        const storyIds = topStories.slice(0, 10);
+        
+        // Fetch details for each story
+        const stories = await Promise.all(
+            storyIds.map(id => 
+                httpsGet(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)
+            )
+        );
+        
+        // Format the response
+        const formattedStories = stories.map(story => ({
+            title: story.title,
+            score: story.score,
+            by: story.by,
+            time: new Date(story.time * 1000).toISOString(),
+            url: story.url,
+            comments: story.descendants || 0
+        }));
+        
+        context.res = {
+            status: 200,
+            body: {
+                success: true,
+                timestamp: new Date().toISOString(),
+                source: 'HackerNews Live API',
+                count: formattedStories.length,
+                stories: formattedStories
+            }
+        };
+    } catch (error) {
+        context.res = {
+            status: 500,
+            body: { error: error.message }
+        };
+    }
+}</textarea>
+                    </div>
+                </div>
+            </div>
+
+            <div class="right-section">
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">🚀 Control Panel</div>
+                    </div>
+                    <div class="controls">
+                        <button onclick="vm.bootVM()">🖥️ BOOT VM</button>
+                        <button onclick="vm.buildDocker()">🐳 BUILD DOCKER</button>
+                        <button onclick="vm.deployFunction()">⚡ DEPLOY</button>
+                        <button onclick="vm.executeLive()">🔥 RUN LIVE</button>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">📊 Live Metrics</div>
+                    </div>
+                    <div class="metrics-grid">
+                        <div class="metric-box">
+                            <div class="metric-value" id="apiCalls">0</div>
+                            <div class="metric-label">API Calls</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value" id="stories">0</div>
+                            <div class="metric-label">Stories Fetched</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value" id="latency">0ms</div>
+                            <div class="metric-label">Latency</div>
+                        </div>
+                        <div class="metric-box">
+                            <div class="metric-value" id="uptime">0s</div>
+                            <div class="metric-label">Uptime</div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">🌐 API Response</div>
+                    </div>
+                    <div class="api-response" id="apiResponse">
+                        <pre>Waiting for execution...</pre>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <div class="panel-header">
+                        <div class="panel-title">📰 Live HackerNews Top Stories</div>
+                    </div>
+                    <div id="hnFeed" style="max-height: 300px; overflow-y: auto;">
+                        <div class="loading-spinner"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        class AzureVMWithDocker {
+            constructor() {
+                this.vmState = 'stopped';
+                this.dockerReady = false;
+                this.functionDeployed = false;
+                this.metrics = {
+                    apiCalls: 0,
+                    storiesFetched: 0,
+                    startTime: Date.now()
+                };
+                
+                this.initialize();
+            }
+
+            initialize() {
+                this.addTerminal('[SYSTEM] Azure VM initialized', 'system');
+                this.addTerminal('[SYSTEM] Ready to boot Linux VM with Docker support', 'system');
+                this.startMetricsUpdater();
+                this.fetchLiveHackerNews();
+            }
+
+            async bootVM() {
+                if (this.vmState === 'running') {
+                    this.showNotification('VM already running!', 'warning');
+                    return;
+                }
+
+                this.addTerminal('[BOOT] Starting Linux VM...', 'system');
+                await this.delay(500);
+                this.addTerminal('[BIOS] SeaBIOS (version 1.13.0-1ubuntu1.1)', 'system');
+                await this.delay(400);
+                this.addTerminal('[GRUB] Loading Linux kernel...', 'system');
+                await this.delay(600);
+                this.addTerminal('[KERNEL] Linux 5.15.0-56-generic #62-Ubuntu SMP', 'system');
+                await this.delay(500);
+                this.addTerminal('[SYSTEMD] Starting services...', 'system');
+                await this.delay(400);
+                this.addTerminal('[NETWORK] eth0: configured 10.0.0.4/24', 'success');
+                await this.delay(300);
+                this.addTerminal('[SSH] OpenSSH server started on port 22', 'success');
+                await this.delay(200);
+                this.addTerminal('[DOCKER] Docker daemon started (v20.10.21)', 'docker');
+                await this.delay(300);
+                this.addTerminal('[AZURE] Azure CLI ready (v2.44.0)', 'azure');
+                this.addTerminal('[SUCCESS] Ubuntu 22.04.1 LTS ready', 'success');
+                this.addTerminal('root@azure:~# ', 'success');
+                
+                this.vmState = 'running';
+                this.showNotification('VM booted successfully!');
+            }
+
+            async buildDocker() {
+                if (this.vmState !== 'running') {
+                    this.showNotification('Boot VM first!', 'error');
+                    return;
+                }
+
+                this.addTerminal('root@azure:~# docker build -t azurefunc:latest .', 'system');
+                await this.delay(500);
+                this.addTerminal('[+] Building 12.3s (8/8) FINISHED', 'docker');
+                await this.delay(400);
+                this.addTerminal(' => [internal] load build definition from Dockerfile', 'docker');
+                await this.delay(300);
+                this.addTerminal(' => [internal] load .dockerignore', 'docker');
+                await this.delay(300);
+                this.addTerminal(' => [internal] load metadata for mcr.microsoft.com/azure-functions/node:4', 'docker');
+                await this.delay(500);
+                this.addTerminal(' => [1/4] FROM mcr.microsoft.com/azure-functions/node:4@sha256:abc123', 'docker');
+                await this.delay(600);
+                this.addTerminal(' => [2/4] WORKDIR /home/site/wwwroot', 'docker');
+                await this.delay(400);
+                this.addTerminal(' => [3/4] COPY package*.json ./', 'docker');
+                await this.delay(400);
+                this.addTerminal(' => [4/4] RUN npm install', 'docker');
+                await this.delay(800);
+                this.addTerminal(' => exporting to image', 'docker');
+                await this.delay(400);
+                this.addTerminal(' => => exporting layers', 'docker');
+                await this.delay(300);
+                this.addTerminal(' => => writing image sha256:def456', 'docker');
+                await this.delay(200);
+                this.addTerminal(' => => naming to docker.io/library/azurefunc:latest', 'docker');
+                this.addTerminal('[SUCCESS] Docker image built successfully', 'success');
+                
+                this.dockerReady = true;
+                this.showNotification('Docker container ready!');
+            }
+
+            async deployFunction() {
+                if (!this.dockerReady) {
+                    this.showNotification('Build Docker container first!', 'error');
+                    return;
+                }
+
+                this.addTerminal('root@azure:~# func azure functionapp publish hackerNewsApp', 'system');
+                await this.delay(600);
+                this.addTerminal('[Azure] Getting site publishing info...', 'azure');
+                await this.delay(500);
+                this.addTerminal('[Azure] Creating archive for current directory...', 'azure');
+                await this.delay(700);
+                this.addTerminal('[Azure] Uploading 2.34 MB...', 'azure');
+                await this.delay(1000);
+                this.addTerminal('[Azure] Upload completed successfully.', 'azure');
+                await this.delay(400);
+                this.addTerminal('[Azure] Deployment completed successfully.', 'azure');
+                await this.delay(300);
+                this.addTerminal('[Azure] Syncing triggers...', 'azure');
+                await this.delay(500);
+                this.addTerminal('[SUCCESS] Function deployed to: https://hackernewsapp.azurewebsites.net/api/HttpTrigger', 'success');
+                
+                this.functionDeployed = true;
+                this.showNotification('Function deployed to Azure!');
+            }
+
+            async executeLive() {
+                if (!this.functionDeployed) {
+                    this.showNotification('Deploy function first!', 'error');
+                    return;
+                }
+
+                this.addTerminal('root@azure:~# curl https://hackernewsapp.azurewebsites.net/api/HttpTrigger', 'system');
+                this.addTerminal('[HTTP] Executing Azure Function...', 'api');
+                
+                const startTime = Date.now();
+                
+                try {
+                    // Fetch real HackerNews data
+                    const topStoriesResponse = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
+                    const topStories = await topStoriesResponse.json();
+                    const storyIds = topStories.slice(0, 10);
+                    
+                    this.addTerminal(`[API] Fetching top ${storyIds.length} stories from HackerNews...`, 'api');
+                    
+                    // Fetch story details
+                    const storyPromises = storyIds.map(id => 
+                        fetch(`https://hacker-news.firebaseio.com/v0/item/${id}.json`)
+                            .then(res => res.json())
+                    );
+                    
+                    const stories = await Promise.all(storyPromises);
+                    const latency = Date.now() - startTime;
+                    
+                    // Format response
+                    const formattedStories = stories.map(story => ({
+                        title: story.title,
+                        score: story.score,
+                        by: story.by,
+                        time: new Date(story.time * 1000).toISOString(),
+                        url: story.url || `https://news.ycombinator.com/item?id=${story.id}`,
+                        comments: story.descendants || 0
+                    }));
+                    
+                    const response = {
+                        success: true,
+                        timestamp: new Date().toISOString(),
+                        source: 'HackerNews Live API',
+                        executionTime: `${latency}ms`,
+                        count: formattedStories.length,
+                        stories: formattedStories
+                    };
+                    
+                    // Update metrics
+                    this.metrics.apiCalls++;
+                    this.metrics.storiesFetched += formattedStories.length;
+                    
+                    document.getElementById('apiCalls').textContent = this.metrics.apiCalls;
+                    document.getElementById('stories').textContent = this.metrics.storiesFetched;
+                    document.getElementById('latency').textContent = `${latency}ms`;
+                    
+                    // Display response
+                    document.getElementById('apiResponse').innerHTML = `<pre>${JSON.stringify(response, null, 2)}</pre>`;
+                    
+                    this.addTerminal(`[SUCCESS] Fetched ${formattedStories.length} stories in ${latency}ms`, 'success');
+                    this.showNotification('Live data fetched successfully!');
+                    
+                } catch (error) {
+                    this.addTerminal(`[ERROR] ${error.message}`, 'error');
+                    this.showNotification('Failed to fetch data!', 'error');
+                }
+            }
+
+            async fetchLiveHackerNews() {
+                try {
+                    const response = await fetch('https://hacker-news.firebaseio.com/v0/topstories.json');
+                    const stories = await response.json();
+                    const feedDiv = document.getElementById('hnFeed');
+                    feedDiv.innerHTML = '';
+                    
+                    // Fetch top 8 stories
+                    for (let i = 0; i < 8; i++) {
+                        const storyResponse = await fetch(`https://hacker-news.firebaseio.com/v0/item/${stories[i]}.json`);
+                        const story = await storyResponse.json();
+                        
+                        const storyElement = document.createElement('div');
+                        storyElement.className = 'hn-story';
+                        storyElement.innerHTML = `
+                            <div class="hn-title">${story.title}</div>
+                            <div class="hn-meta">
+                                ${story.score} points | by ${story.by} | ${story.descendants || 0} comments
+                            </div>
+                        `;
+                        storyElement.onclick = () => {
+                            if (story.url) window.open(story.url, '_blank');
+                        };
+                        feedDiv.appendChild(storyElement);
+                    }
+                } catch (error) {
+                    document.getElementById('hnFeed').innerHTML = '<div style="color: #ff0041; padding: 20px;">Failed to load stories</div>';
+                }
+                
+                // Refresh every 60 seconds
+                setTimeout(() => this.fetchLiveHackerNews(), 60000);
+            }
+
+            startMetricsUpdater() {
+                setInterval(() => {
+                    const uptime = Math.floor((Date.now() - this.metrics.startTime) / 1000);
+                    const hours = Math.floor(uptime / 3600);
+                    const minutes = Math.floor((uptime % 3600) / 60);
+                    const seconds = uptime % 60;
+                    
+                    let uptimeStr = '';
+                    if (hours > 0) uptimeStr += `${hours}h `;
+                    if (minutes > 0) uptimeStr += `${minutes}m `;
+                    uptimeStr += `${seconds}s`;
+                    
+                    document.getElementById('uptime').textContent = uptimeStr;
+                }, 1000);
+            }
+
+            processCommand(command) {
+                this.addTerminal(`root@azure:~# ${command}`, 'system');
+                
+                const cmd = command.toLowerCase().trim();
+                
+                if (cmd === 'help') {
+                    this.addTerminal('Available commands:', 'system');
+                    this.addTerminal('  docker ps     - List running containers', 'system');
+                    this.addTerminal('  docker images - List Docker images', 'system');
+                    this.addTerminal('  func list     - List Azure functions', 'system');
+                    this.addTerminal('  az --version  - Azure CLI version', 'system');
+                    this.addTerminal('  uname -a      - System information', 'system');
+                    this.addTerminal('  clear         - Clear terminal', 'system');
+                } else if (cmd === 'docker ps') {
+                    if (this.dockerReady) {
+                        this.addTerminal('CONTAINER ID   IMAGE              STATUS', 'docker');
+                        this.addTerminal('a1b2c3d4e5f6   azurefunc:latest   Up 2 minutes', 'docker');
+                    } else {
+                        this.addTerminal('No containers running', 'docker');
+                    }
+                } else if (cmd === 'docker images') {
+                    if (this.dockerReady) {
+                        this.addTerminal('REPOSITORY   TAG      IMAGE ID       SIZE', 'docker');
+                        this.addTerminal('azurefunc    latest   def456789abc   287MB', 'docker');
+                    } else {
+                        this.addTerminal('No images available', 'docker');
+                    }
+                } else if (cmd === 'func list') {
+                    if (this.functionDeployed) {
+                        this.addTerminal('Functions in hackerNewsApp:', 'azure');
+                        this.addTerminal('  - HttpTrigger [httpTrigger]', 'azure');
+                    } else {
+                        this.addTerminal('No functions deployed', 'azure');
+                    }
+                } else if (cmd === 'az --version') {
+                    this.addTerminal('azure-cli                         2.44.0', 'azure');
+                    this.addTerminal('core                              2.44.0', 'azure');
+                    this.addTerminal('telemetry                          1.0.8', 'azure');
+                } else if (cmd === 'uname -a') {
+                    this.addTerminal('Linux azure-vm 5.15.0-56-generic #62-Ubuntu SMP Tue Nov 22 19:54:14 UTC 2022 x86_64 GNU/Linux', 'system');
+                } else if (cmd === 'clear') {
+                    document.getElementById('vmTerminal').innerHTML = '';
+                } else if (cmd === '') {
+                    // Empty command
+                } else {
+                    this.addTerminal(`-bash: ${cmd}: command not found`, 'error');
+                }
+            }
+
+            addTerminal(text, className = '') {
+                const terminal = document.getElementById('vmTerminal');
+                const line = document.createElement('div');
+                line.className = `terminal-line ${className}`;
+                line.textContent = text;
+                terminal.appendChild(line);
+                terminal.scrollTop = terminal.scrollHeight;
+            }
+
+            showNotification(message, type = 'success') {
+                const notification = document.createElement('div');
+                notification.className = 'notification';
+                notification.textContent = message;
+                
+                if (type === 'error') {
+                    notification.style.background = '#ff0041';
+                } else if (type === 'warning') {
+                    notification.style.background = '#ffa500';
+                }
+                
+                document.body.appendChild(notification);
+                
+                setTimeout(() => {
+                    notification.style.animation = 'slide-in 0.3s reverse';
+                    setTimeout(() => notification.remove(), 300);
+                }, 3000);
+            }
+
+            delay(ms) {
+                return new Promise(resolve => setTimeout(resolve, ms));
+            }
+
+            reset() {
+                this.vmState = 'stopped';
+                this.dockerReady = false;
+                this.functionDeployed = false;
+                document.getElementById('vmTerminal').innerHTML = '';
+                this.addTerminal('[SYSTEM] VM reset complete', 'system');
+                this.initialize();
+            }
+        }
+
+        // Initialize VM
+        const vm = new AzureVMWithDocker();
+
+        // Terminal input handler
+        document.getElementById('vmInput').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                const command = this.value.trim();
+                if (command) {
+                    vm.processCommand(command);
+                    this.value = '';
+                }
+            }
+        });
+
+        // Auto-initialize
+        window.addEventListener('load', () => {
+            setTimeout(() => {
+                vm.addTerminal('[TIP] Click "BOOT VM" to start, then build Docker, deploy, and run live!', 'success');
+            }, 1000);
+        });
+    </script>
+</body>
+</html>

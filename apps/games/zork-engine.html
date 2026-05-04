@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zork Engine - Text Adventure</title>
+    <style>
+        body {
+            background-color: #1a1a1a;
+            color: #33ff33;
+            font-family: 'Courier New', Courier, monospace;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: center;
+            height: 100vh;
+            box-sizing: border-box;
+        }
+        #game-container {
+            width: 800px;
+            max-width: 100%;
+            display: flex;
+            flex-direction: column;
+            height: 100%;
+        }
+        #output {
+            flex-grow: 1;
+            overflow-y: auto;
+            white-space: pre-wrap;
+            padding-bottom: 20px;
+            scrollbar-width: thin;
+            scrollbar-color: #33ff33 #1a1a1a;
+        }
+        #input-area {
+            display: flex;
+            border-top: 1px solid #33ff33;
+            padding-top: 10px;
+        }
+        #prompt {
+            margin-right: 10px;
+            font-weight: bold;
+        }
+        #command-input {
+            flex-grow: 1;
+            background: transparent;
+            border: none;
+            color: #33ff33;
+            font-family: inherit;
+            font-size: 16px;
+            outline: none;
+        }
+        .room-title {
+            font-weight: bold;
+            color: #fff;
+            margin-top: 20px;
+            margin-bottom: 5px;
+            font-size: 1.2em;
+        }
+        .description {
+            margin-bottom: 10px;
+            line-height: 1.4;
+        }
+        .items {
+            color: #ffff33;
+            margin-bottom: 10px;
+        }
+        .exits {
+            color: #33ffff;
+            margin-bottom: 10px;
+        }
+        .error {
+            color: #ff3333;
+        }
+        .success {
+            color: #33ff33;
+        }
+        /* CRT Effect */
+        body::before {
+            content: " ";
+            display: block;
+            position: absolute;
+            top: 0;
+            left: 0;
+            bottom: 0;
+            right: 0;
+            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.06), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.06));
+            z-index: 2;
+            background-size: 100% 2px, 3px 100%;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div id="game-container">
+        <div id="output"></div>
+        <div id="input-area">
+            <span id="prompt">></span>
+            <input type="text" id="command-input" autofocus autocomplete="off">
+        </div>
+    </div>
+
+<script>
+/**
+ * ZORK ENGINE
+ * A simple text adventure engine with NLP parsing and state management.
+ */
+
+// --- Game State ---
+const state = {
+    currentRoom: 'start',
+    inventory: [],
+    flags: {}, // For tracking game events (e.g., 'door_unlocked': true)
+    history: []
+};
+
+// --- World Definition ---
+const world = {
+    'start': {
+        title: "Damp Cellar",
+        description: "You are in a dark, damp cellar. The air smells of mildew. Stone walls surround you.",
+        exits: { north: 'hallway' },
+        items: ['rusty_key', 'lantern'],
+        interactables: {
+            'walls': "They are made of cold, rough stone. Scratch marks are visible near the floor.",
+            'floor': "It's dirt, packed hard by years of use."
+        }
+    },
+    'hallway': {
+        title: "Long Hallway",
+        description: "A long, narrow hallway stretching north and south. Torches flicker on the walls, casting dancing shadows.",
+        exits: { south: 'start', north: 'armory', east: 'library' },
+        items: [],
+        interactables: {
+            'torches': "They burn with a magical blue flame. You can't take them."
+        }
+    },
+    'armory': {
+        title: "Abandoned Armory",
+        description: "Racks of rusted weapons line the walls. Most are useless, but one looks serviceable.",
+        exits: { south: 'hallway' },
+        items: ['sword', 'shield'],
+        interactables: {
+            'racks': "Empty or filled with rust dust."
+        }
+    },
+    'library': {
+        title: "Dusty Library",
+        description: "Rows of rotting bookshelves fill this room. A large oak door stands to the north.",
+        exits: { west: 'hallway', north: 'treasure_room' },
+        items: ['scroll'],
+        interactables: {
+            'bookshelves': "Most books crumble at your touch.",
+            'door': "It's a sturdy oak door with a heavy iron lock."
+        },
+        // Custom logic for exits
+        exitConstraints: {
+            'north': {
+                check: () => state.flags['library_door_unlocked'],
+                message: "The door is locked tight. You need a key."
+            }
+        }
+    },
+    'treasure_room': {
+        title: "Treasure Chamber",
+        description: "A small room glittering with gold! In the center stands a pedestal.",
+        exits: { south: 'library' },
+        items: ['gem'],
+        interactables: {
+            'pedestal': "An ornate stone pedestal. It looks like it once held something even more valuable."
+        }
+    }
+};
+
+// --- Item Database ---
+const items = {
+    'rusty_key': {
+        name: "rusty key",
+        aliases: ['key'],
+        description: "A heavy iron key, covered in rust.",
+        type: 'tool'
+    },
+    'lantern': {
+        name: "brass lantern",
+        aliases: ['lantern', 'light', 'lamp'],
+        description: "A battered brass lantern. It has some oil left.",
+        type: 'tool'
+    },
+    'sword': {
+        name: "steel sword",
+        aliases: ['sword', 'blade', 'weapon'],
+        description: "A sharp steel sword with a leather grip.",
+        type: 'weapon'
+    },
+    'shield': {
+        name: "wooden shield",
+        aliases: ['shield'],
+        description: "A sturdy wooden shield reinforced with iron bands.",
+        type: 'armor'
+    },
+    'scroll': {
+        name: "ancient scroll",
+        aliases: ['scroll', 'paper', 'note'],
+        description: "The text is faded, but you can make out: 'The key to the treasure lies in the dark.'",
+        type: 'readable',
+        text: "The key to the treasure lies in the dark."
+    },
+    'gem': {
+        name: "glowing gem",
+        aliases: ['gem', 'jewel', 'ruby'],
+        description: "A fist-sized ruby that glows with an inner light.",
+        type: 'treasure'
+    }
+};
+
+// --- Engine Core ---
+
+const outputDiv = document.getElementById('output');
+const inputField = document.getElementById('command-input');
+
+function print(text, className = '') {
+    const div = document.createElement('div');
+    div.className = className;
+    div.textContent = text;
+    outputDiv.appendChild(div);
+    outputDiv.scrollTop = outputDiv.scrollHeight;
+}
+
+function printRoom() {
+    const room = world[state.currentRoom];
+    
+    // Title
+    const titleDiv = document.createElement('div');
+    titleDiv.className = 'room-title';
+    titleDiv.textContent = room.title;
+    outputDiv.appendChild(titleDiv);
+    
+    // Description
+    print(room.description, 'description');
+    
+    // Items
+    if (room.items.length > 0) {
+        const itemNames = room.items.map(id => items[id].name).join(', ');
+        print(`You see: ${itemNames}`, 'items');
+    }
+    
+    // Exits
+    const exitNames = Object.keys(room.exits).join(', ');
+    print(`Exits: ${exitNames}`, 'exits');
+    
+    outputDiv.scrollTop = outputDiv.scrollHeight;
+}
+
+// --- Parser ---
+
+function parseCommand(input) {
+    const cleanInput = input.trim().toLowerCase();
+    if (!cleanInput) return;
+
+    print(`> ${input}`, 'prompt-echo');
+    state.history.push(input);
+
+    const parts = cleanInput.split(' ');
+    const verb = parts[0];
+    const noun = parts.slice(1).join(' '); // Simple noun handling
+
+    // Command Dispatch
+    switch (verb) {
+        case 'n':
+        case 'north':
+            move('north');
+            break;
+        case 's':
+        case 'south':
+            move('south');
+            break;
+        case 'e':
+        case 'east':
+            move('east');
+            break;
+        case 'w':
+        case 'west':
+            move('west');
+            break;
+        case 'l':
+        case 'look':
+        case 'x':
+        case 'examine':
+            look(noun);
+            break;
+        case 'i':
+        case 'inv':
+        case 'inventory':
+            showInventory();
+            break;
+        case 'take':
+        case 'get':
+        case 'grab':
+            take(noun);
+            break;
+        case 'drop':
+            drop(noun);
+            break;
+        case 'use':
+        case 'unlock':
+        case 'open':
+            use(noun);
+            break;
+        case 'read':
+            read(noun);
+            break;
+        case 'help':
+            print("Commands: look, north/south/east/west, take [item], drop [item], inventory, use [item], examine [object]");
+            break;
+        default:
+            print("I don't understand that command.", 'error');
+    }
+}
+
+// --- Actions ---
+
+function move(direction) {
+    const room = world[state.currentRoom];
+    if (room.exits[direction]) {
+        // Check constraints
+        if (room.exitConstraints && room.exitConstraints[direction]) {
+            const constraint = room.exitConstraints[direction];
+            if (!constraint.check()) {
+                print(constraint.message, 'error');
+                return;
+            }
+        }
+        
+        state.currentRoom = room.exits[direction];
+        printRoom();
+    } else {
+        print("You can't go that way.", 'error');
+    }
+}
+
+function look(noun) {
+    if (!noun) {
+        printRoom();
+        return;
+    }
+
+    const room = world[state.currentRoom];
+    
+    // Check room items
+    let itemId = findItem(noun, room.items);
+    if (itemId) {
+        print(items[itemId].description);
+        return;
+    }
+    
+    // Check inventory
+    itemId = findItem(noun, state.inventory);
+    if (itemId) {
+        print(items[itemId].description);
+        return;
+    }
+    
+    // Check interactables (scenery)
+    if (room.interactables) {
+        for (const [key, desc] of Object.entries(room.interactables)) {
+            if (noun.includes(key)) {
+                print(desc);
+                return;
+            }
+        }
+    }
+
+    print("You don't see that here.");
+}
+
+function take(noun) {
+    if (!noun) {
+        print("Take what?");
+        return;
+    }
+
+    const room = world[state.currentRoom];
+    const itemId = findItem(noun, room.items);
+
+    if (itemId) {
+        room.items = room.items.filter(id => id !== itemId);
+        state.inventory.push(itemId);
+        print(`Taken: ${items[itemId].name}`, 'success');
+    } else {
+        print("You can't see that here.");
+    }
+}
+
+function drop(noun) {
+    if (!noun) {
+        print("Drop what?");
+        return;
+    }
+
+    const itemId = findItem(noun, state.inventory);
+
+    if (itemId) {
+        state.inventory = state.inventory.filter(id => id !== itemId);
+        world[state.currentRoom].items.push(itemId);
+        print(`Dropped: ${items[itemId].name}`, 'success');
+    } else {
+        print("You don't have that.");
+    }
+}
+
+function showInventory() {
+    if (state.inventory.length === 0) {
+        print("You are not carrying anything.");
+    } else {
+        const names = state.inventory.map(id => items[id].name).join(', ');
+        print(`You are carrying: ${names}`, 'items');
+    }
+}
+
+function use(noun) {
+    if (!noun) {
+        print("Use what?");
+        return;
+    }
+
+    // Special case: Unlock door
+    if (state.currentRoom === 'library' && (noun.includes('door') || noun.includes('key'))) {
+        if (state.flags['library_door_unlocked']) {
+            print("The door is already unlocked.");
+            return;
+        }
+        
+        if (hasItem('rusty_key')) {
+            state.flags['library_door_unlocked'] = true;
+            print("You insert the rusty key into the heavy oak door. With a groan of metal, it unlocks!", 'success');
+        } else {
+            print("You don't have the key for this door.");
+        }
+        return;
+    }
+
+    print("You can't use that here, or nothing happened.");
+}
+
+function read(noun) {
+    if (!noun) {
+        print("Read what?");
+        return;
+    }
+    
+    const itemId = findItem(noun, state.inventory) || findItem(noun, world[state.currentRoom].items);
+    
+    if (itemId && items[itemId].type === 'readable') {
+        print(`It reads: "${items[itemId].text}"`, 'items');
+    } else if (itemId) {
+        print("There is nothing written on that.");
+    } else {
+        print("You don't see that here.");
+    }
+}
+
+// --- Helpers ---
+
+function findItem(name, itemList) {
+    // Exact match first
+    for (const id of itemList) {
+        if (items[id].name.toLowerCase() === name) return id;
+    }
+    // Alias match
+    for (const id of itemList) {
+        if (items[id].aliases.some(alias => name.includes(alias))) return id;
+    }
+    return null;
+}
+
+function hasItem(id) {
+    return state.inventory.includes(id);
+}
+
+// --- Initialization ---
+
+inputField.addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') {
+        const cmd = this.value;
+        this.value = '';
+        parseCommand(cmd);
+    }
+});
+
+// Start Game
+print("Welcome to the Dungeon. Find the treasure!", 'success');
+printRoom();
+
+</script>
+</body>
+</html>

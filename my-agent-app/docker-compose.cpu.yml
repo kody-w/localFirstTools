@@ -1,0 +1,66 @@
+version: '3.8'
+
+# CPU-only version for systems without NVIDIA GPU
+# Usage: docker compose -f docker-compose.cpu.yml up -d
+
+services:
+  agent_function:
+    image: kodywf/copilot-agent-365:latest
+    build:
+      context: ./azure_function_app
+      dockerfile: Dockerfile
+    ports:
+      - "${FUNCTION_APP_PORT:-7071}:7071"
+    environment:
+      FUNCTIONS_WORKER_RUNTIME: python
+      ASSISTANT_NAME: ${ASSISTANT_NAME:-CopilotAgent365}
+      CHARACTERISTIC_DESCRIPTION: ${CHARACTERISTIC_DESCRIPTION:-a helpful enterprise AI assistant}
+      USE_OLLAMA: ${USE_OLLAMA:-true}
+      OLLAMA_API_BASE_URL: ${OLLAMA_API_BASE_URL:-http://ollama:11434/v1}
+      OLLAMA_MODEL_NAME: ${OLLAMA_MODEL_NAME:-llama3.1}
+      USE_AZURE_STORAGE: ${USE_AZURE_STORAGE:-false}
+      LOCAL_STORAGE_BASE_PATH: /app/local_storage
+    volumes:
+      - ./local_data:/app/local_storage
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_models:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    command: >
+      bash -c "
+      ollama serve &
+      echo 'Waiting for Ollama server to be ready...'
+      while ! curl -s http://localhost:11434/api/tags > /dev/null; do sleep 2; done
+      echo 'Ollama server ready. Pulling llama3.1 model...'
+      ollama pull ${OLLAMA_MODEL_NAME:-llama3.1}
+      echo 'Model ready!'
+      wait -n
+      "
+    networks:
+      - agent_network
+    restart: unless-stopped
+
+volumes:
+  ollama_models:
+    name: copilot-agent-365-ollama-models
+
+networks:
+  agent_network:
+    driver: bridge
+    name: copilot-agent-365-network

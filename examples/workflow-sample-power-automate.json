@@ -1,0 +1,133 @@
+{
+  "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "$connections": {
+      "defaultValue": {},
+      "type": "Object"
+    }
+  },
+  "triggers": {
+    "When_a_contact_is_created": {
+      "type": "ApiConnectionWebhook",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['commondataservice']['connectionId']"
+          }
+        },
+        "path": "/v2/datasets/@{encodeURIComponent('org')}/tables/@{encodeURIComponent('contacts')}/onnewitemswebhook",
+        "queries": {
+          "scope": "Organization"
+        }
+      },
+      "recurrence": {
+        "frequency": "Minute",
+        "interval": 1
+      }
+    }
+  },
+  "actions": {
+    "Check_if_VIP_contact": {
+      "type": "If",
+      "expression": {
+        "and": [
+          {
+            "contains": [
+              "@triggerOutputs()?['body/jobtitle']",
+              "CEO"
+            ]
+          }
+        ]
+      },
+      "actions": {
+        "Send_VIP_notification_email": {
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['office365']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v2/Mail",
+            "body": {
+              "To": "sales-team@company.com",
+              "Subject": "New VIP Contact Created: @{triggerOutputs()?['body/fullname']}",
+              "Body": "<p>A new VIP contact has been created in the CRM.</p><p><strong>Name:</strong> @{triggerOutputs()?['body/fullname']}</p><p><strong>Company:</strong> @{triggerOutputs()?['body/parentcustomerid']}</p><p><strong>Email:</strong> @{triggerOutputs()?['body/emailaddress1']}</p>"
+            }
+          },
+          "runAfter": {}
+        },
+        "Create_follow_up_task": {
+          "type": "ApiConnection",
+          "inputs": {
+            "host": {
+              "connection": {
+                "name": "@parameters('$connections')['commondataservice']['connectionId']"
+              }
+            },
+            "method": "post",
+            "path": "/v2/datasets/@{encodeURIComponent('org')}/tables/@{encodeURIComponent('tasks')}/items",
+            "body": {
+              "subject": "Follow up with new VIP: @{triggerOutputs()?['body/fullname']}",
+              "description": "Schedule introductory call with new VIP contact",
+              "regardingobjectid": "@{triggerOutputs()?['body/contactid']}",
+              "scheduledend": "@{addDays(utcNow(), 3)}"
+            }
+          },
+          "runAfter": {
+            "Send_VIP_notification_email": [
+              "Succeeded"
+            ]
+          }
+        }
+      },
+      "else": {
+        "actions": {
+          "Send_standard_welcome_email": {
+            "type": "ApiConnection",
+            "inputs": {
+              "host": {
+                "connection": {
+                  "name": "@parameters('$connections')['office365']['connectionId']"
+                }
+              },
+              "method": "post",
+              "path": "/v2/Mail",
+              "body": {
+                "To": "@{triggerOutputs()?['body/emailaddress1']}",
+                "Subject": "Welcome to Our Platform!",
+                "Body": "<p>Dear @{triggerOutputs()?['body/firstname']},</p><p>Thank you for your interest in our platform. A member of our team will be in touch soon.</p><p>Best regards,<br>The Sales Team</p>"
+              }
+            },
+            "runAfter": {}
+          }
+        }
+      },
+      "runAfter": {}
+    },
+    "Log_to_audit_table": {
+      "type": "ApiConnection",
+      "inputs": {
+        "host": {
+          "connection": {
+            "name": "@parameters('$connections')['commondataservice']['connectionId']"
+          }
+        },
+        "method": "post",
+        "path": "/v2/datasets/@{encodeURIComponent('org')}/tables/@{encodeURIComponent('audits')}/items",
+        "body": {
+          "name": "Contact Created",
+          "description": "New contact @{triggerOutputs()?['body/fullname']} was created",
+          "createdon": "@{utcNow()}"
+        }
+      },
+      "runAfter": {
+        "Check_if_VIP_contact": [
+          "Succeeded"
+        ]
+      }
+    }
+  }
+}

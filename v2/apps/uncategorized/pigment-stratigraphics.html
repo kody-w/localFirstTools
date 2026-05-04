@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pigment Stratigraphics</title>
+    <meta name="description" content="Excavate through layers of historical pigments revealing chemical compositions and cultural stories from Earth's art history">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #1a1510; min-height: 100vh; font-family: 'Georgia', serif; color: #a09080; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(25,20,15,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(160,140,120,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #d0b090; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #e0c0a0; font-size: 12px; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(100,80,60,0.4); border: 1px solid rgba(160,140,120,0.4);
+            color: #b09070; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #info-panel {
+            position: fixed; right: 20px; top: 20px; width: 220px;
+            background: rgba(25,20,15,0.95); padding: 15px; border-radius: 10px;
+            border: 1px solid rgba(160,140,120,0.3); z-index: 100; font-size: 11px;
+        }
+        #pigment-name { color: #d0b090; font-size: 14px; margin-bottom: 8px; }
+        #chemical-formula { color: #a0c0a0; font-family: monospace; margin-bottom: 8px; }
+        #era-info { color: #90a0b0; margin-bottom: 8px; }
+        #depth-indicator { position: fixed; left: 50%; bottom: 60px; transform: translateX(-50%); font-size: 12px; color: #806040; z-index: 100; }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Pigment Stratigraphics</h3>
+        <div class="control-row">
+            <label>Brush Size <span class="value" id="brush-val">30</span></label>
+            <input type="range" id="brush" min="10" max="80" value="30">
+        </div>
+        <div class="control-row">
+            <label>Excavation Depth <span class="value" id="depth-val">1</span></label>
+            <input type="range" id="depth" min="1" max="7" value="1">
+        </div>
+        <button id="restore-btn">Restore Surface</button>
+        <button id="spectro-btn">Toggle Spectroscope</button>
+    </div>
+    <div id="info-panel">
+        <div id="pigment-name">Surface Layer</div>
+        <div id="chemical-formula">Modern acrylic</div>
+        <div id="era-info">Contemporary (2000-present)</div>
+        <div id="rarity">Common</div>
+    </div>
+    <div id="depth-indicator">Depth: Surface</div>
+    <div id="info">Click and drag to excavate | Reveal pigments from history</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; initLayers(); }
+        
+        const PIGMENT_LAYERS = [
+            { name: 'Modern Acrylic', formula: 'C₃H₄O₂', era: 'Contemporary (1950-present)', hue: 200, sat: 60, light: 50, rarity: 'Common' },
+            { name: 'Cadmium Yellow', formula: 'CdS', era: 'Industrial (1840-1950)', hue: 50, sat: 90, light: 55, rarity: 'Uncommon' },
+            { name: 'Prussian Blue', formula: 'Fe₄[Fe(CN)₆]₃', era: 'Enlightenment (1704-1850)', hue: 220, sat: 70, light: 35, rarity: 'Rare' },
+            { name: 'Vermillion', formula: 'HgS', era: 'Renaissance (1400-1600)', hue: 10, sat: 85, light: 50, rarity: 'Rare (Toxic)' },
+            { name: 'Ultramarine', formula: 'Na₈Al₆Si₆O₂₄S₂', era: 'Medieval (500-1400)', hue: 240, sat: 80, light: 45, rarity: 'Precious' },
+            { name: 'Egyptian Blue', formula: 'CaCuSi₄O₁₀', era: 'Ancient (3000 BCE)', hue: 200, sat: 65, light: 40, rarity: 'Ancient' },
+            { name: 'Red Ochre', formula: 'Fe₂O₃', era: 'Prehistoric (40000+ BCE)', hue: 15, sat: 70, light: 35, rarity: 'Primordial' }
+        ];
+        
+        let brushSize = 30;
+        let excavationDepth = 1;
+        let spectroscope = false;
+        let time = 0;
+        
+        let excavationMap = [];
+        const particles = [];
+        
+        function initLayers() {
+            excavationMap = [];
+            const resolution = 5;
+            for (let y = 0; y < H; y += resolution) {
+                for (let x = 0; x < W; x += resolution) {
+                    excavationMap.push({ x, y, depth: 0, revealed: false });
+                }
+            }
+        }
+        
+        resize(); window.onresize = resize;
+        
+        let isExcavating = false;
+        let lastX = 0, lastY = 0;
+        
+        function excavate(x, y) {
+            const resolution = 5;
+            
+            excavationMap.forEach(cell => {
+                const dist = Math.hypot(cell.x - x, cell.y - y);
+                if (dist < brushSize) {
+                    const intensity = 1 - dist / brushSize;
+                    const newDepth = Math.min(PIGMENT_LAYERS.length - 1, cell.depth + intensity * 0.3 * excavationDepth);
+                    
+                    if (newDepth > cell.depth) {
+                        if (Math.random() < 0.3) {
+                            const layer = PIGMENT_LAYERS[Math.floor(cell.depth)];
+                            particles.push({
+                                x: cell.x + (Math.random() - 0.5) * 10,
+                                y: cell.y + (Math.random() - 0.5) * 10,
+                                vx: (Math.random() - 0.5) * 3,
+                                vy: -Math.random() * 4,
+                                size: 2 + Math.random() * 3,
+                                life: 1,
+                                hue: layer.hue
+                            });
+                        }
+                        cell.depth = newDepth;
+                        cell.revealed = true;
+                    }
+                }
+            });
+        }
+        
+        function getLayerAt(x, y) {
+            const resolution = 5;
+            const cellX = Math.floor(x / resolution) * resolution;
+            const cellY = Math.floor(y / resolution) * resolution;
+            
+            const cell = excavationMap.find(c => c.x === cellX && c.y === cellY);
+            if (cell) {
+                return PIGMENT_LAYERS[Math.floor(cell.depth)];
+            }
+            return PIGMENT_LAYERS[0];
+        }
+        
+        function drawLayers() {
+            ctx.fillStyle = '#1a1510';
+            ctx.fillRect(0, 0, W, H);
+            
+            const resolution = 5;
+            excavationMap.forEach(cell => {
+                const layerIndex = Math.floor(cell.depth);
+                const layer = PIGMENT_LAYERS[layerIndex];
+                const nextLayer = PIGMENT_LAYERS[Math.min(layerIndex + 1, PIGMENT_LAYERS.length - 1)];
+                
+                const blend = cell.depth - layerIndex;
+                const hue = layer.hue + (nextLayer.hue - layer.hue) * blend;
+                const sat = layer.sat + (nextLayer.sat - layer.sat) * blend;
+                const light = layer.light + (nextLayer.light - layer.light) * blend;
+                
+                ctx.fillStyle = "hsl(" + hue + ", " + sat + "%, " + light + "%)";
+                ctx.fillRect(cell.x, cell.y, resolution, resolution);
+                
+                if (cell.revealed && cell.depth > 0.5) {
+                    ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+                    ctx.fillRect(cell.x, cell.y + resolution - 1, resolution, 1);
+                }
+            });
+            
+            if (spectroscope) {
+                drawSpectroscope();
+            }
+        }
+        
+        function drawSpectroscope() {
+            const barHeight = 60;
+            const barY = H - 100;
+            
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, barY - 20, W, barHeight + 40);
+            
+            PIGMENT_LAYERS.forEach((layer, i) => {
+                const x = 100 + i * 120;
+                const width = 80;
+                
+                ctx.fillStyle = "hsl(" + layer.hue + ", " + layer.sat + "%, " + layer.light + "%)";
+                ctx.fillRect(x, barY, width, barHeight);
+                
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.3)';
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, barY, width, barHeight);
+                
+                ctx.fillStyle = '#a09080';
+                ctx.font = '9px Georgia';
+                ctx.textAlign = 'center';
+                ctx.fillText(layer.name.split(' ')[0], x + width/2, barY + barHeight + 15);
+            });
+        }
+        
+        function drawParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx;
+                p.y += p.vy;
+                p.vy += 0.1;
+                p.life -= 0.02;
+                
+                if (p.life <= 0 || p.y > H) {
+                    particles.splice(i, 1);
+                    continue;
+                }
+                
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size * p.life, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + p.hue + ", 60%, 50%, " + p.life + ")";
+                ctx.fill();
+            }
+        }
+        
+        function updateInfoPanel(x, y) {
+            const layer = getLayerAt(x, y);
+            document.getElementById('pigment-name').textContent = layer.name;
+            document.getElementById('chemical-formula').textContent = layer.formula;
+            document.getElementById('era-info').textContent = layer.era;
+            document.getElementById('rarity').textContent = 'Rarity: ' + layer.rarity;
+            document.getElementById('rarity').style.color = layer.rarity === 'Primordial' ? '#ffd700' : 
+                (layer.rarity === 'Precious' ? '#c0a0ff' : '#a09080');
+        }
+        
+        function animate() {
+            time += 0.016;
+            drawLayers();
+            drawParticles();
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onmousedown = e => {
+            if (e.clientX < 200 && e.clientY < 250) return;
+            if (e.clientX > W - 240 && e.clientY < 200) return;
+            isExcavating = true;
+            lastX = e.clientX;
+            lastY = e.clientY;
+            excavate(e.clientX, e.clientY);
+            updateInfoPanel(e.clientX, e.clientY);
+        };
+        
+        canvas.onmousemove = e => {
+            if (isExcavating) {
+                excavate(e.clientX, e.clientY);
+            }
+            updateInfoPanel(e.clientX, e.clientY);
+            
+            const cell = excavationMap.find(c => 
+                Math.abs(c.x - e.clientX) < 5 && Math.abs(c.y - e.clientY) < 5
+            );
+            if (cell) {
+                const depthNames = ['Surface', 'Shallow', 'Medium', 'Deep', 'Ancient', 'Primordial', 'Bedrock'];
+                document.getElementById('depth-indicator').textContent = 'Depth: ' + depthNames[Math.floor(cell.depth)];
+            }
+        };
+        
+        canvas.onmouseup = () => { isExcavating = false; };
+        canvas.onmouseleave = () => { isExcavating = false; };
+        
+        document.getElementById('brush').oninput = e => {
+            brushSize = parseInt(e.target.value);
+            document.getElementById('brush-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('depth').oninput = e => {
+            excavationDepth = parseInt(e.target.value);
+            document.getElementById('depth-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('restore-btn').onclick = () => {
+            excavationMap.forEach(cell => {
+                cell.depth = 0;
+                cell.revealed = false;
+            });
+        };
+        
+        document.getElementById('spectro-btn').onclick = () => {
+            spectroscope = !spectroscope;
+        };
+        
+        animate();
+    </script>
+</body>
+</html>

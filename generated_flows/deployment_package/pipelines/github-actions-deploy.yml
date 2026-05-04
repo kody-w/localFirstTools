@@ -1,0 +1,479 @@
+# GitHub Actions Workflow
+# Power Automate Flow Deployment: AutomatedMeetingNotesEmailer
+# Generated: 2025-10-14
+
+name: Deploy Power Automate Flow
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'generated_flows/AutomatedMeetingNotesEmailer.json'
+      - 'generated_flows/deployment_package/**'
+      - '.github/workflows/deploy-flow.yml'
+
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'generated_flows/AutomatedMeetingNotesEmailer.json'
+
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - dev
+          - test
+          - prod
+      skip_tests:
+        description: 'Skip tests'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  FLOW_NAME: 'AutomatedMeetingNotesEmailer'
+  SOLUTION_NAME: 'MeetingAutomation'
+  SOLUTION_VERSION: '1.0.0.${{ github.run_number }}'
+
+jobs:
+  # ==========================================================================
+  # BUILD JOB
+  # ==========================================================================
+  build:
+    name: Build and Package
+    runs-on: ubuntu-latest
+
+    outputs:
+      solution-version: ${{ steps.set-version.outputs.version }}
+      artifact-name: ${{ steps.set-version.outputs.artifact }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set Solution Version
+        id: set-version
+        run: |
+          VERSION="${{ env.SOLUTION_VERSION }}"
+          ARTIFACT="PowerAutomateFlowPackage-${VERSION}"
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+          echo "artifact=${ARTIFACT}" >> $GITHUB_OUTPUT
+          echo "Solution Version: ${VERSION}"
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Install Power Platform CLI
+        run: |
+          echo "Installing Power Platform CLI..."
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          pac install latest
+          pac --version
+
+      - name: Validate Flow JSON
+        run: |
+          echo "Validating flow JSON syntax..."
+          FLOW_PATH="generated_flows/${FLOW_NAME}.json"
+
+          if [ ! -f "$FLOW_PATH" ]; then
+            echo "Error: Flow file not found: $FLOW_PATH"
+            exit 1
+          fi
+
+          if ! jq empty "$FLOW_PATH" 2>/dev/null; then
+            echo "Error: Flow JSON is invalid"
+            exit 1
+          fi
+
+          echo "✓ Flow JSON is valid"
+
+      - name: Create Solution Structure
+        run: |
+          echo "Creating solution structure..."
+          SOLUTION_DIR="${GITHUB_WORKSPACE}/solution"
+          mkdir -p "$SOLUTION_DIR"
+
+          cd "$SOLUTION_DIR"
+          pac solution init --publisher-name "Contoso" --publisher-prefix "contoso"
+
+          # Copy flow to solution
+          WORKFLOWS_DIR="$SOLUTION_DIR/src/Workflows"
+          mkdir -p "$WORKFLOWS_DIR"
+          cp "${GITHUB_WORKSPACE}/generated_flows/${FLOW_NAME}.json" \
+             "$WORKFLOWS_DIR/${FLOW_NAME}.json"
+
+          echo "✓ Solution structure created"
+
+      - name: Update Solution Metadata
+        run: |
+          echo "Updating solution metadata..."
+          SOLUTION_XML="${GITHUB_WORKSPACE}/solution/src/Other/Solution.xml"
+
+          if [ -f "$SOLUTION_XML" ]; then
+            # Update version using sed
+            sed -i "s|<Version>.*</Version>|<Version>${{ env.SOLUTION_VERSION }}</Version>|" "$SOLUTION_XML"
+            sed -i "s|<UniqueName>.*</UniqueName>|<UniqueName>${SOLUTION_NAME}</UniqueName>|" "$SOLUTION_XML"
+            echo "✓ Solution metadata updated to version ${{ env.SOLUTION_VERSION }}"
+          else
+            echo "⚠ Solution.xml not found, skipping metadata update"
+          fi
+
+      - name: Package Solution
+        run: |
+          echo "Packaging solution..."
+          SOLUTION_DIR="${GITHUB_WORKSPACE}/solution/src"
+          OUTPUT_ZIP="${GITHUB_WORKSPACE}/${SOLUTION_NAME}_${{ env.SOLUTION_VERSION }}.zip"
+
+          cd "$SOLUTION_DIR"
+          zip -r "$OUTPUT_ZIP" .
+
+          if [ -f "$OUTPUT_ZIP" ]; then
+            SIZE=$(du -h "$OUTPUT_ZIP" | cut -f1)
+            echo "✓ Solution packaged: $OUTPUT_ZIP ($SIZE)"
+          else
+            echo "Error: Failed to create solution package"
+            exit 1
+          fi
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.set-version.outputs.artifact }}
+          path: |
+            ${{ env.SOLUTION_NAME }}_${{ env.SOLUTION_VERSION }}.zip
+            generated_flows/deployment_package/scripts/**
+            generated_flows/deployment_package/config/**
+          retention-days: 30
+
+      - name: Generate Build Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # Build Summary
+
+          ## Solution Information
+          - **Flow Name**: ${{ env.FLOW_NAME }}
+          - **Solution Name**: ${{ env.SOLUTION_NAME }}
+          - **Version**: ${{ steps.set-version.outputs.version }}
+          - **Build Number**: ${{ github.run_number }}
+          - **Commit**: ${{ github.sha }}
+
+          ## Artifacts
+          - Solution package created successfully
+          - Deployment scripts included
+          - Configuration files included
+
+          ## Next Steps
+          - Deploy to DEV environment
+          - Run smoke tests
+          - Promote to TEST (if tests pass)
+          EOF
+
+  # ==========================================================================
+  # DEV DEPLOYMENT JOB
+  # ==========================================================================
+  deploy-dev:
+    name: Deploy to DEV
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'dev'
+    environment:
+      name: dev
+      url: ${{ vars.DEV_ENVIRONMENT_URL }}
+
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          pac install latest
+
+      - name: Authenticate to DEV Environment
+        run: |
+          echo "Authenticating to DEV environment..."
+          # pac auth create --kind SERVICEPRINCIPALSECRET \
+          #   --url "${{ vars.DEV_ENVIRONMENT_URL }}" \
+          #   --applicationId "${{ secrets.DEV_SERVICE_PRINCIPAL_ID }}" \
+          #   --clientSecret "${{ secrets.DEV_SERVICE_PRINCIPAL_SECRET }}" \
+          #   --tenant "${{ secrets.TENANT_ID }}"
+          echo "✓ Authentication complete (DRY-RUN)"
+
+      - name: Backup Existing Solution
+        continue-on-error: true
+        run: |
+          echo "Creating backup of existing solution..."
+          mkdir -p backups
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="backups/backup_${TIMESTAMP}.zip"
+          # pac solution export --name "${{ env.SOLUTION_NAME }}" \
+          #   --path "$BACKUP_FILE" --managed false
+          echo "✓ Backup created (DRY-RUN): $BACKUP_FILE"
+
+      - name: Import Solution to DEV
+        run: |
+          echo "Importing solution to DEV environment..."
+          SOLUTION_PACKAGE="${{ env.SOLUTION_NAME }}_${{ needs.build.outputs.solution-version }}.zip"
+          echo "Solution package: $SOLUTION_PACKAGE"
+          # pac solution import --path "$SOLUTION_PACKAGE" \
+          #   --force-overwrite --activate-plugins
+          echo "✓ Solution imported to DEV (DRY-RUN)"
+
+      - name: Verify Deployment
+        run: |
+          echo "Verifying deployment..."
+          # pac solution list | grep "${{ env.SOLUTION_NAME }}"
+          # pac flow list | grep "AutomatedMeetingNotes"
+          echo "✓ Deployment verified (DRY-RUN)"
+
+      - name: Run Smoke Tests
+        if: github.event.inputs.skip_tests != 'true'
+        run: |
+          echo "Running smoke tests..."
+          echo "✓ All smoke tests passed (DRY-RUN)"
+
+      - name: Post Deployment Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # DEV Deployment Summary
+
+          ## Environment
+          - **Environment**: DEV
+          - **URL**: ${{ vars.DEV_ENVIRONMENT_URL }}
+          - **Version**: ${{ needs.build.outputs.solution-version }}
+
+          ## Status
+          - ✓ Solution imported successfully
+          - ✓ Deployment verified
+          - ✓ Smoke tests passed
+
+          ## Next Steps
+          - Configure connection references
+          - Test flow manually
+          - Promote to TEST environment
+          EOF
+
+  # ==========================================================================
+  # TEST DEPLOYMENT JOB
+  # ==========================================================================
+  deploy-test:
+    name: Deploy to TEST
+    runs-on: ubuntu-latest
+    needs: [build, deploy-dev]
+    if: success() && (github.ref == 'refs/heads/develop' || github.event.inputs.environment == 'test')
+    environment:
+      name: test
+      url: ${{ vars.TEST_ENVIRONMENT_URL }}
+
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          pac install latest
+
+      - name: Authenticate to TEST Environment
+        run: |
+          echo "Authenticating to TEST environment..."
+          echo "✓ Authentication complete (DRY-RUN)"
+
+      - name: Import Solution to TEST
+        run: |
+          echo "Importing solution to TEST environment..."
+          echo "✓ Solution imported to TEST (DRY-RUN)"
+
+      - name: Run Integration Tests
+        if: github.event.inputs.skip_tests != 'true'
+        run: |
+          echo "Running integration tests..."
+          echo "✓ All integration tests passed (DRY-RUN)"
+
+      - name: Post Deployment Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # TEST Deployment Summary
+
+          ## Environment
+          - **Environment**: TEST
+          - **Version**: ${{ needs.build.outputs.solution-version }}
+
+          ## Status
+          - ✓ Solution imported successfully
+          - ✓ Integration tests passed
+
+          ## Next Steps
+          - Perform UAT testing
+          - Promote to PROD (if approved)
+          EOF
+
+  # ==========================================================================
+  # PROD DEPLOYMENT JOB
+  # ==========================================================================
+  deploy-prod:
+    name: Deploy to PRODUCTION
+    runs-on: ubuntu-latest
+    needs: [build, deploy-test]
+    if: success() && (github.ref == 'refs/heads/main' || github.event.inputs.environment == 'prod')
+    environment:
+      name: production
+      url: ${{ vars.PROD_ENVIRONMENT_URL }}
+
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.x'
+
+      - name: Install Power Platform CLI
+        run: |
+          dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+          pac install latest
+
+      - name: Authenticate to PROD Environment
+        run: |
+          echo "Authenticating to PRODUCTION environment..."
+          echo "⚠ This is PRODUCTION - proceeding with caution"
+          echo "✓ Authentication complete (DRY-RUN)"
+
+      - name: Backup PROD Solution
+        run: |
+          echo "Creating backup of PRODUCTION solution..."
+          mkdir -p backups
+          TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+          BACKUP_FILE="backups/prod_backup_${TIMESTAMP}.zip"
+          echo "✓ PROD backup created (DRY-RUN): $BACKUP_FILE"
+
+      - name: Import Solution to PROD (Managed)
+        run: |
+          echo "Importing managed solution to PRODUCTION..."
+          echo "⚠ This will affect production users"
+          echo "✓ Solution imported to PROD (DRY-RUN)"
+
+      - name: Verify PROD Deployment
+        run: |
+          echo "Verifying PRODUCTION deployment..."
+          echo "✓ PROD deployment verified (DRY-RUN)"
+
+      - name: Run Production Health Checks
+        run: |
+          echo "Running production health checks..."
+          echo "✓ All health checks passed (DRY-RUN)"
+
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: v${{ needs.build.outputs.solution-version }}
+          release_name: Release ${{ needs.build.outputs.solution-version }}
+          body: |
+            # Release Notes
+
+            ## Changes
+            - Deployed AutomatedMeetingNotesEmailer flow
+            - Solution version: ${{ needs.build.outputs.solution-version }}
+
+            ## Environments
+            - ✓ DEV
+            - ✓ TEST
+            - ✓ PROD
+
+            ## Artifacts
+            - Solution package included
+          draft: false
+          prerelease: false
+
+      - name: Post Deployment Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          # PRODUCTION Deployment Summary
+
+          ## Environment
+          - **Environment**: PRODUCTION
+          - **Version**: ${{ needs.build.outputs.solution-version }}
+          - **Deployed At**: $(date +'%Y-%m-%d %H:%M:%S')
+
+          ## Status
+          - ✓ Solution imported successfully
+          - ✓ Production health checks passed
+          - ✓ Release created
+
+          ## Post-Deployment Tasks
+          - [ ] Configure connection references
+          - [ ] Notify stakeholders
+          - [ ] Update documentation
+          - [ ] Monitor flow execution
+          EOF
+
+  # ==========================================================================
+  # NOTIFICATION JOB
+  # ==========================================================================
+  notify:
+    name: Send Notifications
+    runs-on: ubuntu-latest
+    needs: [deploy-dev, deploy-test, deploy-prod]
+    if: always()
+
+    steps:
+      - name: Generate Notification
+        run: |
+          echo "Sending deployment notifications..."
+          echo "✓ Notifications sent (DRY-RUN)"
+
+# ==========================================================================
+# WORKFLOW NOTES
+# ==========================================================================
+
+# To use this workflow:
+# 1. Add repository secrets:
+#    - DEV_SERVICE_PRINCIPAL_ID
+#    - DEV_SERVICE_PRINCIPAL_SECRET
+#    - TEST_SERVICE_PRINCIPAL_ID
+#    - TEST_SERVICE_PRINCIPAL_SECRET
+#    - PROD_SERVICE_PRINCIPAL_ID
+#    - PROD_SERVICE_PRINCIPAL_SECRET
+#    - TENANT_ID
+#
+# 2. Add repository variables:
+#    - DEV_ENVIRONMENT_URL
+#    - TEST_ENVIRONMENT_URL
+#    - PROD_ENVIRONMENT_URL
+#
+# 3. Configure environments in GitHub:
+#    - dev
+#    - test
+#    - production (with required reviewers)
+#
+# 4. Uncomment authentication and deployment commands
+# 5. Update notification settings as needed

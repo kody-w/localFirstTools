@@ -1,0 +1,476 @@
+# Azure DevOps Pipeline Configuration
+# Power Automate Flow Deployment: AutomatedMeetingNotesEmailer
+# Generated: 2025-10-14
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - generated_flows/AutomatedMeetingNotesEmailer.json
+      - generated_flows/deployment_package/**
+
+pr:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - generated_flows/AutomatedMeetingNotesEmailer.json
+
+variables:
+  # Pipeline Configuration
+  - name: flowName
+    value: 'AutomatedMeetingNotesEmailer'
+  - name: solutionName
+    value: 'MeetingAutomation'
+  - name: solutionVersion
+    value: '1.0.0.$(Build.BuildId)'
+
+  # Environment URLs (set in Azure DevOps Library or here)
+  - name: devEnvironmentUrl
+    value: 'https://org-dev.crm.dynamics.com'
+  - name: testEnvironmentUrl
+    value: 'https://org-test.crm.dynamics.com'
+  - name: prodEnvironmentUrl
+    value: 'https://org-prod.crm.dynamics.com'
+
+  # Agent Configuration
+  - name: vmImage
+    value: 'ubuntu-latest'
+
+  # Artifact Configuration
+  - name: artifactName
+    value: 'PowerAutomateFlowPackage'
+
+# Variable Groups (store secrets here)
+# - group: 'PowerPlatform-ServicePrincipal'
+#   Variables:
+#     - servicePrincipalId
+#     - servicePrincipalSecret
+#     - tenantId
+
+stages:
+  # ============================================================================
+  # BUILD STAGE
+  # ============================================================================
+  - stage: Build
+    displayName: 'Build and Package'
+    jobs:
+      - job: BuildJob
+        displayName: 'Build Flow Package'
+        pool:
+          vmImage: $(vmImage)
+
+        steps:
+          - checkout: self
+            displayName: 'Checkout Repository'
+            clean: true
+
+          - task: PowerShell@2
+            displayName: 'Install Power Platform CLI'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Installing Power Platform CLI..."
+                dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                pac install latest
+
+          - task: PowerShell@2
+            displayName: 'Validate Flow JSON'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Validating flow JSON syntax..."
+                $flowPath = "$(Build.SourcesDirectory)/generated_flows/$(flowName).json"
+
+                if (!(Test-Path $flowPath)) {
+                    Write-Error "Flow file not found: $flowPath"
+                    exit 1
+                }
+
+                try {
+                    $flowContent = Get-Content $flowPath -Raw | ConvertFrom-Json
+                    Write-Host "✓ Flow JSON is valid"
+                } catch {
+                    Write-Error "✗ Flow JSON is invalid: $_"
+                    exit 1
+                }
+
+          - task: PowerShell@2
+            displayName: 'Create Solution Structure'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Creating solution structure..."
+                $solutionDir = "$(Build.ArtifactStagingDirectory)/solution"
+                New-Item -ItemType Directory -Force -Path $solutionDir
+
+                # Initialize solution
+                Set-Location $solutionDir
+                pac solution init --publisher-name "Contoso" --publisher-prefix "contoso"
+
+                # Copy flow to solution
+                $workflowsDir = "$solutionDir/src/Workflows"
+                New-Item -ItemType Directory -Force -Path $workflowsDir
+                Copy-Item "$(Build.SourcesDirectory)/generated_flows/$(flowName).json" `
+                          "$workflowsDir/$(flowName).json"
+
+                Write-Host "✓ Solution structure created"
+
+          - task: PowerShell@2
+            displayName: 'Update Solution Metadata'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Updating solution metadata..."
+                $solutionXml = "$(Build.ArtifactStagingDirectory)/solution/src/Other/Solution.xml"
+
+                if (Test-Path $solutionXml) {
+                    [xml]$xml = Get-Content $solutionXml
+
+                    # Update version
+                    $xml.ImportExportXml.SolutionManifest.Version = "$(solutionVersion)"
+
+                    # Update unique name
+                    $xml.ImportExportXml.SolutionManifest.UniqueName = "$(solutionName)"
+
+                    $xml.Save($solutionXml)
+                    Write-Host "✓ Solution metadata updated to version $(solutionVersion)"
+                } else {
+                    Write-Warning "Solution.xml not found, skipping metadata update"
+                }
+
+          - task: PowerShell@2
+            displayName: 'Package Solution'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Packaging solution..."
+                $solutionDir = "$(Build.ArtifactStagingDirectory)/solution"
+                $outputZip = "$(Build.ArtifactStagingDirectory)/$(solutionName)_$(solutionVersion).zip"
+
+                Set-Location "$solutionDir/src"
+                Compress-Archive -Path * -DestinationPath $outputZip
+
+                if (Test-Path $outputZip) {
+                    $size = (Get-Item $outputZip).Length / 1KB
+                    Write-Host "✓ Solution packaged: $outputZip ($([math]::Round($size, 2)) KB)"
+                } else {
+                    Write-Error "Failed to create solution package"
+                    exit 1
+                }
+
+          - task: CopyFiles@2
+            displayName: 'Copy Deployment Scripts'
+            inputs:
+              SourceFolder: '$(Build.SourcesDirectory)/generated_flows/deployment_package'
+              Contents: |
+                scripts/**
+                config/**
+                reports/**
+              TargetFolder: '$(Build.ArtifactStagingDirectory)'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Build Artifacts'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: '$(artifactName)'
+              publishLocation: 'Container'
+
+  # ============================================================================
+  # DEV DEPLOYMENT STAGE
+  # ============================================================================
+  - stage: DeployDev
+    displayName: 'Deploy to DEV'
+    dependsOn: Build
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployDevJob
+        displayName: 'Deploy to DEV Environment'
+        environment: 'PowerPlatform-DEV'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: $(artifactName)
+                  displayName: 'Download Build Artifacts'
+
+                - task: PowerShell@2
+                  displayName: 'Install Power Platform CLI'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                      pac install latest
+
+                - task: PowerShell@2
+                  displayName: 'Authenticate to DEV Environment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Authenticating to DEV environment..."
+                      # Using service principal authentication
+                      # pac auth create --kind SERVICEPRINCIPALSECRET `
+                      #   --url "$(devEnvironmentUrl)" `
+                      #   --applicationId "$(servicePrincipalId)" `
+                      #   --clientSecret "$(servicePrincipalSecret)" `
+                      #   --tenant "$(tenantId)"
+
+                      Write-Host "✓ Authentication complete (DRY-RUN)"
+                  env:
+                    # These should come from Azure DevOps Library variable group
+                    servicePrincipalId: $(servicePrincipalId)
+                    servicePrincipalSecret: $(servicePrincipalSecret)
+                    tenantId: $(tenantId)
+
+                - task: PowerShell@2
+                  displayName: 'Backup Existing Solution'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Creating backup of existing solution..."
+                      $backupDir = "$(Pipeline.Workspace)/backups"
+                      New-Item -ItemType Directory -Force -Path $backupDir
+
+                      $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+                      $backupFile = "$backupDir/backup_$timestamp.zip"
+
+                      # pac solution export --name "$(solutionName)" `
+                      #   --path $backupFile --managed false
+
+                      Write-Host "✓ Backup created (DRY-RUN): $backupFile"
+                  continueOnError: true
+
+                - task: PowerShell@2
+                  displayName: 'Import Solution to DEV'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Importing solution to DEV environment..."
+                      $solutionPackage = "$(Pipeline.Workspace)/$(artifactName)/$(solutionName)_$(solutionVersion).zip"
+
+                      if (!(Test-Path $solutionPackage)) {
+                          Write-Error "Solution package not found: $solutionPackage"
+                          exit 1
+                      }
+
+                      Write-Host "Solution package: $solutionPackage"
+
+                      # pac solution import --path $solutionPackage `
+                      #   --force-overwrite --activate-plugins
+
+                      Write-Host "✓ Solution imported to DEV (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Verify Deployment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Verifying deployment..."
+
+                      # pac solution list | Select-String "$(solutionName)"
+                      # pac flow list | Select-String "AutomatedMeetingNotes"
+
+                      Write-Host "✓ Deployment verified (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Run Smoke Tests'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Running smoke tests..."
+                      Write-Host "✓ All smoke tests passed (DRY-RUN)"
+
+  # ============================================================================
+  # TEST DEPLOYMENT STAGE
+  # ============================================================================
+  - stage: DeployTest
+    displayName: 'Deploy to TEST'
+    dependsOn: DeployDev
+    condition: succeeded()
+    jobs:
+      - deployment: DeployTestJob
+        displayName: 'Deploy to TEST Environment'
+        environment: 'PowerPlatform-TEST'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: $(artifactName)
+
+                - task: PowerShell@2
+                  displayName: 'Install Power Platform CLI'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                      pac install latest
+
+                - task: PowerShell@2
+                  displayName: 'Authenticate to TEST Environment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Authenticating to TEST environment..."
+                      Write-Host "✓ Authentication complete (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Import Solution to TEST'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Importing solution to TEST environment..."
+                      Write-Host "✓ Solution imported to TEST (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Run Integration Tests'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Running integration tests..."
+                      Write-Host "✓ All integration tests passed (DRY-RUN)"
+
+  # ============================================================================
+  # PRODUCTION DEPLOYMENT STAGE
+  # ============================================================================
+  - stage: DeployProd
+    displayName: 'Deploy to PRODUCTION'
+    dependsOn: DeployTest
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployProdJob
+        displayName: 'Deploy to PRODUCTION Environment'
+        environment: 'PowerPlatform-PROD'
+        pool:
+          vmImage: $(vmImage)
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - download: current
+                  artifact: $(artifactName)
+
+                - task: PowerShell@2
+                  displayName: 'Install Power Platform CLI'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      dotnet tool install --global Microsoft.PowerApps.CLI.Tool
+                      pac install latest
+
+                - task: PowerShell@2
+                  displayName: 'Authenticate to PROD Environment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Authenticating to PRODUCTION environment..."
+                      Write-Host "⚠ This is PRODUCTION - proceeding with caution"
+                      Write-Host "✓ Authentication complete (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Backup PROD Solution'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Creating backup of PRODUCTION solution..."
+                      Write-Host "✓ PROD backup created (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Export Managed Solution'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Exporting managed solution for production..."
+                      Write-Host "✓ Managed solution ready (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Import Solution to PROD (Managed)'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Importing managed solution to PRODUCTION..."
+                      Write-Host "⚠ This will affect production users"
+                      Write-Host "✓ Solution imported to PROD (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Verify PROD Deployment'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Verifying PRODUCTION deployment..."
+                      Write-Host "✓ PROD deployment verified (DRY-RUN)"
+
+                - task: PowerShell@2
+                  displayName: 'Run Production Health Checks'
+                  inputs:
+                    targetType: 'inline'
+                    script: |
+                      Write-Host "Running production health checks..."
+                      Write-Host "✓ All health checks passed (DRY-RUN)"
+
+  # ============================================================================
+  # POST-DEPLOYMENT STAGE
+  # ============================================================================
+  - stage: PostDeployment
+    displayName: 'Post-Deployment Tasks'
+    dependsOn:
+      - DeployDev
+      - DeployTest
+      - DeployProd
+    condition: succeededOrFailed()
+    jobs:
+      - job: PostDeploymentJob
+        displayName: 'Post-Deployment Tasks'
+        pool:
+          vmImage: $(vmImage)
+
+        steps:
+          - task: PowerShell@2
+            displayName: 'Generate Deployment Report'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Generating deployment report..."
+                $report = @"
+                # Deployment Report
+                **Build**: $(Build.BuildNumber)
+                **Date**: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+                **Flow**: $(flowName)
+                **Solution**: $(solutionName) v$(solutionVersion)
+
+                ## Deployment Status
+                - DEV: $($env:AGENT_JOBSTATUS_DEV)
+                - TEST: $($env:AGENT_JOBSTATUS_TEST)
+                - PROD: $($env:AGENT_JOBSTATUS_PROD)
+                "@
+
+                Write-Host $report
+
+          - task: PowerShell@2
+            displayName: 'Send Deployment Notification'
+            inputs:
+              targetType: 'inline'
+              script: |
+                Write-Host "Sending deployment notifications..."
+                Write-Host "✓ Notifications sent (DRY-RUN)"
+
+# ============================================================================
+# PIPELINE NOTES
+# ============================================================================
+
+# To use this pipeline:
+# 1. Create service principal for authentication
+# 2. Store credentials in Azure DevOps Library variable group
+# 3. Create environments in Azure DevOps (PowerPlatform-DEV, TEST, PROD)
+# 4. Update environment URLs in variables section
+# 5. Uncomment authentication and deployment commands
+# 6. Configure approval gates for PROD environment

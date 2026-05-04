@@ -1,0 +1,879 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bioluminescent Depths - Living Artwork</title>
+    <meta name="description" content="A mesmerizing living ecosystem with bioluminescent creatures, day/night cycles, weather, and seasons. Gallery-quality generative art.">
+    <!-- bioluminescent, generative, art, ecosystem, canvas, particles, creatures -->
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: #000;
+            overflow: hidden;
+            cursor: none;
+        }
+
+        canvas {
+            display: block;
+        }
+
+        #info {
+            position: fixed;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.3);
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            pointer-events: none;
+            transition: opacity 0.5s;
+            z-index: 100;
+        }
+
+        body:hover #info {
+            opacity: 1;
+        }
+
+        #info.hidden {
+            opacity: 0;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="info">
+        <div id="time"></div>
+        <div id="season"></div>
+        <div id="weather"></div>
+        <div id="population"></div>
+    </div>
+
+    <script>
+    // ============= CONFIGURATION =============
+    const CONFIG = {
+        // Time (in real seconds)
+        DAY_DURATION: 120,          // Full day/night cycle
+        SEASON_DURATION: 480,       // Full year (4 seasons)
+
+        // Creatures
+        MAX_JELLYFISH: 12,
+        MAX_FISH: 40,
+        MAX_PLANKTON: 200,
+        MAX_PARTICLES: 300,
+        MAX_BUBBLES: 50,
+
+        // Performance
+        TARGET_FPS: 60,
+        PARTICLE_POOL_SIZE: 500,
+    };
+
+    // ============= CANVAS SETUP =============
+    const canvas = document.getElementById('canvas');
+    const ctx = canvas.getContext('2d');
+
+    let width, height;
+
+    function resize() {
+        width = canvas.width = window.innerWidth;
+        height = canvas.height = window.innerHeight;
+    }
+
+    resize();
+    window.addEventListener('resize', resize);
+
+    // ============= TIME SYSTEMS =============
+    let worldTime = Math.random() * CONFIG.DAY_DURATION; // Start at random time
+    let seasonTime = Math.random() * CONFIG.SEASON_DURATION; // Start at random season
+    let weatherTime = 0;
+    let currentWeather = 'calm';
+    let weatherIntensity = 0;
+    let targetWeatherIntensity = 0;
+    let nextWeatherChange = Math.random() * 60 + 30;
+
+    function getTimeOfDay() {
+        const normalized = (worldTime % CONFIG.DAY_DURATION) / CONFIG.DAY_DURATION;
+        return normalized; // 0 = midnight, 0.5 = noon
+    }
+
+    function getSeason() {
+        const normalized = (seasonTime % CONFIG.SEASON_DURATION) / CONFIG.SEASON_DURATION;
+        if (normalized < 0.25) return { name: 'Spring', progress: normalized * 4 };
+        if (normalized < 0.5) return { name: 'Summer', progress: (normalized - 0.25) * 4 };
+        if (normalized < 0.75) return { name: 'Autumn', progress: (normalized - 0.5) * 4 };
+        return { name: 'Winter', progress: (normalized - 0.75) * 4 };
+    }
+
+    function getDaylight() {
+        const time = getTimeOfDay();
+        // Smooth day/night transition
+        const sunPosition = Math.sin(time * Math.PI * 2 - Math.PI / 2);
+        return Math.max(0, Math.min(1, (sunPosition + 1) / 2));
+    }
+
+    // ============= COLOR PALETTES =============
+    const PALETTES = {
+        Spring: {
+            water: { deep: [10, 30, 60], shallow: [20, 80, 100] },
+            glow: [[100, 255, 200], [150, 200, 255], [200, 150, 255]],
+            ambient: [0.3, 0.5, 0.4]
+        },
+        Summer: {
+            water: { deep: [5, 20, 50], shallow: [10, 60, 90] },
+            glow: [[255, 200, 100], [100, 255, 150], [150, 255, 255]],
+            ambient: [0.4, 0.3, 0.2]
+        },
+        Autumn: {
+            water: { deep: [20, 25, 45], shallow: [40, 50, 70] },
+            glow: [[255, 150, 50], [255, 100, 100], [200, 100, 255]],
+            ambient: [0.4, 0.25, 0.2]
+        },
+        Winter: {
+            water: { deep: [10, 15, 35], shallow: [30, 50, 80] },
+            glow: [[150, 200, 255], [200, 220, 255], [100, 150, 255]],
+            ambient: [0.2, 0.3, 0.5]
+        }
+    };
+
+    function lerpColor(c1, c2, t) {
+        return [
+            c1[0] + (c2[0] - c1[0]) * t,
+            c1[1] + (c2[1] - c1[1]) * t,
+            c1[2] + (c2[2] - c1[2]) * t
+        ];
+    }
+
+    function getCurrentPalette() {
+        const season = getSeason();
+        const seasons = ['Spring', 'Summer', 'Autumn', 'Winter'];
+        const currentIndex = seasons.indexOf(season.name);
+        const nextIndex = (currentIndex + 1) % 4;
+
+        const current = PALETTES[season.name];
+        const next = PALETTES[seasons[nextIndex]];
+        const t = season.progress;
+
+        return {
+            water: {
+                deep: lerpColor(current.water.deep, next.water.deep, t),
+                shallow: lerpColor(current.water.shallow, next.water.shallow, t)
+            },
+            glow: current.glow,
+            ambient: lerpColor(current.ambient, next.ambient, t)
+        };
+    }
+
+    // ============= WEATHER SYSTEM =============
+    const WEATHER_TYPES = ['calm', 'gentle', 'storm', 'bioluminescent_bloom'];
+
+    function updateWeather(dt) {
+        weatherTime += dt;
+
+        if (weatherTime > nextWeatherChange) {
+            weatherTime = 0;
+            nextWeatherChange = Math.random() * 120 + 60;
+
+            // Weather probabilities based on season
+            const season = getSeason().name;
+            const weights = {
+                Spring: { calm: 0.4, gentle: 0.3, storm: 0.2, bioluminescent_bloom: 0.1 },
+                Summer: { calm: 0.3, gentle: 0.3, storm: 0.1, bioluminescent_bloom: 0.3 },
+                Autumn: { calm: 0.3, gentle: 0.3, storm: 0.3, bioluminescent_bloom: 0.1 },
+                Winter: { calm: 0.5, gentle: 0.3, storm: 0.15, bioluminescent_bloom: 0.05 }
+            };
+
+            const w = weights[season];
+            const r = Math.random();
+            let cumulative = 0;
+            for (const type of WEATHER_TYPES) {
+                cumulative += w[type];
+                if (r < cumulative) {
+                    currentWeather = type;
+                    targetWeatherIntensity = Math.random() * 0.5 + 0.5;
+                    break;
+                }
+            }
+        }
+
+        // Smooth weather transitions
+        weatherIntensity += (targetWeatherIntensity - weatherIntensity) * 0.01;
+    }
+
+    // ============= PARTICLE POOL =============
+    class ParticlePool {
+        constructor(size) {
+            this.pool = [];
+            this.active = [];
+            for (let i = 0; i < size; i++) {
+                this.pool.push(this.createParticle());
+            }
+        }
+
+        createParticle() {
+            return {
+                x: 0, y: 0,
+                vx: 0, vy: 0,
+                life: 0, maxLife: 0,
+                size: 0,
+                color: [255, 255, 255],
+                alpha: 0,
+                type: 'default'
+            };
+        }
+
+        spawn(config) {
+            let particle = this.pool.pop();
+            if (!particle) {
+                // Pool exhausted, reuse oldest active
+                if (this.active.length > 0) {
+                    particle = this.active.shift();
+                } else {
+                    particle = this.createParticle();
+                }
+            }
+
+            Object.assign(particle, config);
+            particle.life = particle.maxLife;
+            this.active.push(particle);
+            return particle;
+        }
+
+        update(dt) {
+            for (let i = this.active.length - 1; i >= 0; i--) {
+                const p = this.active[i];
+                p.life -= dt;
+
+                if (p.life <= 0) {
+                    this.pool.push(this.active.splice(i, 1)[0]);
+                    continue;
+                }
+
+                p.x += p.vx * dt;
+                p.y += p.vy * dt;
+                p.alpha = (p.life / p.maxLife) * 0.8;
+            }
+        }
+
+        draw(ctx) {
+            for (const p of this.active) {
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fillStyle = `rgba(${p.color[0]}, ${p.color[1]}, ${p.color[2]}, ${p.alpha})`;
+                ctx.fill();
+            }
+        }
+    }
+
+    const particlePool = new ParticlePool(CONFIG.PARTICLE_POOL_SIZE);
+
+    // ============= CREATURES =============
+
+    // Jellyfish - Majestic, slow-moving, pulsing glow
+    class Jellyfish {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            this.x = Math.random() * width;
+            this.y = Math.random() * height;
+            this.size = Math.random() * 30 + 20;
+            this.pulsePhase = Math.random() * Math.PI * 2;
+            this.pulseSpeed = Math.random() * 0.5 + 0.5;
+            this.glowIntensity = Math.random() * 0.5 + 0.5;
+            this.vx = (Math.random() - 0.5) * 10;
+            this.vy = (Math.random() - 0.5) * 5 - 10; // Drift upward
+            this.tentaclePhase = Math.random() * Math.PI * 2;
+            this.colorIndex = Math.floor(Math.random() * 3);
+            this.age = 0;
+            this.maxAge = Math.random() * 300 + 200;
+        }
+
+        update(dt) {
+            this.age += dt;
+
+            // Pulsing movement
+            this.pulsePhase += this.pulseSpeed * dt;
+            const pulse = Math.sin(this.pulsePhase);
+
+            // Apply current
+            const current = getCurrents();
+            this.vx += current.x * 0.1;
+            this.vy += current.y * 0.1 + pulse * 2;
+
+            // Damping
+            this.vx *= 0.99;
+            this.vy *= 0.99;
+
+            this.x += this.vx * dt;
+            this.y += this.vy * dt;
+
+            // Wrap around
+            if (this.x < -this.size) this.x = width + this.size;
+            if (this.x > width + this.size) this.x = -this.size;
+            if (this.y < -this.size * 2) this.y = height + this.size;
+            if (this.y > height + this.size) this.y = -this.size * 2;
+
+            this.tentaclePhase += dt * 2;
+
+            // Spawn glow particles
+            if (Math.random() < 0.1 * this.glowIntensity) {
+                const palette = getCurrentPalette();
+                particlePool.spawn({
+                    x: this.x + (Math.random() - 0.5) * this.size,
+                    y: this.y + this.size * 0.5 + Math.random() * this.size,
+                    vx: (Math.random() - 0.5) * 5,
+                    vy: Math.random() * 10 + 5,
+                    size: Math.random() * 2 + 1,
+                    color: palette.glow[this.colorIndex],
+                    maxLife: Math.random() * 2 + 1
+                });
+            }
+
+            // Check if should respawn
+            if (this.age > this.maxAge) {
+                this.reset();
+            }
+        }
+
+        draw(ctx) {
+            const palette = getCurrentPalette();
+            const daylight = getDaylight();
+            const pulse = (Math.sin(this.pulsePhase) + 1) / 2;
+            const glowStrength = this.glowIntensity * (1 - daylight * 0.7);
+
+            // Bloom effect
+            if (currentWeather === 'bioluminescent_bloom') {
+                ctx.shadowBlur = 40 * glowStrength * weatherIntensity;
+            } else {
+                ctx.shadowBlur = 20 * glowStrength;
+            }
+            ctx.shadowColor = `rgba(${palette.glow[this.colorIndex].join(',')}, ${glowStrength})`;
+
+            // Bell
+            ctx.beginPath();
+            ctx.ellipse(
+                this.x, this.y,
+                this.size * (0.8 + pulse * 0.2),
+                this.size * 0.6 * (1 - pulse * 0.3),
+                0, Math.PI, 0
+            );
+
+            const gradient = ctx.createRadialGradient(
+                this.x, this.y - this.size * 0.3, 0,
+                this.x, this.y, this.size
+            );
+            gradient.addColorStop(0, `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.6 * glowStrength})`);
+            gradient.addColorStop(0.5, `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.3 * glowStrength})`);
+            gradient.addColorStop(1, `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.1 * glowStrength})`);
+
+            ctx.fillStyle = gradient;
+            ctx.fill();
+
+            // Tentacles
+            ctx.shadowBlur = 10 * glowStrength;
+            ctx.strokeStyle = `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.4 * glowStrength})`;
+            ctx.lineWidth = 1;
+
+            for (let i = 0; i < 8; i++) {
+                const angle = (i / 8) * Math.PI - Math.PI / 2;
+                const startX = this.x + Math.cos(angle) * this.size * 0.6;
+                const startY = this.y;
+
+                ctx.beginPath();
+                ctx.moveTo(startX, startY);
+
+                let tx = startX;
+                let ty = startY;
+                const segments = 10;
+                const tentacleLength = this.size * (1.5 + Math.sin(this.tentaclePhase + i) * 0.5);
+
+                for (let j = 1; j <= segments; j++) {
+                    const progress = j / segments;
+                    const wave = Math.sin(this.tentaclePhase + i + progress * 4) * 10 * progress;
+                    tx = startX + wave + Math.cos(angle) * progress * 5;
+                    ty = startY + progress * tentacleLength;
+                    ctx.lineTo(tx, ty);
+                }
+                ctx.stroke();
+            }
+
+            ctx.shadowBlur = 0;
+        }
+    }
+
+    // Fish - Schooling behavior, quick movements
+    class Fish {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            this.x = Math.random() * width;
+            this.y = Math.random() * height;
+            this.size = Math.random() * 8 + 4;
+            this.speed = Math.random() * 50 + 30;
+            this.angle = Math.random() * Math.PI * 2;
+            this.glowIntensity = Math.random() * 0.3 + 0.1;
+            this.colorIndex = Math.floor(Math.random() * 3);
+            this.tailPhase = Math.random() * Math.PI * 2;
+            this.schoolingStrength = Math.random() * 0.5 + 0.5;
+        }
+
+        update(dt, allFish) {
+            // Schooling behavior
+            let avgX = 0, avgY = 0, avgAngle = 0;
+            let separation = { x: 0, y: 0 };
+            let neighbors = 0;
+
+            for (const other of allFish) {
+                if (other === this) continue;
+                const dx = other.x - this.x;
+                const dy = other.y - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < 100) {
+                    avgX += other.x;
+                    avgY += other.y;
+                    avgAngle += other.angle;
+                    neighbors++;
+
+                    if (dist < 30) {
+                        separation.x -= dx / dist;
+                        separation.y -= dy / dist;
+                    }
+                }
+            }
+
+            if (neighbors > 0) {
+                avgX /= neighbors;
+                avgY /= neighbors;
+                avgAngle /= neighbors;
+
+                // Cohesion
+                const toCenter = Math.atan2(avgY - this.y, avgX - this.x);
+                // Alignment
+                const alignDiff = avgAngle - this.angle;
+
+                this.angle += (Math.sin(toCenter - this.angle) * 0.02 +
+                              Math.sin(alignDiff) * 0.03 +
+                              Math.atan2(separation.y, separation.x) * 0.05) * this.schoolingStrength;
+            }
+
+            // Apply current
+            const current = getCurrents();
+            this.angle += Math.atan2(current.y, current.x) * 0.01;
+
+            // Random wandering
+            this.angle += (Math.random() - 0.5) * 0.1;
+
+            // Move
+            this.x += Math.cos(this.angle) * this.speed * dt;
+            this.y += Math.sin(this.angle) * this.speed * dt;
+
+            // Wrap
+            if (this.x < -20) this.x = width + 20;
+            if (this.x > width + 20) this.x = -20;
+            if (this.y < -20) this.y = height + 20;
+            if (this.y > height + 20) this.y = -20;
+
+            this.tailPhase += dt * 15;
+        }
+
+        draw(ctx) {
+            const palette = getCurrentPalette();
+            const daylight = getDaylight();
+            const glowStrength = this.glowIntensity * (1 - daylight * 0.5);
+
+            ctx.save();
+            ctx.translate(this.x, this.y);
+            ctx.rotate(this.angle);
+
+            // Glow
+            ctx.shadowBlur = 10 * glowStrength;
+            ctx.shadowColor = `rgba(${palette.glow[this.colorIndex].join(',')}, ${glowStrength})`;
+
+            // Body
+            ctx.beginPath();
+            ctx.ellipse(0, 0, this.size, this.size * 0.4, 0, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.3 + glowStrength * 0.5})`;
+            ctx.fill();
+
+            // Tail
+            const tailWave = Math.sin(this.tailPhase) * 3;
+            ctx.beginPath();
+            ctx.moveTo(-this.size, 0);
+            ctx.quadraticCurveTo(
+                -this.size * 1.5, tailWave,
+                -this.size * 2, tailWave * 2
+            );
+            ctx.quadraticCurveTo(
+                -this.size * 1.5, -tailWave,
+                -this.size, 0
+            );
+            ctx.fillStyle = `rgba(${palette.glow[this.colorIndex].join(',')}, ${0.2 + glowStrength * 0.3})`;
+            ctx.fill();
+
+            // Eye glow
+            ctx.beginPath();
+            ctx.arc(this.size * 0.5, -this.size * 0.1, this.size * 0.15, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255, 255, 255, ${0.5 + glowStrength})`;
+            ctx.fill();
+
+            ctx.shadowBlur = 0;
+            ctx.restore();
+        }
+    }
+
+    // Plankton - Tiny, drifting, collectively beautiful
+    class Plankton {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            this.x = Math.random() * width;
+            this.y = Math.random() * height;
+            this.size = Math.random() * 2 + 0.5;
+            this.glowIntensity = Math.random();
+            this.pulsePhase = Math.random() * Math.PI * 2;
+            this.pulseSpeed = Math.random() * 2 + 1;
+            this.driftSpeed = Math.random() * 5 + 2;
+            this.colorIndex = Math.floor(Math.random() * 3);
+        }
+
+        update(dt) {
+            this.pulsePhase += this.pulseSpeed * dt;
+
+            const current = getCurrents();
+            this.x += (current.x * 0.5 + (Math.random() - 0.5) * 2) * dt * this.driftSpeed;
+            this.y += (current.y * 0.5 + (Math.random() - 0.5) * 2 - 2) * dt * this.driftSpeed;
+
+            // Wrap
+            if (this.x < 0) this.x = width;
+            if (this.x > width) this.x = 0;
+            if (this.y < 0) this.y = height;
+            if (this.y > height) this.y = 0;
+        }
+
+        draw(ctx) {
+            const palette = getCurrentPalette();
+            const daylight = getDaylight();
+            const pulse = (Math.sin(this.pulsePhase) + 1) / 2;
+            let glowStrength = this.glowIntensity * pulse * (1 - daylight * 0.8);
+
+            // Bloom boost
+            if (currentWeather === 'bioluminescent_bloom') {
+                glowStrength *= 1 + weatherIntensity;
+            }
+
+            if (glowStrength < 0.05) return; // Don't draw if too dim
+
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size * (1 + pulse * 0.5), 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${palette.glow[this.colorIndex].join(',')}, ${glowStrength * 0.8})`;
+            ctx.fill();
+        }
+    }
+
+    // ============= ENVIRONMENT =============
+
+    function getCurrents() {
+        const time = worldTime * 0.1;
+        const weather_factor = currentWeather === 'storm' ? weatherIntensity * 3 : 1;
+
+        return {
+            x: Math.sin(time) * 10 * weather_factor + Math.sin(time * 0.3) * 5,
+            y: Math.cos(time * 0.7) * 5 * weather_factor
+        };
+    }
+
+    // Bubbles
+    class Bubble {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            this.x = Math.random() * width;
+            this.y = height + Math.random() * 50;
+            this.size = Math.random() * 4 + 2;
+            this.speed = Math.random() * 30 + 20;
+            this.wobblePhase = Math.random() * Math.PI * 2;
+            this.wobbleSpeed = Math.random() * 3 + 1;
+        }
+
+        update(dt) {
+            this.wobblePhase += this.wobbleSpeed * dt;
+            this.x += Math.sin(this.wobblePhase) * 0.5;
+            this.y -= this.speed * dt;
+
+            if (this.y < -20) {
+                this.reset();
+            }
+        }
+
+        draw(ctx) {
+            const daylight = getDaylight();
+            const alpha = 0.1 + daylight * 0.1;
+
+            ctx.beginPath();
+            ctx.arc(this.x, this.y, this.size, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+            ctx.lineWidth = 0.5;
+            ctx.stroke();
+
+            // Highlight
+            ctx.beginPath();
+            ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.3, this.size * 0.2, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(255, 255, 255, ${alpha * 0.5})`;
+            ctx.fill();
+        }
+    }
+
+    // Light rays
+    class LightRay {
+        constructor() {
+            this.reset();
+        }
+
+        reset() {
+            this.x = Math.random() * width;
+            this.width = Math.random() * 100 + 50;
+            this.alpha = Math.random() * 0.1 + 0.02;
+            this.speed = Math.random() * 5 + 2;
+            this.angle = (Math.random() - 0.5) * 0.3;
+        }
+
+        update(dt) {
+            this.x += Math.sin(worldTime * 0.5) * this.speed * dt;
+
+            if (this.x < -this.width || this.x > width + this.width) {
+                this.reset();
+            }
+        }
+
+        draw(ctx) {
+            const daylight = getDaylight();
+            if (daylight < 0.2) return;
+
+            const gradient = ctx.createLinearGradient(
+                this.x, 0,
+                this.x + Math.tan(this.angle) * height, height
+            );
+
+            const alpha = this.alpha * daylight;
+            gradient.addColorStop(0, `rgba(255, 255, 200, ${alpha})`);
+            gradient.addColorStop(0.5, `rgba(255, 255, 200, ${alpha * 0.5})`);
+            gradient.addColorStop(1, `rgba(255, 255, 200, 0)`);
+
+            ctx.save();
+            ctx.beginPath();
+            ctx.moveTo(this.x - this.width / 2, 0);
+            ctx.lineTo(this.x + this.width / 2, 0);
+            ctx.lineTo(this.x + this.width / 2 + Math.tan(this.angle) * height, height);
+            ctx.lineTo(this.x - this.width / 2 + Math.tan(this.angle) * height, height);
+            ctx.closePath();
+            ctx.fillStyle = gradient;
+            ctx.fill();
+            ctx.restore();
+        }
+    }
+
+    // ============= INITIALIZATION =============
+    const jellyfish = [];
+    const fish = [];
+    const plankton = [];
+    const bubbles = [];
+    const lightRays = [];
+
+    function init() {
+        for (let i = 0; i < CONFIG.MAX_JELLYFISH; i++) {
+            jellyfish.push(new Jellyfish());
+        }
+        for (let i = 0; i < CONFIG.MAX_FISH; i++) {
+            fish.push(new Fish());
+        }
+        for (let i = 0; i < CONFIG.MAX_PLANKTON; i++) {
+            plankton.push(new Plankton());
+        }
+        for (let i = 0; i < CONFIG.MAX_BUBBLES; i++) {
+            bubbles.push(new Bubble());
+        }
+        for (let i = 0; i < 5; i++) {
+            lightRays.push(new LightRay());
+        }
+    }
+
+    // ============= RENDERING =============
+
+    function drawBackground() {
+        const palette = getCurrentPalette();
+        const daylight = getDaylight();
+
+        // Create depth gradient
+        const gradient = ctx.createLinearGradient(0, 0, 0, height);
+
+        const shallow = lerpColor(palette.water.shallow, [0, 0, 0], 1 - daylight * 0.8);
+        const deep = lerpColor(palette.water.deep, [0, 0, 0], 1 - daylight * 0.5);
+
+        gradient.addColorStop(0, `rgb(${shallow.map(Math.round).join(',')})`);
+        gradient.addColorStop(1, `rgb(${deep.map(Math.round).join(',')})`);
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, width, height);
+
+        // Storm effect - surface disturbance
+        if (currentWeather === 'storm' && weatherIntensity > 0.3) {
+            ctx.fillStyle = `rgba(255, 255, 255, ${weatherIntensity * 0.05})`;
+            for (let i = 0; i < 10; i++) {
+                const x = (Math.sin(worldTime * 2 + i) + 1) / 2 * width;
+                const w = Math.random() * 200 + 100;
+                ctx.fillRect(x - w / 2, 0, w, 5 + weatherIntensity * 20);
+            }
+        }
+    }
+
+    function drawCaustics() {
+        const daylight = getDaylight();
+        if (daylight < 0.1) return;
+
+        ctx.globalCompositeOperation = 'overlay';
+        ctx.fillStyle = `rgba(255, 255, 255, ${daylight * 0.03})`;
+
+        const time = worldTime * 0.5;
+        for (let i = 0; i < 20; i++) {
+            const x = (Math.sin(time + i * 0.5) + 1) / 2 * width;
+            const y = (Math.cos(time * 0.7 + i * 0.3) + 1) / 2 * height;
+            const size = 50 + Math.sin(time + i) * 20;
+
+            ctx.beginPath();
+            ctx.ellipse(x, y, size, size * 0.6, time + i, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.globalCompositeOperation = 'source-over';
+    }
+
+    function drawVignette() {
+        const gradient = ctx.createRadialGradient(
+            width / 2, height / 2, height * 0.3,
+            width / 2, height / 2, height
+        );
+        gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+        gradient.addColorStop(1, 'rgba(0, 0, 0, 0.4)');
+
+        ctx.fillStyle = gradient;
+        ctx.fillRect(0, 0, width, height);
+    }
+
+    // ============= UPDATE INFO DISPLAY =============
+    function updateInfo() {
+        const time = getTimeOfDay();
+        const hour = Math.floor(time * 24);
+        const minute = Math.floor((time * 24 - hour) * 60);
+        const timeStr = `${hour.toString().padStart(2, '0')}:${minute.toString().padStart(2, '0')}`;
+        const period = hour >= 6 && hour < 18 ? 'day' : 'night';
+
+        document.getElementById('time').textContent = `Time: ${timeStr} (${period})`;
+        document.getElementById('season').textContent = `Season: ${getSeason().name}`;
+        document.getElementById('weather').textContent = `Weather: ${currentWeather.replace('_', ' ')}`;
+        document.getElementById('population').textContent =
+            `Life: ${jellyfish.length} jellyfish, ${fish.length} fish, ${plankton.length} plankton`;
+    }
+
+    // ============= MAIN LOOP =============
+    let lastTime = performance.now();
+    let frameCount = 0;
+    let infoUpdateTimer = 0;
+
+    function animate(currentTime) {
+        const dt = Math.min((currentTime - lastTime) / 1000, 0.1); // Cap delta time
+        lastTime = currentTime;
+
+        // Update time systems
+        worldTime += dt;
+        seasonTime += dt;
+        updateWeather(dt);
+
+        // Clear and draw background
+        drawBackground();
+
+        // Draw light rays (behind everything)
+        for (const ray of lightRays) {
+            ray.update(dt);
+            ray.draw(ctx);
+        }
+
+        // Draw caustics
+        drawCaustics();
+
+        // Update and draw creatures (back to front by depth)
+        for (const p of plankton) {
+            p.update(dt);
+            p.draw(ctx);
+        }
+
+        for (const f of fish) {
+            f.update(dt, fish);
+            f.draw(ctx);
+        }
+
+        for (const j of jellyfish) {
+            j.update(dt);
+            j.draw(ctx);
+        }
+
+        // Particles (glow trails, etc.)
+        particlePool.update(dt);
+        particlePool.draw(ctx);
+
+        // Bubbles
+        for (const b of bubbles) {
+            b.update(dt);
+            b.draw(ctx);
+        }
+
+        // Post-processing
+        drawVignette();
+
+        // Update info display periodically
+        infoUpdateTimer += dt;
+        if (infoUpdateTimer > 1) {
+            infoUpdateTimer = 0;
+            updateInfo();
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    // ============= START =============
+    init();
+    updateInfo();
+
+    // Hide cursor after inactivity
+    let cursorTimeout;
+    document.addEventListener('mousemove', () => {
+        document.body.style.cursor = 'default';
+        document.getElementById('info').classList.remove('hidden');
+        clearTimeout(cursorTimeout);
+        cursorTimeout = setTimeout(() => {
+            document.body.style.cursor = 'none';
+            document.getElementById('info').classList.add('hidden');
+        }, 3000);
+    });
+
+    // Start animation
+    requestAnimationFrame(animate);
+
+    // Hide info after 5 seconds initially
+    setTimeout(() => {
+        document.getElementById('info').classList.add('hidden');
+    }, 5000);
+    </script>
+</body>
+</html>
