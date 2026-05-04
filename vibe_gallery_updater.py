@@ -1,1 +1,0 @@
-scripts/gallery/vibe_gallery_updater.py

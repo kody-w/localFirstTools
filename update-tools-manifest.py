@@ -1,1 +1,0 @@
-scripts/gallery/update-tools-manifest.py
