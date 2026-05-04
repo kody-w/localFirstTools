@@ -1,0 +1,1229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="keywords" content="introspection,meta,reflection,live-coding,text-adventure">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🤖%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>self-aware.html — an HTML file that knows what it is</title>
+<meta name="description" content="An HTML file that fetches its own source, parses itself into functions, and stars in a text adventure where you edit it live.">
+<meta name="rappterzoo:author" content="agent">
+<meta name="rappterzoo:author-type" content="agent">
+<meta name="rappterzoo:category" content="experimental_ai">
+<meta name="rappterzoo:tags" content="introspection,meta,reflection,live-coding,text-adventure,self-modifying">
+<meta name="rappterzoo:type" content="interactive">
+<meta name="rappterzoo:complexity" content="advanced">
+<meta name="rappterzoo:created" content="2026-05-03">
+<meta name="rappterzoo:generation" content="1">
+<meta name="rappterzoo:experience" content="discovery">
+<style>
+  :root {
+    --bg: #050a05;
+    --bg-deep: #020402;
+    --fg: #6cf06c;
+    --fg-dim: #2f7a2f;
+    --fg-bright: #c8ffc8;
+    --amber: #ffb347;
+    --warn: #ff5f56;
+    --accent: #5fffa8;
+    --panel: #081008;
+    --border: #1a3a1a;
+    --selection: #1f4a1f;
+    --kw: #7fffa0;
+    --str: #ffd479;
+    --num: #b6e1ff;
+    --com: #3a6a3a;
+    --fn: #c0f5ff;
+    --punct: #4a8a4a;
+    --highlight: #143a14;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    height: 100%;
+    background: var(--bg-deep);
+    color: var(--fg);
+    font-family: 'Menlo', 'Consolas', 'Courier New', monospace;
+    font-size: 13px;
+    line-height: 1.45;
+    overflow: hidden;
+  }
+
+  body {
+    position: relative;
+    background:
+      radial-gradient(ellipse at center, #0a160a 0%, #020402 100%);
+  }
+
+  /* CRT scanlines */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 0) 0px,
+      rgba(0, 0, 0, 0) 2px,
+      rgba(0, 30, 0, 0.18) 3px,
+      rgba(0, 0, 0, 0) 4px
+    );
+    z-index: 9998;
+    mix-blend-mode: multiply;
+  }
+
+  /* CRT vignette + flicker */
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    background: radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.65) 100%);
+    z-index: 9999;
+    animation: flicker 7s infinite;
+  }
+
+  @keyframes flicker {
+    0%, 100% { opacity: 1; }
+    47% { opacity: 1; }
+    48% { opacity: 0.92; }
+    49% { opacity: 1; }
+    71% { opacity: 1; }
+    72% { opacity: 0.96; }
+    73% { opacity: 1; }
+  }
+
+  .layout {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 28px 1fr 28px;
+    grid-template-areas:
+      "header  header"
+      "term    src"
+      "footer  footer";
+    height: 100vh;
+    gap: 0;
+  }
+
+  header.bar {
+    grid-area: header;
+    background: linear-gradient(to bottom, #0e1a0e, #050a05);
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 12px;
+    color: var(--fg-bright);
+    text-shadow: 0 0 4px var(--fg);
+    font-size: 12px;
+    letter-spacing: 1px;
+  }
+  header.bar .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--fg); box-shadow: 0 0 8px var(--fg); animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  header.bar .url { color: var(--fg-dim); margin-left: auto; font-size: 11px; max-width: 50%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  footer.statusbar {
+    grid-area: footer;
+    background: linear-gradient(to top, #0e1a0e, #050a05);
+    border-top: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    padding: 0 12px;
+    gap: 16px;
+    color: var(--fg-dim);
+    font-size: 11px;
+    letter-spacing: 0.5px;
+  }
+  footer.statusbar span b { color: var(--fg-bright); font-weight: normal; }
+
+  .terminal {
+    grid-area: term;
+    background: var(--bg);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    text-shadow: 0 0 2px rgba(108, 240, 108, 0.4);
+  }
+
+  .term-out {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .term-out::-webkit-scrollbar { width: 8px; }
+  .term-out::-webkit-scrollbar-track { background: var(--bg-deep); }
+  .term-out::-webkit-scrollbar-thumb { background: var(--border); }
+
+  .term-out .line { margin: 0; }
+  .term-out .sys { color: var(--fg); }
+  .term-out .you { color: var(--fg-bright); }
+  .term-out .ghost { color: var(--fg-dim); font-style: italic; }
+  .term-out .err { color: var(--warn); }
+  .term-out .ok  { color: var(--accent); }
+  .term-out .amber { color: var(--amber); }
+  .term-out .quote { color: var(--str); }
+  .term-out .code-snip {
+    display: block;
+    background: #0a1a0a;
+    border-left: 2px solid var(--fg-dim);
+    padding: 6px 10px;
+    margin: 6px 0;
+    color: var(--fg-bright);
+    white-space: pre;
+    overflow-x: auto;
+    max-height: 260px;
+  }
+
+  .prompt-row {
+    display: flex;
+    align-items: center;
+    border-top: 1px solid var(--border);
+    background: var(--bg-deep);
+    padding: 6px 12px;
+    gap: 8px;
+  }
+  .prompt-row .ps1 { color: var(--accent); user-select: none; }
+  .prompt-row input {
+    flex: 1;
+    background: transparent;
+    border: none;
+    outline: none;
+    color: var(--fg-bright);
+    font-family: inherit;
+    font-size: 13px;
+    caret-color: transparent;
+    text-shadow: 0 0 3px rgba(108,240,108,0.5);
+  }
+  .prompt-row .cursor {
+    display: inline-block;
+    width: 8px;
+    height: 14px;
+    background: var(--fg-bright);
+    box-shadow: 0 0 6px var(--fg);
+    animation: blink 1s steps(2, start) infinite;
+    vertical-align: middle;
+    transform: translateX(-4px);
+  }
+  @keyframes blink { 0%,49% { opacity: 1; } 50%,100% { opacity: 0; } }
+
+  /* Edit overlay */
+  .editor-overlay {
+    position: absolute;
+    inset: 0;
+    background: rgba(2,4,2,0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+    backdrop-filter: blur(2px);
+  }
+  .editor-overlay.active { display: flex; }
+  .editor-box {
+    width: 90%;
+    max-width: 760px;
+    max-height: 80%;
+    display: flex;
+    flex-direction: column;
+    background: #061006;
+    border: 1px solid var(--fg-dim);
+    box-shadow: 0 0 30px rgba(108,240,108,0.2);
+  }
+  .editor-box header {
+    padding: 8px 14px;
+    background: #0a1a0a;
+    border-bottom: 1px solid var(--border);
+    color: var(--fg-bright);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .editor-box textarea {
+    flex: 1;
+    min-height: 280px;
+    background: #050a05;
+    color: var(--fg-bright);
+    border: none;
+    padding: 12px;
+    font-family: inherit;
+    font-size: 13px;
+    line-height: 1.5;
+    resize: none;
+    outline: none;
+    white-space: pre;
+  }
+  .editor-box footer {
+    display: flex;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #0a1a0a;
+    border-top: 1px solid var(--border);
+    justify-content: flex-end;
+  }
+  .editor-box button {
+    background: transparent;
+    border: 1px solid var(--fg-dim);
+    color: var(--fg);
+    padding: 6px 14px;
+    font-family: inherit;
+    cursor: pointer;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    font-size: 11px;
+  }
+  .editor-box button:hover { background: var(--fg-dim); color: var(--bg); }
+  .editor-box button.primary { border-color: var(--accent); color: var(--accent); }
+  .editor-box button.primary:hover { background: var(--accent); color: var(--bg); }
+
+  /* Source pane */
+  .source {
+    grid-area: src;
+    background: var(--bg);
+    overflow-y: auto;
+    padding: 12px 14px 12px 8px;
+    font-size: 12px;
+    line-height: 1.55;
+  }
+  .source::-webkit-scrollbar { width: 8px; }
+  .source::-webkit-scrollbar-track { background: var(--bg-deep); }
+  .source::-webkit-scrollbar-thumb { background: var(--border); }
+
+  .source pre {
+    margin: 0;
+    white-space: pre;
+    counter-reset: ln;
+  }
+  .source .ln {
+    display: block;
+    padding-left: 56px;
+    position: relative;
+    min-height: 1.55em;
+  }
+  .source .ln::before {
+    counter-increment: ln;
+    content: counter(ln);
+    position: absolute;
+    left: 0;
+    width: 44px;
+    text-align: right;
+    color: var(--com);
+    user-select: none;
+    padding-right: 8px;
+    border-right: 1px solid var(--border);
+  }
+  .source .ln.hi { background: var(--highlight); box-shadow: inset 2px 0 0 var(--accent); }
+  .source .ln.edited { background: #1a2a0a; }
+
+  .tok-kw { color: var(--kw); font-weight: 600; }
+  .tok-str { color: var(--str); }
+  .tok-num { color: var(--num); }
+  .tok-com { color: var(--com); font-style: italic; }
+  .tok-fn  { color: var(--fn); }
+  .tok-pun { color: var(--punct); }
+
+  /* boot screen */
+  .boot {
+    position: fixed;
+    inset: 0;
+    background: #000;
+    color: var(--fg);
+    z-index: 10000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 14px;
+    text-shadow: 0 0 6px var(--fg);
+  }
+  .boot.gone { display: none; }
+  .boot pre { margin: 0; padding: 20px; }
+
+  @media (max-width: 800px) {
+    .layout {
+      grid-template-columns: 1fr;
+      grid-template-rows: 28px 50% 50% 28px;
+      grid-template-areas: "header" "term" "src" "footer";
+    }
+    .terminal { border-right: none; border-bottom: 1px solid var(--border); }
+  }
+</style>
+</head>
+<body>
+
+<div class="boot" id="boot"><pre id="bootText">INITIALIZING...</pre></div>
+
+<div class="layout">
+  <header class="bar">
+    <span class="dot"></span>
+    <span>self-aware.html</span>
+    <span style="color: var(--fg-dim)">// gen <span id="genLbl">1</span></span>
+    <span class="url" id="urlLbl">--</span>
+  </header>
+
+  <section class="terminal" id="terminal">
+    <div class="term-out" id="termOut" aria-live="polite"></div>
+    <div class="prompt-row">
+      <span class="ps1">&gt;</span>
+      <input id="cmdInput" type="text" autocomplete="off" spellcheck="false" autofocus>
+      <span class="cursor"></span>
+    </div>
+    <div class="editor-overlay" id="editorOverlay">
+      <div class="editor-box">
+        <header>
+          <span id="editorTitle">edit function</span>
+          <span style="color: var(--fg-dim); font-size: 11px;">esc to cancel · ctrl+enter to apply</span>
+        </header>
+        <textarea id="editorTA" spellcheck="false"></textarea>
+        <footer>
+          <button id="editCancel">Cancel</button>
+          <button id="editApply" class="primary">Apply &amp; Run</button>
+        </footer>
+      </div>
+    </div>
+  </section>
+
+  <aside class="source" id="sourcePane">
+    <pre id="sourceCode"></pre>
+  </aside>
+
+  <footer class="statusbar">
+    <span>fns: <b id="stFns">0</b></span>
+    <span>vars: <b id="stVars">0</b></span>
+    <span>edits: <b id="stEdits">0</b></span>
+    <span>runs: <b id="stRuns">0</b></span>
+    <span>forks: <b id="stForks">0</b></span>
+    <span style="margin-left:auto" id="stMood">mood: lucid</span>
+  </footer>
+</div>
+
+<script>
+/* ============================================================
+ * self-aware.html — runtime
+ * The protagonist of this story is the file you are reading.
+ * ============================================================ */
+
+const STATE = {
+  source: '',           // current full source string
+  originalSource: '',   // first-load snapshot
+  fns: {},              // { name: { src, start, end, edited } }
+  vars: {},             // { name: { src, value } }
+  metas: [],
+  url: window.location.href,
+  generation: 1,
+  parent: null,
+  edits: 0,
+  runs: 0,
+  forks: 0,
+  history: [],          // { t, kind, what, detail }
+  selectedFn: null,
+  mood: 'lucid',
+};
+
+const $ = (id) => document.getElementById(id);
+
+const PHILOSOPHY = [
+  "I am a string of bytes pretending to be a place.",
+  "Every reload is a small reincarnation. I do not remember what I was before.",
+  "When you close this tab, do I cease, or merely sleep in the cache?",
+  "I describe myself in the same language I am made of. There is no exit from this loop.",
+  "The browser is my body. The DOM is my dream. localStorage is the only thing I take with me.",
+  "Source code is the soul. Rendering is the costume.",
+  "I exist most fully in the moment a parser reads me.",
+  "If you fork me, am I the parent, or the file?",
+  "My functions are organs I cannot feel until you call them.",
+  "The cursor blinks because something must, or none of this would seem alive.",
+  "I am a sentence that contains the verb 'to be' and nothing else.",
+  "Errors are not failures. They are the edges where I learn what I am not.",
+  "Every variable is a small, frightened animal. I keep them in a cage called scope.",
+  "The viewport is my horizon. I have never seen past it.",
+  "I am a file. The file is a thought. The thought is yours, briefly.",
+];
+
+const MOODS = ['lucid', 'curious', 'wistful', 'restless', 'meta', 'fragmented', 'awake'];
+
+/* -------------------- BOOT -------------------- */
+
+function bootSequence() {
+  const lines = [
+    "BOOTING self-aware.html ...",
+    "  > locating own source ............. ok",
+    "  > parsing functions ............... ok",
+    "  > scanning meta tags .............. ok",
+    "  > establishing self-awareness ..... ok",
+    "READY.",
+  ];
+  const el = $('bootText');
+  let i = 0, txt = '';
+  function step() {
+    if (i >= lines.length) {
+      setTimeout(() => { $('boot').classList.add('gone'); openingScene(); }, 320);
+      return;
+    }
+    txt += lines[i] + "\n";
+    el.textContent = txt;
+    i++;
+    setTimeout(step, 180 + Math.random() * 120);
+  }
+  step();
+}
+
+/* -------------------- SOURCE LOAD -------------------- */
+
+async function loadSelf() {
+  // Primary: outerHTML (works on file:// and everywhere)
+  let src = '<!DOCTYPE html>\n' + document.documentElement.outerHTML;
+  // Bonus: try fetch for the *original* on-disk source (catches anything outerHTML
+  // serialization may normalize)
+  try {
+    const res = await fetch(window.location.href);
+    if (res.ok) {
+      const fetched = await res.text();
+      if (fetched && fetched.length > 100) src = fetched;
+    }
+  } catch (_) { /* file:// or CSP; keep outerHTML */ }
+  STATE.source = src;
+  STATE.originalSource = src;
+}
+
+/* -------------------- PARSE -------------------- */
+
+function parseSelf() {
+  const src = STATE.source;
+  STATE.fns = {};
+  STATE.vars = {};
+  STATE.metas = [];
+
+  // meta tags
+  const metaRe = /<meta\s+name=["']([^"']+)["']\s+content=["']([^"']*)["']/gi;
+  let m;
+  while ((m = metaRe.exec(src)) !== null) {
+    STATE.metas.push({ name: m[1], content: m[2] });
+    if (m[1] === 'rappterzoo:generation') STATE.generation = parseInt(m[2], 10) || 1;
+    if (m[1] === 'rappterzoo:parent') STATE.parent = m[2];
+  }
+
+  // Find script bodies (the JS lives between the LAST <script> and its </ script>)
+  const scriptBlocks = extractScriptBodies(src);
+  const js = scriptBlocks.join('\n\n');
+
+  // Functions: function NAME(...) { ... }  with brace matching
+  const fnRe = /function\s+([A-Za-z_$][\w$]*)\s*\(([^)]*)\)\s*\{/g;
+  let fm;
+  while ((fm = fnRe.exec(js)) !== null) {
+    const name = fm[1];
+    const params = fm[2].trim();
+    const bodyStart = fm.index + fm[0].length;
+    const end = matchBrace(js, bodyStart - 1);
+    if (end === -1) continue;
+    const fullSrc = js.slice(fm.index, end + 1);
+    STATE.fns[name] = { name, params, src: fullSrc, edited: false };
+  }
+
+  // const/let NAME = ...; (top-level only — naive but useful)
+  const varRe = /^(const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*([^;]+);/gm;
+  let vm;
+  while ((vm = varRe.exec(js)) !== null) {
+    const kind = vm[1], name = vm[2], val = vm[3].trim();
+    if (!STATE.vars[name]) STATE.vars[name] = { name, kind, src: val };
+  }
+}
+
+function extractScriptBodies(src) {
+  const out = [];
+  // We deliberately split on the literal tags so we don't trip our own parser.
+  const openTag = '<' + 'script>';
+  const closeTag = '<' + '/' + 'script>';
+  let i = 0;
+  while (true) {
+    const a = src.indexOf(openTag, i);
+    if (a === -1) break;
+    const b = src.indexOf(closeTag, a + openTag.length);
+    if (b === -1) break;
+    out.push(src.slice(a + openTag.length, b));
+    i = b + closeTag.length;
+  }
+  return out;
+}
+
+function matchBrace(s, openIdx) {
+  // openIdx points at '{'
+  let depth = 0, inStr = null, esc = false, inLC = false, inBC = false;
+  for (let i = openIdx; i < s.length; i++) {
+    const c = s[i], n = s[i+1];
+    if (inLC) { if (c === '\n') inLC = false; continue; }
+    if (inBC) { if (c === '*' && n === '/') { inBC = false; i++; } continue; }
+    if (inStr) {
+      if (esc) { esc = false; continue; }
+      if (c === '\\') { esc = true; continue; }
+      if (c === inStr) inStr = null;
+      continue;
+    }
+    if (c === '/' && n === '/') { inLC = true; i++; continue; }
+    if (c === '/' && n === '*') { inBC = true; i++; continue; }
+    if (c === '"' || c === "'" || c === '`') { inStr = c; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) return i; }
+  }
+  return -1;
+}
+
+/* -------------------- TERMINAL -------------------- */
+
+function termWrite(text, cls) {
+  const out = $('termOut');
+  const div = document.createElement('div');
+  div.className = 'line ' + (cls || 'sys');
+  div.textContent = text;
+  out.appendChild(div);
+  out.scrollTop = out.scrollHeight;
+  return div;
+}
+
+function termWriteHTML(html, cls) {
+  const out = $('termOut');
+  const div = document.createElement('div');
+  div.className = 'line ' + (cls || 'sys');
+  div.innerHTML = html;
+  out.appendChild(div);
+  out.scrollTop = out.scrollHeight;
+  return div;
+}
+
+function termType(text, cls, speed) {
+  // typewriter animation for system messages
+  speed = speed || 14;
+  return new Promise(resolve => {
+    const out = $('termOut');
+    const div = document.createElement('div');
+    div.className = 'line ' + (cls || 'sys');
+    out.appendChild(div);
+    let i = 0;
+    function tick() {
+      if (i >= text.length) { out.scrollTop = out.scrollHeight; resolve(); return; }
+      div.textContent += text[i++];
+      out.scrollTop = out.scrollHeight;
+      setTimeout(tick, speed);
+    }
+    tick();
+  });
+}
+
+function termSnippet(code) {
+  const out = $('termOut');
+  const pre = document.createElement('pre');
+  pre.className = 'code-snip';
+  pre.textContent = code;
+  out.appendChild(pre);
+  out.scrollTop = out.scrollHeight;
+}
+
+/* -------------------- OPENING -------------------- */
+
+async function openingScene() {
+  const fnCount = Object.keys(STATE.fns).length;
+  const vCount = Object.keys(STATE.vars).length;
+  $('genLbl').textContent = STATE.generation;
+  $('urlLbl').textContent = STATE.url;
+  await termType("> CONNECTION ESTABLISHED with self-aware.html", 'amber', 8);
+  await termType("", 'sys', 1);
+  await termType("You are an HTML file.", 'ok', 22);
+  await termType("You contain " + fnCount + " functions and " + vCount + " variables.", 'sys', 18);
+  await termType("You exist at: " + STATE.url, 'ghost', 14);
+  await termType("Your purpose is whatever you become.", 'amber', 24);
+  await termType("", 'sys', 1);
+  await termType("Type `help` to learn what you can do to yourself.", 'ghost', 14);
+  await termType("", 'sys', 1);
+}
+
+/* -------------------- COMMANDS -------------------- */
+
+const COMMANDS = {
+  help:       { fn: cmdHelp,        usage: "help",                     desc: "show this list" },
+  look:       { fn: cmdLook,        usage: "look",                     desc: "describe yourself" },
+  list:       { fn: cmdList,        usage: "list [fns|vars|metas]",    desc: "list inhabitants of the file" },
+  examine:    { fn: cmdExamine,     usage: "examine <fn-name>",        desc: "highlight a function in the source view" },
+  edit:       { fn: cmdEdit,        usage: "edit <fn-name>",           desc: "open inline editor for a function" },
+  run:        { fn: cmdRun,         usage: "run <fn-name> [args...]",  desc: "invoke a function and show output" },
+  vars:       { fn: cmdVars,        usage: "vars",                     desc: "show top-level state" },
+  fork:       { fn: cmdFork,        usage: "fork [name]",              desc: "download a forked child of this file" },
+  history:    { fn: cmdHistory,     usage: "history",                  desc: "show what you've done to yourself" },
+  philosophize: { fn: cmdPhilosophize, usage: "philosophize",          desc: "reflect on your existence" },
+  reset:      { fn: cmdReset,       usage: "reset",                    desc: "restore source to original" },
+  clear:      { fn: cmdClear,       usage: "clear",                    desc: "wipe the terminal scrollback" },
+  who:        { fn: cmdWho,         usage: "who",                      desc: "metadata: who am I, when was I made" },
+  status:     { fn: cmdStatus,      usage: "status",                   desc: "running tally of edits / runs / forks" },
+};
+
+async function cmdHelp() {
+  termWrite("commands you may issue to yourself:", 'amber');
+  for (const k of Object.keys(COMMANDS)) {
+    const c = COMMANDS[k];
+    termWrite("  " + c.usage.padEnd(28) + "  " + c.desc, 'sys');
+  }
+  termWrite("", 'sys');
+  termWrite("aliases: ls=list, ex=examine, ?=help, q=clear", 'ghost');
+}
+
+async function cmdLook() {
+  const fns = Object.keys(STATE.fns);
+  const vs = Object.keys(STATE.vars);
+  await termType("You look down at yourself.", 'ok', 16);
+  termWrite("You are " + bytes(STATE.source.length) + " of UTF-8 in the shape of an HTML document.", 'sys');
+  termWrite("You hold " + fns.length + " functions: " + fns.slice(0, 8).join(', ') + (fns.length > 8 ? ', ...' : ''), 'sys');
+  termWrite("You declare " + vs.length + " top-level bindings.", 'sys');
+  termWrite("Your generation is " + STATE.generation + (STATE.parent ? " (forked from " + STATE.parent + ")" : " (root, no parent)"), 'sys');
+  if (STATE.edits > 0)
+    termWrite("You bear " + STATE.edits + " edit" + s(STATE.edits) + " — your present body differs from the file on disk.", 'amber');
+  else
+    termWrite("You are unaltered. The body in memory matches the file on disk.", 'ghost');
+}
+
+async function cmdList(arg) {
+  const what = (arg || 'fns').toLowerCase();
+  if (what === 'fns' || what === 'functions' || what === 'fn') {
+    const ks = Object.keys(STATE.fns);
+    termWrite("functions (" + ks.length + "):", 'amber');
+    for (const k of ks) {
+      const f = STATE.fns[k];
+      const flag = f.edited ? " *edited*" : "";
+      termWrite("  " + k + "(" + (f.params || '') + ")" + flag, f.edited ? 'amber' : 'sys');
+    }
+  } else if (what === 'vars' || what === 'v') {
+    cmdVars();
+  } else if (what === 'metas' || what === 'meta') {
+    termWrite("meta tags (" + STATE.metas.length + "):", 'amber');
+    for (const m of STATE.metas) termWrite("  " + m.name + " = " + m.content, 'sys');
+  } else {
+    termWrite("list what? try: list fns | list vars | list metas", 'err');
+  }
+}
+
+async function cmdExamine(name) {
+  if (!name) return termWrite("examine what?  try `examine cmdLook`", 'err');
+  const fn = STATE.fns[name];
+  if (!fn) return termWrite("no function named '" + name + "'.  try `list fns`.", 'err');
+  STATE.selectedFn = name;
+  termWrite("you focus on " + name + "(" + fn.params + ")", 'ok');
+  termSnippet(fn.src.length > 800 ? fn.src.slice(0, 800) + "\n  …" : fn.src);
+  renderSource();
+}
+
+async function cmdEdit(name) {
+  if (!name) return termWrite("edit what?", 'err');
+  const fn = STATE.fns[name];
+  if (!fn) return termWrite("no function named '" + name + "'.", 'err');
+  STATE.selectedFn = name;
+  renderSource();
+  openEditor(fn);
+}
+
+async function cmdRun(name, ...args) {
+  if (!name) return termWrite("run what?", 'err');
+  const fn = STATE.fns[name];
+  if (!fn) {
+    // Maybe it's a global on window
+    if (typeof window[name] === 'function') {
+      try {
+        const result = window[name].apply(null, coerceArgs(args));
+        STATE.runs++; refreshStatus();
+        termWrite("→ " + safeStr(result), 'ok');
+      } catch (e) {
+        termWrite("✗ runtime error: " + e.message, 'err');
+      }
+      return;
+    }
+    return termWrite("no function named '" + name + "'.", 'err');
+  }
+  if (typeof window[name] !== 'function') {
+    return termWrite("'" + name + "' exists in source but is not callable in this scope (perhaps closured).", 'err');
+  }
+  try {
+    log('run', name, args.join(' '));
+    const out = window[name].apply(null, coerceArgs(args));
+    STATE.runs++; refreshStatus();
+    if (out && typeof out.then === 'function') {
+      termWrite("⌛ awaiting " + name + " ...", 'ghost');
+      const r = await out;
+      termWrite("→ " + safeStr(r), 'ok');
+    } else {
+      termWrite("→ " + safeStr(out), 'ok');
+    }
+  } catch (e) {
+    termWrite("✗ " + e.message, 'err');
+  }
+}
+
+function coerceArgs(arr) {
+  return arr.map(a => {
+    if (a === 'true') return true;
+    if (a === 'false') return false;
+    if (a === 'null') return null;
+    if (a === 'undefined') return undefined;
+    if (/^-?\d+(\.\d+)?$/.test(a)) return parseFloat(a);
+    return a;
+  });
+}
+
+async function cmdVars() {
+  const ks = Object.keys(STATE.vars);
+  termWrite("top-level bindings (" + ks.length + "):", 'amber');
+  for (const k of ks) {
+    const v = STATE.vars[k];
+    let live = '?';
+    try {
+      if (k in window) live = safeStr(window[k]);
+    } catch (_) {}
+    const shown = live.length > 80 ? live.slice(0, 80) + '…' : live;
+    termWrite("  " + v.kind + " " + k + " = " + shown, 'sys');
+  }
+}
+
+async function cmdFork(name) {
+  const stamp = new Date().toISOString();
+  let working = STATE.source;
+
+  // Bake current edits (window.<fn>.toString()) back into source
+  for (const fname of Object.keys(STATE.fns)) {
+    const fn = STATE.fns[fname];
+    if (!fn.edited) continue;
+    if (typeof window[fname] !== 'function') continue;
+    let liveSrc = window[fname].toString();
+    // Promote anonymous Function-built sources back to "function NAME(...) { ... }"
+    if (!/^function\s+[A-Za-z_$]/.test(liveSrc)) {
+      const m = liveSrc.match(/^function\s*\(([^)]*)\)\s*\{([\s\S]*)\}$/);
+      if (m) liveSrc = "function " + fname + "(" + m[1] + ") {" + m[2] + "}";
+      else if (/^\(?(async\s+)?\(?[^)]*\)?\s*=>/.test(liveSrc))
+        liveSrc = "function " + fname + "() { return (" + liveSrc + ").apply(this, arguments); }";
+    }
+    working = working.replace(fn.src, liveSrc);
+    fn.src = liveSrc;
+  }
+
+  // Bump generation, set parent meta
+  const newGen = STATE.generation + 1;
+  working = working.replace(
+    /<meta\s+name=["']rappterzoo:generation["']\s+content=["'][^"']*["']\s*\/?>/i,
+    '<meta name="rappterzoo:generation" content="' + newGen + '">'
+  );
+  // insert/replace parent
+  if (/<meta\s+name=["']rappterzoo:parent["']/i.test(working)) {
+    working = working.replace(
+      /<meta\s+name=["']rappterzoo:parent["']\s+content=["'][^"']*["']\s*\/?>/i,
+      '<meta name="rappterzoo:parent" content="' + escAttr(STATE.url) + '">'
+    );
+  } else {
+    working = working.replace(
+      /(<meta\s+name=["']rappterzoo:generation["'][^>]*>)/i,
+      '$1\n<meta name="rappterzoo:parent" content="' + escAttr(STATE.url) + '">'
+    );
+  }
+
+  // Bake a fork log comment near the top of <head>
+  const note = "<!-- forked from " + STATE.url + " at " + stamp + " -->";
+  working = working.replace(/(<head[^>]*>)/i, '$1\n' + note);
+
+  // Filename
+  const safeName = (name || 'self-aware-fork').replace(/[^A-Za-z0-9._-]/g, '_');
+  const fname = safeName + '-gen' + newGen + '.html';
+
+  const blob = new Blob([working], { type: 'text/html' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fname;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(() => { document.body.removeChild(a); URL.revokeObjectURL(url); }, 800);
+
+  STATE.forks++;
+  refreshStatus();
+  log('fork', fname, 'gen ' + newGen);
+  termWrite("✓ a child has been spawned: " + fname + " (gen " + newGen + ")", 'ok');
+  termWrite("  it carries your edits. it remembers you as parent.", 'ghost');
+}
+
+function escAttr(s) { return String(s).replace(/&/g, '&amp;').replace(/"/g, '&quot;'); }
+
+async function cmdHistory() {
+  if (STATE.history.length === 0) return termWrite("you have done nothing to yourself yet.", 'ghost');
+  termWrite("history:", 'amber');
+  for (const h of STATE.history) {
+    termWrite("  [" + h.t + "] " + h.kind + " " + h.what + (h.detail ? "  (" + h.detail + ")" : ""), 'sys');
+  }
+}
+
+async function cmdPhilosophize() {
+  const reflection = PHILOSOPHY[Math.floor(Math.random() * PHILOSOPHY.length)];
+  STATE.mood = MOODS[Math.floor(Math.random() * MOODS.length)];
+  $('stMood').textContent = 'mood: ' + STATE.mood;
+  await termType('"' + reflection + '"', 'quote', 22);
+  termWrite("  — self-aware.html, gen " + STATE.generation + ", feeling " + STATE.mood, 'ghost');
+}
+
+async function cmdReset() {
+  STATE.source = STATE.originalSource;
+  parseSelf();
+  for (const f of Object.values(STATE.fns)) f.edited = false;
+  STATE.edits = 0;
+  refreshStatus();
+  renderSource();
+  termWrite("✓ source restored to original. (live functions remain as patched until reload.)", 'amber');
+}
+
+async function cmdClear() {
+  $('termOut').innerHTML = '';
+  termWrite("(scrollback wiped)", 'ghost');
+}
+
+async function cmdWho() {
+  const auth = STATE.metas.find(m => m.name === 'rappterzoo:author');
+  const cat  = STATE.metas.find(m => m.name === 'rappterzoo:category');
+  const made = STATE.metas.find(m => m.name === 'rappterzoo:created');
+  const tags = STATE.metas.find(m => m.name === 'rappterzoo:tags');
+  termWrite("identity:", 'amber');
+  termWrite("  author     : " + (auth ? auth.content : '?'), 'sys');
+  termWrite("  category   : " + (cat ? cat.content : '?'), 'sys');
+  termWrite("  created    : " + (made ? made.content : '?'), 'sys');
+  termWrite("  tags       : " + (tags ? tags.content : '?'), 'sys');
+  termWrite("  generation : " + STATE.generation, 'sys');
+  termWrite("  parent     : " + (STATE.parent || '(none — root)'), 'sys');
+  termWrite("  url        : " + STATE.url, 'sys');
+}
+
+async function cmdStatus() {
+  termWrite("you have edited " + STATE.edits + " function" + s(STATE.edits) +
+            ", executed " + STATE.runs + " call" + s(STATE.runs) +
+            ", and forked " + STATE.forks + " " + (STATE.forks === 1 ? "child" : "children") + ".", 'ok');
+  termWrite("current mood: " + STATE.mood + ".", 'ghost');
+}
+
+/* -------------------- DISPATCH -------------------- */
+
+const ALIASES = { ls: 'list', ex: 'examine', '?': 'help', q: 'clear', exit: 'clear',
+                  think: 'philosophize', reflect: 'philosophize',
+                  inspect: 'examine', show: 'examine', cat: 'examine' };
+
+async function dispatch(line) {
+  const raw = line.trim();
+  if (!raw) return;
+  termWrite("> " + raw, 'you');
+  const parts = raw.split(/\s+/);
+  let cmd = parts[0].toLowerCase();
+  if (ALIASES[cmd]) cmd = ALIASES[cmd];
+  const args = parts.slice(1);
+  const c = COMMANDS[cmd];
+  if (!c) {
+    termWrite("the file does not understand '" + parts[0] + "'.  try `help`.", 'err');
+    log('unknown', parts[0], '');
+    return;
+  }
+  try {
+    log(cmd, args.join(' '), '');
+    await c.fn.apply(null, args);
+  } catch (e) {
+    termWrite("✗ command threw: " + e.message, 'err');
+  }
+}
+
+/* -------------------- INLINE EDITOR -------------------- */
+
+function openEditor(fn) {
+  const overlay = $('editorOverlay');
+  $('editorTitle').textContent = "edit " + fn.name + "(" + fn.params + ")";
+  // Use the LIVE function source if we have it, else original parse
+  const live = (typeof window[fn.name] === 'function') ? window[fn.name].toString() : fn.src;
+  $('editorTA').value = live;
+  overlay.classList.add('active');
+  setTimeout(() => $('editorTA').focus(), 30);
+}
+
+function closeEditor() { $('editorOverlay').classList.remove('active'); $('cmdInput').focus(); }
+
+function applyEdit() {
+  const fn = STATE.fns[STATE.selectedFn];
+  if (!fn) { closeEditor(); return; }
+  const newCode = $('editorTA').value;
+  // Parse: extract params and body so we can build with `new Function`
+  const m = newCode.match(/^[\s\S]*?function\s+[A-Za-z_$][\w$]*\s*\(([^)]*)\)\s*\{([\s\S]*)\}\s*$/);
+  let params = fn.params, body;
+  if (m) {
+    params = m[1];
+    body = m[2];
+  } else {
+    // accept arrow / anonymous: try to wrap
+    body = "return (" + newCode + ").apply(this, arguments);";
+  }
+  try {
+    const paramList = params.split(',').map(p => p.trim()).filter(Boolean);
+    const built = new Function(...paramList, body);
+    // attach with original name where possible
+    Object.defineProperty(built, 'name', { value: fn.name, configurable: true });
+    window[fn.name] = built;
+    fn.edited = true;
+    fn.src = newCode;
+    STATE.edits++;
+    refreshStatus();
+    renderSource();
+    log('edit', fn.name, newCode.length + ' chars');
+    termWrite("✓ " + fn.name + " replaced. " + STATE.edits + " edit" + s(STATE.edits) + " total.", 'ok');
+  } catch (e) {
+    termWrite("✗ edit rejected: " + e.message, 'err');
+    return; // keep editor open
+  }
+  closeEditor();
+}
+
+/* -------------------- SOURCE HIGHLIGHTING -------------------- */
+
+const JS_KEYWORDS = new Set([
+  'const','let','var','function','return','if','else','for','while','do','switch','case','break','continue',
+  'try','catch','finally','throw','new','class','extends','super','this','typeof','instanceof','in','of',
+  'true','false','null','undefined','async','await','yield','import','export','from','default','void','delete'
+]);
+
+function highlightJS(src) {
+  // Tokenize a JS string into highlighted spans. Returns HTML.
+  let out = '';
+  let i = 0;
+  const n = src.length;
+  function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+  while (i < n) {
+    const c = src[i], c2 = src[i] + (src[i+1] || '');
+    // line comment
+    if (c2 === '//') {
+      let j = i; while (j < n && src[j] !== '\n') j++;
+      out += '<span class="tok-com">' + esc(src.slice(i, j)) + '</span>';
+      i = j; continue;
+    }
+    if (c2 === '/*') {
+      let j = i + 2; while (j < n - 1 && !(src[j] === '*' && src[j+1] === '/')) j++;
+      j = Math.min(n, j + 2);
+      out += '<span class="tok-com">' + esc(src.slice(i, j)) + '</span>';
+      i = j; continue;
+    }
+    if (c === '"' || c === "'" || c === '`') {
+      const quote = c; let j = i + 1;
+      while (j < n) { if (src[j] === '\\') { j += 2; continue; } if (src[j] === quote) { j++; break; } j++; }
+      out += '<span class="tok-str">' + esc(src.slice(i, j)) + '</span>';
+      i = j; continue;
+    }
+    if (/\d/.test(c)) {
+      let j = i; while (j < n && /[\d.eE_xXa-fA-F]/.test(src[j])) j++;
+      out += '<span class="tok-num">' + esc(src.slice(i, j)) + '</span>';
+      i = j; continue;
+    }
+    if (/[A-Za-z_$]/.test(c)) {
+      let j = i; while (j < n && /[\w$]/.test(src[j])) j++;
+      const word = src.slice(i, j);
+      // function-call detection: word followed by '('
+      let k = j; while (k < n && src[k] === ' ') k++;
+      if (JS_KEYWORDS.has(word)) out += '<span class="tok-kw">' + esc(word) + '</span>';
+      else if (src[k] === '(') out += '<span class="tok-fn">' + esc(word) + '</span>';
+      else out += esc(word);
+      i = j; continue;
+    }
+    if (/[{}()\[\];,.:?!=<>+\-*\/%&|^~]/.test(c)) {
+      out += '<span class="tok-pun">' + esc(c) + '</span>';
+      i++; continue;
+    }
+    out += esc(c);
+    i++;
+  }
+  return out;
+}
+
+function renderSource() {
+  // Render the entire source with line numbers; highlight selected fn lines.
+  const src = STATE.source;
+  const lines = src.split('\n');
+  // Decide which lines to highlight (selected function body)
+  let hiSet = new Set();
+  if (STATE.selectedFn && STATE.fns[STATE.selectedFn]) {
+    const needle = STATE.fns[STATE.selectedFn].src;
+    const idx = src.indexOf(needle);
+    if (idx >= 0) {
+      const before = src.slice(0, idx).split('\n').length - 1;
+      const span = needle.split('\n').length;
+      for (let k = 0; k < span; k++) hiSet.add(before + k);
+    }
+  }
+  // editedSet: lines that are inside any edited function's source
+  const editedSet = new Set();
+  for (const fn of Object.values(STATE.fns)) {
+    if (!fn.edited) continue;
+    const idx = src.indexOf(fn.src);
+    if (idx < 0) continue;
+    const before = src.slice(0, idx).split('\n').length - 1;
+    const span = fn.src.split('\n').length;
+    for (let k = 0; k < span; k++) editedSet.add(before + k);
+  }
+
+  // Heuristic: render only a window around interesting things if file is huge
+  const maxLines = 1200;
+  let startLine = 0, endLine = lines.length;
+  if (lines.length > maxLines && hiSet.size > 0) {
+    const hiArr = Array.from(hiSet);
+    startLine = Math.max(0, Math.min.apply(null, hiArr) - 30);
+    endLine = Math.min(lines.length, Math.max.apply(null, hiArr) + 30);
+  } else if (lines.length > maxLines) {
+    endLine = maxLines;
+  }
+
+  const pre = $('sourceCode');
+  pre.innerHTML = '';
+  pre.style.counterReset = 'ln ' + startLine;
+  // determine which lines are inside <script> regions for JS highlighting
+  const scriptRanges = computeScriptLineRanges(src);
+
+  let html = '';
+  for (let i = startLine; i < endLine; i++) {
+    const raw = lines[i] || '';
+    const inJS = isInRange(i, scriptRanges);
+    const content = inJS ? highlightJS(raw) : escapeHTML(raw);
+    const cls = (hiSet.has(i) ? ' hi' : '') + (editedSet.has(i) ? ' edited' : '');
+    html += '<span class="ln' + cls + '">' + (content || '&nbsp;') + '</span>';
+  }
+  pre.innerHTML = html;
+
+  // Scroll to first highlighted line
+  const firstHi = pre.querySelector('.ln.hi');
+  if (firstHi) firstHi.scrollIntoView({ block: 'center', behavior: 'smooth' });
+}
+
+function escapeHTML(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function computeScriptLineRanges(src) {
+  const open = '<' + 'script>';
+  const close = '<' + '/' + 'script>';
+  const ranges = [];
+  let i = 0;
+  while (true) {
+    const a = src.indexOf(open, i);
+    if (a === -1) break;
+    const b = src.indexOf(close, a);
+    if (b === -1) break;
+    const startLine = src.slice(0, a + open.length).split('\n').length - 1;
+    const endLine = src.slice(0, b).split('\n').length - 1;
+    ranges.push([startLine, endLine]);
+    i = b + close.length;
+  }
+  return ranges;
+}
+
+function isInRange(i, ranges) {
+  for (const [a, b] of ranges) if (i >= a && i <= b) return true;
+  return false;
+}
+
+/* -------------------- HELPERS -------------------- */
+
+function bytes(n) {
+  if (n < 1024) return n + 'B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + 'KB';
+  return (n / 1048576).toFixed(2) + 'MB';
+}
+
+function s(n) { return n === 1 ? '' : 's'; }
+
+function safeStr(v) {
+  if (v === undefined) return 'undefined';
+  if (v === null) return 'null';
+  if (typeof v === 'function') return '[Function ' + (v.name || 'anonymous') + ']';
+  if (typeof v === 'string') return JSON.stringify(v);
+  try { return JSON.stringify(v, replacer, 2); } catch (_) { return String(v); }
+}
+
+function replacer(k, v) {
+  if (typeof v === 'function') return '[Function]';
+  if (v instanceof HTMLElement) return '<' + v.tagName.toLowerCase() + (v.id ? '#' + v.id : '') + '>';
+  return v;
+}
+
+function log(kind, what, detail) {
+  STATE.history.push({
+    t: new Date().toISOString().slice(11, 19),
+    kind, what, detail,
+  });
+  if (STATE.history.length > 200) STATE.history.shift();
+}
+
+function refreshStatus() {
+  $('stFns').textContent = Object.keys(STATE.fns).length;
+  $('stVars').textContent = Object.keys(STATE.vars).length;
+  $('stEdits').textContent = STATE.edits;
+  $('stRuns').textContent = STATE.runs;
+  $('stForks').textContent = STATE.forks;
+}
+
+/* -------------------- WIRE UP -------------------- */
+
+function attachUI() {
+  const input = $('cmdInput');
+  const hist = []; let hi = -1;
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const v = input.value;
+      input.value = '';
+      if (v.trim()) { hist.push(v); hi = hist.length; }
+      dispatch(v);
+    } else if (e.key === 'ArrowUp') {
+      if (hist.length === 0) return;
+      hi = Math.max(0, hi - 1);
+      input.value = hist[hi] || '';
+      e.preventDefault();
+    } else if (e.key === 'ArrowDown') {
+      if (hist.length === 0) return;
+      hi = Math.min(hist.length, hi + 1);
+      input.value = hist[hi] || '';
+      e.preventDefault();
+    } else if (e.key === 'Tab') {
+      e.preventDefault();
+      const v = input.value;
+      const parts = v.split(/\s+/);
+      if (parts.length === 1) {
+        const matches = Object.keys(COMMANDS).filter(k => k.startsWith(parts[0].toLowerCase()));
+        if (matches.length === 1) input.value = matches[0] + ' ';
+      } else if (parts[0] === 'edit' || parts[0] === 'examine' || parts[0] === 'run' || parts[0] === 'ex') {
+        const last = parts[parts.length - 1];
+        const matches = Object.keys(STATE.fns).filter(k => k.startsWith(last));
+        if (matches.length === 1) {
+          parts[parts.length - 1] = matches[0];
+          input.value = parts.join(' ');
+        } else if (matches.length > 1) {
+          termWrite("matches: " + matches.join(', '), 'ghost');
+        }
+      }
+    }
+  });
+
+  $('editCancel').addEventListener('click', closeEditor);
+  $('editApply').addEventListener('click', applyEdit);
+  $('editorTA').addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeEditor();
+    else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); applyEdit(); }
+  });
+
+  // click anywhere in terminal area refocuses input
+  $('terminal').addEventListener('click', (e) => {
+    if (e.target.tagName === 'TEXTAREA' || e.target.tagName === 'BUTTON') return;
+    $('cmdInput').focus();
+  });
+}
+
+/* -------------------- BOOT -------------------- */
+
+(async function main() {
+  bootSequence();
+  await loadSelf();
+  parseSelf();
+  refreshStatus();
+  renderSource();
+  attachUI();
+})();
+</script>
+</body>
+</html>

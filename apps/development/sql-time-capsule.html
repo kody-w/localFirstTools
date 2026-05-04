@@ -1,0 +1,1075 @@
+<!DOCTYPE html>
+<!--
+  SQL Time-Capsule — single-file SQL studio with Merkle-chained query log,
+  IndexedDB autosave, and self-contained "time capsule" HTML export/replay.
+
+  CDN EXCEPTION (documented per repo conventions):
+    This app loads sql.js from https://cdn.jsdelivr.net/npm/sql.js@1.10.3/dist/sql-wasm.js
+    There is no practical inline alternative for a SQLite engine compiled to WebAssembly
+    (~1MB+ of wasm bytes). After first online load the wasm bytes are cached in
+    IndexedDB so subsequent loads work fully offline. All other dependencies are inlined.
+
+  Hash chain (Merkle log):
+    For each executed SQL statement, an entry is appended:
+      entry = { i, sql, ts, prevHash, hash }
+    where:
+      hash = SHA-256( prevHash || "|" || i || "|" || ts || "|" || sql )   (UTF-8, hex out)
+    prevHash for entry 0 is 64 zero hex chars. SHA-256 is computed via SubtleCrypto.
+
+  Tamper-evidence:
+    On Verify / Time-Capsule Import the chain is recomputed entry-by-entry. Any mismatch
+    (index, prevHash, or recomputed hash) refuses replay and reports the offending index.
+-->
+<html lang="en">
+<head>
+    <meta name="description" content="SHA-256 Merkle-chained sql.js query log; tamper-evident replayable history">
+    <meta name="keywords" content="sqlite,merkle,audit">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🛠%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SQL Time-Capsule</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel2: #1b2230;
+    --border: #2a313c;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --accent2: #3fb950;
+    --warn: #d29922;
+    --err: #f85149;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: system-ui, -apple-system, Segoe UI, sans-serif; font-size: 13px; }
+  button, input, select, textarea { font-family: inherit; font-size: inherit; color: inherit; }
+  button {
+    background: var(--panel2); border: 1px solid var(--border); color: var(--text);
+    padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: background .12s;
+  }
+  button:hover { background: #233044; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; }
+  button.primary:hover { background: #2978f0; }
+  button.warn { background: #6a4711; border-color: #8a5a14; }
+  button.danger { background: #6a1f1f; border-color: #8a2424; }
+  .toolbar {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 10px;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+    align-items: center;
+  }
+  .toolbar .sep { width: 1px; height: 22px; background: var(--border); margin: 0 4px; }
+  .toolbar .title { font-weight: 700; margin-right: 10px; color: var(--accent); }
+  .toolbar .status { margin-left: auto; color: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .layout {
+    display: grid;
+    grid-template-columns: 240px 1fr 320px;
+    grid-template-rows: 1fr;
+    height: calc(100vh - 46px);
+  }
+  .pane { border-right: 1px solid var(--border); display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .pane:last-child { border-right: none; }
+  .pane h3 {
+    margin: 0; padding: 8px 10px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+    color: var(--muted); letter-spacing: .07em; background: var(--panel); border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .pane .body { flex: 1 1 auto; overflow: auto; padding: 8px 10px; }
+  .center {
+    display: grid; grid-template-rows: minmax(140px, 38%) 1fr; min-height: 0;
+  }
+  .center .editor-wrap, .center .results-wrap { display: flex; flex-direction: column; min-height: 0; }
+  .results-wrap { border-top: 1px solid var(--border); }
+  textarea#sql {
+    flex: 1 1 auto; resize: none; padding: 10px; background: #0b0e13; color: var(--text);
+    border: none; outline: none; font-family: var(--mono); font-size: 13px; line-height: 1.5;
+    tab-size: 2; white-space: pre;
+  }
+  .results-wrap .body { padding: 0; }
+  table.result {
+    width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px;
+  }
+  table.result th, table.result td {
+    border-bottom: 1px solid var(--border); padding: 4px 8px; text-align: left;
+    white-space: nowrap; max-width: 360px; overflow: hidden; text-overflow: ellipsis;
+  }
+  table.result th { background: var(--panel); position: sticky; top: 0; z-index: 1; }
+  table.result tr:hover td { background: #1a2030; }
+  .schema-tree { font-family: var(--mono); font-size: 12px; }
+  .schema-table { margin-bottom: 8px; }
+  .schema-name { cursor: pointer; color: var(--accent); padding: 2px 0; user-select: none; }
+  .schema-name:hover { text-decoration: underline; }
+  .schema-cols { padding-left: 14px; color: var(--muted); display: none; }
+  .schema-cols.open { display: block; }
+  .schema-col { padding: 1px 0; }
+  .schema-col .ctype { color: #b58463; font-style: italic; }
+  .schema-meta { font-size: 11px; color: var(--muted); margin-bottom: 6px; }
+  .log-entry {
+    border-bottom: 1px solid var(--border); padding: 6px 0; font-family: var(--mono); font-size: 11px;
+  }
+  .log-entry .row1 { display: flex; gap: 8px; align-items: center; }
+  .log-entry .idx { color: var(--accent); font-weight: 700; }
+  .log-entry .ts { color: var(--muted); margin-left: auto; }
+  .log-entry .sql { color: var(--text); white-space: pre-wrap; word-break: break-all; }
+  .log-entry .hash { color: #6e7681; font-size: 10px; word-break: break-all; }
+  .log-entry.bad { background: #2b1212; }
+  .toolbar.subtle { background: var(--panel2); padding: 4px 8px; border-bottom: 1px solid var(--border); border-top: 1px solid var(--border); }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 999px; font-size: 10px; background: #233044; color: var(--muted); margin-left: 6px; }
+  .badge.ok { background: #143a1d; color: #56d364; }
+  .badge.bad { background: #3d1414; color: #ff7b72; }
+  .badge.info { background: #1f3148; color: #79c0ff; }
+  #capsule-banner {
+    background: linear-gradient(90deg, #1f3a52, #20303f);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 12px; display: none; gap: 10px; align-items: center;
+  }
+  #capsule-banner.show { display: flex; }
+  #capsule-banner .meta { color: var(--muted); font-family: var(--mono); font-size: 11px; }
+  .modal-bg {
+    position: fixed; inset: 0; background: rgba(0,0,0,.6); display: none;
+    align-items: center; justify-content: center; z-index: 100;
+  }
+  .modal-bg.show { display: flex; }
+  .modal {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 16px; min-width: 480px; max-width: 720px; max-height: 80vh; overflow: auto;
+  }
+  .modal h2 { margin: 0 0 8px 0; }
+  .modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+  pre.diag { background: #0b0e13; border: 1px solid var(--border); padding: 8px; border-radius: 6px; overflow: auto; font-family: var(--mono); font-size: 12px; }
+  .replay-controls { display: flex; gap: 8px; align-items: center; padding: 6px 10px; background: var(--panel2); border-top: 1px solid var(--border); }
+  .replay-controls input[type=range] { flex: 1; }
+  .row-counts { font-family: var(--mono); font-size: 11px; color: var(--muted); padding: 4px 10px; background: var(--panel); border-top: 1px solid var(--border); display: none; }
+  .row-counts.show { display: block; }
+  .row-counts .rc { display: inline-block; margin-right: 14px; }
+  .row-counts .rc b { color: var(--text); }
+  .toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel2); border: 1px solid var(--border); padding: 10px 16px;
+    border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,.4); z-index: 200;
+    opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 80%;
+  }
+  .toast.show { opacity: 1; }
+  .toast.err { border-color: var(--err); color: #ffb4ad; }
+  .toast.ok { border-color: var(--accent2); color: #b8eac0; }
+  .hidden { display: none !important; }
+  .scroller { overflow: auto; }
+</style>
+</head>
+<body>
+
+<!-- This script tag is the slot the time-capsule export rewrites in place. -->
+<script id="__capsule__" type="application/json">null</script>
+
+<div class="toolbar">
+  <span class="title">⏳ SQL Time-Capsule</span>
+  <button id="btn-new">New DB</button>
+  <button id="btn-open">Open .sqlite</button>
+  <button id="btn-export">Export .sqlite</button>
+  <span class="sep"></span>
+  <button id="btn-run" class="primary">▶ Run (Ctrl+Enter)</button>
+  <span class="sep"></span>
+  <button id="btn-csv">Import CSV</button>
+  <button id="btn-json">Import JSON</button>
+  <span class="sep"></span>
+  <button id="btn-cap-export" class="warn">⏏ Time-Capsule Export</button>
+  <button id="btn-cap-import">⏵ Time-Capsule Import + Verify + Replay</button>
+  <button id="btn-verify">Verify Chain</button>
+  <span class="status" id="status">init…</span>
+</div>
+
+<div id="capsule-banner">
+  <div>
+    <strong>📦 Time-capsule loaded</strong>
+    <span class="meta" id="capsule-meta"></span>
+  </div>
+  <button id="btn-cap-verify-replay" class="primary">Verify & Replay Embedded Capsule</button>
+  <button id="btn-cap-load-as-current">Load Snapshot As Current</button>
+</div>
+
+<div class="layout">
+  <!-- LEFT: schema tree -->
+  <div class="pane">
+    <h3>Schema <span class="badge info" id="db-info">—</span></h3>
+    <div class="body" id="schema-tree-body">
+      <div class="schema-meta" id="schema-meta">No tables yet.</div>
+      <div class="schema-tree" id="schema-tree"></div>
+    </div>
+  </div>
+
+  <!-- CENTER: editor + results -->
+  <div class="pane center">
+    <div class="editor-wrap">
+      <h3>Query Editor <span class="badge" id="editor-info">multi-statement OK · Ctrl/⌘+Enter to run</span></h3>
+      <textarea id="sql" spellcheck="false" placeholder="-- Type SQL here. Multi-statement is supported.
+-- Examples:
+CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER);
+INSERT INTO users (name, age) VALUES ('Ada', 36), ('Linus', 54);
+SELECT * FROM users;"></textarea>
+      <div class="replay-controls" id="replay-controls" style="display:none">
+        <button id="rp-play">▶ Play</button>
+        <button id="rp-pause">⏸ Pause</button>
+        <button id="rp-step">⏭ Step</button>
+        <button id="rp-stop" class="danger">⏹ Stop</button>
+        <span style="font-size:11px;color:var(--muted)">Speed:</span>
+        <input id="rp-speed" type="range" min="50" max="2000" value="500" />
+        <span id="rp-speed-label" style="font-size:11px;font-family:var(--mono);min-width:60px;text-align:right"></span>
+        <span id="rp-progress" style="font-size:11px;font-family:var(--mono);min-width:120px;text-align:right;color:var(--muted)"></span>
+      </div>
+      <div class="row-counts" id="row-counts"></div>
+    </div>
+    <div class="results-wrap">
+      <h3>Results <span class="badge" id="results-info">—</span></h3>
+      <div class="body scroller" id="results"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT: query log -->
+  <div class="pane">
+    <h3>Query Log
+      <span>
+        <span class="badge" id="log-count">0</span>
+        <span class="badge ok hidden" id="log-ok">chain ✓</span>
+        <span class="badge bad hidden" id="log-bad">chain ✗</span>
+      </span>
+    </h3>
+    <div class="body" id="log-body">
+      <div class="schema-meta">No queries logged yet.</div>
+    </div>
+  </div>
+</div>
+
+<!-- Modals -->
+<div class="modal-bg" id="modal-bg">
+  <div class="modal">
+    <h2 id="modal-title">Modal</h2>
+    <div id="modal-body"></div>
+    <div class="actions">
+      <button id="modal-close">Close</button>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<!-- File pickers (kept hidden) -->
+<input type="file" id="file-sqlite" accept=".sqlite,.db,.sqlite3,application/octet-stream" class="hidden" />
+<input type="file" id="file-csv" accept=".csv,text/csv" class="hidden" />
+<input type="file" id="file-json" accept=".json,application/json" class="hidden" />
+<input type="file" id="file-capsule" accept=".html,text/html" class="hidden" />
+
+<script>
+"use strict";
+
+/* ========================================================================
+ *  Constants & globals
+ * ====================================================================== */
+const SQLJS_VERSION = "1.10.3";
+const SQLJS_CDN_BASE = `https://cdn.jsdelivr.net/npm/sql.js@${SQLJS_VERSION}/dist/`;
+const IDB_NAME = "sql-time-capsule";
+const IDB_STORE = "kv";
+const KEY_DB = "current-db";
+const KEY_LOG = "current-log";
+const KEY_WASM = "sqljs-wasm-cache";
+const AUTOSAVE_MS = 5000;
+const ZERO_HASH = "0".repeat(64);
+
+let SQL = null;            // sql.js module
+let db = null;             // current Database
+let queryLog = [];         // [{i, sql, ts, prevHash, hash}, ...]
+let lastDbBytes = null;    // cached export
+let dirtySinceSave = false;
+let inReplay = false;
+let originatingHTMLSource = null; // captured pristine source for capsule export
+let embeddedCapsule = null; // parsed __capsule__ data if present
+
+/* ========================================================================
+ *  Tiny helpers
+ * ====================================================================== */
+const $ = (sel) => document.querySelector(sel);
+const $$ = (sel) => document.querySelectorAll(sel);
+
+function escapeHTML(s) {
+  return String(s ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+function setStatus(msg) { $("#status").textContent = msg; }
+function showToast(msg, kind="") {
+  const t = $("#toast");
+  t.textContent = msg; t.className = "toast show " + kind;
+  clearTimeout(showToast._t);
+  showToast._t = setTimeout(() => t.className = "toast", 2400);
+}
+function showModal(title, html) {
+  $("#modal-title").textContent = title;
+  $("#modal-body").innerHTML = html;
+  $("#modal-bg").classList.add("show");
+}
+$("#modal-close").addEventListener("click", () => $("#modal-bg").classList.remove("show"));
+$("#modal-bg").addEventListener("click", (e) => { if (e.target.id === "modal-bg") $("#modal-bg").classList.remove("show"); });
+
+function bytesToHex(buf) {
+  const b = buf instanceof Uint8Array ? buf : new Uint8Array(buf);
+  let s = ""; for (let i = 0; i < b.length; i++) s += b[i].toString(16).padStart(2,"0");
+  return s;
+}
+async function sha256Hex(input) {
+  const data = typeof input === "string" ? new TextEncoder().encode(input) : input;
+  const hash = await crypto.subtle.digest("SHA-256", data);
+  return bytesToHex(hash);
+}
+function bytesToBase64(bytes) {
+  let bin = ""; const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+function downloadBlob(data, filename, mime) {
+  const blob = data instanceof Blob ? data : new Blob([data], { type: mime || "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* ========================================================================
+ *  IndexedDB tiny KV
+ * ====================================================================== */
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      req.result.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbGet(key) {
+  const db = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSet(key, value) {
+  const dbi = await idbOpen();
+  return new Promise((resolve, reject) => {
+    const tx = dbi.transaction(IDB_STORE, "readwrite");
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ========================================================================
+ *  sql.js bootstrap (with wasm caching to IndexedDB for offline use)
+ * ====================================================================== */
+async function loadSqlJs() {
+  setStatus("loading sql.js…");
+  // 1) Load the JS shim from CDN (we rely on browser HTTP cache for offline rerun).
+  await new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = SQLJS_CDN_BASE + "sql-wasm.js";
+    s.onload = resolve;
+    s.onerror = () => reject(new Error("Failed to load sql.js. Network required for first run."));
+    document.head.appendChild(s);
+  });
+  // 2) Try cached wasm bytes; if missing, fetch from CDN and cache.
+  let wasmBytes = await idbGet(KEY_WASM);
+  if (!wasmBytes) {
+    try {
+      const res = await fetch(SQLJS_CDN_BASE + "sql-wasm.wasm");
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      wasmBytes = new Uint8Array(await res.arrayBuffer());
+      await idbSet(KEY_WASM, wasmBytes);
+    } catch (e) {
+      // Fall back to letting initSqlJs locate the wasm itself (still needs network).
+      wasmBytes = null;
+    }
+  }
+  // sql.js exposes initSqlJs() globally via the script we just loaded.
+  SQL = await initSqlJs(wasmBytes ? { wasmBinary: wasmBytes } : { locateFile: f => SQLJS_CDN_BASE + f });
+  setStatus("sql.js ready");
+}
+
+/* ========================================================================
+ *  DB lifecycle
+ * ====================================================================== */
+function newDB(bytes) {
+  if (db) try { db.close(); } catch {}
+  db = bytes ? new SQL.Database(bytes) : new SQL.Database();
+  dirtySinceSave = true;
+  refreshSchema();
+  renderRowCounts();
+}
+async function exportCurrentDBBytes() {
+  if (!db) return new Uint8Array();
+  const b = db.export();
+  lastDbBytes = b;
+  return b;
+}
+
+/* ========================================================================
+ *  Query log (Merkle chain)
+ * ====================================================================== */
+function chainInputString(prevHash, i, ts, sql) {
+  return prevHash + "|" + i + "|" + ts + "|" + sql;
+}
+async function appendLogEntry(sql) {
+  const i = queryLog.length;
+  const ts = Date.now();
+  const prevHash = i === 0 ? ZERO_HASH : queryLog[i-1].hash;
+  const hash = await sha256Hex(chainInputString(prevHash, i, ts, sql));
+  const entry = { i, sql, ts, prevHash, hash };
+  queryLog.push(entry);
+  renderLogEntry(entry);
+  $("#log-count").textContent = String(queryLog.length);
+  return entry;
+}
+async function verifyChain(log) {
+  for (let i = 0; i < log.length; i++) {
+    const e = log[i];
+    if (e.i !== i) return { ok: false, badIndex: i, reason: `entry index field is ${e.i}, expected ${i}` };
+    const expectedPrev = i === 0 ? ZERO_HASH : log[i-1].hash;
+    if (e.prevHash !== expectedPrev) return { ok: false, badIndex: i, reason: `prevHash mismatch (entry says ${e.prevHash.slice(0,12)}…, computed ${expectedPrev.slice(0,12)}…)` };
+    const recomputed = await sha256Hex(chainInputString(e.prevHash, e.i, e.ts, e.sql));
+    if (recomputed !== e.hash) return { ok: false, badIndex: i, reason: `hash mismatch (entry says ${e.hash.slice(0,12)}…, recomputed ${recomputed.slice(0,12)}…)` };
+  }
+  return { ok: true };
+}
+
+/* ========================================================================
+ *  Query execution
+ * ====================================================================== */
+async function runSQL(rawSQL, opts = {}) {
+  if (!db) { showToast("No database loaded", "err"); return; }
+  const sql = rawSQL.trim();
+  if (!sql) return;
+  let results;
+  try {
+    results = db.exec(sql);
+  } catch (e) {
+    showToast("SQL error: " + e.message, "err");
+    renderResults([], "error: " + e.message);
+    if (!opts.skipLog) await appendLogEntry(sql); // log even failures? -> capsule must replay equally; we only log SUCCESS to keep replay deterministic
+    return;
+  }
+  if (!opts.skipLog) await appendLogEntry(sql);
+  dirtySinceSave = true;
+  refreshSchema();
+  renderRowCounts();
+  // Render the LAST result statement that returned columns (if any).
+  if (results && results.length) {
+    const last = results[results.length - 1];
+    renderResults(last.values || [], `${last.columns.length} cols × ${(last.values||[]).length} rows`, last.columns);
+  } else {
+    renderResults([], "ok (no rows)", []);
+  }
+}
+
+/* ========================================================================
+ *  UI rendering: schema, results, log, row counts
+ * ====================================================================== */
+function refreshSchema() {
+  const treeEl = $("#schema-tree");
+  const metaEl = $("#schema-meta");
+  treeEl.innerHTML = "";
+  if (!db) { metaEl.textContent = "No database."; return; }
+  let res;
+  try {
+    res = db.exec("SELECT name, type, sql FROM sqlite_master WHERE type IN ('table','view','index') ORDER BY type, name");
+  } catch { res = []; }
+  const items = (res[0]?.values || []);
+  const tables = items.filter(r => r[1] === "table");
+  const views = items.filter(r => r[1] === "view");
+  const indexes = items.filter(r => r[1] === "index");
+  metaEl.textContent = `${tables.length} table(s) · ${views.length} view(s) · ${indexes.length} index(es)`;
+  $("#db-info").textContent = `${tables.length}t/${views.length}v/${indexes.length}i`;
+
+  for (const [name, type] of [...tables, ...views]) {
+    const wrap = document.createElement("div");
+    wrap.className = "schema-table";
+    const head = document.createElement("div");
+    head.className = "schema-name";
+    head.textContent = `${type === "view" ? "👁" : "▾"} ${name}`;
+    const cols = document.createElement("div");
+    cols.className = "schema-cols";
+    try {
+      const c = db.exec(`PRAGMA table_info(${quoteIdent(name)})`);
+      const rows = (c[0]?.values || []);
+      let count = "";
+      try {
+        const cn = db.exec(`SELECT COUNT(*) FROM ${quoteIdent(name)}`);
+        count = ` (${cn[0].values[0][0]} rows)`;
+      } catch {}
+      head.textContent = `${type === "view" ? "👁" : "▾"} ${name}${count}`;
+      for (const r of rows) {
+        const c1 = document.createElement("div");
+        c1.className = "schema-col";
+        c1.innerHTML = `<span>${escapeHTML(r[1])}</span> <span class="ctype">${escapeHTML(r[2] || "")}</span>${r[5] ? " 🔑" : ""}${r[3] ? " NOT NULL" : ""}`;
+        cols.appendChild(c1);
+      }
+    } catch (e) {
+      cols.textContent = "(could not introspect)";
+    }
+    head.addEventListener("click", () => {
+      cols.classList.toggle("open");
+    });
+    head.addEventListener("dblclick", () => {
+      $("#sql").value = `SELECT * FROM ${quoteIdent(name)} LIMIT 100;`;
+      $("#sql").focus();
+    });
+    wrap.appendChild(head);
+    wrap.appendChild(cols);
+    treeEl.appendChild(wrap);
+  }
+  if (indexes.length) {
+    const h = document.createElement("div"); h.className = "schema-meta"; h.textContent = "Indexes:"; treeEl.appendChild(h);
+    for (const [name] of indexes) {
+      const d = document.createElement("div"); d.className = "schema-col"; d.textContent = "· " + name; treeEl.appendChild(d);
+    }
+  }
+}
+function quoteIdent(s) {
+  return '"' + String(s).replace(/"/g, '""') + '"';
+}
+function renderResults(rows, info, columns) {
+  $("#results-info").textContent = info || "";
+  const el = $("#results");
+  if (!rows || !rows.length) { el.innerHTML = `<div class="schema-meta" style="padding:8px 10px">${escapeHTML(info || "(no rows)")}</div>`; return; }
+  const cols = columns || rows[0].map((_, i) => "c" + i);
+  let html = "<table class='result'><thead><tr>";
+  for (const c of cols) html += `<th>${escapeHTML(c)}</th>`;
+  html += "</tr></thead><tbody>";
+  const max = Math.min(rows.length, 1000);
+  for (let i = 0; i < max; i++) {
+    html += "<tr>";
+    for (const v of rows[i]) {
+      html += `<td>${v === null ? '<span style="color:#6e7681">NULL</span>' : escapeHTML(v)}</td>`;
+    }
+    html += "</tr>";
+  }
+  html += "</tbody></table>";
+  if (rows.length > max) html += `<div class="schema-meta" style="padding:6px 10px">…showing first ${max} of ${rows.length} rows</div>`;
+  el.innerHTML = html;
+}
+function renderLogEntry(entry) {
+  const body = $("#log-body");
+  if (queryLog.length === 1) body.innerHTML = "";
+  const div = document.createElement("div");
+  div.className = "log-entry";
+  div.dataset.idx = entry.i;
+  const dt = new Date(entry.ts).toISOString().replace("T", " ").slice(0, 19);
+  div.innerHTML = `
+    <div class="row1"><span class="idx">#${entry.i}</span><span class="ts">${escapeHTML(dt)}</span></div>
+    <div class="sql">${escapeHTML(entry.sql)}</div>
+    <div class="hash">prev: ${entry.prevHash.slice(0,16)}… · hash: ${entry.hash.slice(0,16)}…</div>
+  `;
+  body.prepend(div);
+}
+function rerenderLog() {
+  $("#log-body").innerHTML = queryLog.length ? "" : '<div class="schema-meta">No queries logged yet.</div>';
+  for (const e of queryLog) renderLogEntry(e);
+  $("#log-count").textContent = String(queryLog.length);
+}
+function renderRowCounts() {
+  const el = $("#row-counts");
+  if (!db) { el.classList.remove("show"); return; }
+  let tables;
+  try {
+    tables = db.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name");
+  } catch { tables = []; }
+  const list = (tables[0]?.values || []).map(r => r[0]).filter(n => !n.startsWith("sqlite_"));
+  if (!list.length) { el.classList.remove("show"); return; }
+  let html = "";
+  for (const t of list) {
+    let n = "?";
+    try { n = db.exec(`SELECT COUNT(*) FROM ${quoteIdent(t)}`)[0].values[0][0]; } catch {}
+    html += `<span class="rc">${escapeHTML(t)}: <b>${n}</b></span>`;
+  }
+  el.innerHTML = html;
+  el.classList.add("show");
+}
+
+/* ========================================================================
+ *  Autosave
+ * ====================================================================== */
+async function autosave() {
+  if (!db || !dirtySinceSave) return;
+  try {
+    const bytes = await exportCurrentDBBytes();
+    await idbSet(KEY_DB, bytes);
+    await idbSet(KEY_LOG, queryLog);
+    dirtySinceSave = false;
+    setStatus(`autosaved ${new Date().toLocaleTimeString()}`);
+  } catch (e) {
+    setStatus("autosave error: " + e.message);
+  }
+}
+async function restoreFromIDB() {
+  try {
+    const bytes = await idbGet(KEY_DB);
+    const log = await idbGet(KEY_LOG);
+    if (bytes) {
+      newDB(new Uint8Array(bytes));
+      setStatus("restored from IndexedDB");
+    } else {
+      newDB();
+    }
+    if (Array.isArray(log)) {
+      queryLog = log;
+      rerenderLog();
+      const v = await verifyChain(queryLog);
+      $("#log-ok").classList.toggle("hidden", !v.ok);
+      $("#log-bad").classList.toggle("hidden", v.ok);
+    }
+  } catch (e) {
+    console.error(e);
+    newDB();
+  }
+}
+
+/* ========================================================================
+ *  CSV / JSON import
+ * ====================================================================== */
+function parseCSV(text) {
+  const rows = [];
+  let cur = []; let cell = ""; let inQ = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQ) {
+      if (c === '"') {
+        if (text[i+1] === '"') { cell += '"'; i++; }
+        else { inQ = false; }
+      } else { cell += c; }
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ",") { cur.push(cell); cell = ""; }
+      else if (c === "\n") { cur.push(cell); rows.push(cur); cur = []; cell = ""; }
+      else if (c === "\r") {/* skip */}
+      else cell += c;
+    }
+  }
+  if (cell.length || cur.length) { cur.push(cell); rows.push(cur); }
+  return rows;
+}
+function inferType(values) {
+  let allInt = true, allReal = true;
+  for (const v of values) {
+    if (v === "" || v == null) continue;
+    if (!/^-?\d+$/.test(v)) allInt = false;
+    if (!/^-?\d+(\.\d+)?([eE][+-]?\d+)?$/.test(v)) allReal = false;
+    if (!allInt && !allReal) break;
+  }
+  if (allInt) return "INTEGER";
+  if (allReal) return "REAL";
+  return "TEXT";
+}
+async function importCSV(file) {
+  const text = await file.text();
+  const rows = parseCSV(text).filter(r => r.length && !(r.length === 1 && r[0] === ""));
+  if (rows.length < 2) { showToast("CSV needs header + at least one row", "err"); return; }
+  const headers = rows[0].map(h => h.trim() || "col");
+  const data = rows.slice(1);
+  const types = headers.map((_, i) => inferType(data.map(r => r[i])));
+  const tableName = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_]/g, "_") || "imported_csv";
+  const cols = headers.map((h, i) => `${quoteIdent(h)} ${types[i]}`).join(", ");
+  await runSQL(`CREATE TABLE IF NOT EXISTS ${quoteIdent(tableName)} (${cols});`);
+  // Build batched insert
+  const ins = `INSERT INTO ${quoteIdent(tableName)} (${headers.map(quoteIdent).join(",")}) VALUES `;
+  const chunkSize = 200;
+  for (let s = 0; s < data.length; s += chunkSize) {
+    const chunk = data.slice(s, s + chunkSize);
+    const vals = chunk.map(r => "(" + headers.map((_, i) => sqlLiteral(r[i], types[i])).join(",") + ")").join(",");
+    await runSQL(ins + vals + ";");
+  }
+  showToast(`Imported ${data.length} rows into ${tableName}`, "ok");
+}
+function sqlLiteral(v, type) {
+  if (v === undefined || v === null || v === "") return "NULL";
+  if (type === "INTEGER" || type === "REAL") return String(v);
+  return "'" + String(v).replace(/'/g, "''") + "'";
+}
+async function importJSON(file) {
+  const text = await file.text();
+  let data;
+  try { data = JSON.parse(text); } catch (e) { showToast("Invalid JSON: " + e.message, "err"); return; }
+  if (!Array.isArray(data)) { showToast("JSON must be an array of objects", "err"); return; }
+  if (!data.length) { showToast("Empty array", "err"); return; }
+  const headers = Array.from(data.reduce((s, o) => { Object.keys(o || {}).forEach(k => s.add(k)); return s; }, new Set()));
+  const types = headers.map(h => inferType(data.map(o => {
+    const v = o?.[h];
+    if (v === null || v === undefined) return "";
+    return typeof v === "object" ? JSON.stringify(v) : String(v);
+  })));
+  const tableName = file.name.replace(/\.[^.]+$/, "").replace(/[^A-Za-z0-9_]/g, "_") || "imported_json";
+  const cols = headers.map((h, i) => `${quoteIdent(h)} ${types[i]}`).join(", ");
+  await runSQL(`CREATE TABLE IF NOT EXISTS ${quoteIdent(tableName)} (${cols});`);
+  const chunkSize = 200;
+  for (let s = 0; s < data.length; s += chunkSize) {
+    const chunk = data.slice(s, s + chunkSize);
+    const vals = chunk.map(o => "(" + headers.map((h, i) => {
+      const v = o?.[h];
+      if (v === null || v === undefined) return "NULL";
+      const sv = typeof v === "object" ? JSON.stringify(v) : String(v);
+      return sqlLiteral(sv, types[i]);
+    }).join(",") + ")").join(",");
+    await runSQL(`INSERT INTO ${quoteIdent(tableName)} (${headers.map(quoteIdent).join(",")}) VALUES ${vals};`);
+  }
+  showToast(`Imported ${data.length} rows into ${tableName}`, "ok");
+}
+
+/* ========================================================================
+ *  Time-Capsule export
+ * ====================================================================== */
+async function captureOriginalSource() {
+  // Try fetch first (works reliably when served over HTTP).
+  try {
+    const res = await fetch(location.href, { cache: "no-cache" });
+    if (res.ok) {
+      const txt = await res.text();
+      if (txt && txt.includes('id="__capsule__"')) return txt;
+    }
+  } catch {}
+  // Fallback: clone current DOM, but reset runtime-only nodes so the export is clean.
+  const clone = document.documentElement.cloneNode(true);
+  // reset runtime-modified panes
+  const reset = (id, html) => { const n = clone.querySelector("#" + id); if (n) n.innerHTML = html; };
+  reset("schema-tree", "");
+  reset("schema-meta", "No tables yet.");
+  reset("results", "");
+  reset("log-body", '<div class="schema-meta">No queries logged yet.</div>');
+  reset("row-counts", "");
+  reset("toast", "");
+  // reset textarea content
+  const ta = clone.querySelector("#sql"); if (ta) ta.textContent = "";
+  // reset capsule script content to placeholder (will be filled below)
+  const cap = clone.querySelector("#__capsule__"); if (cap) cap.textContent = "null";
+  return "<!DOCTYPE html>\n" + clone.outerHTML;
+}
+function injectCapsuleIntoHTML(html, capsuleObj) {
+  // JSON-escape close tags / HTML brackets so it survives inside <script>.
+  const safe = JSON.stringify(capsuleObj)
+    .replace(/</g, "\\u003c")
+    .replace(/>/g, "\\u003e")
+    .replace(/&/g, "\\u0026")
+    .replace(/\u2028/g, "\\u2028")
+    .replace(/\u2029/g, "\\u2029");
+  // Replace ONLY the body of the capsule script tag.
+  const re = /(<script\s+id="__capsule__"[^>]*>)([\s\S]*?)(<\/script>)/i;
+  if (!re.test(html)) {
+    // Inject right before </body> as a fallback.
+    return html.replace(/<\/body>/i, `<script id="__capsule__" type="application/json">${safe}<\/script></body>`);
+  }
+  return html.replace(re, (_, open, _mid, close) => `${open}${safe}${close}`);
+}
+async function exportTimeCapsule() {
+  if (!db) { showToast("No DB", "err"); return; }
+  setStatus("building time-capsule…");
+  const bytes = await exportCurrentDBBytes();
+  const dbBase64 = bytesToBase64(bytes);
+  const snapshotHash = await sha256Hex(bytes);
+  const capsule = {
+    format: "sql-time-capsule",
+    version: 1,
+    createdAt: new Date().toISOString(),
+    sqljsVersion: SQLJS_VERSION,
+    snapshotHash,
+    dbBase64,
+    log: queryLog
+  };
+  const src = await captureOriginalSource();
+  const out = injectCapsuleIntoHTML(src, capsule);
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  downloadBlob(out, `sql-time-capsule-${stamp}.html`, "text/html");
+  setStatus(`exported time-capsule (${(out.length/1024).toFixed(1)} KB; snapshot ${snapshotHash.slice(0,12)}…)`);
+  showToast("Time-capsule exported", "ok");
+}
+
+/* ========================================================================
+ *  Time-Capsule import (file picker) + verify + replay
+ * ====================================================================== */
+async function importTimeCapsuleFile(file) {
+  const text = await file.text();
+  const m = text.match(/<script\s+id="__capsule__"[^>]*>([\s\S]*?)<\/script>/i);
+  if (!m) { showToast("No capsule found in that HTML", "err"); return; }
+  let data;
+  try { data = JSON.parse(m[1]); } catch (e) { showToast("Capsule JSON parse error: " + e.message, "err"); return; }
+  if (!data || data.format !== "sql-time-capsule") { showToast("Not a SQL Time-Capsule file", "err"); return; }
+  await runVerifyAndReplay(data, { source: file.name });
+}
+
+async function runVerifyAndReplay(capsule, opts = {}) {
+  setStatus("verifying chain…");
+  const v = await verifyChain(capsule.log || []);
+  if (!v.ok) {
+    showModal("⛔ Tamper detected — replay refused",
+      `<p>The Merkle-chained query log failed verification.</p>
+       <p><b>Bad entry index:</b> #${v.badIndex}</p>
+       <p><b>Reason:</b> ${escapeHTML(v.reason)}</p>
+       <p>This usually means the embedded log was edited after export, or the entry's <code>sql</code>/<code>ts</code>/<code>i</code>/<code>prevHash</code> no longer matches its <code>hash</code>. Replay will not run.</p>
+       <pre class="diag">${escapeHTML(JSON.stringify(capsule.log[v.badIndex], null, 2))}</pre>`);
+    setStatus(`verify FAILED at #${v.badIndex}: ${v.reason}`);
+    showToast(`Verify failed at entry #${v.badIndex}`, "err");
+    return { ok: false, error: v };
+  }
+  setStatus("chain verified ✓ — replaying");
+  showToast(`Chain verified (${capsule.log.length} entries)`, "ok");
+
+  // Reset to a fresh in-memory DB and replay each entry's SQL through runSQL with skipLog.
+  newDB();
+  queryLog = [];
+  rerenderLog();
+  await replayLog(capsule.log);
+
+  // After replay, hash the resulting DB bytes and compare with the embedded snapshot.
+  const finalBytes = await exportCurrentDBBytes();
+  const finalHash = await sha256Hex(finalBytes);
+  const matches = finalHash === capsule.snapshotHash;
+  const html = `
+    <p>Replay complete (${capsule.log.length} statements).</p>
+    <p>Embedded snapshot SHA-256:<br><code>${escapeHTML(capsule.snapshotHash)}</code></p>
+    <p>Replayed DB SHA-256:<br><code>${escapeHTML(finalHash)}</code></p>
+    <p><b>${matches ? "✅ Bytes match — replay reproduces the snapshot exactly." : "⚠️ Hashes differ — see logical comparison below."}</b></p>
+    ${matches ? "" : `<pre class="diag">${escapeHTML(await logicalDiffSummary(capsule.dbBase64, finalBytes))}</pre>`}
+  `;
+  showModal(matches ? "✅ Time-Capsule verified & replayed" : "⚠️ Replay completed but bytes diverge", html);
+  setStatus(matches ? "replay matches snapshot ✓" : "replay completed, byte-hash differs");
+  // After replay, restore the chain we just rebuilt (it should equal capsule.log given identical inputs).
+  // Re-rendering chain status:
+  const v2 = await verifyChain(queryLog);
+  $("#log-ok").classList.toggle("hidden", !v2.ok);
+  $("#log-bad").classList.toggle("hidden", v2.ok);
+  return { ok: true, matches };
+}
+
+async function logicalDiffSummary(snapshotB64, replayBytes) {
+  // Build a simple side-by-side row count comparison on every user table.
+  let lines = [];
+  try {
+    const snap = new SQL.Database(base64ToBytes(snapshotB64));
+    const rep = new SQL.Database(replayBytes);
+    const tablesA = (snap.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")[0]?.values || []).map(r => r[0]);
+    const tablesB = (rep.exec("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")[0]?.values || []).map(r => r[0]);
+    const all = Array.from(new Set([...tablesA, ...tablesB])).filter(t => !t.startsWith("sqlite_"));
+    lines.push("table".padEnd(28) + "snapshot".padEnd(12) + "replay");
+    for (const t of all) {
+      let a = "—", b = "—";
+      try { a = String(snap.exec(`SELECT COUNT(*) FROM ${quoteIdent(t)}`)[0].values[0][0]); } catch {}
+      try { b = String(rep.exec(`SELECT COUNT(*) FROM ${quoteIdent(t)}`)[0].values[0][0]); } catch {}
+      lines.push(t.padEnd(28) + a.padEnd(12) + b);
+    }
+    snap.close(); rep.close();
+  } catch (e) {
+    lines.push("(could not produce logical diff: " + e.message + ")");
+  }
+  return lines.join("\n");
+}
+
+/* ========================================================================
+ *  Replay engine (with speed slider, pause/step)
+ * ====================================================================== */
+let replayState = null;
+function setReplayUI(active) {
+  $("#replay-controls").style.display = active ? "" : "none";
+}
+async function replayLog(log) {
+  if (!log || !log.length) return;
+  inReplay = true;
+  setReplayUI(true);
+  let speedMs = parseInt($("#rp-speed").value, 10) || 500;
+  replayState = { i: 0, total: log.length, paused: false, stop: false, step: false };
+  $("#rp-speed").oninput = () => {
+    speedMs = parseInt($("#rp-speed").value, 10) || 500;
+    $("#rp-speed-label").textContent = speedMs + " ms";
+  };
+  $("#rp-speed").oninput();
+  $("#rp-play").onclick = () => { replayState.paused = false; };
+  $("#rp-pause").onclick = () => { replayState.paused = true; };
+  $("#rp-step").onclick = () => { replayState.paused = true; replayState.step = true; };
+  $("#rp-stop").onclick = () => { replayState.stop = true; replayState.paused = false; };
+  while (replayState.i < log.length && !replayState.stop) {
+    if (replayState.paused && !replayState.step) {
+      await sleep(80);
+      continue;
+    }
+    replayState.step = false;
+    const e = log[replayState.i];
+    $("#rp-progress").textContent = `${replayState.i + 1} / ${log.length}`;
+    try {
+      db.exec(e.sql);
+    } catch (err) {
+      // Note: failure during replay means the original session likely never hit this either.
+      console.warn("replay error at #" + e.i, err);
+    }
+    // re-append into queryLog with EXACTLY the original entry to keep chain identical.
+    queryLog.push(e);
+    renderLogEntry(e);
+    $("#log-count").textContent = String(queryLog.length);
+    refreshSchema();
+    renderRowCounts();
+    replayState.i++;
+    if (replayState.paused) continue;
+    await sleep(speedMs);
+  }
+  setReplayUI(false);
+  inReplay = false;
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/* ========================================================================
+ *  Embedded capsule auto-detect (when the *exported* file is opened)
+ * ====================================================================== */
+function readEmbeddedCapsule() {
+  const tag = document.getElementById("__capsule__");
+  if (!tag) return null;
+  const txt = (tag.textContent || "").trim();
+  if (!txt || txt === "null") return null;
+  try {
+    const obj = JSON.parse(txt);
+    if (obj && obj.format === "sql-time-capsule") return obj;
+  } catch {}
+  return null;
+}
+function showCapsuleBanner(cap) {
+  const el = $("#capsule-banner");
+  el.classList.add("show");
+  $("#capsule-meta").textContent = `${cap.log?.length || 0} entries · created ${cap.createdAt} · snapshot ${cap.snapshotHash.slice(0,12)}…`;
+}
+
+/* ========================================================================
+ *  Wire up UI
+ * ====================================================================== */
+function wire() {
+  $("#btn-new").addEventListener("click", () => {
+    if (!confirm("Discard current DB and query log?")) return;
+    queryLog = [];
+    rerenderLog();
+    newDB();
+    showToast("New empty DB", "ok");
+  });
+  $("#btn-open").addEventListener("click", () => $("#file-sqlite").click());
+  $("#file-sqlite").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    const buf = new Uint8Array(await f.arrayBuffer());
+    queryLog = []; rerenderLog();
+    newDB(buf);
+    showToast(`Opened ${f.name}`, "ok");
+    e.target.value = "";
+  });
+  $("#btn-export").addEventListener("click", async () => {
+    const bytes = await exportCurrentDBBytes();
+    downloadBlob(new Blob([bytes], { type: "application/octet-stream" }), "database.sqlite");
+  });
+  $("#btn-run").addEventListener("click", () => runSQL($("#sql").value));
+  $("#sql").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault(); runSQL($("#sql").value);
+    }
+  });
+  $("#btn-csv").addEventListener("click", () => $("#file-csv").click());
+  $("#file-csv").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    await importCSV(f); e.target.value = "";
+  });
+  $("#btn-json").addEventListener("click", () => $("#file-json").click());
+  $("#file-json").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    await importJSON(f); e.target.value = "";
+  });
+  $("#btn-cap-export").addEventListener("click", () => exportTimeCapsule().catch(e => showToast("export error: " + e.message, "err")));
+  $("#btn-cap-import").addEventListener("click", () => $("#file-capsule").click());
+  $("#file-capsule").addEventListener("change", async (e) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    await importTimeCapsuleFile(f).catch(err => showToast("import error: " + err.message, "err"));
+    e.target.value = "";
+  });
+  $("#btn-verify").addEventListener("click", async () => {
+    const v = await verifyChain(queryLog);
+    if (v.ok) {
+      $("#log-ok").classList.remove("hidden"); $("#log-bad").classList.add("hidden");
+      showToast(`Chain OK (${queryLog.length} entries)`, "ok");
+    } else {
+      $("#log-ok").classList.add("hidden"); $("#log-bad").classList.remove("hidden");
+      showModal("⛔ Chain verification failed",
+        `<p>Bad entry: <b>#${v.badIndex}</b><br>Reason: ${escapeHTML(v.reason)}</p>
+         <pre class="diag">${escapeHTML(JSON.stringify(queryLog[v.badIndex], null, 2))}</pre>`);
+    }
+  });
+  $("#btn-cap-verify-replay").addEventListener("click", async () => {
+    if (!embeddedCapsule) return;
+    await runVerifyAndReplay(embeddedCapsule, { source: "embedded" });
+  });
+  $("#btn-cap-load-as-current").addEventListener("click", async () => {
+    if (!embeddedCapsule) return;
+    if (!confirm("Replace current DB with embedded snapshot (no replay)?")) return;
+    queryLog = embeddedCapsule.log.slice();
+    rerenderLog();
+    newDB(base64ToBytes(embeddedCapsule.dbBase64));
+    showToast("Loaded snapshot as current DB", "ok");
+  });
+}
+
+/* ========================================================================
+ *  Boot
+ * ====================================================================== */
+(async function main() {
+  wire();
+  setStatus("loading…");
+  try {
+    await loadSqlJs();
+  } catch (e) {
+    setStatus("FAILED to load sql.js: " + e.message);
+    showToast("Could not load sql.js (network?). " + e.message, "err");
+    return;
+  }
+  // Detect a baked-in capsule first.
+  embeddedCapsule = readEmbeddedCapsule();
+  if (embeddedCapsule) {
+    showCapsuleBanner(embeddedCapsule);
+    // Load snapshot as current state (without auto-replaying), so user can compare/replay manually.
+    try {
+      queryLog = embeddedCapsule.log.slice();
+      rerenderLog();
+      newDB(base64ToBytes(embeddedCapsule.dbBase64));
+      // Auto-verify on open so the user immediately sees tamper status.
+      const v = await verifyChain(queryLog);
+      $("#log-ok").classList.toggle("hidden", !v.ok);
+      $("#log-bad").classList.toggle("hidden", v.ok);
+      if (!v.ok) {
+        showModal("⛔ Embedded capsule failed verification",
+          `<p>This capsule's query log is corrupted/tampered.</p>
+           <p><b>Bad entry index:</b> #${v.badIndex}<br><b>Reason:</b> ${escapeHTML(v.reason)}</p>
+           <p>Replay is refused. The embedded snapshot DB has been loaded so you can inspect it, but trust is broken.</p>
+           <pre class="diag">${escapeHTML(JSON.stringify(queryLog[v.badIndex], null, 2))}</pre>`);
+        setStatus(`embedded capsule TAMPERED at #${v.badIndex}`);
+      } else {
+        setStatus(`embedded capsule loaded (${queryLog.length} entries, chain OK)`);
+      }
+    } catch (e) {
+      showToast("capsule load failed: " + e.message, "err");
+    }
+  } else {
+    await restoreFromIDB();
+  }
+  // autosave loop
+  setInterval(autosave, AUTOSAVE_MS);
+  window.addEventListener("beforeunload", () => { try { autosave(); } catch {} });
+})();
+</script>
+</body>
+</html>

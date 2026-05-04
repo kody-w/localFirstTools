@@ -1,0 +1,1405 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="description" content="WebGPU + WebLLM; first-run downloads & caches model in OPFS, then runs fully offline">
+    <meta name="keywords" content="webgpu,llm,offline,ai">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🤖%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Local LLM — Browser-only chat</title>
+<!--
+  ===============================================================================
+  CDN EXCEPTION (intentional, documented).
+
+  This app loads the MLC AI WebLLM SDK at first user interaction from
+    https://esm.run/@mlc-ai/web-llm
+  (which proxies to https://cdn.jsdelivr.net/npm/@mlc-ai/web-llm/+esm).
+
+  This is the sole external resource fetched by app code. WebLLM itself will
+  then download model weights from huggingface.co (the MLC prebuilt model
+  repos) into the browser's OPFS / Cache storage. After that first download,
+  subsequent page loads work fully offline — including chat completions, since
+  inference happens entirely in WebGPU on this device.
+
+  No other network calls are made. No analytics, no telemetry, no servers.
+  Conversations are persisted in IndexedDB on this device only.
+  ===============================================================================
+-->
+<style>
+  :root {
+    --bg: #0e1116;
+    --bg-2: #161b22;
+    --bg-3: #1f2630;
+    --border: #30363d;
+    --fg: #e6edf3;
+    --fg-dim: #8b949e;
+    --accent: #2f81f7;
+    --accent-2: #1f6feb;
+    --green: #2ea043;
+    --green-soft: #238636;
+    --red: #f85149;
+    --red-soft: #da3633;
+    --yellow: #d29922;
+    --user-bubble: #1f6feb;
+    --asst-bubble: #1f2630;
+    --shadow: 0 6px 20px rgba(0,0,0,.35);
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: var(--sans);
+    font-size: 14px;
+    overflow: hidden;
+  }
+  button { font-family: inherit; }
+  /* Layout */
+  .app {
+    display: grid;
+    grid-template-columns: 280px 1fr;
+    height: 100vh;
+  }
+  /* Sidebar */
+  .sidebar {
+    background: var(--bg-2);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+  }
+  .sidebar header {
+    padding: 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sidebar h1 {
+    font-size: 14px;
+    margin: 0;
+    color: var(--fg);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .sidebar h1 .logo {
+    width: 18px; height: 18px;
+    border-radius: 4px;
+    background: linear-gradient(135deg, var(--accent), #a371f7);
+    display: inline-block;
+  }
+  .btn {
+    background: var(--bg-3);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 7px 10px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+    text-align: left;
+    line-height: 1.2;
+  }
+  .btn:hover { background: #2a313c; }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.primary { background: var(--accent-2); border-color: var(--accent); color: white; }
+  .btn.primary:hover { background: var(--accent); }
+  .btn.danger { background: transparent; color: var(--red); border-color: transparent; }
+  .btn.danger:hover { background: rgba(248,81,73,.1); }
+  .btn.icon { padding: 6px 8px; }
+
+  .new-chat {
+    width: 100%;
+    text-align: center;
+    font-weight: 600;
+  }
+  .conversations {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .conv-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 8px 10px;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--fg);
+    border: 1px solid transparent;
+    min-width: 0;
+  }
+  .conv-item:hover { background: var(--bg-3); }
+  .conv-item.active { background: var(--bg-3); border-color: var(--border); }
+  .conv-item .title {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .conv-item .title input {
+    width: 100%;
+    background: var(--bg);
+    color: var(--fg);
+    border: 1px solid var(--accent);
+    border-radius: 4px;
+    padding: 2px 4px;
+    font: inherit;
+  }
+  .conv-item .actions {
+    display: none;
+    gap: 2px;
+  }
+  .conv-item:hover .actions, .conv-item.active .actions { display: flex; }
+  .conv-item .actions button {
+    background: transparent;
+    border: none;
+    color: var(--fg-dim);
+    cursor: pointer;
+    padding: 2px 4px;
+    border-radius: 4px;
+    font-size: 12px;
+  }
+  .conv-item .actions button:hover { background: var(--bg); color: var(--fg); }
+  .sidebar footer {
+    padding: 10px;
+    border-top: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--fg-dim);
+  }
+  .sidebar footer .row { display: flex; gap: 6px; }
+  .sidebar footer .row .btn { flex: 1; text-align: center; font-size: 12px; padding: 6px 8px; }
+
+  /* Main */
+  .main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    background: var(--bg);
+  }
+  .topbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-2);
+    flex-wrap: wrap;
+  }
+  .topbar .title-block {
+    flex: 1;
+    min-width: 200px;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  .topbar .conv-title {
+    font-weight: 600;
+    font-size: 14px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .topbar .conv-sub {
+    font-size: 11px;
+    color: var(--fg-dim);
+  }
+  .topbar select {
+    background: var(--bg-3);
+    color: var(--fg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 6px 8px;
+    font-size: 12px;
+    max-width: 280px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: .04em;
+    text-transform: uppercase;
+    border-radius: 999px;
+    color: white;
+    user-select: none;
+    white-space: nowrap;
+  }
+  .badge.offline { background: var(--green); }
+  .badge.online { background: var(--red); }
+  .badge .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: rgba(255,255,255,.9);
+    box-shadow: 0 0 0 0 rgba(255,255,255,.6);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%   { box-shadow: 0 0 0 0 rgba(255,255,255,.6); }
+    70%  { box-shadow: 0 0 0 6px rgba(255,255,255,0); }
+    100% { box-shadow: 0 0 0 0 rgba(255,255,255,0); }
+  }
+
+  /* Messages */
+  .messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    scroll-behavior: smooth;
+  }
+  .empty-state {
+    margin: auto;
+    text-align: center;
+    color: var(--fg-dim);
+    max-width: 480px;
+    padding: 32px;
+  }
+  .empty-state h2 { color: var(--fg); margin: 0 0 8px; }
+  .empty-state p { line-height: 1.5; }
+  .empty-state .pills { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; margin-top: 12px; }
+  .empty-state .pill {
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    padding: 8px 12px;
+    border-radius: 999px;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .empty-state .pill:hover { background: #2a313c; }
+
+  .msg {
+    display: flex;
+    gap: 10px;
+    max-width: 100%;
+  }
+  .msg .avatar {
+    width: 28px; height: 28px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    font-weight: 700;
+    color: white;
+  }
+  .msg.user .avatar { background: var(--user-bubble); }
+  .msg.assistant .avatar { background: linear-gradient(135deg, var(--accent), #a371f7); }
+  .msg.system .avatar { background: var(--yellow); }
+  .msg .bubble {
+    background: var(--asst-bubble);
+    border: 1px solid var(--border);
+    padding: 10px 12px;
+    border-radius: 10px;
+    line-height: 1.55;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+    max-width: 100%;
+  }
+  .msg.user .bubble {
+    background: var(--user-bubble);
+    border-color: var(--user-bubble);
+    color: white;
+  }
+  .msg.system .bubble {
+    background: rgba(210,153,34,.08);
+    border-color: rgba(210,153,34,.4);
+    font-size: 12.5px;
+    color: var(--yellow);
+  }
+  .msg .meta {
+    font-size: 10px;
+    color: var(--fg-dim);
+    margin-top: 4px;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+  .cursor::after {
+    content: "▍";
+    color: var(--accent);
+    animation: blink 1s steps(2, jump-none) infinite;
+    margin-left: 1px;
+  }
+  @keyframes blink { 50% { opacity: 0; } }
+
+  /* Input */
+  .composer {
+    border-top: 1px solid var(--border);
+    background: var(--bg-2);
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .composer .row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-end;
+  }
+  .composer textarea {
+    flex: 1;
+    resize: none;
+    min-height: 44px;
+    max-height: 160px;
+    background: var(--bg-3);
+    border: 1px solid var(--border);
+    color: var(--fg);
+    border-radius: 8px;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 14px;
+    line-height: 1.5;
+    outline: none;
+  }
+  .composer textarea:focus { border-color: var(--accent); }
+  .composer .send {
+    height: 44px;
+    padding: 0 16px;
+    border-radius: 8px;
+    border: none;
+    background: var(--accent-2);
+    color: white;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .composer .send:hover { background: var(--accent); }
+  .composer .send:disabled { background: var(--bg-3); color: var(--fg-dim); cursor: not-allowed; }
+  .composer .stop {
+    height: 44px;
+    padding: 0 16px;
+    border-radius: 8px;
+    border: 1px solid var(--red-soft);
+    background: rgba(248,81,73,.1);
+    color: var(--red);
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .composer .stop:hover { background: rgba(248,81,73,.2); }
+
+  .composer .system-prompt {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .composer .system-prompt summary {
+    cursor: pointer;
+    color: var(--fg-dim);
+    font-size: 12px;
+    padding: 2px 4px;
+    list-style: none;
+    user-select: none;
+  }
+  .composer .system-prompt summary::before {
+    content: "⚙ ";
+  }
+  .composer .system-prompt textarea {
+    min-height: 60px;
+    max-height: 120px;
+    font-size: 12.5px;
+  }
+
+  /* Status banner */
+  .status {
+    padding: 10px 14px;
+    background: var(--bg-3);
+    border-bottom: 1px solid var(--border);
+    font-size: 12.5px;
+    display: none;
+    gap: 10px;
+    align-items: center;
+  }
+  .status.visible { display: flex; }
+  .status.error { background: rgba(248,81,73,.08); border-color: var(--red-soft); color: var(--red); }
+  .status .progress {
+    flex: 1;
+    height: 6px;
+    background: var(--bg);
+    border-radius: 3px;
+    overflow: hidden;
+    border: 1px solid var(--border);
+  }
+  .status .progress > div {
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--green));
+    width: 0%;
+    transition: width .2s ease;
+  }
+
+  /* Setup overlay */
+  .setup-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,.6);
+    backdrop-filter: blur(6px);
+    z-index: 100;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+  }
+  .setup-overlay.visible { display: flex; }
+  .setup-card {
+    background: var(--bg-2);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    max-width: 560px;
+    width: 100%;
+    padding: 24px;
+  }
+  .setup-card h2 { margin: 0 0 8px; }
+  .setup-card p { line-height: 1.6; color: var(--fg-dim); }
+  .setup-card .req { background: var(--bg-3); border-radius: 8px; padding: 12px; margin: 12px 0; font-size: 13px; }
+  .setup-card .req ul { margin: 4px 0 0; padding-left: 20px; }
+  .setup-card .req li { margin: 4px 0; color: var(--fg); }
+  .setup-card .actions { display: flex; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+
+  /* Mobile */
+  @media (max-width: 720px) {
+    .app { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+    .sidebar {
+      max-height: 38vh;
+      border-right: none;
+      border-bottom: 1px solid var(--border);
+    }
+    .topbar { padding: 8px 10px; }
+    .topbar select { max-width: 160px; font-size: 11px; }
+  }
+</style>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="sidebar">
+    <header>
+      <h1><span class="logo"></span> Local LLM</h1>
+      <button class="btn primary new-chat" id="newChatBtn">+ New chat</button>
+    </header>
+    <div class="conversations" id="convList"></div>
+    <footer>
+      <div>Storage: IndexedDB · this device only</div>
+      <div class="row">
+        <button class="btn" id="exportBtn" title="Export all conversations as JSON">⬇ Export</button>
+        <button class="btn" id="importBtn" title="Import conversations from JSON">⬆ Import</button>
+        <input type="file" id="importFile" accept="application/json,.json" hidden>
+      </div>
+      <div class="row">
+        <button class="btn" id="exportOneBtn" title="Export current conversation">⬇ This chat</button>
+        <button class="btn" id="clearAllBtn" title="Delete all conversations">🗑 Clear all</button>
+      </div>
+    </footer>
+  </aside>
+
+  <section class="main">
+    <div class="topbar">
+      <div class="title-block">
+        <div class="conv-title" id="convTitle">No conversation</div>
+        <div class="conv-sub" id="convSub">Pick or create a chat to begin</div>
+      </div>
+      <select id="modelSelect" title="Choose model"></select>
+      <button class="btn" id="loadModelBtn">Load model</button>
+      <span class="badge offline" id="privacyBadge" title="Network status">
+        <span class="dot"></span>
+        <span id="privacyLabel">OFFLINE</span>
+      </span>
+    </div>
+
+    <div class="status" id="statusBar">
+      <span id="statusText">Ready.</span>
+      <div class="progress"><div id="statusProgress"></div></div>
+    </div>
+
+    <div class="messages" id="messages">
+      <div class="empty-state">
+        <h2>Browser-only LLM chat</h2>
+        <p>Your messages never leave this device. The model runs entirely in WebGPU.
+           First-time loads download model weights once and cache them, then this app
+           is fully offline.</p>
+        <div class="pills" id="starterPills">
+          <button class="pill" data-q="Explain how WebGPU works in two sentences.">Explain WebGPU</button>
+          <button class="pill" data-q="Write a haiku about offline computing.">Offline haiku</button>
+          <button class="pill" data-q="Give me three ideas for a local-first app.">App ideas</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="composer">
+      <details class="system-prompt" id="sysPromptWrap">
+        <summary>System prompt (per conversation)</summary>
+        <textarea id="systemPrompt" placeholder="e.g. You are a concise, helpful assistant."></textarea>
+      </details>
+      <div class="row">
+        <textarea id="input" placeholder="Type a message — Enter to send, Shift+Enter for newline" rows="1"></textarea>
+        <button class="send" id="sendBtn" disabled>Send</button>
+        <button class="stop" id="stopBtn" style="display:none">Stop</button>
+      </div>
+    </div>
+  </section>
+</div>
+
+<!-- Setup / WebGPU-not-available overlay -->
+<div class="setup-overlay" id="setupOverlay">
+  <div class="setup-card">
+    <h2 id="setupTitle">WebGPU not detected</h2>
+    <p id="setupBody">
+      This app runs a real LLM directly inside your browser using WebGPU.
+      Your browser doesn't appear to expose a WebGPU adapter, so on-device
+      inference isn't available right now.
+    </p>
+    <div class="req">
+      <strong>Requirements</strong>
+      <ul>
+        <li>Chrome / Edge 113+ on desktop (or Chrome 121+ on Android with flag)</li>
+        <li>Hardware GPU with ~2 GB free VRAM (more for larger models)</li>
+        <li>HTTPS or localhost (WebGPU is blocked on plain http://)</li>
+        <li>Enabled flag if needed: <code>chrome://flags/#enable-unsafe-webgpu</code></li>
+      </ul>
+    </div>
+    <p>You can still try the UI — Demo Mode runs a tiny rule-based echo bot so the
+       chat is fully navigable without GPU support.</p>
+    <div class="actions">
+      <button class="btn primary" id="setupDemoBtn">Try Demo Mode</button>
+      <button class="btn" id="setupRetryBtn">Retry detection</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+/* =============================================================================
+ * Local LLM — single-file, browser-only chat with WebLLM + IndexedDB persistence.
+ * ============================================================================= */
+
+const APP_NAME = 'local-llm';
+const DB_NAME = 'local-llm';
+const DB_VERSION = 1;
+const STORE = 'conversations';
+
+/* WebLLM CDN — lazy loaded on first interaction. See top-of-file comment. */
+const WEBLLM_CDN = 'https://esm.run/@mlc-ai/web-llm';
+
+/* Curated subset of MLC prebuilt models. IDs match WebLLM's prebuiltAppConfig.
+   Sizes are approximate download sizes for the quantized weights. */
+const MODELS = [
+  { id: 'Phi-3.5-mini-instruct-q4f32_1-MLC',    label: 'Phi-3.5-mini Instruct (q4f32) — ~2.4 GB · default', size: '~2.4 GB' },
+  { id: 'Phi-3.5-mini-instruct-q4f16_1-MLC',    label: 'Phi-3.5-mini Instruct (q4f16) — ~2.0 GB',          size: '~2.0 GB' },
+  { id: 'Llama-3.2-1B-Instruct-q4f32_1-MLC',    label: 'Llama 3.2 1B Instruct — ~0.9 GB · fast',           size: '~0.9 GB' },
+  { id: 'Llama-3.2-3B-Instruct-q4f32_1-MLC',    label: 'Llama 3.2 3B Instruct — ~2.0 GB',                  size: '~2.0 GB' },
+  { id: 'Qwen2.5-0.5B-Instruct-q4f16_1-MLC',    label: 'Qwen 2.5 0.5B Instruct — ~0.4 GB · tiny',          size: '~0.4 GB' },
+  { id: 'TinyLlama-1.1B-Chat-v1.0-q4f16_1-MLC', label: 'TinyLlama 1.1B Chat — ~0.7 GB',                    size: '~0.7 GB' },
+  { id: 'gemma-2-2b-it-q4f32_1-MLC',            label: 'Gemma 2 2B IT — ~1.7 GB',                          size: '~1.7 GB' },
+  { id: 'SmolLM2-1.7B-Instruct-q4f16_1-MLC',    label: 'SmolLM2 1.7B Instruct — ~1.0 GB',                  size: '~1.0 GB' },
+];
+const DEFAULT_MODEL = 'Phi-3.5-mini-instruct-q4f32_1-MLC';
+
+/* ----------------------------- IndexedDB layer ----------------------------- */
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE)) {
+        db.createObjectStore(STORE, { keyPath: 'id' });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function dbAll() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).getAll();
+    req.onsuccess = () => resolve(req.result || []);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function dbPut(rec) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).put(rec);
+    tx.oncomplete = () => resolve(rec);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function dbDel(id) {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function dbClear() {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    tx.objectStore(STORE).clear();
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/* ------------------------------- App state -------------------------------- */
+const state = {
+  conversations: [],            // [{id,title,systemPrompt,messages:[{role,content,ts}],model,createdAt,updatedAt}]
+  currentId: null,
+  engine: null,                 // WebLLM engine
+  engineModel: null,            // currently loaded model id
+  loadingModel: false,
+  generating: false,
+  demoMode: false,
+  webllm: null,                 // dynamically imported namespace
+};
+
+/* --------------------------------- DOM ------------------------------------ */
+const $ = (sel) => document.querySelector(sel);
+const els = {
+  convList: $('#convList'),
+  newChatBtn: $('#newChatBtn'),
+  exportBtn: $('#exportBtn'),
+  importBtn: $('#importBtn'),
+  importFile: $('#importFile'),
+  exportOneBtn: $('#exportOneBtn'),
+  clearAllBtn: $('#clearAllBtn'),
+  convTitle: $('#convTitle'),
+  convSub: $('#convSub'),
+  modelSelect: $('#modelSelect'),
+  loadModelBtn: $('#loadModelBtn'),
+  privacyBadge: $('#privacyBadge'),
+  privacyLabel: $('#privacyLabel'),
+  statusBar: $('#statusBar'),
+  statusText: $('#statusText'),
+  statusProgress: $('#statusProgress'),
+  messages: $('#messages'),
+  systemPrompt: $('#systemPrompt'),
+  sysPromptWrap: $('#sysPromptWrap'),
+  input: $('#input'),
+  sendBtn: $('#sendBtn'),
+  stopBtn: $('#stopBtn'),
+  setupOverlay: $('#setupOverlay'),
+  setupTitle: $('#setupTitle'),
+  setupBody: $('#setupBody'),
+  setupDemoBtn: $('#setupDemoBtn'),
+  setupRetryBtn: $('#setupRetryBtn'),
+  starterPills: $('#starterPills'),
+};
+
+/* ---------------------------- Privacy badge ------------------------------- */
+function renderBadge() {
+  if (navigator.onLine) {
+    els.privacyBadge.classList.remove('offline');
+    els.privacyBadge.classList.add('online');
+    els.privacyLabel.textContent = 'ONLINE — capable of network calls';
+    els.privacyBadge.title = 'Network is reachable. The model itself never sends data, but a fresh model load could fetch from CDN/HuggingFace.';
+  } else {
+    els.privacyBadge.classList.remove('online');
+    els.privacyBadge.classList.add('offline');
+    els.privacyLabel.textContent = 'OFFLINE';
+    els.privacyBadge.title = 'No network. Inference runs entirely on this device.';
+  }
+}
+window.addEventListener('online', renderBadge);
+window.addEventListener('offline', renderBadge);
+
+/* ----------------------------- Setup overlay ------------------------------ */
+async function detectWebGPU() {
+  if (!('gpu' in navigator)) return { ok: false, reason: 'navigator.gpu missing' };
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) return { ok: false, reason: 'No GPU adapter returned' };
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, reason: String(e && e.message || e) };
+  }
+}
+function showSetupOverlay({ title, body } = {}) {
+  if (title) els.setupTitle.textContent = title;
+  if (body)  els.setupBody.textContent  = body;
+  els.setupOverlay.classList.add('visible');
+}
+function hideSetupOverlay() {
+  els.setupOverlay.classList.remove('visible');
+}
+els.setupRetryBtn.addEventListener('click', async () => {
+  const r = await detectWebGPU();
+  if (r.ok) {
+    state.demoMode = false;
+    hideSetupOverlay();
+    setStatus('WebGPU detected. Click "Load model" to download weights.', null);
+  } else {
+    setStatus('Still no WebGPU: ' + r.reason, null, true);
+  }
+});
+els.setupDemoBtn.addEventListener('click', () => {
+  state.demoMode = true;
+  hideSetupOverlay();
+  setStatus('Demo mode active — rule-based echo bot. Real LLM disabled.', null);
+  els.loadModelBtn.disabled = true;
+  els.loadModelBtn.textContent = 'Demo mode';
+  els.sendBtn.disabled = !state.currentId;
+});
+
+/* ------------------------------ Status bar -------------------------------- */
+function setStatus(text, progress01, isError = false) {
+  if (text == null && progress01 == null) {
+    els.statusBar.classList.remove('visible');
+    return;
+  }
+  els.statusBar.classList.add('visible');
+  els.statusBar.classList.toggle('error', !!isError);
+  els.statusText.textContent = text || '';
+  if (typeof progress01 === 'number' && isFinite(progress01)) {
+    const pct = Math.max(0, Math.min(1, progress01)) * 100;
+    els.statusProgress.style.width = pct.toFixed(1) + '%';
+    els.statusProgress.parentElement.style.display = '';
+  } else {
+    els.statusProgress.style.width = '0%';
+    els.statusProgress.parentElement.style.display = progress01 === null ? 'none' : '';
+  }
+}
+
+/* ------------------------------ Conversations ----------------------------- */
+function uid() {
+  return 'c_' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
+function emptyConv() {
+  const now = Date.now();
+  return {
+    id: uid(),
+    title: 'New chat',
+    systemPrompt: 'You are a helpful, concise assistant running locally in the user\'s browser. Be honest about your limits.',
+    messages: [],
+    model: DEFAULT_MODEL,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+function getConv(id) { return state.conversations.find(c => c.id === id) || null; }
+function currentConv() { return getConv(state.currentId); }
+
+function renderConvList() {
+  els.convList.innerHTML = '';
+  const sorted = [...state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+  if (sorted.length === 0) {
+    const e = document.createElement('div');
+    e.style.color = 'var(--fg-dim)';
+    e.style.padding = '12px';
+    e.style.fontSize = '12px';
+    e.textContent = 'No conversations yet.';
+    els.convList.appendChild(e);
+    return;
+  }
+  for (const c of sorted) {
+    const row = document.createElement('div');
+    row.className = 'conv-item' + (c.id === state.currentId ? ' active' : '');
+    row.dataset.id = c.id;
+
+    const title = document.createElement('div');
+    title.className = 'title';
+    title.textContent = c.title || 'Untitled';
+    title.title = c.title || 'Untitled';
+
+    const actions = document.createElement('div');
+    actions.className = 'actions';
+
+    const renameBtn = document.createElement('button');
+    renameBtn.textContent = '✎';
+    renameBtn.title = 'Rename';
+    renameBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      startRename(c.id, title);
+    });
+
+    const delBtn = document.createElement('button');
+    delBtn.textContent = '🗑';
+    delBtn.title = 'Delete';
+    delBtn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      if (!confirm('Delete this conversation? This cannot be undone.')) return;
+      await dbDel(c.id);
+      state.conversations = state.conversations.filter(x => x.id !== c.id);
+      if (state.currentId === c.id) {
+        const next = [...state.conversations].sort((a,b)=>b.updatedAt-a.updatedAt)[0];
+        state.currentId = next ? next.id : null;
+      }
+      renderConvList();
+      renderCurrent();
+    });
+
+    actions.append(renameBtn, delBtn);
+    row.append(title, actions);
+    row.addEventListener('click', () => selectConv(c.id));
+    els.convList.appendChild(row);
+  }
+}
+function startRename(id, titleEl) {
+  const c = getConv(id); if (!c) return;
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.value = c.title;
+  titleEl.textContent = '';
+  titleEl.appendChild(input);
+  input.focus();
+  input.select();
+  const commit = async (save) => {
+    if (save) {
+      const v = input.value.trim();
+      c.title = v || 'Untitled';
+      c.updatedAt = Date.now();
+      await dbPut(c);
+    }
+    renderConvList();
+    if (state.currentId === id) renderCurrent();
+  };
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+  });
+  input.addEventListener('blur', () => commit(true));
+}
+
+function selectConv(id) {
+  state.currentId = id;
+  renderConvList();
+  renderCurrent();
+}
+
+/* ------------------------------ Render messages --------------------------- */
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+function renderCurrent() {
+  const c = currentConv();
+  if (!c) {
+    els.convTitle.textContent = 'No conversation';
+    els.convSub.textContent = 'Pick or create a chat to begin';
+    els.systemPrompt.value = '';
+    els.systemPrompt.disabled = true;
+    els.input.disabled = true;
+    els.sendBtn.disabled = true;
+    els.messages.innerHTML = `
+      <div class="empty-state">
+        <h2>Browser-only LLM chat</h2>
+        <p>Click <b>+ New chat</b> in the sidebar to begin. Your messages never leave this device.</p>
+      </div>`;
+    return;
+  }
+  els.convTitle.textContent = c.title;
+  const modelLabel = (MODELS.find(m => m.id === c.model) || {}).label || c.model;
+  els.convSub.textContent = `${c.messages.length} messages · ${modelLabel}`;
+  els.systemPrompt.value = c.systemPrompt || '';
+  els.systemPrompt.disabled = false;
+  els.input.disabled = state.generating;
+  els.sendBtn.disabled = state.generating || (!state.engine && !state.demoMode);
+
+  // Sync model dropdown to this conversation's model.
+  if (els.modelSelect.value !== c.model) els.modelSelect.value = c.model;
+
+  els.messages.innerHTML = '';
+  if (c.messages.length === 0) {
+    const e = document.createElement('div');
+    e.className = 'empty-state';
+    e.innerHTML = `
+      <h2>${escapeHtml(c.title)}</h2>
+      <p>This chat is empty. Type a message below to get started.</p>
+      <p style="font-size:12px; color: var(--fg-dim)">System prompt and conversation history are persisted locally per-chat.</p>`;
+    els.messages.appendChild(e);
+    return;
+  }
+  for (const m of c.messages) appendMessageNode(m, false);
+  scrollToBottom();
+}
+function appendMessageNode(m, animate = true) {
+  const node = document.createElement('div');
+  node.className = 'msg ' + m.role;
+  node.dataset.role = m.role;
+
+  const av = document.createElement('div');
+  av.className = 'avatar';
+  av.textContent = m.role === 'user' ? 'U' : (m.role === 'assistant' ? 'A' : 'S');
+
+  const wrap = document.createElement('div');
+  wrap.style.flex = '1';
+  wrap.style.minWidth = '0';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = m.content || '';
+
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const ts = m.ts ? new Date(m.ts) : new Date();
+  meta.textContent = m.role + ' · ' + ts.toLocaleTimeString();
+
+  wrap.append(bubble, meta);
+  node.append(av, wrap);
+  els.messages.appendChild(node);
+  if (animate) scrollToBottom();
+  return { bubble, meta, node };
+}
+function scrollToBottom() {
+  els.messages.scrollTop = els.messages.scrollHeight;
+}
+
+/* --------------------------- Model dropdown setup ------------------------- */
+function populateModelSelect() {
+  els.modelSelect.innerHTML = '';
+  for (const m of MODELS) {
+    const opt = document.createElement('option');
+    opt.value = m.id;
+    opt.textContent = m.label;
+    els.modelSelect.appendChild(opt);
+  }
+  els.modelSelect.value = DEFAULT_MODEL;
+}
+els && els.modelSelect && els.modelSelect.addEventListener('change', async () => {
+  const c = currentConv();
+  if (c) {
+    c.model = els.modelSelect.value;
+    c.updatedAt = Date.now();
+    await dbPut(c);
+    renderCurrent();
+  }
+});
+
+/* --------------------------- WebLLM lazy load ----------------------------- */
+async function ensureWebLLM() {
+  if (state.webllm) return state.webllm;
+  setStatus('Loading WebLLM SDK from CDN…', null);
+  try {
+    state.webllm = await import(/* @vite-ignore */ WEBLLM_CDN);
+    return state.webllm;
+  } catch (e) {
+    setStatus('Failed to load WebLLM SDK: ' + (e && e.message || e), null, true);
+    throw e;
+  }
+}
+
+/* --------------------------- Load / switch model -------------------------- */
+async function loadModel(modelId) {
+  if (state.demoMode) {
+    setStatus('Demo mode is active — disable it by reloading to switch to real model.', null, true);
+    return;
+  }
+  if (state.loadingModel) return;
+  if (state.engine && state.engineModel === modelId) {
+    setStatus('Model "' + modelId + '" already loaded.', null);
+    setTimeout(() => setStatus(null, null), 1500);
+    return;
+  }
+  state.loadingModel = true;
+  els.loadModelBtn.disabled = true;
+  els.sendBtn.disabled = true;
+
+  try {
+    const webllm = await ensureWebLLM();
+
+    // Tear down any existing engine if switching models.
+    if (state.engine && state.engineModel !== modelId) {
+      try { await state.engine.unload(); } catch {}
+      state.engine = null;
+      state.engineModel = null;
+    }
+
+    setStatus('Initializing engine for ' + modelId + '…', 0);
+    const engine = await webllm.CreateMLCEngine(modelId, {
+      initProgressCallback: (p) => {
+        // p: { progress: 0..1, text, timeElapsed }
+        const text = (p && p.text) ? p.text : 'Loading…';
+        const prog = (p && typeof p.progress === 'number') ? p.progress : null;
+        setStatus(text, prog);
+      },
+    });
+    state.engine = engine;
+    state.engineModel = modelId;
+    setStatus('Model ready: ' + modelId, 1);
+    setTimeout(() => setStatus(null, null), 1500);
+  } catch (e) {
+    console.error(e);
+    setStatus('Model load failed: ' + (e && e.message || e), null, true);
+  } finally {
+    state.loadingModel = false;
+    els.loadModelBtn.disabled = false;
+    els.sendBtn.disabled = state.generating || (!state.engine && !state.demoMode) || !state.currentId;
+  }
+}
+
+els.loadModelBtn.addEventListener('click', async () => {
+  const r = await detectWebGPU();
+  if (!r.ok) {
+    showSetupOverlay({
+      title: 'WebGPU not detected',
+      body: 'Reason: ' + r.reason + '. Use Demo Mode to navigate the UI without a GPU.'
+    });
+    return;
+  }
+  const modelId = els.modelSelect.value || DEFAULT_MODEL;
+  // Stamp the current conversation's model choice too.
+  const c = currentConv();
+  if (c && c.model !== modelId) {
+    c.model = modelId;
+    c.updatedAt = Date.now();
+    await dbPut(c);
+    renderCurrent();
+  }
+  await loadModel(modelId);
+});
+
+/* ------------------------------ Demo bot ---------------------------------- */
+async function demoReply(userText, onChunk, signal) {
+  // Tiny rule-based echo with deliberate streaming for parity with real LLM UX.
+  const rules = [
+    { re: /\b(hi|hello|hey)\b/i, out: "Hi! I'm running in **Demo Mode** — a rule-based echo bot. Real LLM inference is disabled because WebGPU isn't available." },
+    { re: /\bhelp\b/i, out: "In Demo Mode I just rephrase what you say. Try Chrome/Edge 113+ on a machine with a GPU to load a real model." },
+    { re: /\b(time|date)\b/i, out: "Demo bot can't read clocks reliably, but your browser thinks it's " + new Date().toString() + "." },
+    { re: /\?\s*$/, out: "That's a good question. In Demo Mode I can't really answer it — but I noticed you asked: \"" + userText + "\"" },
+  ];
+  let out = '';
+  const hit = rules.find(r => r.re.test(userText));
+  out = hit ? hit.out : "You said: \"" + userText + "\". (Demo mode echo — load a real model for genuine responses.)";
+
+  // Stream char-by-char.
+  for (let i = 0; i < out.length; i++) {
+    if (signal && signal.aborted) return;
+    onChunk(out[i]);
+    await new Promise(r => setTimeout(r, 12));
+  }
+}
+
+/* ----------------------------- Send / generate ---------------------------- */
+async function handleSend() {
+  if (state.generating) return;
+  const c = currentConv();
+  if (!c) return;
+  const text = els.input.value.trim();
+  if (!text) return;
+
+  // Persist updated system prompt if user edited it.
+  if (els.systemPrompt.value !== c.systemPrompt) {
+    c.systemPrompt = els.systemPrompt.value;
+  }
+
+  const userMsg = { role: 'user', content: text, ts: Date.now() };
+  c.messages.push(userMsg);
+  c.updatedAt = Date.now();
+
+  // Auto-title from first user message.
+  if (c.title === 'New chat' || !c.title) {
+    c.title = text.slice(0, 48).replace(/\s+/g, ' ').trim() || 'Untitled';
+  }
+
+  // Clear empty-state if any, then render the new user msg.
+  const empty = els.messages.querySelector('.empty-state');
+  if (empty) empty.remove();
+  appendMessageNode(userMsg);
+
+  els.input.value = '';
+  autoResizeInput();
+
+  await dbPut(c);
+  renderConvList();
+  els.convTitle.textContent = c.title;
+
+  // Begin assistant streaming.
+  const asstMsg = { role: 'assistant', content: '', ts: Date.now() };
+  const { bubble, meta } = appendMessageNode(asstMsg);
+  bubble.classList.add('cursor');
+
+  state.generating = true;
+  els.sendBtn.style.display = 'none';
+  els.stopBtn.style.display = '';
+  els.input.disabled = true;
+
+  const controller = new AbortController();
+  state._abort = controller;
+
+  const onChunk = (delta) => {
+    asstMsg.content += delta;
+    bubble.textContent = asstMsg.content;
+    scrollToBottom();
+  };
+
+  try {
+    if (state.demoMode) {
+      await demoReply(text, onChunk, controller.signal);
+    } else {
+      if (!state.engine) {
+        throw new Error('No model loaded. Click "Load model" first.');
+      }
+      // Build OpenAI-style messages including system prompt.
+      const sys = (c.systemPrompt || '').trim();
+      const msgs = [];
+      if (sys) msgs.push({ role: 'system', content: sys });
+      for (const m of c.messages) {
+        if (m.role === 'user' || m.role === 'assistant') {
+          // Don't include the in-flight (empty) assistant placeholder.
+          if (m === asstMsg) continue;
+          msgs.push({ role: m.role, content: m.content });
+        }
+      }
+      const stream = await state.engine.chat.completions.create({
+        messages: msgs,
+        stream: true,
+        temperature: 0.7,
+      });
+      for await (const chunk of stream) {
+        if (controller.signal.aborted) {
+          try { await state.engine.interruptGenerate(); } catch {}
+          break;
+        }
+        const delta = chunk?.choices?.[0]?.delta?.content || '';
+        if (delta) onChunk(delta);
+      }
+    }
+  } catch (e) {
+    console.error(e);
+    asstMsg.content += (asstMsg.content ? '\n\n' : '') + '⚠️ Error: ' + (e && e.message || e);
+    bubble.textContent = asstMsg.content;
+  } finally {
+    bubble.classList.remove('cursor');
+    state.generating = false;
+    state._abort = null;
+    els.sendBtn.style.display = '';
+    els.stopBtn.style.display = 'none';
+    els.input.disabled = false;
+    els.sendBtn.disabled = !state.engine && !state.demoMode;
+
+    // Persist the final assistant message (truncated if user pressed stop).
+    asstMsg.ts = Date.now();
+    if (!asstMsg.content) {
+      // Drop empty messages (e.g. abort before any tokens).
+      c.messages = c.messages.filter(x => x !== asstMsg);
+      const last = els.messages.querySelector('.msg.assistant:last-of-type');
+      if (last && last.textContent.trim() === '') last.remove();
+    } else {
+      c.messages.push(asstMsg);
+    }
+    c.updatedAt = Date.now();
+    await dbPut(c);
+    renderConvList();
+    const modelLabel = (MODELS.find(m => m.id === c.model) || {}).label || c.model;
+    els.convSub.textContent = `${c.messages.length} messages · ${modelLabel}`;
+    els.input.focus();
+  }
+}
+
+els.sendBtn.addEventListener('click', handleSend);
+els.stopBtn.addEventListener('click', () => {
+  if (state._abort) state._abort.abort();
+});
+els.input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    handleSend();
+  }
+});
+els.input.addEventListener('input', autoResizeInput);
+function autoResizeInput() {
+  els.input.style.height = 'auto';
+  els.input.style.height = Math.min(160, els.input.scrollHeight) + 'px';
+}
+
+/* Persist system-prompt edits on blur. */
+els.systemPrompt.addEventListener('blur', async () => {
+  const c = currentConv(); if (!c) return;
+  if ((c.systemPrompt || '') !== els.systemPrompt.value) {
+    c.systemPrompt = els.systemPrompt.value;
+    c.updatedAt = Date.now();
+    await dbPut(c);
+  }
+});
+
+/* Starter pills (only used in empty states). */
+els.starterPills && els.starterPills.addEventListener('click', (e) => {
+  const t = e.target.closest('.pill'); if (!t) return;
+  const q = t.dataset.q || t.textContent;
+  if (!state.currentId) {
+    // Make a fresh conversation, then fill the prompt.
+    handleNewChat().then(() => {
+      els.input.value = q;
+      autoResizeInput();
+      els.input.focus();
+    });
+  } else {
+    els.input.value = q;
+    autoResizeInput();
+    els.input.focus();
+  }
+});
+
+/* ------------------------------ New / Import ------------------------------ */
+async function handleNewChat() {
+  const c = emptyConv();
+  c.model = els.modelSelect.value || DEFAULT_MODEL;
+  state.conversations.push(c);
+  await dbPut(c);
+  state.currentId = c.id;
+  renderConvList();
+  renderCurrent();
+  els.input.focus();
+}
+els.newChatBtn.addEventListener('click', handleNewChat);
+
+els.exportBtn.addEventListener('click', () => {
+  const payload = {
+    app: APP_NAME,
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    conversations: state.conversations,
+  };
+  downloadJson(payload, `${APP_NAME}-data-${todayStr()}.json`);
+});
+els.exportOneBtn.addEventListener('click', () => {
+  const c = currentConv();
+  if (!c) { alert('No conversation selected.'); return; }
+  const safe = (c.title || 'chat').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '').slice(0, 40) || 'chat';
+  const payload = { app: APP_NAME, version: 1, exportedAt: new Date().toISOString(), conversations: [c] };
+  downloadJson(payload, `${APP_NAME}-${safe}-${todayStr()}.json`);
+});
+els.importBtn.addEventListener('click', () => els.importFile.click());
+els.importFile.addEventListener('change', async (e) => {
+  const f = e.target.files && e.target.files[0]; if (!f) return;
+  try {
+    const txt = await f.text();
+    const data = JSON.parse(txt);
+    const list = Array.isArray(data) ? data : (data.conversations || []);
+    if (!Array.isArray(list)) throw new Error('Unrecognized JSON shape.');
+    let imported = 0;
+    for (const c of list) {
+      if (!c || !c.id || !Array.isArray(c.messages)) continue;
+      // Ensure unique id; if collision, regenerate.
+      if (state.conversations.some(x => x.id === c.id)) c.id = uid();
+      const rec = {
+        id: c.id,
+        title: c.title || 'Imported chat',
+        systemPrompt: c.systemPrompt || '',
+        messages: c.messages.map(m => ({
+          role: m.role || 'user',
+          content: String(m.content || ''),
+          ts: m.ts || Date.now(),
+        })),
+        model: c.model || DEFAULT_MODEL,
+        createdAt: c.createdAt || Date.now(),
+        updatedAt: Date.now(),
+      };
+      await dbPut(rec);
+      state.conversations.push(rec);
+      imported++;
+    }
+    renderConvList();
+    setStatus(`Imported ${imported} conversation(s).`, null);
+    setTimeout(() => setStatus(null, null), 2000);
+  } catch (err) {
+    alert('Import failed: ' + (err && err.message || err));
+  } finally {
+    e.target.value = '';
+  }
+});
+els.clearAllBtn.addEventListener('click', async () => {
+  if (!confirm('Delete ALL conversations from this device? This cannot be undone.')) return;
+  await dbClear();
+  state.conversations = [];
+  state.currentId = null;
+  renderConvList();
+  renderCurrent();
+});
+
+function downloadJson(obj, filename) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function todayStr() {
+  const d = new Date();
+  const z = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;
+}
+
+/* --------------------------- Refresh recovery ----------------------------- */
+/* If the page was reloaded while an assistant was streaming, the in-flight
+   message was never written to IndexedDB (we only persist completed messages).
+   Nothing to do at load — but we still scan for any historical empty trailing
+   assistant messages from older versions and prune them. */
+function pruneInFlightAssistantMessages() {
+  for (const c of state.conversations) {
+    if (!Array.isArray(c.messages) || c.messages.length === 0) continue;
+    const last = c.messages[c.messages.length - 1];
+    if (last && last.role === 'assistant' && (!last.content || last.content === '')) {
+      c.messages.pop();
+    }
+  }
+}
+
+/* --------------------------------- Init ----------------------------------- */
+async function init() {
+  populateModelSelect();
+  renderBadge();
+
+  // Load persisted conversations.
+  try {
+    const all = await dbAll();
+    state.conversations = all || [];
+    pruneInFlightAssistantMessages();
+    // Pick most recent or create one.
+    if (state.conversations.length === 0) {
+      await handleNewChat();
+    } else {
+      const sorted = [...state.conversations].sort((a, b) => b.updatedAt - a.updatedAt);
+      state.currentId = sorted[0].id;
+      renderConvList();
+      renderCurrent();
+    }
+  } catch (e) {
+    console.error('Failed to load conversations:', e);
+    setStatus('Could not open IndexedDB. Are you in private mode?', null, true);
+  }
+
+  // WebGPU detection up front. Do NOT load WebLLM yet — that's gated behind a click.
+  const r = await detectWebGPU();
+  if (!r.ok) {
+    showSetupOverlay({
+      title: 'WebGPU not detected',
+      body: 'Reason: ' + r.reason + '. You can still use Demo Mode below.'
+    });
+  } else {
+    setStatus('WebGPU available. Click "Load model" to download weights for ' + DEFAULT_MODEL + ' on first use.', null);
+  }
+}
+
+init();
+
+/* ============================================================================
+ * Verifying offline behavior:
+ *  1) First run online: click "Load model" — progress bar fills as weights cache.
+ *  2) DevTools → Network → "Offline": badge flips green → "OFFLINE".
+ *  3) Reload page while offline: app loads from disk; click "Load model" again
+ *     and WebLLM serves the weights from its cached storage. Chat works.
+ *  4) "Stop" mid-stream truncates the assistant message and persists what's there.
+ *  5) Hard reload mid-generation: in-flight assistant turn is dropped (never
+ *     persisted), conversation cleanly resumes.
+ * ============================================================================ */
+</script>
+</body>
+</html>

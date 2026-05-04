@@ -1,0 +1,1032 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="description" content="Record any iframe-loaded app at 30Hz mutation deltas, replay frame-by-frame">
+    <meta name="keywords" content="recording,developer-tool,replay">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🛠%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Session Time Machine</title>
+<style>
+  :root {
+    --bg: #0e1117;
+    --panel: #161b22;
+    --panel-2: #1f2630;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #58a6ff;
+    --rec: #f85149;
+    --ok: #3fb950;
+    --warn: #d29922;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  body { display: flex; flex-direction: column; }
+  .topbar {
+    display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+    padding: 10px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .topbar input[type="text"], .topbar select, .topbar button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    padding: 6px 10px; border-radius: 4px; font-size: 13px; outline: none;
+  }
+  .topbar input[type="text"] { flex: 1 1 320px; min-width: 200px; }
+  .topbar button { cursor: pointer; transition: background 0.15s; }
+  .topbar button:hover:not(:disabled) { background: #2c333d; }
+  .topbar button:disabled { opacity: 0.45; cursor: not-allowed; }
+  .topbar button.primary { background: #1f6feb; border-color: #1f6feb; color: white; }
+  .topbar button.primary:hover:not(:disabled) { background: #388bfd; }
+  .topbar button.danger { background: var(--rec); border-color: var(--rec); color: white; }
+  .topbar button.danger:hover:not(:disabled) { background: #e04848; }
+  .topbar label { font-size: 12px; color: var(--muted); }
+  .row { display: flex; gap: 8px; align-items: center; width: 100%; flex-wrap: wrap; }
+  .scrubrow { padding: 8px 10px; background: var(--panel); border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+  .scrubrow input[type="range"] { flex: 1; }
+  .time { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 12px; color: var(--muted); min-width: 100px; text-align: right; }
+  .frame-wrap { flex: 1; position: relative; background: #000; }
+  iframe { width: 100%; height: 100%; border: 0; background: white; display: block; }
+  .status { position: absolute; top: 10px; right: 10px; padding: 4px 10px; border-radius: 12px; font-size: 11px; font-family: ui-monospace, Menlo, Consolas, monospace; background: rgba(0,0,0,0.7); color: var(--muted); pointer-events: none; }
+  .status.rec { color: var(--rec); }
+  .status.rec::before { content: '● '; animation: blink 1s infinite; }
+  .status.play { color: var(--ok); }
+  .status.play::before { content: '▶ '; }
+  @keyframes blink { 0%, 50% { opacity: 1; } 51%, 100% { opacity: 0.3; } }
+  .badge { display: inline-block; padding: 2px 6px; border-radius: 3px; font-size: 11px; background: var(--panel-2); color: var(--muted); border: 1px solid var(--border); }
+  .badge.live { color: var(--rec); border-color: var(--rec); }
+  .log { position: absolute; bottom: 10px; left: 10px; max-width: 50%; background: rgba(0,0,0,0.7); color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 11px; padding: 6px 10px; border-radius: 4px; pointer-events: none; max-height: 80px; overflow: hidden; }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <div class="row">
+      <input type="text" id="urlInput" placeholder="../games/snake3.html" value="../games/snake3.html">
+      <button id="loadBtn">Load</button>
+      <button id="recBtn" class="danger">● Record</button>
+      <button id="stopBtn" disabled>■ Stop</button>
+      <button id="playBtn" class="primary" disabled>▶ Play</button>
+      <button id="pauseBtn" disabled>❚❚ Pause</button>
+      <label>Speed</label>
+      <select id="speedSel">
+        <option value="0.25">0.25×</option>
+        <option value="1" selected>1×</option>
+        <option value="2">2×</option>
+        <option value="4">4×</option>
+        <option value="8">8×</option>
+      </select>
+      <button id="exportBtn" disabled>⬇ Export</button>
+      <button id="importBtn">⬆ Import</button>
+      <input type="file" id="importFile" accept="application/json" style="display:none">
+      <button id="demoBtn">🎬 Demo</button>
+      <button id="clearBtn">🗑 Clear</button>
+      <span id="evCount" class="badge">0 events</span>
+      <span id="dbStatus" class="badge">DB: …</span>
+    </div>
+  </div>
+  <div class="scrubrow">
+    <input type="range" id="scrub" min="0" max="0" step="1" value="0" disabled>
+    <span class="time" id="timeLabel">00:00.000 / 00:00.000</span>
+  </div>
+  <div class="frame-wrap">
+    <iframe id="frame" sandbox="allow-scripts allow-same-origin allow-forms"></iframe>
+    <div id="statusEl" class="status">idle</div>
+    <div id="logEl" class="log" style="display:none"></div>
+  </div>
+
+<script>
+"use strict";
+/* ============================================================================
+ * Session Time Machine — record + replay sandboxed iframe interactions.
+ * Vanilla JS, single file, IndexedDB persistence, Export/Import JSON.
+ * ============================================================================ */
+
+const APP_NAME = 'session-recorder';
+const DB_NAME = 'session-recorder';
+const STORE = 'recordings';
+
+const $ = (id) => document.getElementById(id);
+const frame = $('frame');
+const statusEl = $('statusEl');
+const logEl = $('logEl');
+const evCount = $('evCount');
+const scrub = $('scrub');
+const timeLabel = $('timeLabel');
+const speedSel = $('speedSel');
+
+/* ----------------------------- State ------------------------------------- */
+const state = {
+  url: '',
+  recording: false,
+  replaying: false,
+  paused: false,
+  startTime: 0,                 // performance.now() when recording started
+  events: [],                   // { t, type, ... }
+  initialStorage: {},           // localStorage snapshot at recording start (best-effort)
+  duration: 0,
+  speed: 1,
+  scrubT: 0,
+  mutationBuffer: [],
+  mutationFlushTimer: null,
+  storagePollTimer: null,
+  storagePollPrev: null,
+  observer: null,
+  patched: false,
+  iframeReady: false,
+  replayStartedAt: 0,           // performance.now() when replay started
+  replayBaseT: 0,               // virtual t at replay start (for scrub resume)
+  replayTimer: null,
+  replayCursor: 0,              // index into state.events
+  pendingDemoResolve: null,
+};
+
+let db = null;
+
+/* ----------------------------- Logging ----------------------------------- */
+function log(msg, kind) {
+  console.log('[STM]', msg);
+  logEl.style.display = 'block';
+  logEl.textContent = msg;
+  if (logEl._timer) clearTimeout(logEl._timer);
+  logEl._timer = setTimeout(() => { logEl.style.display = 'none'; }, 2500);
+}
+function setStatus(text, cls) {
+  statusEl.className = 'status' + (cls ? ' ' + cls : '');
+  statusEl.textContent = text;
+}
+
+/* ----------------------------- IndexedDB --------------------------------- */
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(DB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const d = req.result;
+      if (!d.objectStoreNames.contains(STORE)) {
+        d.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function dbPut(rec) {
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE, 'readwrite');
+    const st = tx.objectStore(STORE);
+    const req = rec.id ? st.put(rec) : st.add(rec);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+function dbCount() {
+  return new Promise((resolve) => {
+    if (!db) return resolve(0);
+    const tx = db.transaction(STORE, 'readonly');
+    const req = tx.objectStore(STORE).count();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(0);
+  });
+}
+
+async function refreshDbStatus() {
+  const c = await dbCount();
+  $('dbStatus').textContent = `DB: ${c} saved`;
+}
+
+/* ----------------------------- Path utilities ---------------------------- */
+function computePath(node, root) {
+  if (node === root) return [];
+  const path = [];
+  let cur = node;
+  while (cur && cur !== root) {
+    const p = cur.parentNode;
+    if (!p) return null;
+    let i = 0, s = p.firstChild;
+    while (s && s !== cur) { i++; s = s.nextSibling; }
+    if (!s) return null;
+    path.unshift(i);
+    cur = p;
+  }
+  return cur === root ? path : null;
+}
+function resolvePath(path, root) {
+  let n = root;
+  for (const i of path) {
+    if (!n || !n.childNodes || i >= n.childNodes.length) return null;
+    n = n.childNodes[i];
+  }
+  return n;
+}
+
+/* ----------------------------- Node serialization ------------------------ */
+function serializeNode(n) {
+  if (!n) return null;
+  if (n.nodeType === 3) return { nt: 3, data: n.data };
+  if (n.nodeType === 8) return { nt: 8, data: n.data };
+  if (n.nodeType === 1) {
+    let html;
+    try { html = n.outerHTML; } catch (_) { html = ''; }
+    return { nt: 1, html };
+  }
+  return { nt: n.nodeType, data: '' };
+}
+function deserializeNode(serialized, doc) {
+  if (!serialized) return null;
+  if (serialized.nt === 3) return doc.createTextNode(serialized.data || '');
+  if (serialized.nt === 8) return doc.createComment(serialized.data || '');
+  if (serialized.nt === 1) {
+    const tpl = doc.createElement('template');
+    tpl.innerHTML = serialized.html || '';
+    return tpl.content.firstChild;
+  }
+  return null;
+}
+
+/* ----------------------------- Recording --------------------------------- */
+function recordEvent(payload) {
+  if (!state.recording) return;
+  const t = performance.now() - state.startTime;
+  const ev = Object.assign({ t: Math.round(t * 100) / 100 }, payload);
+  state.events.push(ev);
+  evCount.textContent = `${state.events.length} events`;
+}
+
+/* ---- Instrumentation injected/applied to iframe contentWindow ---------- */
+function instrumentIframe() {
+  let W;
+  try { W = frame.contentWindow; } catch (_) { return false; }
+  if (!W) return false;
+  let D;
+  try { D = W.document; } catch (_) { return false; }
+  if (!D || !D.body) return false;
+
+  // Single namespace on the iframe window for any state we need.
+  if (!W.__rec) W.__rec = { listeners: [], unhooks: [] };
+
+  // Pointer + key + resize listeners
+  const pointerKinds = ['pointerdown', 'pointermove', 'pointerup', 'click'];
+  const keyKinds = ['keydown', 'keyup'];
+
+  for (const k of pointerKinds) {
+    const fn = (e) => {
+      if (!state.recording) return;
+      // Capture coordinates relative to the iframe document.
+      recordEvent({
+        type: 'pointer', kind: k,
+        x: e.clientX|0, y: e.clientY|0,
+        button: e.button, buttons: e.buttons,
+        pointerId: e.pointerId, pointerType: e.pointerType || 'mouse',
+      });
+    };
+    D.addEventListener(k, fn, true);
+    W.__rec.unhooks.push(() => D.removeEventListener(k, fn, true));
+  }
+  for (const k of keyKinds) {
+    const fn = (e) => {
+      if (!state.recording) return;
+      recordEvent({
+        type: 'key', kind: k,
+        key: e.key, code: e.code, keyCode: e.keyCode,
+        shift: e.shiftKey, ctrl: e.ctrlKey, alt: e.altKey, meta: e.metaKey,
+        repeat: e.repeat,
+      });
+    };
+    D.addEventListener(k, fn, true);
+    W.__rec.unhooks.push(() => D.removeEventListener(k, fn, true));
+  }
+  const onResize = () => {
+    if (!state.recording) return;
+    recordEvent({ type: 'resize', w: W.innerWidth, h: W.innerHeight });
+  };
+  W.addEventListener('resize', onResize);
+  W.__rec.unhooks.push(() => W.removeEventListener('resize', onResize));
+
+  // localStorage proxy via the iframe's own Storage prototype.
+  let storageHooked = false;
+  try {
+    const Storage = W.Storage;
+    if (Storage && Storage.prototype) {
+      const origSet = Storage.prototype.setItem;
+      const origRm = Storage.prototype.removeItem;
+      const origClr = Storage.prototype.clear;
+      Storage.prototype.setItem = function(k, v) {
+        try { if (this === W.localStorage) recordEvent({ type: 'storage', op: 'set', key: String(k), value: String(v) }); } catch (_) {}
+        return origSet.call(this, k, v);
+      };
+      Storage.prototype.removeItem = function(k) {
+        try { if (this === W.localStorage) recordEvent({ type: 'storage', op: 'remove', key: String(k) }); } catch (_) {}
+        return origRm.call(this, k);
+      };
+      Storage.prototype.clear = function() {
+        try { if (this === W.localStorage) recordEvent({ type: 'storage', op: 'clear' }); } catch (_) {}
+        return origClr.call(this);
+      };
+      storageHooked = true;
+      W.__rec.unhooks.push(() => {
+        try {
+          Storage.prototype.setItem = origSet;
+          Storage.prototype.removeItem = origRm;
+          Storage.prototype.clear = origClr;
+        } catch (_) {}
+      });
+    }
+  } catch (_) { storageHooked = false; }
+
+  // Fallback: poll localStorage every 250ms if proxying failed.
+  if (!storageHooked) {
+    log('localStorage proxy blocked; using polling fallback');
+    state.storagePollPrev = snapshotStorage(W);
+    state.storagePollTimer = setInterval(() => {
+      let cur;
+      try { cur = snapshotStorage(W); } catch (_) { return; }
+      const prev = state.storagePollPrev || {};
+      // emit set events for changed/new
+      for (const k in cur) {
+        if (prev[k] !== cur[k]) recordEvent({ type: 'storage', op: 'set', key: k, value: cur[k] });
+      }
+      // emit remove events
+      for (const k in prev) {
+        if (!(k in cur)) recordEvent({ type: 'storage', op: 'remove', key: k });
+      }
+      state.storagePollPrev = cur;
+    }, 250);
+  }
+
+  // IndexedDB write proxy (best-effort)
+  try {
+    const IDBOS = W.IDBObjectStore;
+    if (IDBOS && IDBOS.prototype) {
+      const origs = {};
+      for (const op of ['put', 'add', 'delete']) {
+        origs[op] = IDBOS.prototype[op];
+        IDBOS.prototype[op] = function(...args) {
+          try {
+            recordEvent({
+              type: 'idb', op,
+              storeName: this.name,
+              dbName: (this.transaction && this.transaction.db && this.transaction.db.name) || null,
+              args: args.map(safeClone),
+            });
+          } catch (_) {}
+          return origs[op].apply(this, args);
+        };
+      }
+      W.__rec.unhooks.push(() => {
+        try { for (const op in origs) IDBOS.prototype[op] = origs[op]; } catch (_) {}
+      });
+    }
+  } catch (_) {}
+
+  // MutationObserver — batched at 30Hz, delta-encoded against previous frame.
+  state.observer = new W.MutationObserver((records) => {
+    for (const r of records) state.mutationBuffer.push(r);
+  });
+  state.observer.observe(D.body, {
+    childList: true, subtree: true,
+    attributes: true, attributeOldValue: true,
+    characterData: true, characterDataOldValue: true,
+  });
+  state.mutationFlushTimer = setInterval(() => flushMutations(D.body), 33);
+  W.__rec.unhooks.push(() => {
+    if (state.observer) { state.observer.disconnect(); state.observer = null; }
+    if (state.mutationFlushTimer) { clearInterval(state.mutationFlushTimer); state.mutationFlushTimer = null; }
+    if (state.storagePollTimer) { clearInterval(state.storagePollTimer); state.storagePollTimer = null; }
+  });
+
+  state.patched = true;
+  state.iframeReady = true;
+  return true;
+}
+
+function uninstrumentIframe() {
+  try {
+    const W = frame.contentWindow;
+    if (W && W.__rec && W.__rec.unhooks) {
+      for (const u of W.__rec.unhooks) { try { u(); } catch (_) {} }
+      W.__rec.unhooks = [];
+    }
+  } catch (_) {}
+  state.patched = false;
+  if (state.mutationFlushTimer) { clearInterval(state.mutationFlushTimer); state.mutationFlushTimer = null; }
+  if (state.storagePollTimer) { clearInterval(state.storagePollTimer); state.storagePollTimer = null; }
+  if (state.observer) { try { state.observer.disconnect(); } catch (_) {} state.observer = null; }
+}
+
+function safeClone(v) {
+  try { return JSON.parse(JSON.stringify(v)); }
+  catch (_) {
+    if (v == null) return null;
+    if (typeof v === 'object') return '[unserializable]';
+    return String(v);
+  }
+}
+
+function snapshotStorage(W) {
+  const out = {};
+  try {
+    const ls = W.localStorage;
+    for (let i = 0; i < ls.length; i++) {
+      const k = ls.key(i);
+      out[k] = ls.getItem(k);
+    }
+  } catch (_) {}
+  return out;
+}
+
+/* ----------------------------- Mutation flush ---------------------------- */
+function flushMutations(rootBody) {
+  const buf = state.mutationBuffer;
+  if (!buf.length) return;
+  state.mutationBuffer = [];
+  if (!state.recording) return;
+
+  // Delta-encode: dedupe attribute and characterData changes per (node,attr)
+  // keeping only the FINAL value within this 33ms frame. childList records
+  // are kept in original order because order matters.
+  const lastAttr = new Map(); // node -> Map(attrName -> value)
+  const lastText = new Map(); // node -> finalValue
+  const childListRecs = [];
+
+  for (const r of buf) {
+    if (r.type === 'attributes') {
+      let m = lastAttr.get(r.target);
+      if (!m) { m = new Map(); lastAttr.set(r.target, m); }
+      // store final attribute value (live read from element).
+      let val = null;
+      try { val = r.target.getAttribute(r.attributeName); } catch (_) {}
+      m.set(r.attributeName, val);
+    } else if (r.type === 'characterData') {
+      try { lastText.set(r.target, r.target.data); } catch (_) {}
+    } else if (r.type === 'childList') {
+      childListRecs.push(r);
+    }
+  }
+
+  const out = [];
+
+  // Emit attribute deltas
+  for (const [node, m] of lastAttr) {
+    const path = computePath(node, rootBody);
+    if (!path) continue;
+    for (const [name, value] of m) {
+      out.push({ k: 'attr', p: path, n: name, v: value });
+    }
+  }
+  // Emit text deltas
+  for (const [node, value] of lastText) {
+    const path = computePath(node, rootBody);
+    if (!path) continue;
+    out.push({ k: 'text', p: path, v: value });
+  }
+  // Emit childList in original order
+  for (const r of childListRecs) {
+    const parentPath = computePath(r.target, rootBody);
+    if (!parentPath) continue;
+    // Removals first, using previousSibling to compute index in pre-removal layout.
+    if (r.removedNodes && r.removedNodes.length) {
+      let idx = 0;
+      if (r.previousSibling) {
+        // Walk current children to find previousSibling, then idx = its position + 1.
+        // (previousSibling is still in tree.)
+        let cur = r.target.firstChild, i = 0, found = false;
+        while (cur) {
+          if (cur === r.previousSibling) { idx = i + 1; found = true; break; }
+          i++; cur = cur.nextSibling;
+        }
+        if (!found) idx = 0;
+      }
+      for (let i = 0; i < r.removedNodes.length; i++) {
+        out.push({ k: 'rm', pp: parentPath, i: idx });
+      }
+    }
+    if (r.addedNodes && r.addedNodes.length) {
+      for (let i = 0; i < r.addedNodes.length; i++) {
+        const an = r.addedNodes[i];
+        const apath = computePath(an, rootBody);
+        const idx = apath ? apath[apath.length - 1] : -1;
+        out.push({ k: 'add', pp: parentPath, i: idx, n: serializeNode(an) });
+      }
+    }
+  }
+
+  if (out.length) recordEvent({ type: 'mutations', m: out });
+}
+
+/* ----------------------------- Iframe lifecycle -------------------------- */
+function loadIframe(url, cb) {
+  state.iframeReady = false;
+  uninstrumentIframe();
+  // Force a fresh navigation even if the URL is identical.
+  try {
+    if (frame.contentWindow && frame.contentWindow.location) {
+      // Use about:blank as a stepping stone so a same-URL re-load always fires.
+      frame.src = 'about:blank';
+    }
+  } catch (_) {}
+  const onLoad = () => {
+    frame.removeEventListener('load', onLoad);
+    // Now navigate to the real target.
+    const onLoad2 = () => {
+      frame.removeEventListener('load', onLoad2);
+      // Wait one tick for DOM to settle then instrument.
+      setTimeout(() => {
+        const ok = instrumentIframe();
+        if (cb) cb(ok);
+      }, 0);
+    };
+    frame.addEventListener('load', onLoad2);
+    frame.src = url;
+  };
+  frame.addEventListener('load', onLoad);
+}
+
+/* ----------------------------- Recording control ------------------------- */
+function startRecording() {
+  if (state.recording) return;
+  if (!state.iframeReady) {
+    log('Load a URL first');
+    return;
+  }
+  state.events = [];
+  state.mutationBuffer = [];
+  state.duration = 0;
+  state.startTime = performance.now();
+  // Snapshot localStorage at t=0 (best effort).
+  try { state.initialStorage = snapshotStorage(frame.contentWindow); }
+  catch (_) { state.initialStorage = {}; }
+  state.recording = true;
+  setStatus('REC', 'rec');
+  $('recBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  $('playBtn').disabled = true;
+  $('exportBtn').disabled = true;
+  evCount.textContent = '0 events';
+  log('Recording started');
+}
+
+function stopRecording() {
+  if (!state.recording) return;
+  // One last flush.
+  try {
+    const D = frame.contentWindow && frame.contentWindow.document;
+    if (D && D.body) flushMutations(D.body);
+  } catch (_) {}
+  state.recording = false;
+  state.duration = state.events.length ? state.events[state.events.length - 1].t : 0;
+  setStatus('idle');
+  $('recBtn').disabled = false;
+  $('stopBtn').disabled = true;
+  $('playBtn').disabled = state.events.length === 0;
+  $('exportBtn').disabled = state.events.length === 0;
+  scrub.max = String(Math.max(1, Math.round(state.duration)));
+  scrub.value = '0';
+  scrub.disabled = state.events.length === 0;
+  updateTimeLabel(0);
+  log(`Recorded ${state.events.length} events, ${(state.duration/1000).toFixed(2)}s`);
+  // Save to IndexedDB.
+  saveToDB().catch((e) => log('DB save failed: ' + e.message));
+}
+
+async function saveToDB() {
+  if (!db) return;
+  const rec = {
+    createdAt: Date.now(),
+    url: state.url,
+    duration: state.duration,
+    events: state.events,
+    initialStorage: state.initialStorage,
+    eventCount: state.events.length,
+  };
+  await dbPut(rec);
+  await refreshDbStatus();
+}
+
+/* ----------------------------- Replay ------------------------------------ */
+function applyMutationBatch(records, root) {
+  // records is an array of {k, p|pp, ...}
+  // childList ops: remove first then add, in the original order.
+  for (const op of records) {
+    try {
+      if (op.k === 'attr') {
+        const n = resolvePath(op.p, root);
+        if (!n || n.nodeType !== 1) continue;
+        if (op.v === null) n.removeAttribute(op.n);
+        else n.setAttribute(op.n, op.v);
+      } else if (op.k === 'text') {
+        const n = resolvePath(op.p, root);
+        if (!n || (n.nodeType !== 3 && n.nodeType !== 8)) continue;
+        n.data = op.v;
+      } else if (op.k === 'rm') {
+        const parent = resolvePath(op.pp, root);
+        if (!parent) continue;
+        const child = parent.childNodes[op.i];
+        if (child) parent.removeChild(child);
+      } else if (op.k === 'add') {
+        const parent = resolvePath(op.pp, root);
+        if (!parent) continue;
+        const newNode = deserializeNode(op.n, root.ownerDocument);
+        if (!newNode) continue;
+        const ref = parent.childNodes[op.i] || null;
+        parent.insertBefore(newNode, ref);
+      }
+    } catch (_) { /* skip individual failed ops */ }
+  }
+}
+
+function dispatchEvent(ev) {
+  let W;
+  try { W = frame.contentWindow; } catch (_) { return; }
+  if (!W) return;
+  const D = W.document;
+  if (!D) return;
+  try {
+    if (ev.type === 'pointer') {
+      const target = D.elementFromPoint(ev.x, ev.y) || D.body;
+      const Ctor = W.PointerEvent || W.MouseEvent;
+      const init = {
+        bubbles: true, cancelable: true, view: W,
+        clientX: ev.x, clientY: ev.y,
+        button: ev.button || 0, buttons: ev.buttons || 0,
+        pointerId: ev.pointerId, pointerType: ev.pointerType || 'mouse',
+      };
+      let pe;
+      try { pe = new Ctor(ev.kind, init); }
+      catch (_) { pe = new W.MouseEvent(ev.kind, init); }
+      target.dispatchEvent(pe);
+    } else if (ev.type === 'key') {
+      const target = D.activeElement || D.body || D;
+      const ke = new W.KeyboardEvent(ev.kind, {
+        bubbles: true, cancelable: true,
+        key: ev.key, code: ev.code, keyCode: ev.keyCode,
+        shiftKey: !!ev.shift, ctrlKey: !!ev.ctrl,
+        altKey: !!ev.alt, metaKey: !!ev.meta,
+        repeat: !!ev.repeat,
+      });
+      // Some browsers don't honour keyCode in KeyboardEvent ctor; patch.
+      try { Object.defineProperty(ke, 'keyCode', { get() { return ev.keyCode; } }); } catch (_) {}
+      try { Object.defineProperty(ke, 'which', { get() { return ev.keyCode; } }); } catch (_) {}
+      target.dispatchEvent(ke);
+      // Also dispatch on document so document-level handlers fire even if
+      // activeElement intercepts.
+      if (target !== D) D.dispatchEvent(new W.KeyboardEvent(ev.kind, {
+        bubbles: true, cancelable: true,
+        key: ev.key, code: ev.code, keyCode: ev.keyCode,
+        shiftKey: !!ev.shift, ctrlKey: !!ev.ctrl,
+        altKey: !!ev.alt, metaKey: !!ev.meta,
+      }));
+    } else if (ev.type === 'resize') {
+      try { W.dispatchEvent(new W.Event('resize')); } catch (_) {}
+    } else if (ev.type === 'storage') {
+      const ls = W.localStorage;
+      if (ev.op === 'set') ls.setItem(ev.key, ev.value);
+      else if (ev.op === 'remove') ls.removeItem(ev.key);
+      else if (ev.op === 'clear') ls.clear();
+    } else if (ev.type === 'mutations') {
+      // Apply recorded mutations as visual fallback. Iframe JS runs in
+      // parallel, so this is supplemental — it ensures replay fidelity
+      // even if the iframe's own JS diverges.
+      const D = frame.contentWindow && frame.contentWindow.document;
+      if (D && D.body) applyMutationBatch(ev.m, D.body);
+    } else if (ev.type === 'idb') {
+      // We do not replay IndexedDB writes — the iframe's own logic re-runs
+      // and reissues them naturally. Captured for inspection.
+    }
+  } catch (e) {
+    // Single-event failures should not crash replay.
+    console.warn('[STM] replay dispatch error', ev.type, e);
+  }
+}
+
+function preApplyInitialStorage() {
+  // Apply state.initialStorage to localStorage BEFORE iframe load.
+  // Since the iframe is same-origin, parent's localStorage is the iframe's
+  // localStorage too.
+  try {
+    if (!state.initialStorage) return;
+    for (const k in state.initialStorage) {
+      try { localStorage.setItem(k, state.initialStorage[k]); } catch (_) {}
+    }
+  } catch (_) {}
+}
+
+function startReplay(fromT) {
+  if (state.replaying) stopReplay();
+  if (state.events.length === 0) return;
+  fromT = fromT || 0;
+  state.replaying = true;
+  state.paused = false;
+  $('playBtn').disabled = true;
+  $('pauseBtn').disabled = false;
+  $('recBtn').disabled = true;
+  $('stopBtn').disabled = false;
+  setStatus(`PLAY ${state.speed}×`, 'play');
+
+  // Pre-apply localStorage and reload iframe at original URL.
+  preApplyInitialStorage();
+  loadIframe(state.url, () => {
+    // Note: do NOT re-instrument capture during replay; instrumentIframe
+    // checks state.recording, so capture is a no-op while we are replaying.
+    state.replayStartedAt = performance.now();
+    state.replayBaseT = fromT;
+    state.replayCursor = 0;
+    // Skip to first event >= fromT, applying any mutation/storage events
+    // in the [0, fromT] window instantly so visual state is roughly right.
+    while (state.replayCursor < state.events.length && state.events[state.replayCursor].t < fromT) {
+      const ev = state.events[state.replayCursor];
+      // Apply state-mutating events instantly to "catch up".
+      if (ev.type === 'storage' || ev.type === 'mutations' || ev.type === 'resize') {
+        dispatchEvent(ev);
+      }
+      state.replayCursor++;
+    }
+    scheduleNext();
+  });
+}
+
+function scheduleNext() {
+  if (!state.replaying || state.paused) return;
+  if (state.replayCursor >= state.events.length) {
+    // Done.
+    finishReplay();
+    return;
+  }
+  const ev = state.events[state.replayCursor];
+  const virtualNow = state.replayBaseT + (performance.now() - state.replayStartedAt) * state.speed;
+  let waitMs = (ev.t - virtualNow) / state.speed;
+  if (waitMs < 0) waitMs = 0;
+  state.replayTimer = setTimeout(() => {
+    if (!state.replaying || state.paused) return;
+    dispatchEvent(ev);
+    state.replayCursor++;
+    // Advance scrubber.
+    const tNow = state.replayBaseT + (performance.now() - state.replayStartedAt) * state.speed;
+    scrub.value = String(Math.min(state.duration, Math.round(tNow)));
+    updateTimeLabel(tNow);
+    scheduleNext();
+  }, waitMs);
+}
+
+function finishReplay() {
+  if (state.replayTimer) { clearTimeout(state.replayTimer); state.replayTimer = null; }
+  state.replaying = false;
+  state.paused = false;
+  setStatus('idle');
+  $('playBtn').disabled = state.events.length === 0;
+  $('pauseBtn').disabled = true;
+  $('recBtn').disabled = false;
+  $('stopBtn').disabled = true;
+  scrub.value = String(Math.round(state.duration));
+  updateTimeLabel(state.duration);
+  log('Replay complete');
+}
+
+function stopReplay() {
+  if (state.replayTimer) { clearTimeout(state.replayTimer); state.replayTimer = null; }
+  state.replaying = false;
+  state.paused = false;
+  setStatus('idle');
+  $('playBtn').disabled = state.events.length === 0;
+  $('pauseBtn').disabled = true;
+  $('recBtn').disabled = false;
+  $('stopBtn').disabled = true;
+}
+
+function pauseReplay() {
+  if (!state.replaying) return;
+  state.paused = !state.paused;
+  if (state.paused) {
+    if (state.replayTimer) { clearTimeout(state.replayTimer); state.replayTimer = null; }
+    setStatus('paused');
+    $('pauseBtn').textContent = '▶ Resume';
+  } else {
+    // Recompute base from current scrub position.
+    const tNow = parseInt(scrub.value, 10) || 0;
+    state.replayBaseT = tNow;
+    state.replayStartedAt = performance.now();
+    setStatus(`PLAY ${state.speed}×`, 'play');
+    $('pauseBtn').textContent = '❚❚ Pause';
+    scheduleNext();
+  }
+}
+
+/* ----------------------------- Scrub ------------------------------------- */
+function onScrub() {
+  if (state.events.length === 0) return;
+  const t = parseInt(scrub.value, 10) || 0;
+  state.scrubT = t;
+  updateTimeLabel(t);
+  // If currently replaying, jump.
+  if (state.replaying) {
+    if (state.replayTimer) { clearTimeout(state.replayTimer); state.replayTimer = null; }
+    // Re-derive state from the start to t.
+    state.replaying = false;
+    startReplay(t);
+  }
+}
+
+function updateTimeLabel(t) {
+  timeLabel.textContent = `${fmtTime(t)} / ${fmtTime(state.duration)}`;
+}
+function fmtTime(ms) {
+  ms = Math.max(0, ms|0);
+  const m = (ms / 60000)|0;
+  const s = ((ms % 60000) / 1000)|0;
+  const r = ms % 1000;
+  return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}.${String(r).padStart(3,'0')}`;
+}
+
+/* ----------------------------- Export / Import --------------------------- */
+function exportRecording() {
+  const blob = new Blob([JSON.stringify(buildManifest(), null, 0)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  a.href = url;
+  a.download = `${APP_NAME}-${stamp}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  // Report size in log (bytes).
+  log(`Exported ${blob.size} bytes (${state.events.length} events)`);
+}
+function buildManifest() {
+  return {
+    manifest: {
+      app: APP_NAME,
+      version: 1,
+      createdAt: new Date().toISOString(),
+      ua: navigator.userAgent,
+      eventCount: state.events.length,
+      duration: state.duration,
+    },
+    url: state.url,
+    initialStorage: state.initialStorage,
+    events: state.events,
+  };
+}
+function importRecording(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      if (!data || !Array.isArray(data.events)) throw new Error('bad format');
+      state.url = data.url || state.url;
+      state.events = data.events;
+      state.initialStorage = data.initialStorage || {};
+      state.duration = (data.manifest && data.manifest.duration) || (data.events.length ? data.events[data.events.length-1].t : 0);
+      $('urlInput').value = state.url;
+      scrub.max = String(Math.max(1, Math.round(state.duration)));
+      scrub.value = '0';
+      scrub.disabled = false;
+      $('playBtn').disabled = false;
+      $('exportBtn').disabled = false;
+      evCount.textContent = `${state.events.length} events`;
+      updateTimeLabel(0);
+      // Load iframe at the imported URL so play is ready.
+      state.url && loadIframe(state.url, () => log('Imported and ready to replay'));
+    } catch (e) {
+      log('Import failed: ' + e.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+/* ----------------------------- Demo -------------------------------------- */
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+async function runDemo() {
+  state.url = '../games/snake3.html';
+  $('urlInput').value = state.url;
+  setStatus('demo: loading');
+  await new Promise(resolve => loadIframe(state.url, () => resolve()));
+  // Give the iframe a beat to set up Three.js / DOM.
+  await sleep(500);
+  // Start recording.
+  startRecording();
+  // Programmatically dispatch a canned 5-second sequence: arrow keys to wake
+  // the game and steer the snake around in a square.
+  const W = frame.contentWindow;
+  const D = W && W.document;
+  const tap = (key, code, kc) => {
+    if (!D || !W) return;
+    const down = new W.KeyboardEvent('keydown', { bubbles: true, cancelable: true, key, code, keyCode: kc });
+    const up = new W.KeyboardEvent('keyup', { bubbles: true, cancelable: true, key, code, keyCode: kc });
+    try { Object.defineProperty(down, 'keyCode', { get() { return kc; } }); } catch (_) {}
+    try { Object.defineProperty(up, 'keyCode', { get() { return kc; } }); } catch (_) {}
+    D.dispatchEvent(down); D.dispatchEvent(up);
+  };
+  // Click the Start Game button if a welcome screen is showing.
+  try {
+    const startBtn = D && D.querySelector('#welcome button, button[onclick*="startGame"]');
+    if (startBtn) {
+      const rect = startBtn.getBoundingClientRect();
+      const cx = (rect.left + rect.width / 2) | 0;
+      const cy = (rect.top + rect.height / 2) | 0;
+      const fire = (kind) => {
+        const ev = new W.PointerEvent(kind, {
+          bubbles: true, cancelable: true, view: W,
+          clientX: cx, clientY: cy, button: 0, buttons: kind === 'pointerdown' ? 1 : 0,
+          pointerType: 'mouse', pointerId: 1,
+        });
+        startBtn.dispatchEvent(ev);
+      };
+      fire('pointerdown'); fire('pointerup');
+      const click = new W.MouseEvent('click', { bubbles: true, cancelable: true, view: W, clientX: cx, clientY: cy });
+      startBtn.dispatchEvent(click);
+    }
+  } catch (_) {}
+  await sleep(400);
+  // Steer pattern.
+  const steps = [
+    ['ArrowUp',    'ArrowUp',    38],
+    ['ArrowRight', 'ArrowRight', 39],
+    ['ArrowDown',  'ArrowDown',  40],
+    ['ArrowLeft',  'ArrowLeft',  37],
+    ['ArrowUp',    'ArrowUp',    38],
+    ['ArrowRight', 'ArrowRight', 39],
+  ];
+  const interval = 4500 / steps.length;  // spread over remaining ~4.5s
+  for (const [k, c, kc] of steps) {
+    tap(k, c, kc);
+    await sleep(interval);
+  }
+  // Stop recording (~5s total).
+  stopRecording();
+  // Play back at 2×.
+  speedSel.value = '2';
+  state.speed = 2;
+  setStatus('demo: replaying 2×');
+  startReplay(0);
+}
+
+/* ----------------------------- UI bindings ------------------------------- */
+$('loadBtn').addEventListener('click', () => {
+  state.url = $('urlInput').value.trim();
+  if (!state.url) return;
+  loadIframe(state.url, (ok) => {
+    if (ok) log('Loaded: ' + state.url);
+    else log('Iframe loaded but instrumentation may have failed');
+  });
+});
+$('recBtn').addEventListener('click', startRecording);
+$('stopBtn').addEventListener('click', () => {
+  if (state.recording) stopRecording();
+  else if (state.replaying) stopReplay();
+});
+$('playBtn').addEventListener('click', () => startReplay(parseInt(scrub.value, 10) || 0));
+$('pauseBtn').addEventListener('click', pauseReplay);
+$('exportBtn').addEventListener('click', exportRecording);
+$('importBtn').addEventListener('click', () => $('importFile').click());
+$('importFile').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0];
+  if (f) importRecording(f);
+  e.target.value = '';
+});
+$('demoBtn').addEventListener('click', () => { runDemo().catch(e => log('Demo error: ' + e.message)); });
+$('clearBtn').addEventListener('click', () => {
+  state.events = [];
+  state.duration = 0;
+  state.initialStorage = {};
+  evCount.textContent = '0 events';
+  scrub.value = '0';
+  scrub.max = '0';
+  scrub.disabled = true;
+  $('playBtn').disabled = true;
+  $('exportBtn').disabled = true;
+  updateTimeLabel(0);
+  log('Cleared');
+});
+speedSel.addEventListener('change', () => {
+  state.speed = parseFloat(speedSel.value) || 1;
+  if (state.replaying) {
+    // Recompute base so playback continues smoothly at the new speed.
+    const tNow = state.replayBaseT + (performance.now() - state.replayStartedAt) * (state.speed === 0 ? 1 : 1);
+    state.replayBaseT = parseInt(scrub.value, 10) || 0;
+    state.replayStartedAt = performance.now();
+    setStatus(`PLAY ${state.speed}×`, 'play');
+    if (state.replayTimer) { clearTimeout(state.replayTimer); state.replayTimer = null; }
+    scheduleNext();
+  }
+});
+scrub.addEventListener('input', onScrub);
+
+/* ----------------------------- Boot -------------------------------------- */
+(async function boot() {
+  try {
+    db = await openDB();
+    await refreshDbStatus();
+  } catch (e) {
+    $('dbStatus').textContent = 'DB: error';
+    log('IndexedDB unavailable: ' + e.message);
+  }
+  // Auto-load the default URL so the user can hit Record immediately.
+  state.url = $('urlInput').value.trim();
+  if (state.url) {
+    loadIframe(state.url, (ok) => {
+      if (ok) log('Ready');
+    });
+  }
+})();
+</script>
+</body>
+</html>

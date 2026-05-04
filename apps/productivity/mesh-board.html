@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="description" content="Yjs CRDT over PeerJS — infinite canvas with embedded iframe widgets">
+    <meta name="keywords" content="crdt,yjs,p2p,canvas">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🛠%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mesh Board — collaborative iframe workspace</title>
+
+<!--
+  ════════════════════════════════════════════════════════════════════════════
+   Mesh Board
+  ════════════════════════════════════════════════════════════════════════════
+
+   CRDT library
+   ────────────
+     Yjs, loaded as an ESM bundle from jsDelivr:
+         import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.18/+esm'
+     Why Yjs (and not Automerge or y-webrtc):
+       • jsDelivr serves a stable single-file ESM build with all deps inlined,
+         so no extra import-map / dependency wiring is required.
+       • Y.Map gives us per-widget last-writer-wins semantics with no glue.
+       • encodeStateAsUpdate / applyUpdate make P2P transport over arbitrary
+         data channels straightforward.
+     We DO NOT use y-webrtc — PeerJS is the transport so the host's PeerJS
+     ID can serve as the human-shareable "room code" (matches the rest of
+     this repo's P2P apps).
+
+   Transport
+   ─────────
+     PeerJS data channels.  Topology: the host's peer id IS the room code.
+     When a peer joins the host, the host returns its current peer-list so
+     the new arrival dials every existing peer.  As each dial completes,
+     both ends exchange a full Yjs state snapshot.  After the handshake the
+     network is a full mesh and every Yjs `update` event is broadcast over
+     every open data connection.  Awareness (cursors / handles) travels on
+     the same connections as a non-CRDT side-channel.
+
+   Same-origin caveat (READ THIS)
+   ──────────────────────────────
+     localStorage is keyed PER-ORIGIN, not per-path.  Because the parent
+     (mesh-board.html) and every dropped widget are served from the same
+     origin (e.g. http://localhost:8000), they ALL share one localStorage
+     bucket.  Consequences:
+
+       1.  A widget's "snapshot localStorage" captures the entire shared
+           bucket at that moment, not just keys belonging to that specific
+           widget URL.  We filter out our own mesh-board-* keys so we don't
+           recurse.
+       2.  When a widget is hydrated we seed localStorage from its snapshot
+           and *then* set iframe.src.  The iframe's first synchronous read
+           sees the seeded data.  If a workspace contains several widgets
+           we hydrate them sequentially (waiting for each iframe's `load`)
+           so one widget's seed isn't clobbered by the next before the
+           first iframe has run its scripts.
+       3.  If two widgets touch the SAME localStorage key (e.g. two snake
+           clones), the most-recently-snapshotted value wins on hydrate.
+           That matches the spec's verification step ("snake's last score").
+
+   File / app conventions
+   ──────────────────────
+     Single self-contained HTML file.  CDN imports for PeerJS, qrcodejs and
+     Yjs (documented above).  No build step.  Persistence is localStorage
+     under the namespace `mesh-board-*`, plus the user-facing
+     `workspace.json` import/export round-trip.
+  ════════════════════════════════════════════════════════════════════════════
+-->
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --panel-2: #1f2630;
+    --border: #2a323d;
+    --accent: #79c0ff;
+    --accent-2: #d2a8ff;
+    --good: #3fb950;
+    --warn: #d29922;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  *,*::before,*::after { box-sizing: border-box; }
+  html, body { margin:0; padding:0; height:100%; overflow:hidden; background:var(--bg); color:var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, system-ui, sans-serif; font-size:14px; }
+  button, input { font: inherit; color: inherit; }
+  button { background: var(--panel-2); border:1px solid var(--border); color:var(--text); border-radius:6px;
+    padding:6px 10px; cursor:pointer; transition:background .15s,border-color .15s; }
+  button:hover { background:#293241; border-color:#3a4453; }
+  button:active { transform:translateY(1px); }
+  button.primary { background: linear-gradient(180deg,#1f6feb,#1158c7); border-color:#1f6feb; }
+  button.primary:hover { background: linear-gradient(180deg,#388bfd,#1f6feb); }
+  input[type=text], input:not([type]) { background:var(--panel-2); border:1px solid var(--border); border-radius:6px;
+    padding:6px 10px; color:var(--text); outline:none; }
+  input:focus { border-color:var(--accent); }
+
+  /* ── Layout ─────────────────────────────────────────── */
+  #topBar { position:fixed; top:0; left:0; right:0; height:48px; background:var(--panel);
+    border-bottom:1px solid var(--border); display:flex; align-items:center; gap:12px; padding:0 12px; z-index:50; }
+  #topBar .brand { font-weight:600; letter-spacing:.3px; }
+  #topBar .group { display:flex; align-items:center; gap:6px; }
+  #topBar .spacer { flex:1; }
+  #roomLabel { font-family: ui-monospace, SF Mono, Menlo, monospace; font-size:12px; color:var(--muted);
+    background:var(--panel-2); padding:4px 8px; border-radius:4px; border:1px solid var(--border); user-select:all; max-width:240px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #peerCount { font-size:12px; color:var(--muted); }
+  #handleInput { width:120px; }
+
+  #sidePanel { position:fixed; top:48px; bottom:0; left:0; width:280px; background:var(--panel);
+    border-right:1px solid var(--border); display:flex; flex-direction:column; z-index:40; }
+  #sidePanel header { padding:10px 12px; border-bottom:1px solid var(--border); font-size:12px; color:var(--muted);
+    text-transform:uppercase; letter-spacing:.6px; display:flex; align-items:center; gap:8px; }
+  #searchInput { margin:8px 12px; }
+  #appList { flex:1; overflow-y:auto; padding:0 8px 12px; }
+  .app-card { display:flex; gap:10px; align-items:center; padding:8px 10px; border-radius:6px;
+    cursor:grab; user-select:none; border:1px solid transparent; transition:background .12s, border-color .12s; }
+  .app-card:hover { background:var(--panel-2); border-color:var(--border); }
+  .app-card:active { cursor:grabbing; }
+  .app-card .ico { font-size:22px; width:32px; text-align:center; }
+  .app-card .meta { display:flex; flex-direction:column; min-width:0; }
+  .app-card .meta strong { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+  .app-card .meta small { color:var(--muted); font-size:11px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; max-width:200px; }
+
+  #board { position:fixed; top:48px; left:280px; right:0; bottom:0; overflow:hidden; cursor:default;
+    background:
+      radial-gradient(circle at 1px 1px, #1f2630 1px, transparent 1px) 0 0/24px 24px,
+      var(--bg);
+  }
+  body.pan-mode #board, #board.panning { cursor: grab; }
+  #board.panning { cursor: grabbing; }
+  #world { position:absolute; top:0; left:0; width:0; height:0; transform-origin:0 0; will-change:transform; }
+  #cursors { position:absolute; inset:0; pointer-events:none; overflow:hidden; }
+  #hud { position:absolute; bottom:10px; left:10px; color:var(--muted); font-size:11px; pointer-events:none;
+    background:rgba(0,0,0,.35); padding:4px 8px; border-radius:4px; }
+  #zoomLabel { position:absolute; bottom:10px; right:10px; color:var(--muted); font-size:11px; font-family:ui-monospace,monospace;
+    background:rgba(0,0,0,.35); padding:4px 8px; border-radius:4px; }
+
+  /* ── Widgets ─────────────────────────────────────────── */
+  .widget { position:absolute; background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    box-shadow: var(--shadow); display:flex; flex-direction:column; overflow:hidden; min-width:160px; min-height:120px; }
+  .widget-header { display:flex; align-items:center; gap:6px; padding:4px 6px; background:var(--panel-2);
+    border-bottom:1px solid var(--border); cursor:move; user-select:none; flex:0 0 30px; }
+  .widget-title { font-size:12px; font-weight:600; flex:1; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
+  .widget-header button { padding:2px 6px; font-size:11px; background:transparent; border:none; color:var(--muted); }
+  .widget-header button:hover { color:var(--text); background:var(--border); }
+  .widget-body { flex:1; position:relative; background:#fff; }
+  .widget-body iframe { width:100%; height:100%; border:0; display:block; background:#fff; }
+  .widget-resize { position:absolute; right:0; bottom:0; width:14px; height:14px; cursor:nwse-resize;
+    background: linear-gradient(135deg, transparent 50%, var(--muted) 50%, var(--muted) 60%, transparent 60%, transparent 70%, var(--muted) 70%, var(--muted) 80%, transparent 80%);
+    z-index:5; }
+  .widget.snapped .widget-header { box-shadow: inset 0 0 0 2px var(--good); }
+
+  /* ── Cursors (awareness) ─────────────────────────────── */
+  .cursor { position:absolute; top:0; left:0; pointer-events:none; transform:translate(-9999px,-9999px); will-change:transform; transition: transform .08s linear; z-index:30; }
+  .cursor-dot { width:12px; height:12px; border-radius:50%; border:2px solid white; box-shadow:0 1px 4px rgba(0,0,0,.5); }
+  .cursor-label { margin-top:3px; padding:1px 6px; border-radius:4px; color:white; font-size:11px; font-weight:600; white-space:nowrap; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+
+  /* ── Modal ───────────────────────────────────────────── */
+  .modal { position:fixed; inset:0; background:rgba(0,0,0,.65); display:flex; align-items:center; justify-content:center; z-index:200; }
+  .modal.hidden { display:none; }
+  .modal-card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:20px;
+    text-align:center; max-width:340px; box-shadow: var(--shadow); }
+  .modal-card h3 { margin:0 0 12px; font-size:16px; }
+  .modal-card #qrContainer { background:white; padding:10px; border-radius:6px; display:inline-block; }
+  .modal-card #qrLink { display:block; margin:12px 0; font-family:ui-monospace,monospace; font-size:11px; color:var(--muted); word-break:break-all; }
+
+  /* ── Toast ───────────────────────────────────────────── */
+  #toast { position:fixed; bottom:20px; left:50%; transform:translateX(-50%) translateY(60px);
+    background:var(--panel-2); border:1px solid var(--border); padding:10px 16px; border-radius:8px;
+    box-shadow:var(--shadow); opacity:0; transition: transform .25s, opacity .25s; pointer-events:none; z-index:300; }
+  #toast.show { transform:translateX(-50%) translateY(0); opacity:1; }
+
+  /* ── Drop hover state ────────────────────────────────── */
+  #board.drop-hover { outline: 2px dashed var(--accent); outline-offset:-8px; }
+
+  /* ── Mobile-ish ──────────────────────────────────────── */
+  @media (max-width: 720px) {
+    #sidePanel { width:220px; }
+    #board { left:220px; }
+    #handleInput { width:80px; }
+    #roomLabel { max-width:120px; }
+  }
+</style>
+</head>
+<body>
+
+<header id="topBar">
+  <div class="brand">🕸️ Mesh Board</div>
+  <div class="group">
+    <input id="handleInput" type="text" placeholder="Your name" />
+    <button id="newRoomBtn" class="primary" title="Create a new room">New room</button>
+    <span id="roomLabel">offline</span>
+    <button id="copyLinkBtn" title="Copy join link">🔗</button>
+    <button id="qrBtn" title="Show QR code to invite a peer">📱</button>
+    <span id="peerCount">0 peers</span>
+  </div>
+  <div class="spacer"></div>
+  <div class="group">
+    <button id="snapAllBtn" title="Snapshot every widget's localStorage">📸 All</button>
+    <button id="exportBtn" title="Download workspace.json">⬇️ Export</button>
+    <input id="importFile" type="file" accept="application/json" hidden />
+    <button id="importBtn" title="Load workspace.json">⬆️ Import</button>
+    <button id="fitBtn" title="Reset zoom / pan">🎯 Fit</button>
+  </div>
+</header>
+
+<aside id="sidePanel">
+  <header><span>📚 Apps</span><span id="appCount" style="margin-left:auto;color:var(--muted);font-size:11px;"></span></header>
+  <input id="searchInput" type="text" placeholder="Search apps…" />
+  <div id="appList">Loading catalog…</div>
+</aside>
+
+<main id="board">
+  <div id="world"></div>
+  <div id="cursors"></div>
+  <div id="hud">Hold <kbd>Space</kbd> + drag (or middle-click) to pan · Scroll to zoom · Drag apps from left → board</div>
+  <div id="zoomLabel">100%</div>
+</main>
+
+<div id="qrModal" class="modal hidden">
+  <div class="modal-card">
+    <h3>Scan to join the room</h3>
+    <div id="qrContainer"></div>
+    <code id="qrLink"></code>
+    <div style="display:flex;gap:8px;justify-content:center;">
+      <button id="qrCopyBtn">Copy link</button>
+      <button id="qrCloseBtn">Close</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script type="module">
+// ════════════════════════════════════════════════════════════════════════════
+// CRDT: Yjs (see file-header comment for the choice rationale).
+// ════════════════════════════════════════════════════════════════════════════
+import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.18/+esm';
+
+// ── Constants ─────────────────────────────────────────────────────────────
+const APP_NAME       = 'mesh-board';
+const HANDLE_KEY     = `${APP_NAME}-handle`;
+const WORKSPACE_KEY  = `${APP_NAME}-workspace`;
+const LS_PREFIX      = `${APP_NAME}-`;          // anything starting with this is OUR stuff
+const REPO_ROOT      = new URL('../../', location.href);
+const CONFIG_URL     = new URL('data/config/utility_apps_config.json', REPO_ROOT).href;
+const CURSOR_HZ_MS   = 33;
+const DRAG_HZ_MS     = 50;
+const AWARENESS_TTL  = 12000;
+
+// ── Tiny helpers ──────────────────────────────────────────────────────────
+const $  = (s, r=document) => r.querySelector(s);
+const $$ = (s, r=document) => Array.from(r.querySelectorAll(s));
+const uid = () => Math.random().toString(36).slice(2, 10);
+const clamp = (v,a,b) => Math.max(a, Math.min(b, v));
+const isInputFocused = () => {
+  const el = document.activeElement;
+  return el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+};
+
+const els = {
+  topBar: $('#topBar'),
+  appList: $('#appList'),
+  appCount: $('#appCount'),
+  searchInput: $('#searchInput'),
+  board: $('#board'),
+  world: $('#world'),
+  cursors: $('#cursors'),
+  newRoomBtn: $('#newRoomBtn'),
+  roomLabel: $('#roomLabel'),
+  copyLinkBtn: $('#copyLinkBtn'),
+  qrBtn: $('#qrBtn'),
+  qrModal: $('#qrModal'),
+  qrContainer: $('#qrContainer'),
+  qrLink: $('#qrLink'),
+  qrCopyBtn: $('#qrCopyBtn'),
+  qrCloseBtn: $('#qrCloseBtn'),
+  peerCount: $('#peerCount'),
+  exportBtn: $('#exportBtn'),
+  importBtn: $('#importBtn'),
+  importFile: $('#importFile'),
+  fitBtn: $('#fitBtn'),
+  snapAllBtn: $('#snapAllBtn'),
+  hud: $('#hud'),
+  zoomLabel: $('#zoomLabel'),
+  handleInput: $('#handleInput'),
+  toast: $('#toast'),
+};
+
+let toastTimer = null;
+function toast(msg, ms=2200) {
+  els.toast.textContent = msg;
+  els.toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => els.toast.classList.remove('show'), ms);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// CRDT document
+// ════════════════════════════════════════════════════════════════════════════
+const ydoc      = new Y.Doc();
+const yWidgets  = ydoc.getMap('widgets');     // id -> { url, title, x, y, w, h, z, storageSnapshot }
+const widgetEls = new Map();                  // id -> DOM element
+
+// Yjs `update` event: broadcast to peers, persist locally. We tag remote-applied
+// updates with origin === 'remote' so we don't echo them back into the mesh.
+ydoc.on('update', (update, origin) => {
+  if (origin !== 'remote') broadcastUpdate(update);
+  persistLocal();
+});
+
+// Map observer: react to additions / deletions / value-replacements.
+yWidgets.observe(event => {
+  for (const [id, change] of event.changes.keys) {
+    if (change.action === 'delete') {
+      const el = widgetEls.get(id);
+      if (el) el.remove();
+      widgetEls.delete(id);
+    } else if (change.action === 'add') {
+      enqueueWidgetCreate(id, yWidgets.get(id));
+    } else if (change.action === 'update') {
+      updateWidgetEl(id, yWidgets.get(id));
+    }
+  }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Widget lifecycle  (sequential creation so per-widget localStorage seeding
+// isn't clobbered by a sibling widget seeding mid-load)
+// ════════════════════════════════════════════════════════════════════════════
+const createQueue = [];
+let creating = false;
+function enqueueWidgetCreate(id, data) {
+  createQueue.push({ id, data });
+  if (!creating) processCreateQueue();
+}
+async function processCreateQueue() {
+  creating = true;
+  while (createQueue.length) {
+    const { id, data } = createQueue.shift();
+    try { await createWidgetEl(id, data); }
+    catch (e) { console.error('widget create failed', e); }
+  }
+  creating = false;
+}
+
+async function createWidgetEl(id, data) {
+  if (widgetEls.has(id)) { updateWidgetEl(id, data); return; }
+  const el = document.createElement('div');
+  el.className = 'widget';
+  el.dataset.id = id;
+  el.style.left   = data.x + 'px';
+  el.style.top    = data.y + 'px';
+  el.style.width  = data.w + 'px';
+  el.style.height = data.h + 'px';
+  el.style.zIndex = data.z || 1;
+  el.innerHTML = `
+    <header class="widget-header">
+      <span class="widget-title"></span>
+      <button class="widget-snap"  title="Snapshot localStorage">📸</button>
+      <button class="widget-reload" title="Reload">↻</button>
+      <button class="widget-close" title="Remove">✕</button>
+    </header>
+    <div class="widget-body"><iframe sandbox="allow-scripts allow-same-origin allow-forms"></iframe></div>
+    <div class="widget-resize"></div>`;
+  el.querySelector('.widget-title').textContent = data.title || data.url.split('/').pop();
+  els.world.appendChild(el);
+  widgetEls.set(id, el);
+
+  // Wire up controls immediately so users can drag / close even while the
+  // iframe is still loading.
+  el.querySelector('.widget-close').onclick  = e => { e.stopPropagation(); removeWidget(id); };
+  el.querySelector('.widget-snap').onclick   = e => { e.stopPropagation(); snapshotWidget(id); };
+  el.querySelector('.widget-reload').onclick = e => { e.stopPropagation(); reloadWidget(id); };
+  el.querySelector('.widget-header').addEventListener('mousedown', e => {
+    if (e.target.closest('button')) return;
+    startDragWidget(id, e);
+  });
+  el.querySelector('.widget-resize').addEventListener('mousedown', e => startResizeWidget(id, e));
+  el.addEventListener('mousedown', () => bringToFront(id), true);
+
+  // Seed shared localStorage from this widget's snapshot BEFORE setting iframe.src
+  // so the iframe's scripts read the seeded values on first execution.
+  if (data.storageSnapshot) applyStorageSnapshot(data.storageSnapshot);
+
+  const iframe = el.querySelector('iframe');
+  await new Promise(resolve => {
+    iframe.addEventListener('load',  () => resolve(), { once: true });
+    iframe.addEventListener('error', () => resolve(), { once: true });
+    iframe.src = data.url;
+  });
+  // Give the iframe a beat to run its inline scripts and read localStorage
+  // before we move on to seed the next widget.
+  await new Promise(r => setTimeout(r, 60));
+}
+
+function updateWidgetEl(id, data) {
+  // Avoid overriding the DOM while WE are dragging/resizing this widget.
+  if (widgetDrag?.id === id || widgetResize?.id === id) return;
+  let el = widgetEls.get(id);
+  if (!el) { enqueueWidgetCreate(id, data); return; }
+  el.style.left   = data.x + 'px';
+  el.style.top    = data.y + 'px';
+  el.style.width  = data.w + 'px';
+  el.style.height = data.h + 'px';
+  el.style.zIndex = data.z || 1;
+  const titleEl = el.querySelector('.widget-title');
+  if (titleEl && data.title) titleEl.textContent = data.title;
+  el.classList.toggle('snapped', !!(data.storageSnapshot && Object.keys(data.storageSnapshot).length));
+}
+
+function setWidget(id, patch) {
+  const cur = yWidgets.get(id);
+  if (!cur) return;
+  yWidgets.set(id, { ...cur, ...patch });
+}
+
+function removeWidget(id) { yWidgets.delete(id); }
+
+function reloadWidget(id) {
+  const el = widgetEls.get(id);
+  if (!el) return;
+  const iframe = el.querySelector('iframe');
+  const data = yWidgets.get(id);
+  if (data?.storageSnapshot) applyStorageSnapshot(data.storageSnapshot);
+  iframe.src = iframe.src;
+}
+
+function bringToFront(id) {
+  let maxZ = 0;
+  yWidgets.forEach(v => { if ((v.z||0) > maxZ) maxZ = v.z; });
+  const cur = yWidgets.get(id);
+  if (!cur || cur.z === maxZ) return;
+  setWidget(id, { z: maxZ + 1 });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// localStorage snapshots
+//
+// Same-origin iframes share parent.localStorage.  A widget's "storageSnapshot"
+// is a flat { key: value } capture of every NON-mesh-board key at snapshot
+// time.  On hydrate we re-write each pair to localStorage before iframe.src
+// is set so the iframe sees the seeded data on first read.
+// ════════════════════════════════════════════════════════════════════════════
+function applyStorageSnapshot(snap) {
+  if (!snap) return;
+  for (const [k, v] of Object.entries(snap)) {
+    if (k.startsWith(LS_PREFIX)) continue;       // never touch mesh-board's own keys
+    try { localStorage.setItem(k, v); } catch {}
+  }
+}
+
+function captureLocalStorageOf(win) {
+  const ls  = win.localStorage;
+  const out = {};
+  for (let i = 0; i < ls.length; i++) {
+    const k = ls.key(i);
+    if (!k || k.startsWith(LS_PREFIX)) continue; // skip our own bookkeeping keys
+    try { out[k] = ls.getItem(k); } catch {}
+  }
+  return out;
+}
+
+function snapshotWidget(id) {
+  const el = widgetEls.get(id);
+  if (!el) return;
+  const iframe = el.querySelector('iframe');
+  let snap;
+  try {
+    snap = captureLocalStorageOf(iframe.contentWindow);
+  } catch (e) {
+    toast('⚠ Snapshot blocked (cross-origin iframe).');
+    return;
+  }
+  setWidget(id, { storageSnapshot: snap });
+  toast(`📸 Captured ${Object.keys(snap).length} key${Object.keys(snap).length===1?'':'s'} for ${yWidgets.get(id).title}`);
+}
+
+function snapshotAll() {
+  let n = 0;
+  yWidgets.forEach((_, id) => { snapshotWidget(id); n++; });
+  if (n === 0) toast('No widgets on the board yet.');
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Pan & zoom
+// ════════════════════════════════════════════════════════════════════════════
+const view = { panX: 0, panY: 0, zoom: 1 };
+let spaceDown = false, panning = false, panStart = null;
+
+function applyView() {
+  els.world.style.transform = `translate3d(${view.panX}px, ${view.panY}px, 0) scale(${view.zoom})`;
+  els.zoomLabel.textContent = Math.round(view.zoom * 100) + '%';
+  renderAwareness();
+}
+applyView();
+
+function screenToWorld(sx, sy) {
+  const r = els.board.getBoundingClientRect();
+  return { x: (sx - r.left - view.panX) / view.zoom, y: (sy - r.top - view.panY) / view.zoom };
+}
+function worldToScreen(wx, wy) {
+  return { x: wx * view.zoom + view.panX, y: wy * view.zoom + view.panY };
+}
+
+window.addEventListener('keydown', e => {
+  if (e.code === 'Space' && !spaceDown && !isInputFocused()) {
+    spaceDown = true;
+    document.body.classList.add('pan-mode');
+    e.preventDefault();
+  }
+});
+window.addEventListener('keyup', e => {
+  if (e.code === 'Space') { spaceDown = false; document.body.classList.remove('pan-mode'); }
+});
+
+els.board.addEventListener('mousedown', e => {
+  // Only initiate a board-pan if the mouse is on the board background, never on a widget.
+  if (e.target !== els.board && e.target !== els.world) return;
+  if (e.button === 1 || (e.button === 0 && spaceDown)) {
+    panning = true;
+    els.board.classList.add('panning');
+    panStart = { x: e.clientX, y: e.clientY, panX: view.panX, panY: view.panY };
+    e.preventDefault();
+  }
+});
+
+window.addEventListener('mousemove', e => {
+  if (panning) {
+    view.panX = panStart.panX + (e.clientX - panStart.x);
+    view.panY = panStart.panY + (e.clientY - panStart.y);
+    applyView();
+  }
+  handleWidgetDragMove(e);
+  handleWidgetResizeMove(e);
+  broadcastCursor(e);
+});
+window.addEventListener('mouseup', () => {
+  panning = false;
+  els.board.classList.remove('panning');
+  finalizeWidgetDrag();
+  finalizeWidgetResize();
+});
+
+els.board.addEventListener('wheel', e => {
+  e.preventDefault();
+  const factor   = Math.exp(-e.deltaY * 0.001);
+  const newZoom  = clamp(view.zoom * factor, 0.1, 4);
+  const r        = els.board.getBoundingClientRect();
+  const sx       = e.clientX - r.left;
+  const sy       = e.clientY - r.top;
+  const wx       = (sx - view.panX) / view.zoom;
+  const wy       = (sy - view.panY) / view.zoom;
+  view.zoom      = newZoom;
+  view.panX      = sx - wx * newZoom;
+  view.panY      = sy - wy * newZoom;
+  applyView();
+}, { passive: false });
+
+els.fitBtn.onclick = () => { view.panX = 0; view.panY = 0; view.zoom = 1; applyView(); };
+
+// ════════════════════════════════════════════════════════════════════════════
+// Widget drag / resize
+// ════════════════════════════════════════════════════════════════════════════
+let widgetDrag   = null;   // { id, ox, oy, lastX, lastY, lastBcast }
+let widgetResize = null;   // { id, sx, sy, sw, sh, lastW, lastH, lastBcast }
+
+function startDragWidget(id, e) {
+  bringToFront(id);
+  const data = yWidgets.get(id); if (!data) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+  widgetDrag = { id, ox: w.x - data.x, oy: w.y - data.y, lastX: data.x, lastY: data.y, lastBcast: 0 };
+  e.preventDefault();
+}
+function startResizeWidget(id, e) {
+  bringToFront(id);
+  const data = yWidgets.get(id); if (!data) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+  widgetResize = { id, sx: w.x, sy: w.y, sw: data.w, sh: data.h, lastW: data.w, lastH: data.h, lastBcast: 0 };
+  e.preventDefault();
+  e.stopPropagation();
+}
+function handleWidgetDragMove(e) {
+  if (!widgetDrag) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+  const x = w.x - widgetDrag.ox, y = w.y - widgetDrag.oy;
+  widgetDrag.lastX = x; widgetDrag.lastY = y;
+  const el = widgetEls.get(widgetDrag.id);
+  if (el) { el.style.left = x + 'px'; el.style.top = y + 'px'; }
+  const now = performance.now();
+  if (now - widgetDrag.lastBcast > DRAG_HZ_MS) {
+    widgetDrag.lastBcast = now;
+    setWidget(widgetDrag.id, { x, y });
+  }
+}
+function handleWidgetResizeMove(e) {
+  if (!widgetResize) return;
+  const w = screenToWorld(e.clientX, e.clientY);
+  const newW = Math.max(160, widgetResize.sw + (w.x - widgetResize.sx));
+  const newH = Math.max(120, widgetResize.sh + (w.y - widgetResize.sy));
+  widgetResize.lastW = newW; widgetResize.lastH = newH;
+  const el = widgetEls.get(widgetResize.id);
+  if (el) { el.style.width = newW + 'px'; el.style.height = newH + 'px'; }
+  const now = performance.now();
+  if (now - widgetResize.lastBcast > DRAG_HZ_MS) {
+    widgetResize.lastBcast = now;
+    setWidget(widgetResize.id, { w: newW, h: newH });
+  }
+}
+function finalizeWidgetDrag() {
+  if (!widgetDrag) return;
+  setWidget(widgetDrag.id, { x: widgetDrag.lastX, y: widgetDrag.lastY });
+  widgetDrag = null;
+}
+function finalizeWidgetResize() {
+  if (!widgetResize) return;
+  setWidget(widgetResize.id, { w: widgetResize.lastW, h: widgetResize.lastH });
+  widgetResize = null;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Drop a side-panel app card onto the board → spawn a widget
+// ════════════════════════════════════════════════════════════════════════════
+els.board.addEventListener('dragover', e => {
+  e.preventDefault();
+  els.board.classList.add('drop-hover');
+  e.dataTransfer.dropEffect = 'copy';
+});
+els.board.addEventListener('dragleave', () => els.board.classList.remove('drop-hover'));
+els.board.addEventListener('drop', e => {
+  e.preventDefault();
+  els.board.classList.remove('drop-hover');
+  const url = e.dataTransfer.getData('application/x-mesh-url') || e.dataTransfer.getData('text/uri-list') || e.dataTransfer.getData('text/plain');
+  if (!url) return;
+  const title = e.dataTransfer.getData('application/x-mesh-title') || url.split('/').pop();
+  const w = screenToWorld(e.clientX, e.clientY);
+  spawnWidget({ url, title, x: w.x - 200, y: w.y - 110, w: 420, h: 320 });
+});
+
+function spawnWidget({ url, title, x, y, w=420, h=320 }) {
+  let maxZ = 0;
+  yWidgets.forEach(v => { if ((v.z||0) > maxZ) maxZ = v.z; });
+  const id = uid();
+  yWidgets.set(id, { url, title, x, y, w, h, z: maxZ + 1, storageSnapshot: null });
+  return id;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Side panel: load app catalog from utility_apps_config.json
+// ════════════════════════════════════════════════════════════════════════════
+async function loadAppCatalog() {
+  try {
+    const res  = await fetch(CONFIG_URL);
+    const data = await res.json();
+    renderAppList(data.apps || []);
+  } catch (e) {
+    els.appList.innerHTML = '<div style="padding:12px;color:var(--warn);font-size:12px;">⚠ Catalog fetch failed.<br>Serve via <code>python3 -m http.server 8000</code> from the repo root.</div>';
+    console.error('catalog load failed', e);
+  }
+}
+function renderAppList(apps) {
+  els.appList.innerHTML = '';
+  els.appCount.textContent = apps.length;
+  for (const app of apps) {
+    const card = document.createElement('div');
+    card.className   = 'app-card';
+    card.draggable   = true;
+    // app.path looks like "./apps/<cat>/<file>.html" — resolve to absolute URL relative to repo root.
+    const resolved = new URL(app.path.replace(/^\.\//, ''), REPO_ROOT).href;
+    const tags     = (app.tags || []).slice(0, 3).join(' · ');
+    card.innerHTML = `
+      <span class="ico">${app.icon || '📦'}</span>
+      <div class="meta">
+        <strong></strong>
+        <small></small>
+      </div>`;
+    card.querySelector('strong').textContent = app.title || app.id;
+    card.querySelector('small').textContent  = tags || (app.description || '');
+    card.dataset.url   = resolved;
+    card.dataset.title = app.title || app.id;
+    card.addEventListener('dragstart', e => {
+      e.dataTransfer.setData('application/x-mesh-url',   resolved);
+      e.dataTransfer.setData('application/x-mesh-title', card.dataset.title);
+      e.dataTransfer.setData('text/uri-list', resolved);
+      e.dataTransfer.setData('text/plain',    resolved);
+      e.dataTransfer.effectAllowed = 'copy';
+    });
+    card.addEventListener('dblclick', () => {
+      // Double-click also drops the app at the centre of the visible board.
+      const r = els.board.getBoundingClientRect();
+      const w = screenToWorld(r.left + r.width/2, r.top + r.height/2);
+      spawnWidget({ url: resolved, title: card.dataset.title, x: w.x - 200, y: w.y - 110 });
+    });
+    els.appList.appendChild(card);
+  }
+  applySearch();
+}
+function applySearch() {
+  const q = els.searchInput.value.toLowerCase().trim();
+  $$('.app-card', els.appList).forEach(c => {
+    c.style.display = !q || c.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+els.searchInput.addEventListener('input', applySearch);
+
+// ════════════════════════════════════════════════════════════════════════════
+// PeerJS mesh
+// ════════════════════════════════════════════════════════════════════════════
+let peer        = null;
+let myPeerId    = null;
+let isHost      = false;
+let roomCode    = null;
+const peers     = new Map();   // peerId -> DataConnection
+
+function updatePeerCount() {
+  const n = [...peers.values()].filter(c => c.open).length;
+  els.peerCount.textContent = `${n} peer${n===1?'':'s'}`;
+}
+function setRoomLabel(code, host) {
+  roomCode = code;
+  els.roomLabel.textContent = (host ? 'host · ' : 'peer · ') + code;
+  els.roomLabel.title = code;
+}
+function buildShareLink(code) {
+  return `${location.origin}${location.pathname}?room=${encodeURIComponent(code)}`;
+}
+
+function broadcastUpdate(update) {
+  const buf = update;
+  for (const conn of peers.values()) {
+    if (conn.open) {
+      try { conn.send({ type: 'y-update', update: buf }); } catch (e) { console.warn('send fail', e); }
+    }
+  }
+}
+
+function setupConnection(conn) {
+  if (peers.has(conn.peer) && peers.get(conn.peer) !== conn) {
+    // We already have a different DataConnection to this peer; close the new one to avoid dup traffic.
+    try { conn.close(); } catch {}
+    return;
+  }
+  peers.set(conn.peer, conn);
+
+  conn.on('open', () => {
+    updatePeerCount();
+    // Send our full Yjs state.
+    try { conn.send({ type: 'y-sync', update: Y.encodeStateAsUpdate(ydoc) }); } catch (e) { console.warn(e); }
+    // Tell the new peer about everyone else we know — they'll dial them to form a mesh.
+    const others = [...peers.keys()].filter(p => p !== conn.peer && p !== myPeerId);
+    if (others.length) conn.send({ type: 'peer-list', peers: others });
+    // Send our latest awareness so the new peer sees us immediately.
+    if (lastCursor) {
+      conn.send({ type: 'awareness', from: myPeerId, name: getHandle(), color: myColor,
+                  x: lastCursor.x, y: lastCursor.y, visible: lastCursor.visible });
+    }
+  });
+  conn.on('data', msg => handleMessage(conn, msg));
+  conn.on('close', () => {
+    if (peers.get(conn.peer) === conn) peers.delete(conn.peer);
+    cleanupAwareness(conn.peer);
+    updatePeerCount();
+  });
+  conn.on('error', err => console.warn('conn error', conn.peer, err));
+}
+
+function handleMessage(conn, msg) {
+  if (!msg || typeof msg !== 'object') return;
+  switch (msg.type) {
+    case 'y-sync':
+    case 'y-update': {
+      try {
+        const u = msg.update instanceof Uint8Array ? msg.update : new Uint8Array(msg.update);
+        Y.applyUpdate(ydoc, u, 'remote');
+      } catch (e) { console.error('applyUpdate failed', e); }
+      break;
+    }
+    case 'peer-list': {
+      for (const p of (msg.peers || [])) {
+        if (p && p !== myPeerId && !peers.has(p)) dialPeer(p);
+      }
+      break;
+    }
+    case 'awareness': {
+      receiveAwareness(msg);
+      break;
+    }
+    default: break;
+  }
+}
+
+function dialPeer(pid) {
+  if (!peer || !pid || pid === myPeerId || peers.has(pid)) return;
+  try {
+    const conn = peer.connect(pid, { reliable: true });
+    setupConnection(conn);
+  } catch (e) { console.warn('dial failed', e); }
+}
+
+function initPeer() {
+  return new Promise((resolve, reject) => {
+    try {
+      peer = new Peer();
+    } catch (e) { reject(e); return; }
+    peer.on('open', id => {
+      myPeerId = id;
+      peer.on('connection', conn => setupConnection(conn));
+      peer.on('error', err => {
+        console.warn('peer error', err);
+        if (err && err.type === 'peer-unavailable') {
+          toast('⚠ Room not found (host offline?).');
+        }
+      });
+      resolve(id);
+    });
+    peer.on('error', err => { console.warn('peer error', err); reject(err); });
+  });
+}
+
+async function createRoom() {
+  if (peer) return;
+  els.newRoomBtn.disabled = true;
+  els.newRoomBtn.textContent = '…';
+  try {
+    await initPeer();
+    isHost = true;
+    setRoomLabel(myPeerId, true);
+    els.newRoomBtn.textContent = 'Hosting';
+    toast('Room created — share the link or QR.');
+  } catch (e) {
+    els.newRoomBtn.disabled = false;
+    els.newRoomBtn.textContent = 'New room';
+    toast('⚠ Failed to create room.');
+  }
+}
+
+async function joinRoom(code) {
+  if (peer) return;
+  els.newRoomBtn.disabled = true;
+  els.newRoomBtn.textContent = '…';
+  try {
+    await initPeer();
+    isHost = false;
+    setRoomLabel(code, false);
+    els.newRoomBtn.textContent = 'Connected';
+    dialPeer(code);
+    toast('Joining room…');
+  } catch (e) {
+    els.newRoomBtn.disabled = false;
+    els.newRoomBtn.textContent = 'New room';
+    toast('⚠ Failed to join room.');
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Awareness (cursors + handles) — non-CRDT side channel
+// ════════════════════════════════════════════════════════════════════════════
+const COLORS = ['#79c0ff','#d2a8ff','#ffa657','#7ee787','#ff7b72','#ffdf5d','#a5d6ff','#f0883e'];
+const myColor = COLORS[Math.floor(Math.random() * COLORS.length)];
+let lastCursor = { x: 0, y: 0, visible: false };
+let cursorThrottle = 0;
+const awarenessState = new Map();   // peerId -> { name, color, x, y, ts, visible }
+const awarenessEls   = new Map();   // peerId -> DOM element
+
+function getHandle() {
+  return (els.handleInput.value || '').trim() || 'anon';
+}
+
+function broadcastCursor(e) {
+  if (!peer) return;
+  const r = els.board.getBoundingClientRect();
+  const inBoard = e.clientX >= r.left && e.clientX <= r.right && e.clientY >= r.top && e.clientY <= r.bottom;
+  const w = screenToWorld(e.clientX, e.clientY);
+  lastCursor = { x: w.x, y: w.y, visible: inBoard };
+  const now = performance.now();
+  if (now - cursorThrottle < CURSOR_HZ_MS) return;
+  cursorThrottle = now;
+  const payload = { type: 'awareness', from: myPeerId, name: getHandle(), color: myColor,
+                    x: w.x, y: w.y, visible: inBoard };
+  for (const conn of peers.values()) if (conn.open) {
+    try { conn.send(payload); } catch {}
+  }
+}
+
+function receiveAwareness(msg) {
+  if (!msg.from || msg.from === myPeerId) return;
+  awarenessState.set(msg.from, {
+    name: msg.name || 'peer', color: msg.color || '#79c0ff',
+    x: msg.x, y: msg.y, visible: msg.visible !== false, ts: Date.now()
+  });
+  renderAwareness();
+}
+
+function cleanupAwareness(pid) {
+  awarenessState.delete(pid);
+  const el = awarenessEls.get(pid);
+  if (el) { el.remove(); awarenessEls.delete(pid); }
+}
+
+function renderAwareness() {
+  for (const [pid, st] of awarenessState) {
+    let el = awarenessEls.get(pid);
+    if (!el) {
+      el = document.createElement('div');
+      el.className = 'cursor';
+      el.innerHTML = '<div class="cursor-dot"></div><div class="cursor-label"></div>';
+      els.cursors.appendChild(el);
+      awarenessEls.set(pid, el);
+    }
+    el.querySelector('.cursor-dot').style.background = st.color;
+    const lbl = el.querySelector('.cursor-label');
+    lbl.textContent = st.name;
+    lbl.style.background = st.color;
+    if (!st.visible) {
+      el.style.transform = 'translate(-9999px,-9999px)';
+      continue;
+    }
+    const s = worldToScreen(st.x, st.y);
+    el.style.transform = `translate(${s.x}px, ${s.y}px)`;
+  }
+}
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [pid, st] of [...awarenessState]) {
+    if (now - st.ts > AWARENESS_TTL) cleanupAwareness(pid);
+  }
+}, 4000);
+
+// ════════════════════════════════════════════════════════════════════════════
+// Export / import workspace.json
+//
+// The exported document is the full CRDT state, captured as a plain widgets
+// array (id + every field including storageSnapshot).  On import we hydrate
+// the iframes sequentially so each one's localStorage seed survives.
+// ════════════════════════════════════════════════════════════════════════════
+function exportWorkspace() {
+  const widgets = [];
+  yWidgets.forEach((data, id) => widgets.push({ id, ...data }));
+  const payload = {
+    version: 1,
+    app: APP_NAME,
+    exportedAt: new Date().toISOString(),
+    widgets
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `${APP_NAME}-data-${new Date().toISOString().slice(0,10)}.json`;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(a.href);
+  toast(`Exported ${widgets.length} widget${widgets.length===1?'':'s'}.`);
+}
+
+async function importWorkspace(file) {
+  const txt  = await file.text();
+  let data;
+  try { data = JSON.parse(txt); }
+  catch { toast('⚠ Invalid JSON.'); return; }
+  if (!data || !Array.isArray(data.widgets)) { toast('⚠ Not a mesh-board workspace.'); return; }
+
+  // 1) Pre-seed shared localStorage with the union of all snapshots so even
+  //    widgets without their own snapshot start with sensible values.  Each
+  //    individual widget will re-seed its own snapshot just before its iframe
+  //    is constructed (see createWidgetEl), which is the authoritative seed.
+  for (const w of data.widgets) {
+    if (w.storageSnapshot) applyStorageSnapshot(w.storageSnapshot);
+  }
+  // 2) Replace CRDT widgets atomically; observers will re-render.
+  ydoc.transact(() => {
+    yWidgets.forEach((_, id) => yWidgets.delete(id));
+    for (const w of data.widgets) {
+      const { id, ...rest } = w;
+      yWidgets.set(id || uid(), rest);
+    }
+  });
+  toast(`Imported ${data.widgets.length} widget${data.widgets.length===1?'':'s'}.`);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Local persistence (so a refresh keeps your board even when offline)
+// ════════════════════════════════════════════════════════════════════════════
+let persistTimer = null;
+function persistLocal() {
+  clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    const widgets = [];
+    yWidgets.forEach((data, id) => widgets.push({ id, ...data }));
+    try { localStorage.setItem(WORKSPACE_KEY, JSON.stringify({ widgets })); } catch {}
+  }, 250);
+}
+function restoreLocal() {
+  const txt = localStorage.getItem(WORKSPACE_KEY);
+  if (!txt) return;
+  try {
+    const data = JSON.parse(txt);
+    if (!Array.isArray(data.widgets)) return;
+    ydoc.transact(() => {
+      for (const w of data.widgets) {
+        const { id, ...rest } = w;
+        yWidgets.set(id || uid(), rest);
+      }
+    });
+  } catch (e) { console.warn('restore failed', e); }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// QR / share
+// ════════════════════════════════════════════════════════════════════════════
+function showQR() {
+  if (!roomCode) { toast('Create or join a room first.'); return; }
+  const link = buildShareLink(roomCode);
+  els.qrContainer.innerHTML = '';
+  try {
+    new QRCode(els.qrContainer, { text: link, width: 220, height: 220, correctLevel: QRCode.CorrectLevel.H });
+  } catch {
+    els.qrContainer.textContent = '(QR unavailable)';
+  }
+  els.qrLink.textContent = link;
+  els.qrModal.classList.remove('hidden');
+}
+els.qrCloseBtn.onclick = () => els.qrModal.classList.add('hidden');
+els.qrCopyBtn.onclick  = async () => {
+  if (!roomCode) return;
+  try { await navigator.clipboard.writeText(buildShareLink(roomCode)); toast('Link copied.'); } catch { toast('⚠ Copy failed.'); }
+};
+els.qrBtn.onclick      = showQR;
+els.copyLinkBtn.onclick = async () => {
+  if (!roomCode) { toast('Create or join a room first.'); return; }
+  try { await navigator.clipboard.writeText(buildShareLink(roomCode)); toast('Link copied.'); } catch {}
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// Wire up top bar
+// ════════════════════════════════════════════════════════════════════════════
+els.handleInput.value = localStorage.getItem(HANDLE_KEY) || `peer-${uid().slice(0,4)}`;
+els.handleInput.addEventListener('input', () => {
+  try { localStorage.setItem(HANDLE_KEY, els.handleInput.value); } catch {}
+});
+
+els.newRoomBtn.onclick = () => createRoom();
+els.exportBtn.onclick  = exportWorkspace;
+els.importBtn.onclick  = () => els.importFile.click();
+els.importFile.addEventListener('change', e => {
+  const f = e.target.files?.[0];
+  if (f) importWorkspace(f);
+  e.target.value = '';
+});
+els.snapAllBtn.onclick = snapshotAll;
+
+// ════════════════════════════════════════════════════════════════════════════
+// Boot
+// ════════════════════════════════════════════════════════════════════════════
+loadAppCatalog();
+restoreLocal();
+
+// Auto-join via ?room=ID
+const params  = new URLSearchParams(location.search);
+const incoming = params.get('room');
+if (incoming) joinRoom(incoming);
+
+</script>
+</body>
+</html>

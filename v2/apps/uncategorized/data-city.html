@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Holographic Data City</title>
+    <meta name="description" content="Fly through your data. A 3D visualization where files are skyscrapers and folders are districts.">
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', sans-serif; }
+        canvas { display: block; }
+        
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: #0ff;
+            pointer-events: none;
+            text-shadow: 0 0 5px #0ff;
+        }
+        
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 20, 40, 0.9);
+            border: 1px solid #0ff;
+            padding: 10px;
+            color: #fff;
+            border-radius: 4px;
+            pointer-events: none;
+            display: none;
+            font-size: 12px;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.3);
+        }
+        
+        .file-icon { display: inline-block; width: 10px; height: 10px; margin-right: 5px; }
+        
+        #controls-hint {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 12px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <h1 style="margin: 0; font-size: 24px;">DATA CITY</h1>
+        <div id="path">/root</div>
+    </div>
+
+    <div id="tooltip"></div>
+    
+    <div id="controls-hint">
+        WASD to Fly | Mouse to Look | Shift to Boost
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // --- Mock Data Generation ---
+        function generateFS(depth, maxFiles) {
+            if (depth === 0) return [];
+            
+            const items = [];
+            const numFiles = Math.floor(Math.random() * maxFiles) + 1;
+            const numFolders = Math.floor(Math.random() * 3);
+            
+            const types = ['js', 'html', 'css', 'json', 'png', 'py', 'md'];
+            
+            for (let i = 0; i < numFiles; i++) {
+                const type = types[Math.floor(Math.random() * types.length)];
+                items.push({
+                    name: `file_${Math.random().toString(36).substr(7)}.${type}`,
+                    type: 'file',
+                    ext: type,
+                    size: Math.floor(Math.random() * 1000) + 10
+                });
+            }
+            
+            for (let i = 0; i < numFolders; i++) {
+                items.push({
+                    name: `folder_${Math.random().toString(36).substr(7)}`,
+                    type: 'folder',
+                    children: generateFS(depth - 1, maxFiles)
+                });
+            }
+            
+            return items;
+        }
+
+        const fileSystem = {
+            name: 'root',
+            type: 'folder',
+            children: generateFS(4, 10)
+        };
+
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000510);
+        scene.fog = new THREE.FogExp2(0x000510, 0.002);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+        dirLight.position.set(100, 200, 100);
+        scene.add(dirLight);
+
+        // City Generation
+        const FILE_COLORS = {
+            'js': 0xffff00,
+            'html': 0xff4400,
+            'css': 0x00aaff,
+            'json': 0xaaaaaa,
+            'png': 0xff00ff,
+            'py': 0x336699,
+            'md': 0xffffff
+        };
+
+        function buildCity(node, x, z, width, depth, parentMesh) {
+            // Draw base for folder
+            const padding = 2;
+            const innerWidth = width - padding * 2;
+            const innerDepth = depth - padding * 2;
+            
+            const baseGeo = new THREE.BoxGeometry(width, 1, depth);
+            const baseMat = new THREE.MeshPhongMaterial({ 
+                color: 0x112233, 
+                transparent: true, 
+                opacity: 0.8,
+                emissive: 0x001122
+            });
+            const base = new THREE.Mesh(baseGeo, baseMat);
+            base.position.set(x, 0, z);
+            base.userData = { node: node };
+            scene.add(base);
+            
+            // Layout children (Treemap-ish)
+            // Simple grid layout for now
+            if (!node.children) return;
+            
+            const count = node.children.length;
+            const cols = Math.ceil(Math.sqrt(count));
+            const rows = Math.ceil(count / cols);
+            
+            const cellW = innerWidth / cols;
+            const cellD = innerDepth / rows;
+            
+            node.children.forEach((child, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                
+                const cx = x - innerWidth/2 + cellW/2 + col * cellW;
+                const cz = z - innerDepth/2 + cellD/2 + row * cellD;
+                
+                if (child.type === 'file') {
+                    // Building
+                    const h = Math.max(2, child.size / 10);
+                    const geo = new THREE.BoxGeometry(cellW * 0.8, h, cellD * 0.8);
+                    const color = FILE_COLORS[child.ext] || 0x888888;
+                    const mat = new THREE.MeshPhongMaterial({ 
+                        color: color,
+                        emissive: color,
+                        emissiveIntensity: 0.2
+                    });
+                    const mesh = new THREE.Mesh(geo, mat);
+                    mesh.position.set(cx, h/2 + 0.5, cz);
+                    mesh.userData = { node: child };
+                    scene.add(mesh);
+                    
+                    // Glow line
+                    const edges = new THREE.EdgesGeometry(geo);
+                    const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.1 }));
+                    mesh.add(line);
+                    
+                } else {
+                    // Recursive Folder
+                    // Stack it slightly higher? Or just nested.
+                    // Let's make nested districts flat but visually distinct
+                    buildCity(child, cx, cz, cellW, cellD, base);
+                }
+            });
+        }
+
+        // Start building
+        buildCity(fileSystem, 0, 0, 200, 200);
+
+        // Grid floor
+        const grid = new THREE.GridHelper(1000, 100, 0x004488, 0x001122);
+        scene.add(grid);
+
+        // --- Controls ---
+        camera.position.set(0, 100, 200);
+        camera.lookAt(0, 0, 0);
+
+        const keys = { w: false, a: false, s: false, d: false, shift: false, space: false, c: false };
+        
+        document.addEventListener('keydown', e => {
+            const k = e.key.toLowerCase();
+            if (keys.hasOwnProperty(k)) keys[k] = true;
+            if (e.key === 'Shift') keys.shift = true;
+            if (e.key === ' ') keys.space = true;
+        });
+        
+        document.addEventListener('keyup', e => {
+            const k = e.key.toLowerCase();
+            if (keys.hasOwnProperty(k)) keys[k] = false;
+            if (e.key === 'Shift') keys.shift = false;
+            if (e.key === ' ') keys.space = false;
+        });
+
+        let mouse = { x: 0, y: 0 };
+        let isLocked = false;
+
+        document.addEventListener('click', () => {
+            if (!isLocked) document.body.requestPointerLock();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            isLocked = document.pointerLockElement === document.body;
+        });
+
+        document.addEventListener('mousemove', e => {
+            if (isLocked) {
+                camera.rotation.y -= e.movementX * 0.002;
+                camera.rotation.x -= e.movementY * 0.002;
+                camera.rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, camera.rotation.x));
+            }
+            
+            // Raycasting for tooltip (use client coordinates when not locked, center when locked)
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        // --- Loop ---
+        const raycaster = new THREE.Raycaster();
+        const tooltip = document.getElementById('tooltip');
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Movement
+            const speed = keys.shift ? 2.0 : 0.5;
+            const dir = new THREE.Vector3();
+            camera.getWorldDirection(dir);
+            const right = new THREE.Vector3().crossVectors(dir, camera.up);
+            
+            if (keys.w) camera.position.add(dir.multiplyScalar(speed));
+            if (keys.s) camera.position.add(dir.multiplyScalar(-speed));
+            if (keys.a) camera.position.add(right.multiplyScalar(-speed));
+            if (keys.d) camera.position.add(right.multiplyScalar(speed));
+            if (keys.space) camera.position.y += speed;
+            if (keys.c) camera.position.y -= speed;
+
+            // Raycast
+            if (isLocked) {
+                raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            } else {
+                raycaster.setFromCamera(mouse, camera);
+            }
+            
+            const intersects = raycaster.intersectObjects(scene.children);
+            
+            if (intersects.length > 0) {
+                const obj = intersects[0].object;
+                if (obj.userData.node) {
+                    const node = obj.userData.node;
+                    tooltip.style.display = 'block';
+                    
+                    // Position tooltip
+                    // If locked, center screen. If not, follow mouse.
+                    if (isLocked) {
+                        tooltip.style.left = '50%';
+                        tooltip.style.top = '50%';
+                        tooltip.style.transform = 'translate(20px, 20px)';
+                    } else {
+                        // Need event data, but we are in loop. 
+                        // Just use fixed position or update in mousemove
+                        // Let's just center it for now if locked
+                    }
+                    
+                    tooltip.innerHTML = `
+                        <strong>${node.name}</strong><br>
+                        Type: ${node.type}<br>
+                        Size: ${node.size || '-'} KB
+                    `;
+                    
+                    document.getElementById('path').textContent = node.name;
+                }
+            } else {
+                tooltip.style.display = 'none';
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+    </script>
+</body>
+</html>

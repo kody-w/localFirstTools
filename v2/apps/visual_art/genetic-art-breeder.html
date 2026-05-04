@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Genetic Art Breeder</title>
+    <meta name="description" content="Evolve unique SVG creatures using genetic algorithms. Select your favorites and breed new generations.">
+    <style>
+        :root {
+            --bg: #1a1a1a;
+            --card-bg: #2a2a2a;
+            --highlight: #00ff9d;
+            --text: #e0e0e0;
+        }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background-color: var(--bg);
+            color: var(--text);
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            min-height: 100vh;
+        }
+        header {
+            text-align: center;
+            margin-bottom: 20px;
+        }
+        h1 { margin: 0; color: var(--highlight); }
+        p { color: #888; max-width: 600px; }
+        
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        
+        button {
+            background: #333;
+            color: #fff;
+            border: 1px solid #555;
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 5px;
+            font-size: 1rem;
+            transition: all 0.2s;
+        }
+        button:hover { background: #444; border-color: var(--highlight); }
+        button.primary {
+            background: var(--highlight);
+            color: #000;
+            border: none;
+            font-weight: bold;
+        }
+        button.primary:hover {
+            background: #00cc7d;
+            transform: scale(1.05);
+        }
+        
+        #population-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+            gap: 15px;
+            width: 100%;
+            max-width: 1200px;
+        }
+        
+        .creature-card {
+            background: var(--card-bg);
+            border: 2px solid transparent;
+            border-radius: 10px;
+            padding: 10px;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            position: relative;
+        }
+        
+        .creature-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        
+        .creature-card.selected {
+            border-color: var(--highlight);
+            background: #2a3a3a;
+            box-shadow: 0 0 15px rgba(0, 255, 157, 0.3);
+        }
+        
+        .creature-card.selected::after {
+            content: '❤️';
+            position: absolute;
+            top: 5px;
+            right: 5px;
+            font-size: 1.2rem;
+        }
+        
+        svg {
+            width: 100%;
+            height: 130px;
+            overflow: visible;
+        }
+
+        .stats {
+            font-size: 0.7rem;
+            color: #666;
+            margin-top: 5px;
+            font-family: monospace;
+        }
+        
+        #generation-info {
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: rgba(0,0,0,0.8);
+            padding: 10px;
+            border-radius: 5px;
+            border: 1px solid #333;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>Genetic Art Breeder</h1>
+        <p>Select your favorite creatures (2 or more) and click "Evolve" to breed the next generation. Traits are passed down with random mutations.</p>
+    </header>
+
+    <div class="controls">
+        <button class="primary" onclick="evolve()">🧬 Evolve Generation</button>
+        <button onclick="randomize()">🎲 Randomize All</button>
+        <button onclick="toggleAutoSelect()">🤖 Auto-Select Best</button>
+        <div style="display: flex; align-items: center; gap: 5px;">
+            <label for="mutation-rate">Mutation Rate:</label>
+            <input type="range" id="mutation-rate" min="0" max="100" value="10">
+        </div>
+    </div>
+
+    <div id="population-grid"></div>
+    
+    <div id="generation-info">Generation: <span id="gen-count">1</span></div>
+
+    <script>
+        // --- Configuration ---
+        const POPULATION_SIZE = 18;
+        const GENOME_SIZE = 12; // Number of genes
+        
+        // --- Genetic Engine ---
+        
+        class Genome {
+            constructor(genes) {
+                if (genes) {
+                    this.genes = genes;
+                } else {
+                    this.genes = new Float32Array(GENOME_SIZE);
+                    for (let i = 0; i < GENOME_SIZE; i++) {
+                        this.genes[i] = Math.random();
+                    }
+                }
+            }
+
+            copy() {
+                return new Genome(new Float32Array(this.genes));
+            }
+
+            mutate(rate) {
+                for (let i = 0; i < GENOME_SIZE; i++) {
+                    if (Math.random() < rate) {
+                        // Small tweak or full randomization?
+                        if (Math.random() < 0.5) {
+                            this.genes[i] += (Math.random() - 0.5) * 0.2; // Tweak
+                        } else {
+                            this.genes[i] = Math.random(); // New value
+                        }
+                        // Clamp
+                        this.genes[i] = Math.max(0, Math.min(1, this.genes[i]));
+                    }
+                }
+            }
+
+            static crossover(parentA, parentB) {
+                const newGenes = new Float32Array(GENOME_SIZE);
+                const midpoint = Math.floor(Math.random() * GENOME_SIZE);
+                
+                for (let i = 0; i < GENOME_SIZE; i++) {
+                    if (i < midpoint) {
+                        newGenes[i] = parentA.genes[i];
+                    } else {
+                        newGenes[i] = parentB.genes[i];
+                    }
+                }
+                return new Genome(newGenes);
+            }
+        }
+
+        // --- Creature Renderer ---
+
+        class Creature {
+            constructor(genome) {
+                this.genome = genome;
+                this.traits = this.decode(genome);
+            }
+
+            decode(g) {
+                const genes = g.genes;
+                return {
+                    hue: Math.floor(genes[0] * 360),
+                    saturation: 50 + genes[1] * 50,
+                    lightness: 40 + genes[2] * 40,
+                    bodySize: 30 + genes[3] * 30,
+                    bodyShape: Math.floor(genes[4] * 3), // 0: Circle, 1: Rect, 2: Poly
+                    eyeCount: Math.floor(genes[5] * 4) + 1, // 1-4 eyes
+                    eyeSize: 5 + genes[6] * 10,
+                    limbCount: Math.floor(genes[7] * 8), // 0-7 limbs
+                    limbLength: 20 + genes[8] * 40,
+                    limbType: Math.floor(genes[9] * 3), // 0: Line, 1: Tentacle, 2: Joint
+                    symmetry: genes[10] > 0.5 ? 'radial' : 'bilateral',
+                    detail: genes[11] // Extra decoration
+                };
+            }
+
+            render() {
+                const t = this.traits;
+                const color = `hsl(${t.hue}, ${t.saturation}%, ${t.lightness}%)`;
+                const eyeColor = `hsl(${(t.hue + 180) % 360}, 80%, 90%)`;
+                
+                let svg = `<g transform="translate(75, 65)">`; // Center in 150x130 box
+
+                // Limbs
+                const angleStep = (Math.PI * 2) / t.limbCount;
+                for (let i = 0; i < t.limbCount; i++) {
+                    let angle = i * angleStep;
+                    if (t.symmetry === 'bilateral') {
+                        // Constrain angles for bilateral
+                        angle = (Math.PI / (t.limbCount + 1)) * (i + 1) + Math.PI/2; 
+                        // Mirror logic handled by drawing twice or just using radial for simplicity in this demo
+                        // Let's stick to radial distribution but modified for bilateral look
+                        if (i % 2 === 0) angle = -angle;
+                    }
+
+                    const x2 = Math.cos(angle) * (t.bodySize + t.limbLength);
+                    const y2 = Math.sin(angle) * (t.bodySize + t.limbLength);
+                    
+                    let limbPath = '';
+                    if (t.limbType === 0) { // Straight
+                        limbPath = `<line x1="0" y1="0" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="4" stroke-linecap="round" />`;
+                    } else if (t.limbType === 1) { // Wavy
+                        const mx = x2 * 0.5 + Math.sin(angle * 5) * 10;
+                        const my = y2 * 0.5 + Math.cos(angle * 5) * 10;
+                        limbPath = `<path d="M0,0 Q${mx},${my} ${x2},${y2}" stroke="${color}" stroke-width="4" fill="none" stroke-linecap="round" />`;
+                    } else { // Jointed
+                        const jx = x2 * 0.6;
+                        const jy = y2 * 0.6;
+                        limbPath = `<polyline points="0,0 ${jx},${jy} ${x2},${y2}" stroke="${color}" stroke-width="4" fill="none" stroke-linecap="round" />`;
+                    }
+                    svg += limbPath;
+                }
+
+                // Body
+                if (t.bodyShape === 0) {
+                    svg += `<circle r="${t.bodySize}" fill="${color}" />`;
+                } else if (t.bodyShape === 1) {
+                    const s = t.bodySize * 1.6;
+                    svg += `<rect x="${-s/2}" y="${-s/2}" width="${s}" height="${s}" rx="10" fill="${color}" />`;
+                } else {
+                    const points = [];
+                    const sides = 3 + Math.floor(t.detail * 4);
+                    for (let i = 0; i < sides; i++) {
+                        const a = (i / sides) * Math.PI * 2;
+                        points.push(`${Math.cos(a) * t.bodySize},${Math.sin(a) * t.bodySize}`);
+                    }
+                    svg += `<polygon points="${points.join(' ')}" fill="${color}" />`;
+                }
+
+                // Eyes
+                const eyeOffset = t.bodySize * 0.4;
+                if (t.eyeCount === 1) {
+                    svg += this.renderEye(0, 0, t.eyeSize, eyeColor);
+                } else {
+                    for (let i = 0; i < t.eyeCount; i++) {
+                        const a = (i / t.eyeCount) * Math.PI * 2 - Math.PI/2;
+                        // For bilateral, adjust
+                        const ex = Math.cos(a) * eyeOffset;
+                        const ey = Math.sin(a) * eyeOffset;
+                        svg += this.renderEye(ex, ey, t.eyeSize, eyeColor);
+                    }
+                }
+
+                svg += `</g>`;
+                return svg;
+            }
+
+            renderEye(x, y, size, color) {
+                return `
+                    <g transform="translate(${x}, ${y})">
+                        <circle r="${size}" fill="#fff" />
+                        <circle r="${size * 0.4}" fill="#000" />
+                        <circle cx="${size * 0.15}" cy="${-size * 0.15}" r="${size * 0.15}" fill="#fff" />
+                    </g>
+                `;
+            }
+        }
+
+        // --- App Logic ---
+
+        let population = [];
+        let selectedIndices = new Set();
+        let generation = 1;
+
+        function init() {
+            randomize();
+        }
+
+        function randomize() {
+            population = [];
+            selectedIndices.clear();
+            generation = 1;
+            updateGenCount();
+            
+            for (let i = 0; i < POPULATION_SIZE; i++) {
+                population.push(new Genome());
+            }
+            renderGrid();
+        }
+
+        function renderGrid() {
+            const grid = document.getElementById('population-grid');
+            grid.innerHTML = '';
+            
+            population.forEach((genome, index) => {
+                const creature = new Creature(genome);
+                const card = document.createElement('div');
+                card.className = `creature-card ${selectedIndices.has(index) ? 'selected' : ''}`;
+                card.onclick = () => toggleSelection(index);
+                
+                card.innerHTML = `
+                    <svg viewBox="0 0 150 130">${creature.render()}</svg>
+                    <div class="stats">DNA: ${genome.genes[0].toFixed(2)}...</div>
+                `;
+                
+                grid.appendChild(card);
+            });
+        }
+
+        function toggleSelection(index) {
+            if (selectedIndices.has(index)) {
+                selectedIndices.delete(index);
+            } else {
+                selectedIndices.add(index);
+            }
+            renderGrid();
+        }
+
+        function evolve() {
+            if (selectedIndices.size < 2) {
+                alert("Please select at least 2 parents to breed!");
+                return;
+            }
+
+            const parents = Array.from(selectedIndices).map(i => population[i]);
+            const nextGen = [];
+            
+            // Elitism: Keep the best parents? Let's keep the top 2 unchanged
+            nextGen.push(parents[0].copy());
+            if (parents.length > 1) nextGen.push(parents[1].copy());
+
+            const mutationRate = document.getElementById('mutation-rate').value / 100;
+
+            // Fill the rest
+            while (nextGen.length < POPULATION_SIZE) {
+                // Tournament selection or random from pool?
+                // Let's just pick two random parents from the selected pool
+                const p1 = parents[Math.floor(Math.random() * parents.length)];
+                const p2 = parents[Math.floor(Math.random() * parents.length)];
+                
+                const child = Genome.crossover(p1, p2);
+                child.mutate(mutationRate);
+                nextGen.push(child);
+            }
+
+            population = nextGen;
+            selectedIndices.clear();
+            generation++;
+            updateGenCount();
+            renderGrid();
+        }
+
+        function updateGenCount() {
+            document.getElementById('gen-count').textContent = generation;
+        }
+
+        function toggleAutoSelect() {
+            // Just for fun, select random 3
+            selectedIndices.clear();
+            for(let i=0; i<3; i++) {
+                selectedIndices.add(Math.floor(Math.random() * POPULATION_SIZE));
+            }
+            renderGrid();
+        }
+
+        // Start
+        init();
+
+    </script>
+</body>
+</html>

@@ -1,0 +1,1978 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta name="keywords" content="livecoding,hydra,strudel,shader,midi,audio,synth">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🎵%3C/text%3E%3C/svg%3E">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SHADER//SYNTH — Live Coded Audiovisual</title>
+<meta name="description" content="A Hydra+Strudel inspired live-coded audiovisual instrument. Type one-line patterns, evaluate with Cmd+Enter, see/hear them immediately. WebGL2 fragment shader compilation, Tone.js audio, Web MIDI input.">
+
+<meta name="rappterzoo:author" content="agent">
+<meta name="rappterzoo:author-type" content="agent">
+<meta name="rappterzoo:category" content="audio_music">
+<meta name="rappterzoo:tags" content="livecoding,hydra,strudel,shader,midi,audio,synth,realtime">
+<meta name="rappterzoo:type" content="interactive">
+<meta name="rappterzoo:complexity" content="advanced">
+<meta name="rappterzoo:created" content="2026-05-03">
+<meta name="rappterzoo:generation" content="1">
+<meta name="rappterzoo:experience" content="flow">
+<meta name="rappterzoo:spec" content="https://www.w3.org/TR/webmidi/">
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #050807;
+  --bg-soft: #0a1110;
+  --fg: #aef0d4;
+  --neon: #00ff9c;
+  --cyan: #00e5ff;
+  --magenta: #ff00aa;
+  --amber: #ffb000;
+  --red: #ff3355;
+  --dim: #4a6b5e;
+  --grid: rgba(0, 255, 156, 0.07);
+  --crt: rgba(0, 255, 156, 0.04);
+  --mono: 'IBM Plex Mono', 'Fira Code', 'JetBrains Mono', 'SF Mono', 'Menlo', 'Consolas', monospace;
+}
+
+html, body {
+  width: 100%;
+  height: 100%;
+  background: #000;
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background:
+    radial-gradient(circle at 20% 10%, rgba(0,229,255,0.06), transparent 50%),
+    radial-gradient(circle at 80% 90%, rgba(255,0,170,0.05), transparent 50%),
+    var(--bg);
+}
+
+#scanlines {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background: repeating-linear-gradient(
+    to bottom,
+    transparent 0,
+    transparent 2px,
+    rgba(0, 0, 0, 0.18) 3px,
+    transparent 4px
+  );
+  z-index: 1000;
+  mix-blend-mode: multiply;
+  opacity: 0.55;
+}
+
+#vignette {
+  pointer-events: none;
+  position: fixed;
+  inset: 0;
+  background: radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.7) 100%);
+  z-index: 999;
+}
+
+#glcanvas {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  background: #000;
+  image-rendering: pixelated;
+}
+
+#topbar {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  padding: 8px 14px;
+  background: linear-gradient(180deg, rgba(10,17,16,0.92), rgba(5,8,7,0.78));
+  border-bottom: 1px solid var(--neon);
+  box-shadow: 0 0 16px rgba(0,255,156,0.15);
+  gap: 18px;
+  font-size: 12px;
+}
+
+.brand {
+  color: var(--neon);
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-shadow: 0 0 8px var(--neon);
+}
+
+.brand .glyph { color: var(--magenta); }
+
+.statusgroup { display: flex; gap: 16px; flex: 1; }
+
+.status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--dim);
+}
+.status .dot {
+  width: 8px; height: 8px;
+  border-radius: 50%;
+  background: var(--dim);
+  box-shadow: 0 0 6px transparent;
+  transition: all 0.2s;
+}
+.status.ok .dot { background: var(--neon); box-shadow: 0 0 8px var(--neon); }
+.status.warn .dot { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+.status.err .dot { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.status.ok .label { color: var(--fg); }
+.status.warn .label { color: var(--amber); }
+.status.err .label { color: var(--red); }
+
+.toolbtn {
+  background: transparent;
+  border: 1px solid var(--dim);
+  color: var(--fg);
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toolbtn:hover {
+  border-color: var(--neon);
+  color: var(--neon);
+  box-shadow: inset 0 0 12px rgba(0,255,156,0.2), 0 0 6px rgba(0,255,156,0.3);
+}
+.toolbtn.armed {
+  border-color: var(--magenta);
+  color: var(--magenta);
+  box-shadow: 0 0 10px var(--magenta);
+}
+
+#editors {
+  position: relative;
+  z-index: 10;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1px;
+  height: 50vh;
+  background: var(--neon);
+  border-bottom: 1px solid var(--neon);
+}
+
+.editor-pane {
+  display: flex;
+  flex-direction: column;
+  background: rgba(5, 8, 7, 0.78);
+  backdrop-filter: blur(2px);
+  position: relative;
+  overflow: hidden;
+}
+
+.pane-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  border-bottom: 1px dashed var(--dim);
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+.pane-header .title { color: var(--neon); text-shadow: 0 0 6px var(--neon); }
+.editor-pane.audio .pane-header .title { color: var(--magenta); text-shadow: 0 0 6px var(--magenta); }
+.pane-header .meta { color: var(--dim); font-size: 10px; }
+
+.editor-area {
+  position: relative;
+  flex: 1;
+  overflow: auto;
+}
+
+.editor-area textarea {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  color: var(--fg);
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 12px 14px 60px 50px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.55;
+  caret-color: var(--neon);
+  white-space: pre;
+  tab-size: 2;
+  letter-spacing: 0.01em;
+}
+
+.editor-pane.audio .editor-area textarea { caret-color: var(--magenta); }
+
+.linenums {
+  pointer-events: none;
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 38px;
+  padding: 12px 0 60px 0;
+  color: var(--dim);
+  font-size: 12px;
+  line-height: 1.55;
+  text-align: right;
+  font-family: var(--mono);
+  user-select: none;
+  border-right: 1px dashed rgba(74,107,94,0.4);
+  background: rgba(0,0,0,0.2);
+}
+.linenums div { padding-right: 8px; }
+.linenums .current { color: var(--neon); text-shadow: 0 0 6px var(--neon); }
+.editor-pane.audio .linenums .current { color: var(--magenta); text-shadow: 0 0 6px var(--magenta); }
+
+.errorbar {
+  position: absolute;
+  bottom: 0; left: 0; right: 0;
+  padding: 6px 12px;
+  background: rgba(255,51,85,0.1);
+  border-top: 1px solid var(--red);
+  color: var(--red);
+  font-size: 11px;
+  white-space: pre-wrap;
+  max-height: 50px;
+  overflow: auto;
+  display: none;
+}
+.errorbar.show { display: block; }
+.errorbar.info {
+  background: rgba(0,255,156,0.08);
+  border-top-color: var(--neon);
+  color: var(--neon);
+}
+
+.flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  border: 2px solid var(--neon);
+  opacity: 0;
+  transition: opacity 0.4s;
+  box-shadow: inset 0 0 30px rgba(0,255,156,0.4);
+}
+.editor-pane.audio .flash { border-color: var(--magenta); box-shadow: inset 0 0 30px rgba(255,0,170,0.4); }
+.flash.fire { opacity: 1; transition: opacity 0.05s; }
+
+#presets {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  gap: 6px;
+  padding: 6px 14px;
+  overflow-x: auto;
+  background: rgba(5,8,7,0.85);
+  border-bottom: 1px solid var(--dim);
+  scrollbar-width: thin;
+}
+#presets::-webkit-scrollbar { height: 4px; }
+#presets::-webkit-scrollbar-thumb { background: var(--dim); }
+
+.preset-chip {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--dim);
+  color: var(--fg);
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.preset-chip:hover {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  box-shadow: 0 0 8px rgba(0,229,255,0.4);
+}
+
+#help-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 500;
+  background: rgba(5, 8, 7, 0.96);
+  backdrop-filter: blur(4px);
+  display: none;
+  flex-direction: column;
+  padding: 40px;
+  overflow: auto;
+}
+#help-overlay.show { display: flex; }
+#help-overlay h1 {
+  color: var(--neon);
+  text-shadow: 0 0 12px var(--neon);
+  font-size: 22px;
+  letter-spacing: 0.16em;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--neon);
+  padding-bottom: 10px;
+}
+#help-overlay h2 {
+  color: var(--magenta);
+  text-shadow: 0 0 8px var(--magenta);
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  margin: 18px 0 10px;
+}
+#help-overlay h3 {
+  color: var(--cyan);
+  font-size: 13px;
+  margin: 10px 0 6px;
+  letter-spacing: 0.08em;
+}
+#help-overlay p, #help-overlay li {
+  color: var(--fg);
+  font-size: 12px;
+  line-height: 1.6;
+  margin-bottom: 4px;
+}
+#help-overlay code {
+  background: rgba(0,255,156,0.08);
+  color: var(--neon);
+  padding: 1px 6px;
+  border: 1px solid rgba(0,255,156,0.2);
+  border-radius: 2px;
+}
+#help-overlay .grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 30px;
+}
+#help-overlay .close-x {
+  position: absolute;
+  top: 20px; right: 24px;
+  color: var(--red);
+  cursor: pointer;
+  font-size: 18px;
+  letter-spacing: 0.2em;
+}
+
+#audio-prompt {
+  position: fixed;
+  inset: 0;
+  z-index: 800;
+  background: rgba(0, 0, 0, 0.92);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  cursor: pointer;
+  text-align: center;
+  padding: 40px;
+}
+#audio-prompt.gone { display: none; }
+#audio-prompt .ascii {
+  color: var(--neon);
+  text-shadow: 0 0 12px var(--neon);
+  font-size: 13px;
+  white-space: pre;
+  line-height: 1.1;
+  margin-bottom: 24px;
+}
+#audio-prompt .msg {
+  color: var(--cyan);
+  font-size: 16px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  animation: pulse 1.4s infinite;
+}
+#audio-prompt .sub {
+  color: var(--dim);
+  font-size: 11px;
+  margin-top: 18px;
+  letter-spacing: 0.12em;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.evalflash {
+  position: fixed;
+  pointer-events: none;
+  z-index: 200;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--neon);
+  text-shadow: 0 0 8px var(--neon);
+  opacity: 0;
+  transition: opacity 0.3s, transform 0.5s;
+}
+.evalflash.audio { color: var(--magenta); text-shadow: 0 0 8px var(--magenta); }
+.evalflash.fire { opacity: 1; transform: translateY(-30px); }
+
+.crt-corner {
+  position: fixed;
+  z-index: 998;
+  pointer-events: none;
+  width: 18px;
+  height: 18px;
+  border-color: var(--neon);
+}
+.crt-corner.tl { top: 4px; left: 4px; border-top: 2px solid; border-left: 2px solid; }
+.crt-corner.tr { top: 4px; right: 4px; border-top: 2px solid; border-right: 2px solid; }
+.crt-corner.bl { bottom: 4px; left: 4px; border-bottom: 2px solid; border-left: 2px solid; }
+.crt-corner.br { bottom: 4px; right: 4px; border-bottom: 2px solid; border-right: 2px solid; }
+
+.midimon {
+  position: fixed;
+  bottom: 8px; right: 12px;
+  z-index: 50;
+  background: rgba(0,0,0,0.7);
+  border: 1px solid var(--dim);
+  padding: 6px 10px;
+  font-size: 10px;
+  color: var(--cyan);
+  pointer-events: none;
+  display: none;
+  min-width: 120px;
+  letter-spacing: 0.06em;
+}
+.midimon.show { display: block; }
+.midimon .ccrow { color: var(--fg); }
+.midimon .ccrow .v { color: var(--cyan); }
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
+::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--neon); }
+</style>
+</head>
+<body>
+
+<canvas id="glcanvas"></canvas>
+<div id="vignette"></div>
+<div id="scanlines"></div>
+<div class="crt-corner tl"></div>
+<div class="crt-corner tr"></div>
+<div class="crt-corner bl"></div>
+<div class="crt-corner br"></div>
+
+<div id="topbar">
+  <span class="brand">SHADER<span class="glyph">//</span>SYNTH</span>
+  <div class="statusgroup">
+    <div class="status" id="status-gl"><span class="dot"></span><span class="label">WEBGL</span></div>
+    <div class="status" id="status-audio"><span class="dot"></span><span class="label">AUDIO</span></div>
+    <div class="status" id="status-midi"><span class="dot"></span><span class="label">MIDI</span></div>
+    <div class="status" id="status-bpm"><span class="dot"></span><span class="label">BPM 120</span></div>
+  </div>
+  <button class="toolbtn" id="btn-eval-all" title="Evaluate both editors">[EVAL ALL]</button>
+  <button class="toolbtn" id="btn-stop" title="Stop audio (Cmd+.)">[STOP]</button>
+  <button class="toolbtn" id="btn-help" title="Toggle help">[?]</button>
+</div>
+
+<div id="editors">
+  <div class="editor-pane visual">
+    <div class="pane-header">
+      <span class="title">▌ VISUAL ░ FRAGMENT</span>
+      <span class="meta">cmd+enter to eval line · cmd+shift+enter all</span>
+    </div>
+    <div class="editor-area">
+      <div class="linenums" id="linenums-v"></div>
+      <textarea id="editor-visual" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">// VISUAL — chain operators, end with .out()
+osc(40, 0.1, 0.8).rotate(0.1).color(1.4, 0.6, 1.2).out()</textarea>
+      <div class="flash" id="flash-v"></div>
+    </div>
+    <div class="errorbar" id="err-v"></div>
+  </div>
+
+  <div class="editor-pane audio">
+    <div class="pane-header">
+      <span class="title">▌ AUDIO ░ PATTERN</span>
+      <span class="meta">cmd+enter to play line · cmd+. to stop</span>
+    </div>
+    <div class="editor-area">
+      <div class="linenums" id="linenums-a"></div>
+      <textarea id="editor-audio" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off">// AUDIO — patterns ride a clock
+s("bd*4").gain(0.7)
+s("~ sn ~ sn").gain(0.6)
+s("hh*8").gain(0.3)
+n("c2 ~ eb2 g2").s("bass").gain(0.5).lpf(800)</textarea>
+      <div class="flash" id="flash-a"></div>
+    </div>
+    <div class="errorbar" id="err-a"></div>
+  </div>
+</div>
+
+<div id="presets"></div>
+
+<div id="audio-prompt">
+  <div class="ascii">┌──────────────────────────┐
+│   SHADER // SYNTH        │
+│   live coded a/v rig     │
+└──────────────────────────┘</div>
+  <div class="msg">▶ click anywhere to enable audio</div>
+  <div class="sub">cmd+enter evaluates · cmd+. stops · ? for help</div>
+</div>
+
+<div id="help-overlay">
+  <span class="close-x">[ X CLOSE ]</span>
+  <h1>SHADER // SYNTH — REFERENCE</h1>
+  <div class="grid2">
+    <div>
+      <h2>VISUAL DSL</h2>
+      <p>Chain operators, end with <code>.out()</code>. Each chain compiles to GLSL.</p>
+      <h3>SOURCES</h3>
+      <ul>
+        <li><code>osc(freq, sync, offset)</code> — oscillating bars</li>
+        <li><code>noise(scale, offset)</code> — perlin-ish noise</li>
+        <li><code>voronoi(scale, speed, blending)</code> — cell pattern</li>
+        <li><code>shape(sides, radius, smoothing)</code> — polygon</li>
+        <li><code>gradient(speed)</code> — rainbow gradient</li>
+        <li><code>solid(r, g, b)</code> — flat color</li>
+        <li><code>src(o0)</code> — feedback from previous frame</li>
+      </ul>
+      <h3>GEOM</h3>
+      <ul>
+        <li><code>.rotate(angle, speed)</code></li>
+        <li><code>.scale(amount, xMult, yMult)</code></li>
+        <li><code>.repeat(rx, ry)</code></li>
+        <li><code>.kaleid(n)</code></li>
+        <li><code>.pixelate(x, y)</code></li>
+        <li><code>.modulate(other, amount)</code></li>
+        <li><code>.modulateRotate(other, mult, offset)</code></li>
+        <li><code>.modulateScale(other, mult)</code></li>
+      </ul>
+      <h3>COLOR</h3>
+      <ul>
+        <li><code>.color(r, g, b)</code></li>
+        <li><code>.brightness(n)</code> · <code>.contrast(n)</code></li>
+        <li><code>.invert()</code> · <code>.luma(threshold)</code></li>
+        <li><code>.posterize(n, gamma)</code></li>
+        <li><code>.saturate(n)</code></li>
+      </ul>
+      <h3>BLEND</h3>
+      <ul>
+        <li><code>.blend(other, amount)</code></li>
+        <li><code>.add(other, amount)</code> · <code>.mult(other, amount)</code></li>
+        <li><code>.diff(other)</code> · <code>.layer(other)</code></li>
+      </ul>
+    </div>
+    <div>
+      <h2>AUDIO DSL</h2>
+      <p>Strudel-flavored mini patterns. Whitespace = steps, <code>~</code> = rest, <code>*N</code> = repeat.</p>
+      <h3>SOURCES</h3>
+      <ul>
+        <li><code>s("bd sn hh cp")</code> — sample names</li>
+        <li><code>n("c2 e2 g2")</code> — note names or midi numbers</li>
+      </ul>
+      <h3>SAMPLES</h3>
+      <ul>
+        <li><code>bd</code> — kick</li>
+        <li><code>sn</code> — snare</li>
+        <li><code>hh</code> — hat</li>
+        <li><code>cp</code> — clap</li>
+        <li><code>bass / lead / pad</code> — synths (use with <code>n()</code>)</li>
+        <li><code>sine / square / saw / tri</code> — basic synth waves</li>
+      </ul>
+      <h3>MODIFIERS</h3>
+      <ul>
+        <li><code>.gain(n)</code> · <code>.pan(n)</code></li>
+        <li><code>.lpf(hz)</code> · <code>.hpf(hz)</code></li>
+        <li><code>.delay(time)</code> · <code>.room(amt)</code></li>
+        <li><code>.speed(n)</code> · <code>.cycles(n)</code></li>
+      </ul>
+      <h2>MIDI</h2>
+      <p>Use <code>midi(cc, lo, hi, min, max)</code> in any visual or audio expression.</p>
+      <ul>
+        <li><code>osc(midi(1, 0, 127, 10, 80)).out()</code></li>
+        <li>MIDI notes trigger built-in samples by pitch class.</li>
+      </ul>
+      <h2>KEYS</h2>
+      <ul>
+        <li><code>Cmd/Ctrl + Enter</code> — evaluate current block</li>
+        <li><code>Cmd/Ctrl + Shift + Enter</code> — evaluate full editor</li>
+        <li><code>Cmd/Ctrl + .</code> — stop audio</li>
+        <li><code>?</code> — toggle this help</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<div class="midimon" id="midimon"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js"></script>
+
+<script>
+"use strict";
+
+/* ============================================================
+   SHADER//SYNTH — single-file live coded audiovisual rig
+   ============================================================
+   Visual DSL: chainable operators -> compiled GLSL fragment shader
+   Audio  DSL: strudel-flavored patterns -> Tone.js scheduling
+   Input:     Web MIDI for CC routing + note triggers
+   ============================================================ */
+
+const $ = (id) => document.getElementById(id);
+const log = (...a) => console.log("[ssyn]", ...a);
+
+/* ============================================================
+   GLOBAL STATE
+   ============================================================ */
+const STATE = {
+  audioReady: false,
+  midiReady: false,
+  bpm: 120,
+  startTime: performance.now() / 1000,
+  midiCC: new Array(128).fill(0),
+  midiNoteCB: [],
+  lastVisualSrc: "",
+  lastAudioSrc: "",
+};
+
+/* ============================================================
+   STATUS HELPERS
+   ============================================================ */
+function setStatus(id, mode, label) {
+  const el = $("status-" + id);
+  if (!el) return;
+  el.classList.remove("ok", "warn", "err");
+  if (mode) el.classList.add(mode);
+  if (label) el.querySelector(".label").textContent = label;
+}
+
+function showError(which, msg) {
+  const el = $("err-" + which);
+  if (!msg) { el.classList.remove("show"); el.textContent = ""; return; }
+  el.classList.remove("info");
+  el.classList.add("show");
+  el.textContent = "✗ " + msg;
+}
+function showInfo(which, msg) {
+  const el = $("err-" + which);
+  el.classList.add("show", "info");
+  el.textContent = "» " + msg;
+  setTimeout(() => { if (el.textContent.startsWith("» " + msg)) { el.classList.remove("show"); } }, 1400);
+}
+
+function flashPane(which) {
+  const f = $("flash-" + which);
+  f.classList.add("fire");
+  setTimeout(() => f.classList.remove("fire"), 80);
+}
+
+/* ============================================================
+   ============================================================
+   VISUAL DSL — compiles op chains into a GLSL fragment shader
+   ============================================================
+   ============================================================ */
+
+/* Each operator returns a "node" object with a fluent chain API.
+   When .out() is invoked, the node tree is compiled to GLSL.
+   Op categories:
+     src     — produces a starting color from st (vec2 uv)
+     geom    — modifies st BEFORE source samples (rotate/scale/etc)
+     color   — modifies output color AFTER source samples
+     combine — mixes another full chain's color
+     modulate— uses another chain's sampled color to displace st
+*/
+
+let _outputNode = null;
+
+function _node(spec) {
+  const proto = _ChainProto;
+  const n = Object.create(proto);
+  n.src = spec.src;
+  n.geom = spec.geom || [];
+  n.color = spec.color || [];
+  return n;
+}
+
+const _ChainProto = {
+  // GEOM ops
+  rotate(angle = 10, speed = 0) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "rotate", args: [angle, speed] }]), color: this.color });
+  },
+  scale(amount = 1.5, xMult = 1, yMult = 1, offsetX = 0.5, offsetY = 0.5) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "scale", args: [amount, xMult, yMult, offsetX, offsetY] }]), color: this.color });
+  },
+  repeat(repeatX = 3, repeatY = 3, offsetX = 0, offsetY = 0) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "repeat", args: [repeatX, repeatY, offsetX, offsetY] }]), color: this.color });
+  },
+  kaleid(nSides = 4) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "kaleid", args: [nSides] }]), color: this.color });
+  },
+  pixelate(x = 20, y = 20) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "pixelate", args: [x, y] }]), color: this.color });
+  },
+  modulate(other, amount = 0.1) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "modulate", args: [other, amount] }]), color: this.color });
+  },
+  modulateRotate(other, mult = 1, offset = 0) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "modulateRotate", args: [other, mult, offset] }]), color: this.color });
+  },
+  modulateScale(other, mult = 1, offset = 1) {
+    return _node({ src: this.src, geom: this.geom.concat([{ kind: "modulateScale", args: [other, mult, offset] }]), color: this.color });
+  },
+
+  // COLOR ops
+  color(r = 1, g = 1, b = 1) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "color", args: [r, g, b] }]) });
+  },
+  brightness(amt = 0.4) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "brightness", args: [amt] }]) });
+  },
+  contrast(amt = 1.6) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "contrast", args: [amt] }]) });
+  },
+  invert() {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "invert", args: [] }]) });
+  },
+  luma(threshold = 0.5, tolerance = 0.1) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "luma", args: [threshold, tolerance] }]) });
+  },
+  posterize(bins = 3, gamma = 0.6) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "posterize", args: [bins, gamma] }]) });
+  },
+  saturate(amt = 2) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "saturate", args: [amt] }]) });
+  },
+
+  // COMBINE ops
+  blend(other, amount = 0.5) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "blend", args: [other, amount] }]) });
+  },
+  add(other, amount = 1) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "add", args: [other, amount] }]) });
+  },
+  mult(other, amount = 1) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "mult", args: [other, amount] }]) });
+  },
+  diff(other) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "diff", args: [other] }]) });
+  },
+  layer(other) {
+    return _node({ src: this.src, geom: this.geom, color: this.color.concat([{ kind: "layer", args: [other] }]) });
+  },
+
+  // OUTPUT
+  out(buf = 0) {
+    _outputNode = this;
+    return this;
+  },
+};
+
+/* === SOURCE FACTORIES === */
+function osc(freq = 60, sync = 0.1, offset = 0) {
+  return _node({ src: { kind: "osc", args: [freq, sync, offset] } });
+}
+function noise(scale = 10, offset = 0.1) {
+  return _node({ src: { kind: "noise", args: [scale, offset] } });
+}
+function voronoi(scale = 5, speed = 0.3, blending = 0.3) {
+  return _node({ src: { kind: "voronoi", args: [scale, speed, blending] } });
+}
+function shape(sides = 3, radius = 0.3, smoothing = 0.01) {
+  return _node({ src: { kind: "shape", args: [sides, radius, smoothing] } });
+}
+function gradient(speed = 0.5) {
+  return _node({ src: { kind: "gradient", args: [speed] } });
+}
+function solid(r = 0, g = 0, b = 0, a = 1) {
+  return _node({ src: { kind: "solid", args: [r, g, b, a] } });
+}
+function src(idx = 0) {
+  return _node({ src: { kind: "src", args: [idx] } });
+}
+
+/* === midi() helper for visuals/audio === */
+function midi(cc = 1, lo = 0, hi = 127, min = 0, max = 1) {
+  const v = STATE.midiCC[cc | 0] || 0;
+  const t = (v - lo) / (hi - lo);
+  return min + Math.max(0, Math.min(1, t)) * (max - min);
+}
+
+/* === GLSL emission === */
+
+const GLSL_PRELUDE = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform float u_time;
+uniform vec2  u_res;
+uniform sampler2D u_prev;
+
+#define PI 3.141592653589793
+
+float _hash(vec2 p) {
+  p = fract(p * vec2(123.34, 456.21));
+  p += dot(p, p + 45.32);
+  return fract(p.x * p.y);
+}
+float _noise2(vec2 p) {
+  vec2 i = floor(p);
+  vec2 f = fract(p);
+  float a = _hash(i);
+  float b = _hash(i + vec2(1.0, 0.0));
+  float c = _hash(i + vec2(0.0, 1.0));
+  float d = _hash(i + vec2(1.0, 1.0));
+  vec2 u = f * f * (3.0 - 2.0 * f);
+  return mix(a, b, u.x) + (c - a) * u.y * (1.0 - u.x) + (d - b) * u.x * u.y;
+}
+vec2 _rotateP(vec2 st, float a) {
+  st -= 0.5;
+  st = mat2(cos(a), -sin(a), sin(a), cos(a)) * st;
+  st += 0.5;
+  return st;
+}
+float _luminance(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+`;
+
+const GLSL_OPS = `
+vec4 src_osc(vec2 _st, float frequency, float sync, float offset) {
+  float r = sin((_st.x - offset/frequency + u_time*sync) * frequency) * 0.5 + 0.5;
+  float g = sin((_st.x + u_time*sync) * frequency) * 0.5 + 0.5;
+  float b = sin((_st.x + offset + u_time*sync) * frequency) * 0.5 + 0.5;
+  return vec4(r, g, b, 1.0);
+}
+vec4 src_noise(vec2 _st, float scale, float offset) {
+  float n = _noise2(_st * scale + u_time * offset);
+  return vec4(vec3(n), 1.0);
+}
+vec4 src_voronoi(vec2 _st, float scale, float speed, float blending) {
+  vec2 p = _st * scale;
+  vec2 i_st = floor(p);
+  vec2 f_st = fract(p);
+  float m_dist = 10.0;
+  vec3 col = vec3(0.0);
+  for (int j = -1; j <= 1; j++) {
+    for (int k = -1; k <= 1; k++) {
+      vec2 neighbor = vec2(float(k), float(j));
+      vec2 r = vec2(_hash(i_st + neighbor), _hash(i_st + neighbor + 17.0));
+      r = 0.5 + 0.5 * sin(u_time * speed + 6.2831 * r);
+      vec2 diff = neighbor + r - f_st;
+      float d = length(diff);
+      if (d < m_dist) {
+        m_dist = d;
+        col = vec3(_hash(i_st + neighbor), _hash(i_st + neighbor + 7.7), _hash(i_st + neighbor + 13.3));
+      }
+    }
+  }
+  vec3 final = mix(col, vec3(m_dist), blending);
+  return vec4(final, 1.0);
+}
+vec4 src_shape(vec2 _st, float sides, float radius, float smoothing) {
+  vec2 st = _st * 2.0 - 1.0;
+  float a = atan(st.x, st.y) + PI;
+  float r = 6.2831/max(1.0, sides);
+  float d = cos(floor(0.5 + a/r) * r - a) * length(st);
+  float v = 1.0 - smoothstep(radius, radius + smoothing + 0.0001, d);
+  return vec4(vec3(v), 1.0);
+}
+vec4 src_gradient(vec2 _st, float speed) {
+  return vec4(_st.x, _st.y, sin(u_time*speed)*0.5 + 0.5, 1.0);
+}
+vec4 src_solid(vec2 _st, float r, float g, float b, float a) {
+  return vec4(r, g, b, a);
+}
+vec4 src_src(vec2 _st, float idx) {
+  return texture(u_prev, _st);
+}
+
+vec2 geom_rotate(vec2 _st, float angle, float speed) {
+  return _rotateP(_st, angle + u_time*speed);
+}
+vec2 geom_scale(vec2 _st, float amount, float xMult, float yMult, float ox, float oy) {
+  vec2 st = _st - vec2(ox, oy);
+  st *= (1.0 / vec2(amount * xMult, amount * yMult));
+  st += vec2(ox, oy);
+  return st;
+}
+vec2 geom_repeat(vec2 _st, float rx, float ry, float ox, float oy) {
+  vec2 st = _st * vec2(rx, ry);
+  st.x += step(1.0, mod(st.y, 2.0)) * ox;
+  st.y += step(1.0, mod(st.x, 2.0)) * oy;
+  return fract(st);
+}
+vec2 geom_kaleid(vec2 _st, float nSides) {
+  vec2 st = _st - 0.5;
+  float r = length(st);
+  float a = atan(st.y, st.x);
+  float pi = 2.0 * PI;
+  a = mod(a, pi/max(1.0, nSides));
+  a = abs(a - pi/max(1.0, nSides)/2.0);
+  return r * vec2(cos(a), sin(a)) + 0.5;
+}
+vec2 geom_pixelate(vec2 _st, float pX, float pY) {
+  vec2 xy = vec2(pX, pY);
+  return (floor(_st * xy) + 0.5) / xy;
+}
+
+vec4 col_color(vec4 c, float r, float g, float b) {
+  return vec4(c.rgb * vec3(r, g, b), c.a);
+}
+vec4 col_brightness(vec4 c, float amt) { return vec4(c.rgb + amt, c.a); }
+vec4 col_contrast(vec4 c, float amt) { return vec4(((c.rgb - 0.5) * max(amt, 0.0)) + 0.5, c.a); }
+vec4 col_invert(vec4 c) { return vec4(1.0 - c.rgb, c.a); }
+vec4 col_luma(vec4 c, float threshold, float tolerance) {
+  float y = _luminance(c.rgb);
+  return c * smoothstep(threshold - tolerance, threshold + tolerance, y);
+}
+vec4 col_posterize(vec4 c, float bins, float gamma) {
+  vec3 g = pow(c.rgb, vec3(gamma));
+  vec3 q = floor(g * bins) / bins;
+  return vec4(pow(q, vec3(1.0/max(gamma, 0.0001))), c.a);
+}
+vec4 col_saturate(vec4 c, float amt) {
+  float y = _luminance(c.rgb);
+  return vec4(mix(vec3(y), c.rgb, amt), c.a);
+}
+
+vec4 cmb_blend(vec4 a, vec4 b, float amt) { return mix(a, b, amt); }
+vec4 cmb_add(vec4 a, vec4 b, float amt) { return a + b * amt; }
+vec4 cmb_mult(vec4 a, vec4 b, float amt) { return a * (1.0 - amt) + a * b * amt; }
+vec4 cmb_diff(vec4 a, vec4 b) { return vec4(abs(a.rgb - b.rgb), max(a.a, b.a)); }
+vec4 cmb_layer(vec4 a, vec4 b) { return mix(a, b, b.a); }
+`;
+
+/* Compile a node tree to a GLSL chain function name + emit body. */
+let _glslChainCounter = 0;
+let _glslAuxFns = "";
+
+function _resetGlslState() {
+  _glslChainCounter = 0;
+  _glslAuxFns = "";
+}
+
+function _f(n) {
+  // Format float for GLSL — always include decimal
+  if (typeof n !== "number" || !isFinite(n)) n = 0;
+  let s = n.toFixed(6);
+  // trim trailing zeros but keep at least one decimal
+  s = s.replace(/0+$/, "").replace(/\.$/, ".0");
+  if (!s.includes(".")) s += ".0";
+  return s;
+}
+
+function _compileChain(node) {
+  const fnIdx = _glslChainCounter++;
+  const fnName = "chain_" + fnIdx;
+  let body = "  vec2 _st = uv;\n";
+
+  // GEOM ops applied to st in chain order
+  for (const op of node.geom) {
+    if (op.kind === "rotate") {
+      body += `  _st = geom_rotate(_st, ${_f(op.args[0])}, ${_f(op.args[1])});\n`;
+    } else if (op.kind === "scale") {
+      body += `  _st = geom_scale(_st, ${_f(op.args[0])}, ${_f(op.args[1])}, ${_f(op.args[2])}, ${_f(op.args[3])}, ${_f(op.args[4])});\n`;
+    } else if (op.kind === "repeat") {
+      body += `  _st = geom_repeat(_st, ${_f(op.args[0])}, ${_f(op.args[1])}, ${_f(op.args[2])}, ${_f(op.args[3])});\n`;
+    } else if (op.kind === "kaleid") {
+      body += `  _st = geom_kaleid(_st, ${_f(op.args[0])});\n`;
+    } else if (op.kind === "pixelate") {
+      body += `  _st = geom_pixelate(_st, ${_f(op.args[0])}, ${_f(op.args[1])});\n`;
+    } else if (op.kind === "modulate") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _m = ${otherFn}(_st); _st += (_m.rg - 0.5) * ${_f(op.args[1])}; }\n`;
+    } else if (op.kind === "modulateRotate") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _m = ${otherFn}(_st); _st = _rotateP(_st, _m.r * ${_f(op.args[1])} + ${_f(op.args[2])}); }\n`;
+    } else if (op.kind === "modulateScale") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _m = ${otherFn}(_st); float s = 1.0 / (_m.r * ${_f(op.args[1])} + ${_f(op.args[2])}); _st = (_st - 0.5) * s + 0.5; }\n`;
+    }
+  }
+
+  // SRC sampling
+  const s = node.src;
+  if (!s) {
+    body += "  vec4 c = vec4(0.0, 0.0, 0.0, 1.0);\n";
+  } else if (s.kind === "osc") {
+    body += `  vec4 c = src_osc(_st, ${_f(s.args[0])}, ${_f(s.args[1])}, ${_f(s.args[2])});\n`;
+  } else if (s.kind === "noise") {
+    body += `  vec4 c = src_noise(_st, ${_f(s.args[0])}, ${_f(s.args[1])});\n`;
+  } else if (s.kind === "voronoi") {
+    body += `  vec4 c = src_voronoi(_st, ${_f(s.args[0])}, ${_f(s.args[1])}, ${_f(s.args[2])});\n`;
+  } else if (s.kind === "shape") {
+    body += `  vec4 c = src_shape(_st, ${_f(s.args[0])}, ${_f(s.args[1])}, ${_f(s.args[2])});\n`;
+  } else if (s.kind === "gradient") {
+    body += `  vec4 c = src_gradient(_st, ${_f(s.args[0])});\n`;
+  } else if (s.kind === "solid") {
+    body += `  vec4 c = src_solid(_st, ${_f(s.args[0])}, ${_f(s.args[1])}, ${_f(s.args[2])}, ${_f(s.args[3])});\n`;
+  } else if (s.kind === "src") {
+    body += `  vec4 c = src_src(_st, ${_f(s.args[0])});\n`;
+  } else {
+    body += "  vec4 c = vec4(0.0, 0.0, 0.0, 1.0);\n";
+  }
+
+  // COLOR ops applied to c in chain order
+  for (const op of node.color) {
+    if (op.kind === "color") {
+      body += `  c = col_color(c, ${_f(op.args[0])}, ${_f(op.args[1])}, ${_f(op.args[2])});\n`;
+    } else if (op.kind === "brightness") {
+      body += `  c = col_brightness(c, ${_f(op.args[0])});\n`;
+    } else if (op.kind === "contrast") {
+      body += `  c = col_contrast(c, ${_f(op.args[0])});\n`;
+    } else if (op.kind === "invert") {
+      body += `  c = col_invert(c);\n`;
+    } else if (op.kind === "luma") {
+      body += `  c = col_luma(c, ${_f(op.args[0])}, ${_f(op.args[1])});\n`;
+    } else if (op.kind === "posterize") {
+      body += `  c = col_posterize(c, ${_f(op.args[0])}, ${_f(op.args[1])});\n`;
+    } else if (op.kind === "saturate") {
+      body += `  c = col_saturate(c, ${_f(op.args[0])});\n`;
+    } else if (op.kind === "blend") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _o = ${otherFn}(uv); c = cmb_blend(c, _o, ${_f(op.args[1])}); }\n`;
+    } else if (op.kind === "add") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _o = ${otherFn}(uv); c = cmb_add(c, _o, ${_f(op.args[1])}); }\n`;
+    } else if (op.kind === "mult") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _o = ${otherFn}(uv); c = cmb_mult(c, _o, ${_f(op.args[1])}); }\n`;
+    } else if (op.kind === "diff") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _o = ${otherFn}(uv); c = cmb_diff(c, _o); }\n`;
+    } else if (op.kind === "layer") {
+      const otherFn = _compileChain(op.args[0]);
+      body += `  { vec4 _o = ${otherFn}(uv); c = cmb_layer(c, _o); }\n`;
+    }
+  }
+
+  body += "  return c;\n";
+
+  _glslAuxFns += `vec4 ${fnName}(vec2 uv) {\n${body}}\n\n`;
+  return fnName;
+}
+
+function compileVisualToGLSL(rootNode) {
+  _resetGlslState();
+  const rootFn = _compileChain(rootNode);
+  const main = `
+void main() {
+  vec4 c = ${rootFn}(vUv);
+  fragColor = vec4(c.rgb, 1.0);
+}
+`;
+  return GLSL_PRELUDE + GLSL_OPS + _glslAuxFns + main;
+}
+
+/* ============================================================
+   WEBGL2 RENDERER
+   ============================================================ */
+
+const VS = `#version 300 es
+in vec2 a_pos;
+out vec2 vUv;
+void main() {
+  vUv = (a_pos + 1.0) * 0.5;
+  gl_Position = vec4(a_pos, 0.0, 1.0);
+}`;
+
+const DEFAULT_FS = `#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+uniform float u_time;
+void main() {
+  float v = sin((vUv.x + vUv.y) * 8.0 + u_time) * 0.5 + 0.5;
+  vec3 c = mix(vec3(0.0, 0.6, 0.4), vec3(0.6, 0.0, 0.5), v);
+  fragColor = vec4(c * 0.4, 1.0);
+}`;
+
+class Renderer {
+  constructor(canvas) {
+    this.canvas = canvas;
+    this.gl = canvas.getContext("webgl2", { antialias: false, premultipliedAlpha: false });
+    if (!this.gl) {
+      setStatus("gl", "err", "NO WEBGL2");
+      return;
+    }
+    setStatus("gl", "ok", "WEBGL2");
+    const gl = this.gl;
+
+    this.program = null;
+    this.locTime = null;
+    this.locRes = null;
+    this.locPrev = null;
+    this.startTime = performance.now() / 1000;
+
+    // VAO with full-screen quad
+    this.vao = gl.createVertexArray();
+    gl.bindVertexArray(this.vao);
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 3,-1, -1,3]), gl.STATIC_DRAW);
+
+    // Will assign attrib location after compilation
+    this._quadBuf = buf;
+
+    // Feedback ping-pong
+    this._setupFBO();
+
+    // Default shader
+    this.compile(DEFAULT_FS);
+
+    this.resize();
+    window.addEventListener("resize", () => this.resize());
+  }
+
+  _setupFBO() {
+    const gl = this.gl;
+    this.fbos = [null, null];
+    this.tex = [null, null];
+    for (let i = 0; i < 2; i++) {
+      const tex = gl.createTexture();
+      gl.bindTexture(gl.TEXTURE_2D, tex);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      const fbo = gl.createFramebuffer();
+      gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+      this.tex[i] = tex;
+      this.fbos[i] = fbo;
+    }
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    this._fboPing = 0;
+    this._fboW = 0; this._fboH = 0;
+  }
+
+  _resizeFBO(w, h) {
+    if (this._fboW === w && this._fboH === h) return;
+    const gl = this.gl;
+    for (let i = 0; i < 2; i++) {
+      gl.bindTexture(gl.TEXTURE_2D, this.tex[i]);
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
+    this._fboW = w; this._fboH = h;
+  }
+
+  resize() {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.floor(window.innerWidth * dpr * 0.85);
+    const h = Math.floor(window.innerHeight * dpr * 0.85);
+    this.canvas.width = w;
+    this.canvas.height = h;
+    this._resizeFBO(w, h);
+  }
+
+  compileShader(src, type) {
+    const gl = this.gl;
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const info = gl.getShaderInfoLog(sh) || "shader compile failed";
+      gl.deleteShader(sh);
+      throw new Error(info);
+    }
+    return sh;
+  }
+
+  compile(fragSrc) {
+    const gl = this.gl;
+    let vs, fs, prog;
+    try {
+      vs = this.compileShader(VS, gl.VERTEX_SHADER);
+      fs = this.compileShader(fragSrc, gl.FRAGMENT_SHADER);
+      prog = gl.createProgram();
+      gl.attachShader(prog, vs);
+      gl.attachShader(prog, fs);
+      gl.linkProgram(prog);
+      if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+        const info = gl.getProgramInfoLog(prog) || "link failed";
+        throw new Error(info);
+      }
+    } catch (e) {
+      if (vs) gl.deleteShader(vs);
+      if (fs) gl.deleteShader(fs);
+      if (prog) gl.deleteProgram(prog);
+      throw e;
+    }
+
+    if (this.program) gl.deleteProgram(this.program);
+    this.program = prog;
+    gl.useProgram(prog);
+
+    const aPos = gl.getAttribLocation(prog, "a_pos");
+    gl.bindVertexArray(this.vao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this._quadBuf);
+    if (aPos >= 0) {
+      gl.enableVertexAttribArray(aPos);
+      gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0);
+    }
+
+    this.locTime = gl.getUniformLocation(prog, "u_time");
+    this.locRes = gl.getUniformLocation(prog, "u_res");
+    this.locPrev = gl.getUniformLocation(prog, "u_prev");
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+  }
+
+  draw() {
+    if (!this.gl || !this.program) return;
+    const gl = this.gl;
+    const t = performance.now() / 1000 - this.startTime;
+    gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+    gl.useProgram(this.program);
+    gl.bindVertexArray(this.vao);
+
+    // bind previous fbo as feedback texture
+    const readIdx = this._fboPing;
+    const writeIdx = 1 - this._fboPing;
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.tex[readIdx]);
+    if (this.locPrev) gl.uniform1i(this.locPrev, 0);
+    if (this.locTime) gl.uniform1f(this.locTime, t);
+    if (this.locRes) gl.uniform2f(this.locRes, this.canvas.width, this.canvas.height);
+
+    // render to write fbo
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.fbos[writeIdx]);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // blit to default framebuffer
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.fbos[writeIdx]);
+    gl.bindFramebuffer(gl.DRAW_FRAMEBUFFER, null);
+    gl.blitFramebuffer(
+      0, 0, this.canvas.width, this.canvas.height,
+      0, 0, this.canvas.width, this.canvas.height,
+      gl.COLOR_BUFFER_BIT, gl.NEAREST
+    );
+
+    this._fboPing = writeIdx;
+  }
+}
+
+const renderer = new Renderer($("glcanvas"));
+
+function loop() {
+  if (renderer && renderer.gl) renderer.draw();
+  requestAnimationFrame(loop);
+}
+loop();
+
+/* ============================================================
+   VISUAL EVALUATOR — runs the chain code, captures _outputNode
+   ============================================================ */
+
+function evalVisualSrc(srcCode) {
+  _outputNode = null;
+  // Provide DSL in scope
+  const fn = new Function(
+    "osc","noise","voronoi","shape","gradient","solid","src","midi","time","cc",
+    "\"use strict\";\n" + srcCode + "\n"
+  );
+  const time = (performance.now() / 1000) - STATE.startTime;
+  const cc = (i) => STATE.midiCC[i | 0] / 127;
+  fn(osc, noise, voronoi, shape, gradient, solid, src, midi, time, cc);
+  if (!_outputNode) {
+    throw new Error("no .out() called — chain didn't render");
+  }
+  const glsl = compileVisualToGLSL(_outputNode);
+  renderer.compile(glsl);
+  STATE.lastVisualSrc = srcCode;
+  return glsl;
+}
+
+/* ============================================================
+   ============================================================
+   AUDIO DSL — Strudel-flavored mini-language using Tone.js
+   ============================================================
+   ============================================================ */
+
+const AUDIO = {
+  ready: false,
+  patterns: [],   // active patterns (active set)
+  loopId: null,
+  bpm: 120,
+  cycleSeconds: 2.0, // 1 bar at 120bpm
+  samples: {},
+  synths: {},
+  bus: null,
+  reverb: null,
+  delay: null,
+};
+
+function buildAudioGraph() {
+  if (AUDIO.bus) return;
+  const T = window.Tone;
+
+  AUDIO.bus = new T.Gain(0.85).toDestination();
+  AUDIO.reverb = new T.Reverb({ decay: 2.6, wet: 0 }).connect(AUDIO.bus);
+  AUDIO.delay = new T.FeedbackDelay({ delayTime: 0.25, feedback: 0.4, wet: 0 }).connect(AUDIO.reverb);
+
+  // Synthesized "samples" via short envelopes
+  AUDIO.makeBd = () => {
+    const k = new T.MembraneSynth({
+      pitchDecay: 0.04, octaves: 6,
+      envelope: { attack: 0.001, decay: 0.4, sustain: 0, release: 0.1 }
+    }).connect(AUDIO.delay);
+    return k;
+  };
+  AUDIO.makeSn = () => {
+    const n = new T.NoiseSynth({
+      noise: { type: "white" },
+      envelope: { attack: 0.001, decay: 0.18, sustain: 0 }
+    }).connect(AUDIO.delay);
+    return n;
+  };
+  AUDIO.makeHh = () => {
+    const m = new T.MetalSynth({
+      frequency: 250, envelope: { attack: 0.001, decay: 0.08, release: 0.02 },
+      harmonicity: 5.1, modulationIndex: 32, resonance: 4000, octaves: 1.5
+    }).connect(AUDIO.delay);
+    m.volume.value = -16;
+    return m;
+  };
+  AUDIO.makeCp = () => {
+    const n = new T.NoiseSynth({
+      noise: { type: "pink" },
+      envelope: { attack: 0.002, decay: 0.16, sustain: 0 }
+    }).connect(AUDIO.delay);
+    return n;
+  };
+  AUDIO.makeBass = () => {
+    const s = new T.MonoSynth({
+      oscillator: { type: "sawtooth" },
+      filter: { Q: 2, type: "lowpass" },
+      envelope: { attack: 0.005, decay: 0.2, sustain: 0.4, release: 0.2 },
+      filterEnvelope: { attack: 0.01, decay: 0.2, sustain: 0.4, release: 0.4, baseFrequency: 200, octaves: 2.5 }
+    }).connect(AUDIO.delay);
+    return s;
+  };
+  AUDIO.makeLead = () => {
+    const s = new T.PolySynth(T.Synth, {
+      oscillator: { type: "triangle" },
+      envelope: { attack: 0.01, decay: 0.1, sustain: 0.4, release: 0.6 }
+    }).connect(AUDIO.delay);
+    return s;
+  };
+  AUDIO.makePad = () => {
+    const s = new T.PolySynth(T.AMSynth, {
+      harmonicity: 2.4,
+      envelope: { attack: 0.4, decay: 0.6, sustain: 0.7, release: 1.4 }
+    }).connect(AUDIO.delay);
+    return s;
+  };
+  AUDIO.makeWave = (type) => {
+    const s = new T.PolySynth(T.Synth, {
+      oscillator: { type: type },
+      envelope: { attack: 0.005, decay: 0.12, sustain: 0.4, release: 0.4 }
+    }).connect(AUDIO.delay);
+    return s;
+  };
+
+  AUDIO.synths.bd = AUDIO.makeBd();
+  AUDIO.synths.sn = AUDIO.makeSn();
+  AUDIO.synths.hh = AUDIO.makeHh();
+  AUDIO.synths.cp = AUDIO.makeCp();
+  AUDIO.synths.bass = AUDIO.makeBass();
+  AUDIO.synths.lead = AUDIO.makeLead();
+  AUDIO.synths.pad = AUDIO.makePad();
+  AUDIO.synths.sine = AUDIO.makeWave("sine");
+  AUDIO.synths.square = AUDIO.makeWave("square");
+  AUDIO.synths.saw = AUDIO.makeWave("sawtooth");
+  AUDIO.synths.tri = AUDIO.makeWave("triangle");
+}
+
+/* === Mini-pattern parser ===
+   "bd*4"      -> ["bd","bd","bd","bd"]
+   "~ sn ~ sn" -> [null,"sn",null,"sn"]
+   "c2 e2 g2"  -> ["c2","e2","g2"]
+*/
+function parseMini(str) {
+  if (str == null) return [];
+  const tokens = String(str).trim().split(/\s+/).filter(Boolean);
+  const out = [];
+  for (const tok of tokens) {
+    if (!tok) continue;
+    const m = tok.match(/^(.+?)\*(\d+)$/);
+    if (m) {
+      const [, val, count] = m;
+      const v = val === "~" ? null : val;
+      for (let i = 0; i < (count | 0); i++) out.push(v);
+    } else {
+      out.push(tok === "~" ? null : tok);
+    }
+  }
+  return out;
+}
+
+/* === Pattern object — built up by chained methods === */
+class Pattern {
+  constructor(kind, str) {
+    this.kind = kind;          // 's' or 'n'
+    this.steps = parseMini(str);
+    this.synthName = (kind === "n") ? "lead" : null;  // default for n()
+    this.params = { gain: 1, lpf: 0, hpf: 0, delay: 0, room: 0, speed: 1, pan: 0, cycles: 1 };
+  }
+  s(name) { this.synthName = name; return this; }
+  n(notes) {
+    // when called on a pattern that already has notes, replace
+    this.kind = "n";
+    this.steps = parseMini(notes);
+    return this;
+  }
+  gain(v) { this.params.gain = v; return this; }
+  lpf(v) { this.params.lpf = v; return this; }
+  hpf(v) { this.params.hpf = v; return this; }
+  delay(v) { this.params.delay = v; return this; }
+  room(v) { this.params.room = v; return this; }
+  speed(v) { this.params.speed = v; return this; }
+  pan(v) { this.params.pan = v; return this; }
+  cycles(v) { this.params.cycles = v; return this; }
+}
+
+/* === DSL entry points === */
+function s(name) {
+  const p = new Pattern("s", name);
+  AUDIO.patterns.push(p);
+  return p;
+}
+function n(notes) {
+  const p = new Pattern("n", notes);
+  AUDIO.patterns.push(p);
+  return p;
+}
+
+/* === Note name -> frequency / midi number === */
+const NOTE_TO_SEMITONE = { c: 0, "c#": 1, db: 1, d: 2, "d#": 3, eb: 3, e: 4, f: 5, "f#": 6, gb: 6, g: 7, "g#": 8, ab: 8, a: 9, "a#": 10, bb: 10, b: 11 };
+function noteToFreq(token) {
+  if (token == null) return null;
+  if (/^\d+$/.test(token)) {
+    const midi = parseInt(token, 10);
+    return Tone.Frequency(midi, "midi").toFrequency();
+  }
+  const m = String(token).toLowerCase().match(/^([a-g][#b]?)(-?\d+)?$/);
+  if (!m) return null;
+  const semis = NOTE_TO_SEMITONE[m[1]];
+  const octave = m[2] !== undefined ? parseInt(m[2], 10) : 4;
+  if (semis === undefined) return null;
+  const midi = (octave + 1) * 12 + semis;
+  return Tone.Frequency(midi, "midi").toFrequency();
+}
+
+/* === Schedule patterns on Tone.Transport === */
+function startAudioLoop() {
+  if (AUDIO.loopId !== null) return;
+  const T = Tone;
+  T.Transport.bpm.value = AUDIO.bpm;
+  // run every 16th
+  AUDIO.loopId = T.Transport.scheduleRepeat((time) => {
+    const transportSec = T.Transport.seconds;
+    const cycleSec = (60 / AUDIO.bpm) * 4; // 1 bar = 4 beats
+    const cyclePos = (transportSec % cycleSec) / cycleSec; // 0..1
+
+    for (const pat of AUDIO.patterns) {
+      const len = pat.steps.length;
+      if (!len) continue;
+      const cycles = Math.max(1, pat.params.cycles | 0);
+      const phase = (cyclePos * cycles) % 1;
+      const stepIdx = Math.floor(phase * len);
+      const stepTime = phase * len - stepIdx;
+      // trigger only at the very start of a step (within tolerance)
+      const tol = (1 / len) * 0.06;
+      if (stepTime > tol) continue;
+      const tok = pat.steps[stepIdx];
+      if (tok == null) continue;
+      try { triggerStep(pat, tok, time); } catch (e) { /* swallow per-step errors */ }
+    }
+  }, "16n");
+
+  if (T.Transport.state !== "started") T.Transport.start();
+}
+
+function stopAudioLoop() {
+  if (AUDIO.loopId !== null) {
+    Tone.Transport.clear(AUDIO.loopId);
+    AUDIO.loopId = null;
+  }
+  Tone.Transport.stop();
+  Tone.Transport.cancel();
+  AUDIO.patterns = [];
+}
+
+function triggerStep(pat, tok, time) {
+  const T = Tone;
+  const synthName = pat.kind === "n" ? (pat.synthName || "lead") : tok;
+  const synth = AUDIO.synths[synthName];
+  const dur = "16n";
+
+  if (!synth) return; // unknown sample
+
+  // gain via gain node insertion is heavy — we adjust via volume in dB on synth
+  const gainDb = pat.params.gain > 0 ? Tone.gainToDb(Math.min(2, Math.max(0, pat.params.gain))) : -60;
+
+  // Apply send-style params globally for now
+  if (typeof pat.params.delay === "number" && AUDIO.delay && AUDIO.delay.wet) {
+    AUDIO.delay.wet.value = Math.max(0, Math.min(1, pat.params.delay));
+  }
+  if (typeof pat.params.room === "number" && AUDIO.reverb && AUDIO.reverb.wet) {
+    AUDIO.reverb.wet.value = Math.max(0, Math.min(1, pat.params.room));
+  }
+
+  if (pat.kind === "s") {
+    // sample patterns: trigger drum-like synths
+    if (synthName === "bd") {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease("c2", "16n", time);
+    } else if (synthName === "sn") {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease("16n", time);
+    } else if (synthName === "hh") {
+      synth.volume.value = gainDb - 8;
+      synth.triggerAttackRelease("c5", "32n", time);
+    } else if (synthName === "cp") {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease("16n", time);
+    } else if (synth.triggerAttackRelease) {
+      synth.volume.value = gainDb;
+      const f = noteToFreq("c4") || 440;
+      synth.triggerAttackRelease(f, dur, time);
+    }
+  } else if (pat.kind === "n") {
+    const f = noteToFreq(tok);
+    if (f == null) return;
+    if (synth.triggerAttackRelease) {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease(f, dur, time);
+    }
+  }
+}
+
+/* === Audio eval — run Pattern factory expressions, replacing pattern set === */
+function evalAudioSrc(srcCode) {
+  if (!AUDIO.bus) buildAudioGraph();
+
+  // Reset patterns on full eval
+  AUDIO.patterns = [];
+
+  const fn = new Function(
+    "s", "n", "midi", "cc", "bpm",
+    "\"use strict\";\n" + srcCode + "\n"
+  );
+  const cc = (i) => STATE.midiCC[i | 0] / 127;
+  const bpm = (v) => { if (typeof v === "number") { AUDIO.bpm = v; Tone.Transport.bpm.value = v; setStatus("bpm", "ok", "BPM " + v); } return AUDIO.bpm; };
+  fn(s, n, midi, cc, bpm);
+
+  startAudioLoop();
+  STATE.lastAudioSrc = srcCode;
+  return AUDIO.patterns.length;
+}
+
+/* ============================================================
+   AUDIO ENABLE GATE
+   ============================================================ */
+async function enableAudio() {
+  try {
+    await Tone.start();
+    buildAudioGraph();
+    AUDIO.ready = true;
+    STATE.audioReady = true;
+    setStatus("audio", "ok", "AUDIO");
+    $("audio-prompt").classList.add("gone");
+  } catch (e) {
+    setStatus("audio", "err", "AUDIO ERR");
+    log("audio enable failed", e);
+  }
+}
+$("audio-prompt").addEventListener("click", enableAudio);
+
+/* ============================================================
+   MIDI
+   ============================================================ */
+async function setupMidi() {
+  if (!navigator.requestMIDIAccess) {
+    setStatus("midi", "warn", "NO MIDI");
+    return;
+  }
+  try {
+    const access = await navigator.requestMIDIAccess({ sysex: false });
+    const inputs = access.inputs;
+    let count = 0;
+    inputs.forEach(input => {
+      input.onmidimessage = onMidiMessage;
+      count++;
+    });
+    access.onstatechange = () => {
+      let n = 0;
+      access.inputs.forEach(inp => { inp.onmidimessage = onMidiMessage; n++; });
+      setStatus("midi", n > 0 ? "ok" : "warn", n > 0 ? `MIDI ×${n}` : "MIDI 0");
+    };
+    STATE.midiReady = true;
+    setStatus("midi", count > 0 ? "ok" : "warn", count > 0 ? `MIDI ×${count}` : "MIDI 0");
+    if (count > 0) $("midimon").classList.add("show");
+  } catch (e) {
+    setStatus("midi", "err", "MIDI BLOCKED");
+  }
+}
+
+function onMidiMessage(ev) {
+  const [status, d1, d2] = ev.data;
+  const cmd = status & 0xf0;
+  if (cmd === 0xb0) {
+    // CC
+    STATE.midiCC[d1] = d2;
+    updateMidiMonitor(d1, d2);
+  } else if (cmd === 0x90 && d2 > 0) {
+    // note on
+    triggerMidiNote(d1, d2);
+    updateMidiMonitor("n" + d1, d2);
+  } else if (cmd === 0x80 || (cmd === 0x90 && d2 === 0)) {
+    // note off — no-op
+  }
+}
+
+function triggerMidiNote(note, vel) {
+  if (!AUDIO.ready) return;
+  const pc = note % 12;
+  // Map pitch class to one of our drum/synth voices
+  const map = {
+    0: "bd", 1: "hh", 2: "sn", 3: "hh",
+    4: "cp", 5: "bd", 6: "hh", 7: "sn",
+    8: "cp", 9: "bd", 10: "hh", 11: "sn",
+  };
+  const which = map[pc];
+  const synth = AUDIO.synths[which];
+  if (!synth) return;
+  const gainDb = Tone.gainToDb(vel / 127);
+  try {
+    if (which === "bd") {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease(Tone.Frequency(note, "midi").toFrequency(), "16n");
+    } else if (which === "sn" || which === "cp") {
+      synth.volume.value = gainDb;
+      synth.triggerAttackRelease("16n");
+    } else if (which === "hh") {
+      synth.volume.value = gainDb - 8;
+      synth.triggerAttackRelease("c5", "32n");
+    }
+  } catch (e) {}
+}
+
+const _midiMonItems = {};
+function updateMidiMonitor(key, val) {
+  _midiMonItems[key] = val;
+  const el = $("midimon");
+  const keys = Object.keys(_midiMonItems).slice(-6);
+  el.innerHTML = "<div style='color:var(--magenta);margin-bottom:4px'>MIDI MONITOR</div>" +
+    keys.map(k => `<div class="ccrow">${String(k).padStart(3," ")} <span class="v">${_midiMonItems[k]}</span></div>`).join("");
+}
+
+setupMidi();
+
+/* ============================================================
+   EDITOR LINE NUMBERS & EVAL HELPERS
+   ============================================================ */
+function syncLineNums(textarea, container) {
+  const lines = textarea.value.split("\n").length;
+  const before = textarea.value.substr(0, textarea.selectionStart).split("\n").length;
+  let html = "";
+  for (let i = 1; i <= lines; i++) {
+    html += `<div class="${i === before ? "current" : ""}">${i}</div>`;
+  }
+  container.innerHTML = html;
+}
+
+function getCurrentBlock(textarea) {
+  // Get selected text, OR current line if no selection.
+  // A "block" extends across consecutive non-empty lines around the cursor.
+  const val = textarea.value;
+  const selStart = textarea.selectionStart;
+  const selEnd = textarea.selectionEnd;
+  if (selStart !== selEnd) {
+    return val.substring(selStart, selEnd);
+  }
+  // expand to whole logical block
+  const lines = val.split("\n");
+  let charIdx = 0;
+  let cursorLine = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const lineEnd = charIdx + lines[i].length;
+    if (selStart >= charIdx && selStart <= lineEnd) {
+      cursorLine = i;
+      break;
+    }
+    charIdx = lineEnd + 1;
+  }
+  // Walk up while line is non-empty
+  let start = cursorLine;
+  while (start > 0 && lines[start - 1].trim() !== "" && !/^\s*\/\//.test(lines[start - 1])) start--;
+  let end = cursorLine;
+  while (end < lines.length - 1 && lines[end + 1].trim() !== "" && !/^\s*\/\//.test(lines[end + 1])) end++;
+  return lines.slice(start, end + 1).join("\n");
+}
+
+function flashEvalIndicator(textarea, kind) {
+  const rect = textarea.getBoundingClientRect();
+  const div = document.createElement("div");
+  div.className = "evalflash" + (kind === "audio" ? " audio" : "");
+  div.style.left = (rect.left + 60) + "px";
+  div.style.top = (rect.top + 50) + "px";
+  div.textContent = "▶ EVAL";
+  document.body.appendChild(div);
+  requestAnimationFrame(() => div.classList.add("fire"));
+  setTimeout(() => div.remove(), 600);
+}
+
+/* ============================================================
+   EDITORS WIRING
+   ============================================================ */
+const editorVisual = $("editor-visual");
+const editorAudio = $("editor-audio");
+const linenumsV = $("linenums-v");
+const linenumsA = $("linenums-a");
+
+function refreshLines() {
+  syncLineNums(editorVisual, linenumsV);
+  syncLineNums(editorAudio, linenumsA);
+}
+[editorVisual, editorAudio].forEach(el => {
+  ["input", "click", "keyup", "scroll"].forEach(ev => el.addEventListener(ev, refreshLines));
+});
+refreshLines();
+
+function evalVisual(allFlag) {
+  try {
+    const code = allFlag ? editorVisual.value : getCurrentBlock(editorVisual);
+    if (!code.trim()) return;
+    evalVisualSrc(code);
+    showError("v", null);
+    showInfo("v", "compiled · " + (allFlag ? "full buffer" : "block"));
+    flashPane("v");
+    flashEvalIndicator(editorVisual, "visual");
+  } catch (e) {
+    showError("v", e.message || String(e));
+  }
+}
+
+function evalAudio(allFlag) {
+  if (!AUDIO.ready) {
+    showError("a", "click to enable audio first");
+    return;
+  }
+  try {
+    const code = allFlag ? editorAudio.value : editorAudio.value; // audio always full eval (re-arms patterns)
+    if (!code.trim()) return;
+    const count = evalAudioSrc(code);
+    showError("a", null);
+    showInfo("a", count + " pattern(s) live");
+    flashPane("a");
+    flashEvalIndicator(editorAudio, "audio");
+  } catch (e) {
+    showError("a", e.message || String(e));
+  }
+}
+
+function isCmd(e) { return e.metaKey || e.ctrlKey; }
+
+editorVisual.addEventListener("keydown", (e) => {
+  if (isCmd(e) && e.key === "Enter") {
+    e.preventDefault();
+    evalVisual(e.shiftKey);
+  } else if (isCmd(e) && e.key === ".") {
+    e.preventDefault();
+    stopAudioLoop();
+    showInfo("a", "stopped");
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    const start = editorVisual.selectionStart;
+    const end = editorVisual.selectionEnd;
+    editorVisual.value = editorVisual.value.substring(0, start) + "  " + editorVisual.value.substring(end);
+    editorVisual.selectionStart = editorVisual.selectionEnd = start + 2;
+  }
+});
+
+editorAudio.addEventListener("keydown", (e) => {
+  if (isCmd(e) && e.key === "Enter") {
+    e.preventDefault();
+    evalAudio(e.shiftKey);
+  } else if (isCmd(e) && e.key === ".") {
+    e.preventDefault();
+    stopAudioLoop();
+    showInfo("a", "stopped");
+  } else if (e.key === "Tab") {
+    e.preventDefault();
+    const start = editorAudio.selectionStart;
+    const end = editorAudio.selectionEnd;
+    editorAudio.value = editorAudio.value.substring(0, start) + "  " + editorAudio.value.substring(end);
+    editorAudio.selectionStart = editorAudio.selectionEnd = start + 2;
+  }
+});
+
+/* Global shortcuts */
+document.addEventListener("keydown", (e) => {
+  // ? key (shift+/) toggles help (only when not in a textarea, OR explicitly on Shift+/)
+  if (e.key === "?" && !(e.target.tagName === "TEXTAREA")) {
+    $("help-overlay").classList.toggle("show");
+  }
+  if (isCmd(e) && e.key === ".") {
+    e.preventDefault();
+    stopAudioLoop();
+    showInfo("a", "stopped");
+  }
+});
+
+$("btn-eval-all").addEventListener("click", () => {
+  evalVisual(true);
+  if (AUDIO.ready) evalAudio(true);
+});
+$("btn-stop").addEventListener("click", () => {
+  stopAudioLoop();
+  showInfo("a", "stopped");
+});
+$("btn-help").addEventListener("click", () => {
+  $("help-overlay").classList.toggle("show");
+});
+document.querySelector("#help-overlay .close-x").addEventListener("click", () => {
+  $("help-overlay").classList.remove("show");
+});
+
+/* ============================================================
+   PRESETS
+   ============================================================ */
+const PRESETS = [
+  {
+    name: "▶ HELLO",
+    visual: `osc(40, 0.1, 0.8).rotate(0.1).color(1.4, 0.6, 1.2).out()`,
+    audio: `s("bd*4").gain(0.7)
+s("~ sn ~ sn").gain(0.6)
+s("hh*8").gain(0.3)
+n("c2 ~ eb2 g2").s("bass").gain(0.5).lpf(800)`
+  },
+  {
+    name: "VORONOI BLOOM",
+    visual: `voronoi(5, 0.3, 0.3).blend(noise(3, 0.2), 0.3).color(2.5, 1.0, 0.0).out()`,
+    audio: `s("bd ~ ~ bd ~ ~ bd ~").gain(0.7)
+s("hh*16").gain(0.2)
+n("c3 g3 eb3 bb3").s("pad").gain(0.4).room(0.5)`
+  },
+  {
+    name: "KALEID DRIFT",
+    visual: `osc(20, 0.05, 1).kaleid(6).rotate(0.2).color(0.3, 1.4, 1.8).out()`,
+    audio: `n("c4 e4 g4 b4 d5 g4 e4 c4").s("lead").gain(0.4).delay(0.4).room(0.5)`
+  },
+  {
+    name: "REPEAT GRID",
+    visual: `shape(4, 0.3, 0.05).repeat(3, 3).modulateRotate(osc(1), 0.6).out()`,
+    audio: `s("bd*2").gain(0.7)
+s("~ cp").gain(0.55)
+s("hh ~ hh hh ~ hh ~ hh").gain(0.3)`
+  },
+  {
+    name: "ANALOG WORM",
+    visual: `noise(4, 0.05).modulate(noise(2, 0.03), 0.2).color(1.2, 0.4, 1.6).contrast(1.4).out()`,
+    audio: `n("a1 a1 e2 g1").s("bass").gain(0.6).lpf(700)
+s("hh*8").gain(0.18)`
+  },
+  {
+    name: "CRT STORM",
+    visual: `osc(120, 0.2).pixelate(40, 30).diff(noise(8, 0.1)).color(0.2, 1.8, 1.6).out()`,
+    audio: `s("bd ~ bd bd ~ bd ~ ~").gain(0.7)
+s("~ ~ sn ~ ~ sn ~ ~").gain(0.55)
+s("hh*16").gain(0.22)`
+  },
+  {
+    name: "MIDI CC1 OSC",
+    visual: `osc(midi(1, 0, 127, 8, 80), 0.1).rotate(0.05).color(1.0, 1.2, 0.6).out()`,
+    audio: `s("bd*4").gain(0.7)
+n("c2 c2 g2 eb2").s("bass").gain(0.5).lpf(midi(2, 0, 127, 200, 4000))`
+  },
+  {
+    name: "FEEDBACK ECHO",
+    visual: `src(0).scale(1.02).rotate(0.01).blend(osc(20, 0.1).color(2,0.5,1.5), 0.05).out()`,
+    audio: `s("bd ~ ~ bd").gain(0.6)
+n("g4 b4 d5 g5 b4 d5").s("lead").gain(0.35).delay(0.5).room(0.6)`
+  },
+  {
+    name: "POLY BREATH",
+    visual: `gradient(0.3).kaleid(8).modulateRotate(noise(2, 0.05), 1, 0).saturate(2).out()`,
+    audio: `n("c3 g3 c4 e4 g4").s("pad").gain(0.5).room(0.7)
+s("~ ~ hh ~").gain(0.2)`
+  },
+  {
+    name: "BREAKBEAT",
+    visual: `shape(8, 0.5, 0.1).repeat(4,4).diff(osc(30,0.1)).invert().out()`,
+    audio: `s("bd ~ ~ bd ~ bd ~ ~").gain(0.75)
+s("~ sn ~ ~ sn ~ ~ sn").gain(0.6)
+s("hh*16").gain(0.25)
+n("a1 ~ a1 c2 ~ g1 ~ e2").s("bass").gain(0.5).lpf(900)`
+  }
+];
+
+function buildPresetUI() {
+  const root = $("presets");
+  root.innerHTML = "";
+  PRESETS.forEach((p, i) => {
+    const btn = document.createElement("button");
+    btn.className = "preset-chip";
+    btn.textContent = p.name;
+    btn.title = "Load preset";
+    btn.addEventListener("click", () => {
+      editorVisual.value = p.visual;
+      editorAudio.value = p.audio;
+      refreshLines();
+      try { evalVisualSrc(p.visual); showError("v", null); showInfo("v", "loaded: " + p.name); flashPane("v"); }
+      catch (e) { showError("v", e.message); }
+      if (AUDIO.ready) {
+        try { evalAudioSrc(p.audio); showError("a", null); showInfo("a", "loaded: " + p.name); flashPane("a"); }
+        catch (e) { showError("a", e.message); }
+      }
+    });
+    root.appendChild(btn);
+  });
+}
+buildPresetUI();
+
+/* ============================================================
+   BOOT — render an initial visual so the canvas isn't blank
+   ============================================================ */
+window.addEventListener("load", () => {
+  try {
+    evalVisualSrc(editorVisual.value);
+    showInfo("v", "ready · cmd+enter to eval");
+  } catch (e) {
+    showError("v", e.message);
+  }
+  setStatus("bpm", "ok", "BPM " + AUDIO.bpm);
+});
+
+// ESC closes help
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("help-overlay").classList.remove("show");
+});
+
+// Expose a tiny console API for power users / debugging
+window.SSYN = {
+  evalVisual: (code) => evalVisualSrc(code),
+  evalAudio: (code) => evalAudioSrc(code),
+  stop: stopAudioLoop,
+  state: STATE,
+  audio: AUDIO,
+  preset: (i) => {
+    const p = PRESETS[i % PRESETS.length];
+    editorVisual.value = p.visual;
+    editorAudio.value = p.audio;
+    refreshLines();
+  },
+};
+
+log("SHADER//SYNTH booted. Click to enable audio · Cmd+Enter to eval · ? for help");
+</script>
+
+</body>
+</html>

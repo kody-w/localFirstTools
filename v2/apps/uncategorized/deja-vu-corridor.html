@@ -1,0 +1,600 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Déjà Vu Corridor</title>
+    <meta name="description" content="Navigate an endless hallway where doors lead to rooms you've already been in, but everything is slightly different each time.">
+    <!-- tags: dream, surreal, experimental, canvas, exploration, ambient -->
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #0a0a0f;
+            min-height: 100vh;
+            font-family: 'Georgia', serif;
+            overflow: hidden;
+        }
+
+        #gameCanvas {
+            display: block;
+            cursor: none;
+        }
+
+        .ui-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            padding: 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .room-counter {
+            color: rgba(255, 255, 255, 0.3);
+            font-size: 0.9em;
+            font-style: italic;
+        }
+
+        .familiarity {
+            color: rgba(255, 255, 255, 0.3);
+            font-size: 0.9em;
+            text-align: right;
+        }
+
+        .message-overlay {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: rgba(255, 255, 255, 0.5);
+            font-size: 1.5em;
+            font-style: italic;
+            text-align: center;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 2s ease;
+            z-index: 100;
+        }
+
+        .message-overlay.visible {
+            opacity: 1;
+        }
+
+        .instructions {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: rgba(255, 255, 255, 0.2);
+            font-size: 0.8em;
+            pointer-events: none;
+            transition: opacity 3s ease;
+        }
+
+        .vignette {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            pointer-events: none;
+            background: radial-gradient(ellipse at center, transparent 0%, transparent 50%, rgba(0,0,0,0.8) 100%);
+            z-index: 50;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+
+    <div class="vignette"></div>
+
+    <div class="ui-overlay">
+        <div class="room-counter">
+            Room <span id="roomNumber">1</span>
+            <br>
+            <span id="visitCount" style="font-size: 0.8em; opacity: 0.5;"></span>
+        </div>
+        <div class="familiarity">
+            <span id="familiarityText">Unfamiliar</span>
+            <br>
+            <span id="driftText" style="font-size: 0.8em; opacity: 0.5;"></span>
+        </div>
+    </div>
+
+    <div class="message-overlay" id="messageOverlay"></div>
+
+    <div class="instructions" id="instructions">
+        Click doors to move. Hold to remember.
+    </div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+        resize();
+        window.addEventListener('resize', resize);
+
+        // Game state
+        const state = {
+            currentRoom: 0,
+            roomHistory: [],
+            roomMemory: new Map(), // Stores details about visited rooms
+            totalVisits: 0,
+            mouseX: 0,
+            mouseY: 0,
+            transitionProgress: 0,
+            transitioning: false,
+            nextRoom: null,
+            holdStart: 0,
+            holding: false
+        };
+
+        // Room generation seed
+        function seededRandom(seed) {
+            const x = Math.sin(seed) * 10000;
+            return x - Math.floor(x);
+        }
+
+        // Generate room properties
+        function generateRoom(roomId, visitCount = 0) {
+            const seed = roomId * 12345;
+            const drift = Math.min(visitCount * 0.1, 0.5); // Rooms drift with each visit
+
+            // Base properties from seed
+            const baseHue = seededRandom(seed) * 360;
+            const baseSaturation = 10 + seededRandom(seed + 1) * 20;
+            const baseBrightness = 5 + seededRandom(seed + 2) * 10;
+
+            // Apply drift
+            const hue = (baseHue + drift * 30 * (seededRandom(seed + visitCount) - 0.5)) % 360;
+            const saturation = baseSaturation + drift * 10 * (seededRandom(seed + visitCount + 1) - 0.5);
+            const brightness = baseBrightness + drift * 5 * (seededRandom(seed + visitCount + 2) - 0.5);
+
+            // Room features
+            const numDoors = 2 + Math.floor(seededRandom(seed + 3) * 3); // 2-4 doors
+            const hasWindow = seededRandom(seed + 4) > 0.6;
+            const hasPainting = seededRandom(seed + 5) > 0.5;
+            const hasChair = seededRandom(seed + 6) > 0.7;
+            const hasMirror = seededRandom(seed + 7) > 0.8;
+
+            // Corridor length
+            const corridorDepth = 200 + seededRandom(seed + 8) * 300;
+
+            // Objects shift with visits
+            const objectDrift = drift * 50;
+
+            return {
+                id: roomId,
+                visitCount,
+                hue,
+                saturation,
+                brightness,
+                numDoors,
+                hasWindow,
+                hasPainting,
+                hasChair,
+                hasMirror,
+                corridorDepth,
+                objectDrift,
+                doors: generateDoors(roomId, numDoors, visitCount),
+                ambientLight: 0.3 + seededRandom(seed + 9) * 0.4
+            };
+        }
+
+        function generateDoors(roomId, numDoors, visitCount) {
+            const doors = [];
+            const seed = roomId * 67890;
+
+            for (let i = 0; i < numDoors; i++) {
+                const doorSeed = seed + i * 1000;
+                const side = i % 2 === 0 ? 'left' : 'right';
+                const depth = 0.3 + seededRandom(doorSeed) * 0.5;
+
+                // Door destination (somewhat random but deterministic)
+                let destination = Math.floor(seededRandom(doorSeed + 1) * 20);
+
+                // Sometimes doors loop back
+                if (seededRandom(doorSeed + 2) > 0.7 && visitCount > 0) {
+                    destination = roomId; // Loop to self
+                }
+
+                doors.push({
+                    side,
+                    depth,
+                    destination,
+                    width: 60 + seededRandom(doorSeed + 3) * 40,
+                    height: 120 + seededRandom(doorSeed + 4) * 60,
+                    open: seededRandom(doorSeed + 5) > 0.7,
+                    color: `hsl(${seededRandom(doorSeed + 6) * 60 + 20}, 20%, 25%)`
+                });
+            }
+
+            return doors;
+        }
+
+        let currentRoomData = generateRoom(0);
+
+        // Messages that appear
+        const messages = [
+            "Have I been here before?",
+            "Something feels different...",
+            "The shadows remember.",
+            "Was that painting always there?",
+            "The door seems familiar.",
+            "Time moves strangely here.",
+            "The corridor stretches endlessly.",
+            "Which way did I come from?",
+            "The walls are watching.",
+            "I think I recognize this place."
+        ];
+
+        function showMessage(text) {
+            const overlay = document.getElementById('messageOverlay');
+            overlay.textContent = text;
+            overlay.classList.add('visible');
+
+            setTimeout(() => {
+                overlay.classList.remove('visible');
+            }, 4000);
+        }
+
+        // Drawing functions
+        function draw() {
+            const { width, height } = canvas;
+            const centerX = width / 2;
+            const centerY = height / 2;
+
+            // Room colors
+            const room = currentRoomData;
+            const bgColor = `hsl(${room.hue}, ${room.saturation}%, ${room.brightness}%)`;
+            const floorColor = `hsl(${room.hue}, ${room.saturation * 0.8}%, ${room.brightness * 0.6}%)`;
+            const ceilingColor = `hsl(${room.hue}, ${room.saturation * 0.5}%, ${room.brightness * 0.8}%)`;
+
+            // Clear
+            ctx.fillStyle = bgColor;
+            ctx.fillRect(0, 0, width, height);
+
+            // Draw corridor perspective
+            const vanishY = centerY * 0.4;
+            const corridorWidth = width * 0.8;
+            const corridorHeight = height * 0.9;
+
+            // Floor
+            ctx.fillStyle = floorColor;
+            ctx.beginPath();
+            ctx.moveTo(0, height);
+            ctx.lineTo(width, height);
+            ctx.lineTo(centerX + corridorWidth * 0.15, vanishY + corridorHeight * 0.3);
+            ctx.lineTo(centerX - corridorWidth * 0.15, vanishY + corridorHeight * 0.3);
+            ctx.closePath();
+            ctx.fill();
+
+            // Ceiling
+            ctx.fillStyle = ceilingColor;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(width, 0);
+            ctx.lineTo(centerX + corridorWidth * 0.15, vanishY - corridorHeight * 0.1);
+            ctx.lineTo(centerX - corridorWidth * 0.15, vanishY - corridorHeight * 0.1);
+            ctx.closePath();
+            ctx.fill();
+
+            // Left wall
+            ctx.fillStyle = `hsl(${room.hue}, ${room.saturation}%, ${room.brightness * 0.7}%)`;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(0, height);
+            ctx.lineTo(centerX - corridorWidth * 0.15, vanishY + corridorHeight * 0.3);
+            ctx.lineTo(centerX - corridorWidth * 0.15, vanishY - corridorHeight * 0.1);
+            ctx.closePath();
+            ctx.fill();
+
+            // Right wall
+            ctx.fillStyle = `hsl(${room.hue}, ${room.saturation}%, ${room.brightness * 0.9}%)`;
+            ctx.beginPath();
+            ctx.moveTo(width, 0);
+            ctx.lineTo(width, height);
+            ctx.lineTo(centerX + corridorWidth * 0.15, vanishY + corridorHeight * 0.3);
+            ctx.lineTo(centerX + corridorWidth * 0.15, vanishY - corridorHeight * 0.1);
+            ctx.closePath();
+            ctx.fill();
+
+            // Far wall (end of corridor)
+            ctx.fillStyle = `hsl(${room.hue}, ${room.saturation * 0.3}%, ${room.brightness * 0.4}%)`;
+            ctx.fillRect(
+                centerX - corridorWidth * 0.15,
+                vanishY - corridorHeight * 0.1,
+                corridorWidth * 0.3,
+                corridorHeight * 0.4
+            );
+
+            // Draw doors
+            room.doors.forEach((door, i) => {
+                drawDoor(door, i, room);
+            });
+
+            // Draw window if present
+            if (room.hasWindow) {
+                drawWindow(room);
+            }
+
+            // Draw painting if present
+            if (room.hasPainting) {
+                drawPainting(room);
+            }
+
+            // Ambient light effect
+            const gradient = ctx.createRadialGradient(
+                centerX, vanishY, 0,
+                centerX, vanishY, Math.max(width, height)
+            );
+            gradient.addColorStop(0, `rgba(255, 240, 200, ${room.ambientLight * 0.1})`);
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0.3)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, width, height);
+
+            // Transition effect
+            if (state.transitioning) {
+                ctx.fillStyle = `rgba(0, 0, 0, ${state.transitionProgress})`;
+                ctx.fillRect(0, 0, width, height);
+            }
+
+            // Custom cursor
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+            ctx.beginPath();
+            ctx.arc(state.mouseX, state.mouseY, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Hold indicator
+            if (state.holding) {
+                const holdProgress = Math.min((Date.now() - state.holdStart) / 2000, 1);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.5)';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.arc(state.mouseX, state.mouseY, 15, -Math.PI / 2, -Math.PI / 2 + holdProgress * Math.PI * 2);
+                ctx.stroke();
+
+                if (holdProgress >= 1) {
+                    // Memory effect - show room details
+                    showRoomMemory();
+                }
+            }
+        }
+
+        function drawDoor(door, index, room) {
+            const { width, height } = canvas;
+            const centerX = width / 2;
+            const centerY = height / 2;
+
+            // Calculate door position based on depth
+            const depthScale = 1 - door.depth * 0.7;
+            const wallOffset = door.side === 'left' ? -1 : 1;
+
+            const doorX = centerX + wallOffset * width * 0.3 * depthScale;
+            const doorY = centerY * (0.8 + door.depth * 0.4);
+            const doorW = door.width * depthScale;
+            const doorH = door.height * depthScale;
+
+            // Door frame
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(doorX - doorW / 2 - 5, doorY - doorH - 5, doorW + 10, doorH + 10);
+
+            // Door
+            ctx.fillStyle = door.color;
+            ctx.fillRect(doorX - doorW / 2, doorY - doorH, doorW, doorH);
+
+            // Door handle
+            const handleX = door.side === 'left' ? doorX + doorW / 2 - 10 : doorX - doorW / 2 + 10;
+            ctx.fillStyle = '#887755';
+            ctx.beginPath();
+            ctx.arc(handleX, doorY - doorH * 0.4, 4 * depthScale, 0, Math.PI * 2);
+            ctx.fill();
+
+            // Light under door if open
+            if (door.open) {
+                ctx.fillStyle = 'rgba(255, 240, 200, 0.3)';
+                ctx.fillRect(doorX - doorW / 2 + 5, doorY - 5, doorW - 10, 5);
+            }
+
+            // Store door hitbox for click detection
+            door.hitbox = {
+                x: doorX - doorW / 2,
+                y: doorY - doorH,
+                w: doorW,
+                h: doorH
+            };
+        }
+
+        function drawWindow(room) {
+            const { width, height } = canvas;
+            const windowX = width * 0.15 + room.objectDrift * 0.5;
+            const windowY = height * 0.25;
+            const windowW = 80;
+            const windowH = 100;
+
+            // Frame
+            ctx.fillStyle = '#2a2a2a';
+            ctx.fillRect(windowX - 5, windowY - 5, windowW + 10, windowH + 10);
+
+            // Glass with moonlight
+            const gradient = ctx.createLinearGradient(windowX, windowY, windowX + windowW, windowY + windowH);
+            gradient.addColorStop(0, 'rgba(100, 120, 180, 0.4)');
+            gradient.addColorStop(1, 'rgba(40, 50, 80, 0.6)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(windowX, windowY, windowW, windowH);
+
+            // Moonlight beam
+            ctx.fillStyle = 'rgba(200, 220, 255, 0.05)';
+            ctx.beginPath();
+            ctx.moveTo(windowX, windowY + windowH);
+            ctx.lineTo(windowX + windowW, windowY + windowH);
+            ctx.lineTo(windowX + windowW + 100, height);
+            ctx.lineTo(windowX - 50, height);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function drawPainting(room) {
+            const { width, height } = canvas;
+            const paintingX = width * 0.75 - room.objectDrift * 0.3;
+            const paintingY = height * 0.2;
+            const paintingW = 100;
+            const paintingH = 70;
+
+            // Frame
+            ctx.fillStyle = '#4a3a2a';
+            ctx.fillRect(paintingX - 8, paintingY - 8, paintingW + 16, paintingH + 16);
+
+            // Canvas
+            ctx.fillStyle = `hsl(${room.hue + 60}, 30%, 30%)`;
+            ctx.fillRect(paintingX, paintingY, paintingW, paintingH);
+
+            // Abstract shapes that drift
+            const shapeSeed = room.id * 999;
+            for (let i = 0; i < 3; i++) {
+                const sx = paintingX + seededRandom(shapeSeed + i) * paintingW;
+                const sy = paintingY + seededRandom(shapeSeed + i + 10) * paintingH;
+                const sr = 10 + seededRandom(shapeSeed + i + 20) * 20;
+                const shue = (room.hue + seededRandom(shapeSeed + i + 30) * 120) % 360;
+
+                ctx.fillStyle = `hsla(${shue}, 40%, 50%, 0.6)`;
+                ctx.beginPath();
+                ctx.arc(sx + room.objectDrift * 0.1, sy, sr, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function showRoomMemory() {
+            const room = currentRoomData;
+            const memory = state.roomMemory.get(room.id);
+
+            if (memory) {
+                const firstVisit = new Date(memory.firstVisit).toLocaleTimeString();
+                document.getElementById('visitCount').textContent = `First seen: ${firstVisit}`;
+            }
+        }
+
+        // Room transition
+        function transitionToRoom(roomId) {
+            if (state.transitioning) return;
+
+            state.transitioning = true;
+            state.transitionProgress = 0;
+
+            const animate = () => {
+                state.transitionProgress += 0.02;
+
+                if (state.transitionProgress >= 1) {
+                    // Switch room at peak darkness
+                    if (state.transitionProgress < 1.5) {
+                        // Update state
+                        const visitCount = (state.roomMemory.get(roomId)?.visits || 0) + 1;
+
+                        if (!state.roomMemory.has(roomId)) {
+                            state.roomMemory.set(roomId, {
+                                firstVisit: Date.now(),
+                                visits: 0
+                            });
+                        }
+                        state.roomMemory.get(roomId).visits = visitCount;
+
+                        state.currentRoom = roomId;
+                        state.totalVisits++;
+                        currentRoomData = generateRoom(roomId, visitCount);
+
+                        // Update UI
+                        document.getElementById('roomNumber').textContent = roomId + 1;
+
+                        const familiarity = visitCount > 3 ? 'Very Familiar' :
+                                          visitCount > 1 ? 'Familiar' :
+                                          'Unfamiliar';
+                        document.getElementById('familiarityText').textContent = familiarity;
+
+                        if (visitCount > 1) {
+                            document.getElementById('driftText').textContent = `Visited ${visitCount} times`;
+                            showMessage(messages[Math.floor(Math.random() * messages.length)]);
+                        } else {
+                            document.getElementById('driftText').textContent = 'First time here';
+                        }
+                    }
+
+                    if (state.transitionProgress >= 2) {
+                        state.transitioning = false;
+                        state.transitionProgress = 0;
+                        return;
+                    }
+                }
+
+                draw();
+                requestAnimationFrame(animate);
+            };
+
+            animate();
+        }
+
+        // Input handling
+        canvas.addEventListener('mousemove', (e) => {
+            state.mouseX = e.clientX;
+            state.mouseY = e.clientY;
+        });
+
+        canvas.addEventListener('mousedown', (e) => {
+            state.holding = true;
+            state.holdStart = Date.now();
+        });
+
+        canvas.addEventListener('mouseup', (e) => {
+            state.holding = false;
+
+            // Check door clicks
+            const room = currentRoomData;
+            for (const door of room.doors) {
+                if (door.hitbox &&
+                    e.clientX >= door.hitbox.x &&
+                    e.clientX <= door.hitbox.x + door.hitbox.w &&
+                    e.clientY >= door.hitbox.y &&
+                    e.clientY <= door.hitbox.y + door.hitbox.h) {
+
+                    transitionToRoom(door.destination);
+                    return;
+                }
+            }
+        });
+
+        canvas.addEventListener('mouseleave', () => {
+            state.holding = false;
+        });
+
+        // Hide instructions after a while
+        setTimeout(() => {
+            document.getElementById('instructions').style.opacity = '0';
+        }, 10000);
+
+        // Main loop
+        function gameLoop() {
+            if (!state.transitioning) {
+                draw();
+            }
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Initialize
+        state.roomMemory.set(0, { firstVisit: Date.now(), visits: 1 });
+        gameLoop();
+
+        // Initial message
+        setTimeout(() => {
+            showMessage("Where does this corridor lead?");
+        }, 3000);
+    </script>
+</body>
+</html>

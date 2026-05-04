@@ -1,0 +1,668 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Genetic Car Evolution</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Courier New', monospace; color: #0f0; }
+        #ui {
+            position: absolute; top: 10px; left: 10px;
+            background: rgba(0, 0, 0, 0.8); padding: 15px;
+            border: 1px solid #0f0; border-radius: 5px; pointer-events: none;
+        }
+        .stat { margin-bottom: 5px; font-size: 14px; }
+        #controls {
+            position: absolute; top: 10px; right: 10px;
+            background: rgba(0, 0, 0, 0.8); padding: 15px;
+            border: 1px solid #0f0; border-radius: 5px;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        button {
+            background: #003300; color: #0f0; border: 1px solid #0f0;
+            padding: 8px 15px; cursor: pointer; font-family: inherit; font-weight: bold;
+            transition: all 0.2s;
+        }
+        button:hover { background: #005500; box-shadow: 0 0 10px #0f0; }
+        .highlight { color: #fff; font-weight: bold; }
+        #countdown {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            font-size: 100px; color: #fff; font-weight: bold; text-shadow: 0 0 20px #0f0;
+            pointer-events: none; display: none;
+        }
+    </style>
+    <!-- Cannon.js for Physics -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/cannon.js/0.6.2/cannon.min.js"></script>
+    <!-- Three.js for Rendering -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+</head>
+<body>
+    <div id="loading-screen" style="position:absolute; top:0; left:0; width:100%; height:100%; background:#000; display:flex; align-items:center; justify-content:center; z-index:1000;">
+        <div style="text-align:center; color:#0f0; font-family:'Courier New',monospace;">
+            <div style="font-size:24px; margin-bottom:20px;">Loading 3D Genetic Car Evolution...</div>
+            <div id="loading-status" style="font-size:14px; color:#666;">Initializing physics engine...</div>
+        </div>
+    </div>
+    <div id="error-display" style="position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); color:red; background:rgba(0,0,0,0.9); padding:20px; display:none; z-index:999; max-width:80%; border:1px solid red; border-radius:5px;"></div>
+    <script>
+        window.onerror = function(msg, url, line, col, error) {
+            const div = document.getElementById('error-display');
+            const loading = document.getElementById('loading-screen');
+            if (loading) loading.style.display = 'none';
+            div.style.display = 'block';
+            div.innerHTML = `<strong>Error:</strong> ${msg}<br><small>${url}:${line}</small><br><br><button onclick="location.reload()" style="background:#300;color:#f00;border:1px solid #f00;padding:10px 20px;cursor:pointer;">Reload Page</button>`;
+            return false;
+        };
+
+        // Check if libraries loaded
+        window.addEventListener('DOMContentLoaded', function() {
+            setTimeout(function() {
+                if (typeof THREE === 'undefined') {
+                    document.getElementById('error-display').style.display = 'block';
+                    document.getElementById('error-display').innerHTML = '<strong>Error:</strong> Three.js failed to load. Check your internet connection.';
+                    document.getElementById('loading-screen').style.display = 'none';
+                }
+                if (typeof CANNON === 'undefined') {
+                    document.getElementById('error-display').style.display = 'block';
+                    document.getElementById('error-display').innerHTML = '<strong>Error:</strong> Cannon.js physics engine failed to load. Check your internet connection.';
+                    document.getElementById('loading-screen').style.display = 'none';
+                }
+            }, 3000);
+        });
+    </script>
+    <div id="ui">
+        <div class="stat">Generation: <span id="gen" class="highlight">1</span></div>
+        <div class="stat">Alive: <span id="alive" class="highlight">20</span>/20</div>
+        <div class="stat">Best Distance: <span id="best-dist" class="highlight">0</span>m</div>
+        <div class="stat">Time: <span id="time">0.0</span>s</div>
+    </div>
+
+    <div id="countdown">3</div>
+
+    <div id="controls">
+        <button onclick="toggleSpeed()">Toggle Fast Forward</button>
+        <button onclick="nextGen()">Force Next Gen</button>
+        <button onclick="resetSim()">Reset Simulation</button>
+    </div>
+
+    <script>
+        // --- Configuration ---
+        const POPULATION_SIZE = 20;
+        const MUTATION_RATE = 0.1;
+        const ROUND_TIME = 10;
+        const FINISH_LINE_Z = -400;
+        
+        // --- Three.js Setup ---
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x1a1a1a);
+        scene.fog = new THREE.Fog(0x1a1a1a, 20, 100);
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        // Lights
+        const ambientLight = new THREE.AmbientLight(0x404040);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+        dirLight.position.set(10, 20, 10);
+        dirLight.castShadow = true;
+        dirLight.shadow.camera.top = 50;
+        dirLight.shadow.camera.bottom = -50;
+        dirLight.shadow.camera.left = -50;
+        dirLight.shadow.camera.right = 50;
+        scene.add(dirLight);
+
+        // --- Cannon.js Setup ---
+        const world = new CANNON.World();
+        world.gravity.set(0, -9.82, 0);
+        world.broadphase = new CANNON.NaiveBroadphase();
+        world.solver.iterations = 10;
+
+        // Materials
+        const groundMaterial = new CANNON.Material();
+        const wheelMaterial = new CANNON.Material();
+        const chassisMaterial = new CANNON.Material();
+
+        const wheelGroundContact = new CANNON.ContactMaterial(wheelMaterial, groundMaterial, {
+            friction: 0.3,
+            restitution: 0,
+            contactEquationStiffness: 1000
+        });
+        world.addContactMaterial(wheelGroundContact);
+
+        // --- Game State ---
+        let cars = [];
+        let terrainBodies = [];
+        let terrainMeshes = [];
+        let generation = 1;
+        let timer = 0;
+        let bestDistance = 0;
+        let isFastForward = false;
+        let frameId;
+        let raceActive = false;
+
+        // --- Car Class ---
+        class Car {
+            constructor(dna, x, y, z) {
+                this.dna = dna || this.generateRandomDNA();
+                this.bodies = [];
+                this.meshes = [];
+                this.constraints = [];
+                this.vehicle = null;
+                this.maxDist = 0;
+                this.alive = true;
+                
+                this.build(x, y, z);
+            }
+
+            generateRandomDNA() {
+                // DNA: Chassis dimensions, Wheel size, Engine power, Suspension stiffness
+                return {
+                    width: 1 + Math.random() * 1.5,
+                    height: 0.5 + Math.random() * 0.5,
+                    length: 2 + Math.random() * 2,
+                    wheelRadius: 0.3 + Math.random() * 0.5,
+                    enginePower: 10 + Math.random() * 40, // Power level
+                    suspensionStiffness: 10 + Math.random() * 20,
+                    wheelPositions: [
+                        { x: -1, z: -1 }, // FL
+                        { x: 1, z: -1 },  // FR
+                        { x: -1, z: 1 },  // BL
+                        { x: 1, z: 1 }    // BR
+                    ].map(p => ({
+                        x: p.x * (0.5 + Math.random()), // Randomize wheel placement
+                        z: p.z * (0.5 + Math.random())
+                    }))
+                };
+            }
+
+            build(x, y, z) {
+                // Chassis
+                const chassisShape = new CANNON.Box(new CANNON.Vec3(this.dna.width/2, this.dna.height/2, this.dna.length/2));
+                const chassisBody = new CANNON.Body({ mass: 150, material: chassisMaterial });
+                chassisBody.addShape(chassisShape);
+                chassisBody.position.set(x, y, z);
+                // Rotate to face -Z (Finish Line)
+                const quaternion = new CANNON.Quaternion();
+                quaternion.setFromAxisAngle(new CANNON.Vec3(0, 1, 0), Math.PI); // 180 degrees
+                chassisBody.quaternion.copy(quaternion);
+                chassisBody.angularVelocity.set(0, 0, 0); // Initial stability
+                
+                // Visual Chassis
+                const chassisGeo = new THREE.BoxGeometry(this.dna.width, this.dna.height, this.dna.length);
+                const chassisMat = new THREE.MeshPhongMaterial({ color: Math.random() * 0xffffff });
+                const chassisMesh = new THREE.Mesh(chassisGeo, chassisMat);
+                chassisMesh.castShadow = true;
+                
+                this.bodies.push(chassisBody);
+                this.meshes.push(chassisMesh);
+                this.chassisBody = chassisBody;
+                this.chassisMesh = chassisMesh;
+
+                // Raycast Vehicle
+                this.vehicle = new CANNON.RaycastVehicle({
+                    chassisBody: chassisBody,
+                    indexRightAxis: 0, // x
+                    indexUpAxis: 1,    // y
+                    indexForwardAxis: 2 // z
+                });
+
+                // Add Wheels
+                const wheelOptions = {
+                    radius: this.dna.wheelRadius,
+                    directionLocal: new CANNON.Vec3(0, -1, 0),
+                    suspensionStiffness: this.dna.suspensionStiffness,
+                    suspensionRestLength: 0.3,
+                    frictionSlip: 5,
+                    dampingRelaxation: 2.3,
+                    dampingCompression: 4.4,
+                    maxSuspensionForce: 100000,
+                    rollInfluence: 0.01,
+                    axleLocal: new CANNON.Vec3(1, 0, 0),
+                    chassisConnectionPointLocal: new CANNON.Vec3(0, 0, 0),
+                    maxSuspensionTravel: 0.3,
+                    customSlidingRotationalSpeed: -30,
+                    useCustomSlidingRotationalSpeed: true
+                };
+
+                this.dna.wheelPositions.forEach((pos, i) => {
+                    wheelOptions.chassisConnectionPointLocal.set(pos.x, -this.dna.height/2, pos.z);
+                    this.vehicle.addWheel(wheelOptions);
+                });
+
+                this.vehicle.addToWorld(world);
+
+                // Wheel Visuals
+                const wheelGeo = new THREE.CylinderGeometry(this.dna.wheelRadius, this.dna.wheelRadius, this.dna.wheelRadius / 2, 20);
+                wheelGeo.rotateZ(Math.PI / 2);
+                const wheelMat = new THREE.MeshPhongMaterial({ color: 0x333333 });
+
+                this.vehicle.wheelInfos.forEach((wheel) => {
+                    const cylinder = new THREE.Mesh(wheelGeo, wheelMat);
+                    cylinder.castShadow = true;
+                    scene.add(cylinder);
+                    this.meshes.push(cylinder);
+                });
+
+                // Add to world/scene
+                world.addBody(chassisBody);
+                scene.add(chassisMesh);
+            }
+
+            destroy() {
+                try {
+                    // Remove vehicle from physics world
+                    if (this.vehicle) {
+                        this.vehicle.removeFromWorld(world);
+                    }
+                    // Remove chassis body
+                    if (this.chassisBody) {
+                        world.removeBody(this.chassisBody);
+                    }
+                    // Remove all meshes from scene
+                    this.meshes.forEach(mesh => {
+                        if (mesh) {
+                            scene.remove(mesh);
+                            if (mesh.geometry) mesh.geometry.dispose();
+                            if (mesh.material) mesh.material.dispose();
+                        }
+                    });
+                    // Clear references
+                    this.meshes = [];
+                    this.bodies = [];
+                    this.vehicle = null;
+                    this.chassisBody = null;
+                    this.chassisMesh = null;
+                } catch(e) {
+                    console.warn('Error destroying car:', e);
+                }
+            }
+
+            update() {
+                if (!this.alive || !this.vehicle || !this.chassisBody) return;
+
+                if (!raceActive) {
+                    // Brakes ON
+                    this.vehicle.setBrake(10, 0);
+                    this.vehicle.setBrake(10, 1);
+                    this.vehicle.setBrake(10, 2);
+                    this.vehicle.setBrake(10, 3);
+                    this.vehicle.applyEngineForce(0, 2);
+                    this.vehicle.applyEngineForce(0, 3);
+                    
+                    // Sync Visuals
+                    this.syncVisuals();
+                    return;
+                }
+
+                // Brakes OFF
+                this.vehicle.setBrake(0, 0);
+                this.vehicle.setBrake(0, 1);
+                this.vehicle.setBrake(0, 2);
+                this.vehicle.setBrake(0, 3);
+
+                // Apply Engine Force (4WD)
+                // Positive force moves forward when rotated 180 deg (facing -Z)
+                this.vehicle.applyEngineForce(this.dna.enginePower * 10, 2);
+                this.vehicle.applyEngineForce(this.dna.enginePower * 10, 3);
+                
+                // Sync Visuals
+                this.syncVisuals();
+
+                // Fitness Check (Distance Z)
+                // We move in -Z direction
+                const dist = -this.chassisBody.position.z;
+                if (dist > this.maxDist) this.maxDist = dist;
+
+                // Kill if flipped (Up vector dot product with world up)
+                const up = new CANNON.Vec3(0, 1, 0);
+                const localUp = new CANNON.Vec3(0, 1, 0);
+                this.chassisBody.quaternion.vmult(localUp, localUp);
+                
+                if (localUp.dot(up) < 0) { // Upside down
+                    this.alive = false;
+                    this.vehicle.applyEngineForce(0, 2);
+                    this.vehicle.applyEngineForce(0, 3);
+                }
+            }
+
+            syncVisuals() {
+                // Sync chassis
+                this.chassisMesh.position.set(
+                    this.chassisBody.position.x,
+                    this.chassisBody.position.y,
+                    this.chassisBody.position.z
+                );
+                this.chassisMesh.quaternion.set(
+                    this.chassisBody.quaternion.x,
+                    this.chassisBody.quaternion.y,
+                    this.chassisBody.quaternion.z,
+                    this.chassisBody.quaternion.w
+                );
+
+                // Sync wheels
+                for (let i = 0; i < this.vehicle.wheelInfos.length; i++) {
+                    this.vehicle.updateWheelTransform(i);
+                    const t = this.vehicle.wheelInfos[i].worldTransform;
+                    const wheelMesh = this.meshes[i+1]; // +1 because 0 is chassis
+                    if (wheelMesh && t) {
+                        wheelMesh.position.set(t.position.x, t.position.y, t.position.z);
+                        wheelMesh.quaternion.set(t.quaternion.x, t.quaternion.y, t.quaternion.z, t.quaternion.w);
+                    }
+                }
+            }
+        }
+
+        // --- Terrain Generation ---
+        function generateTerrain() {
+            // Clear old
+            terrainBodies.forEach(b => world.removeBody(b));
+            terrainMeshes.forEach(m => scene.remove(m));
+            terrainBodies = [];
+            terrainMeshes = [];
+
+            // Ground Plane (Start Area)
+            createBox(0, -1, 10, 60, 1, 60, 0x222222);
+
+            // Long Flat Track
+            // Create one massive flat strip to ensure smoothness
+            const trackLength = 1000;
+            const trackWidth = 40;
+            
+            const shape = new CANNON.Box(new CANNON.Vec3(trackWidth/2, 1, trackLength/2));
+            const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+            body.addShape(shape);
+            body.position.set(0, -1, -trackLength/2 + 10); // Start connecting to start area
+            world.addBody(body);
+            terrainBodies.push(body);
+
+            const geo = new THREE.BoxGeometry(trackWidth, 2, trackLength);
+            const mat = new THREE.MeshPhongMaterial({ color: 0x444444 });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(body.position);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
+
+            // Finish Line
+            const finishGeo = new THREE.BoxGeometry(trackWidth, 0.1, 2);
+            const finishMat = new THREE.MeshBasicMaterial({ color: 0xffffff }); // White line
+            const finishMesh = new THREE.Mesh(finishGeo, finishMat);
+            finishMesh.position.set(0, 0.1, FINISH_LINE_Z);
+            scene.add(finishMesh);
+            terrainMeshes.push(finishMesh);
+            
+            // Checkered flag posts
+            createPost(-trackWidth/2, 0, FINISH_LINE_Z);
+            createPost(trackWidth/2, 0, FINISH_LINE_Z);
+        }
+
+        function createPost(x, y, z) {
+            const geo = new THREE.CylinderGeometry(0.5, 0.5, 10);
+            const mat = new THREE.MeshPhongMaterial({ color: 0xffffff });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.set(x, y+5, z);
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
+        }
+
+        function createSegment(z, y, length, angle, color) {
+            // Calculate center position based on start point (z, y) and angle
+            // The box is positioned at its center, so we need to offset from the start point
+            const halfLen = length / 2;
+            const centerY = y - Math.sin(angle) * halfLen;
+            const centerZ = z - Math.cos(angle) * halfLen;
+
+            const shape = new CANNON.Box(new CANNON.Vec3(15, 1, length/2));
+            const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+            body.addShape(shape);
+            body.position.set(0, centerY, centerZ);
+            body.quaternion.setFromAxisAngle(new CANNON.Vec3(1, 0, 0), angle);
+            
+            world.addBody(body);
+            terrainBodies.push(body);
+
+            const geo = new THREE.BoxGeometry(30, 2, length);
+            const mat = new THREE.MeshPhongMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(body.position);
+            mesh.quaternion.copy(body.quaternion);
+            mesh.receiveShadow = true;
+            
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
+        }
+
+        function createBox(x, y, z, w, h, d, color) {
+            const shape = new CANNON.Box(new CANNON.Vec3(w/2, h/2, d/2));
+            const body = new CANNON.Body({ mass: 0, material: groundMaterial });
+            body.addShape(shape);
+            body.position.set(x, y, z);
+            world.addBody(body);
+            terrainBodies.push(body);
+
+            const geo = new THREE.BoxGeometry(w, h, d);
+            const mat = new THREE.MeshPhongMaterial({ color: color });
+            const mesh = new THREE.Mesh(geo, mat);
+            mesh.position.copy(body.position);
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+            terrainMeshes.push(mesh);
+        }
+
+        // --- Genetic Algorithm ---
+        function nextGen() {
+            // Sort by fitness
+            cars.sort((a, b) => b.maxDist - a.maxDist);
+            const bestCar = cars[0];
+            bestDistance = Math.max(bestDistance, bestCar.maxDist);
+            document.getElementById('best-dist').innerText = Math.floor(bestDistance);
+
+            // Selection
+            const parents = cars.slice(0, POPULATION_SIZE / 2);
+            const nextGenDNA = [];
+            
+            // Elitism
+            nextGenDNA.push(JSON.parse(JSON.stringify(bestCar.dna)));
+
+            // Breeding
+            while (nextGenDNA.length < POPULATION_SIZE) {
+                const p1 = parents[Math.floor(Math.random() * parents.length)];
+                const p2 = parents[Math.floor(Math.random() * parents.length)];
+                const childDNA = crossover(p1.dna, p2.dna);
+                mutate(childDNA);
+                nextGenDNA.push(childDNA);
+            }
+
+            // Reset
+            cars.forEach(c => c.destroy());
+            cars = [];
+            
+            spawnCars(nextGenDNA);
+
+            generation++;
+            startRaceSequence();
+        }
+
+        function spawnCars(dnaList) {
+            const cols = 5;
+            const spacingX = 8;
+            const spacingZ = 8;
+            
+            dnaList.forEach((dna, i) => {
+                const col = i % cols;
+                const row = Math.floor(i / cols);
+                // Center the grid
+                const x = (col - (cols-1)/2) * spacingX;
+                const z = 30 - (row * spacingZ); // Start back at z=30, facing -Z
+                
+                cars.push(new Car(dna, x, 2, z));
+            });
+        }
+
+        function crossover(dna1, dna2) {
+            const child = {};
+            // Mix properties
+            for (let key in dna1) {
+                if (key === 'wheelPositions') {
+                    child[key] = Math.random() > 0.5 ? 
+                        JSON.parse(JSON.stringify(dna1[key])) : 
+                        JSON.parse(JSON.stringify(dna2[key]));
+                } else {
+                    child[key] = Math.random() > 0.5 ? dna1[key] : dna2[key];
+                }
+            }
+            return child;
+        }
+
+        function mutate(dna) {
+            if (Math.random() < MUTATION_RATE) dna.width += (Math.random()-0.5);
+            if (Math.random() < MUTATION_RATE) dna.length += (Math.random()-0.5);
+            if (Math.random() < MUTATION_RATE) dna.wheelRadius += (Math.random()-0.5) * 0.2;
+            if (Math.random() < MUTATION_RATE) dna.enginePower += (Math.random()-0.5) * 10;
+            
+            // Clamp values
+            dna.width = Math.max(0.5, dna.width);
+            dna.length = Math.max(1, dna.length);
+            dna.wheelRadius = Math.max(0.2, dna.wheelRadius);
+            dna.enginePower = Math.max(5, dna.enginePower);
+        }
+
+        // --- Main Loop ---
+        function init() {
+            try {
+                document.getElementById('loading-status').textContent = 'Generating terrain...';
+                generateTerrain();
+
+                document.getElementById('loading-status').textContent = 'Spawning cars...';
+                const initialDNA = [];
+                for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
+                spawnCars(initialDNA);
+
+                document.getElementById('loading-status').textContent = 'Starting simulation...';
+
+                // Hide loading screen
+                setTimeout(() => {
+                    const loadingScreen = document.getElementById('loading-screen');
+                    if (loadingScreen) loadingScreen.style.display = 'none';
+                }, 500);
+
+                animate();
+                startRaceSequence();
+            } catch(e) {
+                console.error('Init error:', e);
+                document.getElementById('error-display').style.display = 'block';
+                document.getElementById('error-display').innerHTML = `<strong>Initialization Error:</strong> ${e.message}<br><br><button onclick="location.reload()" style="background:#300;color:#f00;border:1px solid #f00;padding:10px 20px;cursor:pointer;">Reload Page</button>`;
+                document.getElementById('loading-screen').style.display = 'none';
+            }
+        }
+
+        function startRaceSequence() {
+            raceActive = false;
+            timer = 0;
+            updateUI();
+            
+            const cd = document.getElementById('countdown');
+            cd.style.display = 'block';
+            
+            let count = 3;
+            cd.innerText = count;
+            
+            const interval = setInterval(() => {
+                count--;
+                if (count > 0) {
+                    cd.innerText = count;
+                } else if (count === 0) {
+                    cd.innerText = "GO!";
+                    cd.style.color = "#0f0";
+                } else {
+                    clearInterval(interval);
+                    cd.style.display = 'none';
+                    cd.style.color = "#fff";
+                    raceActive = true;
+                }
+            }, 1000);
+        }
+
+        function animate() {
+            frameId = requestAnimationFrame(animate);
+
+            const dt = 1 / 60;
+            const steps = isFastForward ? 5 : 1;
+
+            for(let i=0; i<steps; i++) {
+                world.step(dt);
+                cars.forEach(c => c.update());
+                if (raceActive) timer += dt;
+            }
+
+            // Camera Follow Leader - find the car that has traveled the furthest
+            let leader = null;
+            cars.forEach(c => {
+                if (c && c.alive) {
+                    if (!leader || c.maxDist > leader.maxDist) leader = c;
+                }
+            });
+            // If no alive cars, follow the one with max distance
+            if (!leader && cars.length > 0) {
+                leader = cars.reduce((best, c) => (c && c.maxDist > (best?.maxDist || 0)) ? c : best, cars[0]);
+            }
+
+            if (leader && leader.chassisMesh) {
+                const targetPos = leader.chassisMesh.position.clone();
+                targetPos.y += 10;
+                targetPos.z += 20; // Look from behind
+                targetPos.x += 0;
+                camera.position.lerp(targetPos, 0.1);
+                camera.lookAt(leader.chassisMesh.position);
+            }
+
+            document.getElementById('time').innerText = timer.toFixed(1);
+            document.getElementById('alive').innerText = cars.filter(c => c.alive).length;
+
+            if (raceActive && (timer > ROUND_TIME || cars.every(c => !c.alive))) {
+                nextGen();
+            }
+
+            renderer.render(scene, camera);
+        }
+
+        // --- UI Functions ---
+        function updateUI() {
+            document.getElementById('gen').innerText = generation;
+        }
+
+        function toggleSpeed() {
+            isFastForward = !isFastForward;
+        }
+
+        function resetSim() {
+            cars.forEach(c => c.destroy());
+            cars = [];
+            generation = 1;
+            bestDistance = 0;
+            timer = 0;
+            generateTerrain();
+            
+            const initialDNA = [];
+            for(let i=0; i<POPULATION_SIZE; i++) initialDNA.push(null);
+            spawnCars(initialDNA);
+            
+            updateUI();
+            startRaceSequence();
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        init();
+
+    </script>
+</body>
+</html>

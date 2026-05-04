@@ -1,0 +1,598 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🛠%3C/text%3E%3C/svg%3E">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Health Check — Run Every App in a Sandboxed iframe</title>
+    <meta name="description" content="Reads the gallery registry, opens every registered app in a sandboxed iframe, captures load errors / console errors / load timeouts, and reports status. Catches the next bug class automatically.">
+    <meta name="keywords" content="testing,health,iframe,registry,console-errors,smoke-test">
+    <meta name="icon" content="🩺">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-0: #0a0a0f;
+            --bg-1: #14141d;
+            --bg-2: #1d1d2a;
+            --bg-3: #2a2a3a;
+            --fg-0: #f0f0f5;
+            --fg-1: #b8b8c8;
+            --fg-2: #6a6a7a;
+            --accent: #06ffa5;
+            --ok: #06ffa5;
+            --warn: #ffb800;
+            --fail: #ff4060;
+            --slow: #b888ff;
+            --border: rgba(255,255,255,0.08);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            min-height: 100vh;
+        }
+        header {
+            padding: 28px 24px 14px;
+            border-bottom: 1px solid var(--border);
+            background: linear-gradient(180deg, var(--bg-1), var(--bg-0));
+        }
+        header h1 { font-size: 26px; font-weight: 200; margin-bottom: 4px; }
+        header h1 .accent { color: var(--accent); }
+        header .sub { color: var(--fg-1); font-size: 13px; max-width: 760px; line-height: 1.55; }
+        .toolbar {
+            padding: 14px 24px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            align-items: center;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-1);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        .toolbar input[type=search] {
+            flex: 1;
+            min-width: 180px;
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        .toolbar input[type=number] {
+            width: 80px;
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            padding: 6px 10px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+            font-variant-numeric: tabular-nums;
+        }
+        .toolbar label { color: var(--fg-2); font-size: 12px; display: flex; align-items: center; gap: 6px; }
+        button {
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.15s;
+        }
+        button:hover { background: var(--bg-3); border-color: var(--accent); }
+        button.primary { background: var(--accent); color: var(--bg-0); border-color: var(--accent); font-weight: 600; }
+        button.primary:hover { background: #00cc84; }
+        button.danger { color: var(--fail); border-color: rgba(255,64,96,0.3); }
+        button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .stats {
+            padding: 14px 24px;
+            background: var(--bg-1);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            gap: 28px;
+            flex-wrap: wrap;
+        }
+        .stat { display: flex; flex-direction: column; gap: 2px; min-width: 60px; }
+        .stat .v { font-size: 22px; font-weight: 200; font-variant-numeric: tabular-nums; }
+        .stat .l { font-size: 10px; color: var(--fg-2); text-transform: uppercase; letter-spacing: 0.06em; }
+        .stat.ok .v { color: var(--ok); }
+        .stat.warn .v { color: var(--warn); }
+        .stat.fail .v { color: var(--fail); }
+
+        .progress {
+            height: 4px;
+            background: var(--bg-2);
+            position: sticky;
+            top: 56px;
+            z-index: 9;
+        }
+        .progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, var(--accent), var(--slow));
+            width: 0%;
+            transition: width 0.2s;
+        }
+
+        main { padding: 18px 24px 60px; max-width: 1400px; margin: 0 auto; }
+
+        .row {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            display: grid;
+            grid-template-columns: 32px minmax(0, 1.5fr) 90px 130px minmax(0, 2fr) 110px;
+            gap: 14px;
+            align-items: center;
+            padding: 10px 16px;
+            font-size: 13px;
+            transition: background 0.15s;
+        }
+        .row:hover { background: var(--bg-2); }
+        .row .status-icon { font-size: 16px; text-align: center; }
+        .row .title { font-weight: 500; word-break: break-word; }
+        .row .title .path { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; color: var(--fg-2); margin-top: 2px; word-break: break-all; }
+        .row .ms { font-variant-numeric: tabular-nums; color: var(--fg-1); font-size: 12px; }
+        .row .verdict { font-size: 12px; font-weight: 500; }
+        .row .verdict.ok { color: var(--ok); }
+        .row .verdict.warn { color: var(--warn); }
+        .row .verdict.fail { color: var(--fail); }
+        .row .verdict.slow { color: var(--slow); }
+        .row .messages {
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 11px;
+            color: var(--fg-1);
+            max-height: 4em;
+            overflow: hidden;
+            white-space: pre-wrap;
+            cursor: pointer;
+        }
+        .row .messages.expanded { max-height: none; }
+        .row.expanded .messages { max-height: none; }
+        .row .actions { display: flex; gap: 6px; justify-content: flex-end; }
+        .row .actions button { padding: 4px 9px; font-size: 11px; }
+
+        @media (max-width: 1100px) {
+            .row { grid-template-columns: 28px 1fr 80px 100px; }
+            .row .messages, .row .actions { grid-column: 1 / -1; padding-top: 6px; }
+        }
+
+        .row.s-pending { opacity: 0.65; }
+        .row.s-running { border-color: var(--slow); }
+        .row.s-ok { border-color: rgba(6,255,165,0.25); }
+        .row.s-warn { border-color: rgba(255,184,0,0.3); }
+        .row.s-fail { border-color: rgba(255,64,96,0.4); background: rgba(255,64,96,0.04); }
+
+        .preview-frame {
+            display: none;
+            position: fixed;
+            inset: 50px 50px 50px 50%;
+            transform: translateX(-50%);
+            width: calc(min(900px, 90vw));
+            background: var(--bg-1);
+            border: 1px solid var(--accent);
+            border-radius: 12px;
+            z-index: 100;
+            box-shadow: 0 20px 80px rgba(0,0,0,0.6);
+            display: none;
+            flex-direction: column;
+        }
+        .preview-frame.show { display: flex; }
+        .preview-frame header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 14px;
+            border-bottom: 1px solid var(--border);
+            background: var(--bg-2);
+        }
+        .preview-frame header h3 { font-size: 14px; font-weight: 500; }
+        .preview-frame iframe {
+            flex: 1;
+            border: none;
+            min-height: 400px;
+            background: white;
+        }
+        #worker-frame {
+            position: fixed;
+            top: -10000px;
+            left: -10000px;
+            width: 1024px;
+            height: 768px;
+            border: 0;
+        }
+
+        .empty { padding: 60px 24px; text-align: center; color: var(--fg-2); font-size: 14px; }
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--bg-2);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            padding: 12px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.2s;
+            z-index: 1000;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>🩺 Health <span class="accent">Check</span></h1>
+    <p class="sub">
+        Reads <code>vibe_gallery_config.json</code>, opens every registered app in a sandboxed hidden iframe, watches for
+        <code>error</code> / <code>unhandledrejection</code> / load timeout / 404, and reports per-app verdict.
+        Throttled to keep your tab responsive. Run nightly to catch the next regression.
+    </p>
+</header>
+
+<div class="toolbar">
+    <input type="search" id="filter" placeholder="Filter by title, path, or category…" autocomplete="off">
+    <label>Concurrency<input type="number" id="concurrency" min="1" max="8" value="3"></label>
+    <label>Timeout<input type="number" id="timeout" min="2" max="60" value="10"> s</label>
+    <button id="run-all" class="primary">▶ Run all</button>
+    <button id="run-failing" disabled>↻ Re-run failing</button>
+    <button id="stop" class="danger" disabled>⏹ Stop</button>
+    <button id="export-report">⬇ Export report</button>
+</div>
+
+<div class="progress"><div class="progress-bar" id="progress-bar"></div></div>
+
+<div class="stats">
+    <div class="stat"><div class="v" id="stat-total">—</div><div class="l">Total</div></div>
+    <div class="stat ok"><div class="v" id="stat-ok">—</div><div class="l">Pass</div></div>
+    <div class="stat warn"><div class="v" id="stat-warn">—</div><div class="l">Warn</div></div>
+    <div class="stat fail"><div class="v" id="stat-fail">—</div><div class="l">Fail</div></div>
+    <div class="stat"><div class="v" id="stat-pending">—</div><div class="l">Pending</div></div>
+    <div class="stat"><div class="v" id="stat-time">—</div><div class="l">Total time</div></div>
+</div>
+
+<main id="main"><div class="empty">Loading registry…</div></main>
+
+<div class="preview-frame" id="preview">
+    <header>
+        <h3 id="preview-title">Preview</h3>
+        <button onclick="document.getElementById('preview').classList.remove('show'); document.getElementById('preview-frame').src='about:blank'">Close</button>
+    </header>
+    <iframe id="preview-frame"></iframe>
+</div>
+
+<iframe id="worker-frame" sandbox="allow-scripts allow-same-origin allow-forms" referrerpolicy="no-referrer"></iframe>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = sel => document.querySelector(sel);
+const main = $('#main');
+let apps = [];        // [{title, path, category, _row, _result}]
+let queue = [];
+let running = false;
+let stopRequested = false;
+let runStartTime = 0;
+
+async function loadApps() {
+    const candidates = ['../../vibe_gallery_config.json', '../../data/config/utility_apps_config.json'];
+    for (const url of candidates) {
+        try {
+            const r = await fetch(url);
+            if (!r.ok) continue;
+            const cfg = await r.json();
+            if (cfg.vibeGallery?.categories) {
+                const list = [];
+                for (const [k, c] of Object.entries(cfg.vibeGallery.categories)) {
+                    for (const app of (c.apps || [])) {
+                        list.push({
+                            title: app.title || app.filename || '(untitled)',
+                            path: app.path || app.filename,
+                            category: app.category || k,
+                            featured: !!app.featured,
+                            _result: { state: 'pending', errors: [], warnings: [], ms: 0 },
+                        });
+                    }
+                }
+                return list;
+            }
+            if (cfg.apps) {
+                return cfg.apps.map(a => ({
+                    title: a.title,
+                    path: a.path,
+                    category: a.category || 'utilities',
+                    featured: false,
+                    _result: { state: 'pending', errors: [], warnings: [], ms: 0 },
+                }));
+            }
+        } catch (e) {}
+    }
+    return [];
+}
+
+function fmt(ms) {
+    if (ms < 1000) return ms + ' ms';
+    return (ms / 1000).toFixed(2) + ' s';
+}
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function escapeAttr(s) { return escapeHtml(s); }
+
+function fixPath(p) {
+    if (!p) return '';
+    p = p.replace(/^\.?\//, '');
+    return '../../' + p;
+}
+
+function renderRow(app, idx) {
+    const r = app._result;
+    const stateCls = `s-${r.state}`;
+    const icons = { pending: '·', running: '⏳', ok: '✅', warn: '⚠️', fail: '❌' };
+    const verdictTxt = { pending: '—', running: 'running…', ok: 'pass', warn: r.errors.length ? 'warn' : 'slow', fail: 'fail' };
+    const verdictCls = r.state === 'warn' && r.errors.length === 0 && r.ms > 5000 ? 'slow' : r.state;
+    const msgs = [...r.errors, ...r.warnings].slice(0, 5);
+    return `
+        <div class="row ${stateCls}" data-i="${idx}">
+            <div class="status-icon">${icons[r.state] || '·'}</div>
+            <div class="title">
+                ${app.featured ? '⭐ ' : ''}${escapeHtml(app.title)}
+                <div class="path">${escapeHtml(app.path)} · ${escapeHtml(app.category)}</div>
+            </div>
+            <div class="ms">${r.ms ? fmt(r.ms) : ''}</div>
+            <div class="verdict ${verdictCls}">${verdictTxt[r.state]}</div>
+            <div class="messages" title="Click to expand">${msgs.length ? escapeHtml(msgs.join('\n')) : '<span style="color:var(--fg-2)">no messages</span>'}</div>
+            <div class="actions">
+                <button data-act="run">Run</button>
+                <button data-act="open">Open</button>
+                <button data-act="preview">Peek</button>
+            </div>
+        </div>
+    `;
+}
+
+function rerender(filter) {
+    if (apps.length === 0) {
+        main.innerHTML = '<div class="empty">No apps in registry. Are you running this on the static site?</div>';
+        return;
+    }
+    const f = (filter || '').toLowerCase();
+    const visible = apps.map((a, i) => ({ a, i })).filter(({ a }) => {
+        if (!f) return true;
+        return a.title.toLowerCase().includes(f) || a.path.toLowerCase().includes(f) || a.category.toLowerCase().includes(f);
+    });
+    main.innerHTML = visible.map(({ a, i }) => renderRow(a, i)).join('') || '<div class="empty">No matches</div>';
+
+    main.querySelectorAll('.row').forEach(rowEl => {
+        const i = +rowEl.dataset.i;
+        rowEl.querySelector('[data-act="run"]').onclick = () => runOne(i);
+        rowEl.querySelector('[data-act="open"]').onclick = () => window.open(fixPath(apps[i].path), '_blank');
+        rowEl.querySelector('[data-act="preview"]').onclick = () => {
+            $('#preview-title').textContent = apps[i].title;
+            $('#preview-frame').src = fixPath(apps[i].path);
+            $('#preview').classList.add('show');
+        };
+        rowEl.querySelector('.messages').onclick = (e) => e.target.classList.toggle('expanded');
+    });
+    updateStats();
+}
+
+function updateStats() {
+    const counts = { pending: 0, running: 0, ok: 0, warn: 0, fail: 0 };
+    let totalMs = 0;
+    for (const a of apps) {
+        counts[a._result.state] = (counts[a._result.state] || 0) + 1;
+        if (a._result.ms) totalMs += a._result.ms;
+    }
+    $('#stat-total').textContent = apps.length;
+    $('#stat-ok').textContent = counts.ok;
+    $('#stat-warn').textContent = counts.warn;
+    $('#stat-fail').textContent = counts.fail;
+    $('#stat-pending').textContent = counts.pending + counts.running;
+    $('#stat-time').textContent = totalMs ? fmt(totalMs) : '—';
+    const done = counts.ok + counts.warn + counts.fail;
+    $('#progress-bar').style.width = (apps.length ? (done / apps.length * 100) : 0) + '%';
+    $('#run-failing').disabled = counts.fail === 0 || running;
+}
+
+async function runOne(i, opts) {
+    opts = opts || {};
+    const app = apps[i];
+    const url = fixPath(app.path);
+    const r = app._result;
+    r.state = 'running'; r.errors = []; r.warnings = []; r.ms = 0;
+    rerender($('#filter').value);
+    const start = performance.now();
+    const TIMEOUT = (parseInt($('#timeout').value, 10) || 10) * 1000;
+
+    return new Promise(resolve => {
+        const frame = $('#worker-frame');
+        let done = false;
+        let timer = null;
+
+        function finish(state, msg) {
+            if (done) return;
+            done = true;
+            clearTimeout(timer);
+            window.removeEventListener('message', onMsg);
+            frame.removeEventListener('load', onLoad);
+            frame.removeEventListener('error', onError);
+            r.state = state;
+            r.ms = Math.round(performance.now() - start);
+            if (msg) {
+                if (state === 'fail') r.errors.push(msg);
+                else r.warnings.push(msg);
+            }
+            // Reset frame
+            try { frame.src = 'about:blank'; } catch (_) {}
+            rerender($('#filter').value);
+            resolve();
+        }
+
+        function onLoad() {
+            // The page loaded, but it might still throw async
+            // Wait a settle window for runtime errors to surface
+            setTimeout(() => {
+                if (done) return;
+                // Verdict: we got here without errors — ok or warn(slow)
+                const elapsed = performance.now() - start;
+                if (r.errors.length) finish('warn', null);
+                else if (elapsed > 5000) finish('warn', 'slow load: ' + Math.round(elapsed) + 'ms');
+                else finish('ok', null);
+            }, 1500);
+        }
+        function onError(e) {
+            r.errors.push('frame load error');
+            finish('fail', 'frame load error');
+        }
+        function onMsg(e) {
+            if (e.source !== frame.contentWindow) return;
+            // Apps can postMessage themselves but we don't rely on that for verdict
+        }
+
+        // Capture console.error from inside frame using shared-origin
+        // (we use sandbox='allow-scripts allow-same-origin' so we can read frame contentWindow)
+        const probe = () => {
+            try {
+                const fw = frame.contentWindow;
+                if (!fw) return;
+                if (fw.console && !fw.console.__probed) {
+                    const orig = fw.console.error;
+                    fw.console.error = function (...args) {
+                        try { r.errors.push('console.error: ' + args.map(String).join(' ')); } catch (_) {}
+                        try { orig.apply(this, args); } catch (_) {}
+                    };
+                    fw.console.__probed = true;
+                }
+                fw.addEventListener('error', ev => {
+                    r.errors.push('uncaught: ' + (ev.message || 'unknown'));
+                });
+                fw.addEventListener('unhandledrejection', ev => {
+                    r.errors.push('unhandled rejection: ' + (ev.reason && ev.reason.message ? ev.reason.message : String(ev.reason)));
+                });
+            } catch (_) { /* cross-origin -- shouldn't happen for same-origin paths */ }
+        };
+
+        timer = setTimeout(() => finish('fail', 'timeout (' + (TIMEOUT/1000) + 's)'), TIMEOUT);
+        frame.addEventListener('load', onLoad, { once: true });
+        frame.addEventListener('error', onError, { once: true });
+        window.addEventListener('message', onMsg);
+
+        try {
+            // Need to pre-fetch to detect 404 cleanly
+            fetch(url, { method: 'HEAD' }).then(res => {
+                if (!res.ok) {
+                    r.errors.push('HTTP ' + res.status);
+                    return finish('fail', 'HTTP ' + res.status);
+                }
+                frame.src = url;
+                // Probe a couple of times in case load is delayed
+                setTimeout(probe, 100);
+                setTimeout(probe, 600);
+                setTimeout(probe, 1500);
+            }).catch(e => {
+                r.errors.push('fetch error: ' + (e.message || e));
+                finish('fail', 'fetch error');
+            });
+        } catch (e) {
+            finish('fail', 'launch error: ' + e.message);
+        }
+    });
+}
+
+async function runAll(filterFn) {
+    const conc = Math.max(1, parseInt($('#concurrency').value, 10) || 3);
+    queue = apps.map((a, i) => i).filter(i => !filterFn || filterFn(apps[i]));
+    running = true;
+    stopRequested = false;
+    runStartTime = performance.now();
+    $('#run-all').disabled = true;
+    $('#run-failing').disabled = true;
+    $('#stop').disabled = false;
+    let active = 0;
+    return new Promise(resolve => {
+        const tick = () => {
+            if (stopRequested && active === 0) {
+                running = false;
+                $('#run-all').disabled = false;
+                $('#stop').disabled = true;
+                updateStats();
+                resolve();
+                return;
+            }
+            while (active < conc && queue.length > 0 && !stopRequested) {
+                const i = queue.shift();
+                active++;
+                runOne(i).then(() => {
+                    active--;
+                    setTimeout(tick, 50);
+                });
+            }
+            if (queue.length === 0 && active === 0) {
+                running = false;
+                $('#run-all').disabled = false;
+                $('#stop').disabled = true;
+                updateStats();
+                toast(`Done in ${fmt(Math.round(performance.now() - runStartTime))}`);
+                resolve();
+            }
+        };
+        tick();
+    });
+}
+
+function exportReport() {
+    const report = {
+        format: 'localFirstTools-health-v1',
+        ranAt: new Date().toISOString(),
+        origin: location.origin,
+        apps: apps.map(a => ({
+            title: a.title,
+            path: a.path,
+            category: a.category,
+            featured: a.featured,
+            state: a._result.state,
+            ms: a._result.ms,
+            errors: a._result.errors,
+            warnings: a._result.warnings,
+        })),
+    };
+    const blob = new Blob([JSON.stringify(report, null, 2)], { type: 'application/json' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `health-check-report-${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    toast('Report exported');
+}
+
+function toast(msg) {
+    const t = $('#toast');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// wire toolbar
+$('#filter').oninput = () => rerender($('#filter').value);
+$('#run-all').onclick = () => runAll();
+$('#run-failing').onclick = () => runAll(a => a._result.state === 'fail');
+$('#stop').onclick = () => { stopRequested = true; toast('Stopping…'); };
+$('#export-report').onclick = exportReport;
+
+(async () => {
+    apps = await loadApps();
+    rerender();
+})();
+</script>
+
+</body>
+</html>

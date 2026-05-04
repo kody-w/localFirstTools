@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Membrane Drift</title>
+    <meta name="description" content="Semi-permeable cellular membranes selectively filter floating particles based on chemical affinity, creating osmotic exchange patterns">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { background: #080a10; min-height: 100vh; font-family: 'Georgia', serif; color: #8090a0; overflow: hidden; }
+        #canvas { position: fixed; top: 0; left: 0; cursor: crosshair; }
+        #controls {
+            position: fixed; top: 20px; left: 20px; background: rgba(10,15,25,0.95);
+            padding: 20px; border-radius: 10px; border: 1px solid rgba(80,120,160,0.3);
+            z-index: 100;
+        }
+        h3 { margin-bottom: 15px; color: #a0c0e0; font-weight: normal; }
+        .control-row { margin: 10px 0; }
+        label { display: block; font-size: 11px; margin-bottom: 5px; opacity: 0.8; }
+        input[type="range"] { width: 140px; }
+        .value { float: right; color: #b0d0f0; font-size: 12px; }
+        .particle-type { display: inline-block; width: 20px; height: 20px; border-radius: 50%; margin: 2px; cursor: pointer; border: 2px solid transparent; }
+        .particle-type.selected { border-color: white; }
+        button {
+            display: block; width: 100%; padding: 10px; margin: 6px 0;
+            background: rgba(60,100,140,0.4); border: 1px solid rgba(80,120,160,0.4);
+            color: #90b0d0; cursor: pointer; border-radius: 6px; font-family: inherit;
+        }
+        #info { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); font-size: 12px; opacity: 0.5; z-index: 100; }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <div id="controls">
+        <h3>Membrane Drift</h3>
+        <div class="control-row">
+            <label>Particle Type</label>
+            <div id="particle-palette"></div>
+        </div>
+        <div class="control-row">
+            <label>Membrane Permeability <span class="value" id="perm-val">50</span></label>
+            <input type="range" id="perm" min="10" max="100" value="50">
+        </div>
+        <div class="control-row">
+            <label>Diffusion Rate <span class="value" id="diff-val">40</span></label>
+            <input type="range" id="diff" min="10" max="100" value="40">
+        </div>
+        <button id="membrane-btn">Add Membrane</button>
+        <button id="flood-btn">Flood Particles</button>
+        <button id="clear-btn">Clear All</button>
+    </div>
+    <div id="info">Click to spawn particles | Membranes filter by type</div>
+    <script>
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        let W, H;
+        function resize() { W = canvas.width = innerWidth; H = canvas.height = innerHeight; }
+        resize(); window.onresize = resize;
+        
+        const PARTICLE_TYPES = [
+            { name: 'alpha', hue: 200, affinity: [1, 0.3, 0.1] },
+            { name: 'beta', hue: 120, affinity: [0.2, 1, 0.5] },
+            { name: 'gamma', hue: 40, affinity: [0.1, 0.4, 1] },
+            { name: 'delta', hue: 300, affinity: [0.5, 0.5, 0.5] }
+        ];
+        
+        let selectedType = 0;
+        let permeability = 0.5;
+        let diffusionRate = 0.4;
+        let time = 0;
+        
+        const particles = [];
+        const membranes = [];
+        
+        function createPalette() {
+            const palette = document.getElementById('particle-palette');
+            PARTICLE_TYPES.forEach((type, i) => {
+                const btn = document.createElement('div');
+                btn.className = 'particle-type' + (i === selectedType ? ' selected' : '');
+                btn.style.background = "hsl(" + type.hue + ", 70%, 50%)";
+                btn.onclick = () => {
+                    document.querySelectorAll('.particle-type').forEach(b => b.classList.remove('selected'));
+                    btn.classList.add('selected');
+                    selectedType = i;
+                };
+                palette.appendChild(btn);
+            });
+        }
+        createPalette();
+        
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type;
+                this.vx = (Math.random() - 0.5) * 2;
+                this.vy = (Math.random() - 0.5) * 2;
+                this.size = 4 + Math.random() * 3;
+                this.phase = Math.random() * Math.PI * 2;
+                this.trail = [];
+            }
+            
+            update() {
+                this.phase += 0.05;
+                
+                this.vx += (Math.random() - 0.5) * 0.1 * diffusionRate;
+                this.vy += (Math.random() - 0.5) * 0.1 * diffusionRate;
+                
+                membranes.forEach(membrane => {
+                    const result = membrane.interact(this);
+                    if (result.blocked) {
+                        this.vx = result.vx;
+                        this.vy = result.vy;
+                    } else if (result.absorbed) {
+                        this.glow = 1;
+                    }
+                });
+                
+                this.vx *= 0.98;
+                this.vy *= 0.98;
+                
+                this.x += this.vx;
+                this.y += this.vy;
+                
+                if (this.x < 0) { this.x = 0; this.vx *= -0.5; }
+                if (this.x > W) { this.x = W; this.vx *= -0.5; }
+                if (this.y < 0) { this.y = 0; this.vy *= -0.5; }
+                if (this.y > H) { this.y = H; this.vy *= -0.5; }
+                
+                this.trail.push({ x: this.x, y: this.y });
+                if (this.trail.length > 10) this.trail.shift();
+                
+                if (this.glow) this.glow *= 0.95;
+            }
+            
+            draw() {
+                const type = PARTICLE_TYPES[this.type];
+                const pulse = 1 + Math.sin(this.phase) * 0.2;
+                
+                if (this.trail.length > 1) {
+                    ctx.beginPath();
+                    ctx.moveTo(this.trail[0].x, this.trail[0].y);
+                    this.trail.forEach(p => ctx.lineTo(p.x, p.y));
+                    ctx.strokeStyle = "hsla(" + type.hue + ", 60%, 50%, 0.2)";
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
+                
+                if (this.glow > 0.1) {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.size * 3, 0, Math.PI * 2);
+                    ctx.fillStyle = "hsla(" + type.hue + ", 80%, 60%, " + (this.glow * 0.3) + ")";
+                    ctx.fill();
+                }
+                
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.size * pulse, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + type.hue + ", 70%, 60%, 0.9)";
+                ctx.fill();
+                
+                ctx.beginPath();
+                ctx.arc(this.x - this.size * 0.3, this.y - this.size * 0.3, this.size * 0.3, 0, Math.PI * 2);
+                ctx.fillStyle = "hsla(" + type.hue + ", 50%, 80%, 0.5)";
+                ctx.fill();
+            }
+        }
+        
+        class Membrane {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.radius = 80 + Math.random() * 40;
+                this.affinity = Math.floor(Math.random() * 3);
+                this.health = 1;
+                this.pulse = Math.random() * Math.PI * 2;
+                this.absorbed = 0;
+                this.points = [];
+                
+                const segments = 32;
+                for (let i = 0; i < segments; i++) {
+                    const angle = (i / segments) * Math.PI * 2;
+                    this.points.push({
+                        baseAngle: angle,
+                        offset: 0,
+                        velocity: 0
+                    });
+                }
+            }
+            
+            interact(particle) {
+                const dx = particle.x - this.x;
+                const dy = particle.y - this.y;
+                const dist = Math.hypot(dx, dy);
+                
+                if (dist > this.radius + 20 || dist < this.radius - 20) {
+                    return { blocked: false };
+                }
+                
+                const typeAffinity = PARTICLE_TYPES[particle.type].affinity[this.affinity];
+                const passChance = typeAffinity * permeability;
+                
+                if (Math.random() < passChance) {
+                    this.absorbed++;
+                    const nearestPoint = Math.floor((Math.atan2(dy, dx) + Math.PI) / (Math.PI * 2) * this.points.length);
+                    if (this.points[nearestPoint]) {
+                        this.points[nearestPoint].velocity += 0.5;
+                    }
+                    return { blocked: false, absorbed: true };
+                }
+                
+                const nx = dx / dist;
+                const ny = dy / dist;
+                const dotProduct = particle.vx * nx + particle.vy * ny;
+                
+                return {
+                    blocked: true,
+                    vx: particle.vx - 2 * dotProduct * nx * 0.5,
+                    vy: particle.vy - 2 * dotProduct * ny * 0.5
+                };
+            }
+            
+            update() {
+                this.pulse += 0.02;
+                
+                this.points.forEach(p => {
+                    p.offset += p.velocity;
+                    p.velocity *= 0.9;
+                    p.offset *= 0.95;
+                });
+                
+                if (this.absorbed > 50) {
+                    this.health = Math.max(0.3, 1 - (this.absorbed - 50) * 0.01);
+                }
+            }
+            
+            draw() {
+                const affinityHue = [200, 120, 40][this.affinity];
+                const breathe = 1 + Math.sin(this.pulse) * 0.05;
+                
+                ctx.beginPath();
+                this.points.forEach((p, i) => {
+                    const angle = p.baseAngle;
+                    const r = this.radius * breathe + p.offset * 10;
+                    const x = this.x + Math.cos(angle) * r;
+                    const y = this.y + Math.sin(angle) * r;
+                    
+                    if (i === 0) ctx.moveTo(x, y);
+                    else ctx.lineTo(x, y);
+                });
+                ctx.closePath();
+                
+                const gradient = ctx.createRadialGradient(
+                    this.x, this.y, this.radius * 0.5,
+                    this.x, this.y, this.radius * 1.2
+                );
+                gradient.addColorStop(0, "hsla(" + affinityHue + ", 50%, 20%, 0.1)");
+                gradient.addColorStop(0.7, "hsla(" + affinityHue + ", 60%, 30%, 0.2)");
+                gradient.addColorStop(1, "transparent");
+                ctx.fillStyle = gradient;
+                ctx.fill();
+                
+                ctx.strokeStyle = "hsla(" + affinityHue + ", 70%, 50%, " + (0.5 * this.health) + ")";
+                ctx.lineWidth = 3 * this.health;
+                ctx.stroke();
+                
+                ctx.strokeStyle = "hsla(" + affinityHue + ", 80%, 70%, " + (0.2 * this.health) + ")";
+                ctx.lineWidth = 8 * this.health;
+                ctx.stroke();
+                
+                ctx.font = "10px Georgia";
+                ctx.fillStyle = "hsla(" + affinityHue + ", 60%, 70%, 0.7)";
+                ctx.textAlign = "center";
+                ctx.fillText(PARTICLE_TYPES[this.affinity].name + " affinity", this.x, this.y);
+                ctx.fillText("absorbed: " + this.absorbed, this.x, this.y + 12);
+            }
+        }
+        
+        function drawBackground() {
+            ctx.fillStyle = '#080a10';
+            ctx.fillRect(0, 0, W, H);
+            
+            ctx.fillStyle = 'rgba(40, 60, 80, 0.03)';
+            for (let x = 0; x < W; x += 20) {
+                for (let y = 0; y < H; y += 20) {
+                    ctx.fillRect(x, y, 1, 1);
+                }
+            }
+        }
+        
+        function drawConcentrationField() {
+            const resolution = 50;
+            const counts = {};
+            
+            for (let y = 0; y < H; y += resolution) {
+                for (let x = 0; x < W; x += resolution) {
+                    let localCount = 0;
+                    let avgHue = 0;
+                    
+                    particles.forEach(p => {
+                        if (Math.abs(p.x - x) < resolution && Math.abs(p.y - y) < resolution) {
+                            localCount++;
+                            avgHue += PARTICLE_TYPES[p.type].hue;
+                        }
+                    });
+                    
+                    if (localCount > 0) {
+                        avgHue /= localCount;
+                        const intensity = Math.min(0.2, localCount * 0.03);
+                        ctx.fillStyle = "hsla(" + avgHue + ", 50%, 40%, " + intensity + ")";
+                        ctx.fillRect(x, y, resolution, resolution);
+                    }
+                }
+            }
+        }
+        
+        function animate() {
+            time += 0.016;
+            
+            drawBackground();
+            drawConcentrationField();
+            
+            membranes.forEach(m => m.update());
+            membranes.forEach(m => m.draw());
+            
+            particles.forEach(p => p.update());
+            particles.forEach(p => p.draw());
+            
+            requestAnimationFrame(animate);
+        }
+        
+        canvas.onclick = e => {
+            if (e.clientX < 200 && e.clientY < 350) return;
+            
+            for (let i = 0; i < 5; i++) {
+                particles.push(new Particle(
+                    e.clientX + (Math.random() - 0.5) * 30,
+                    e.clientY + (Math.random() - 0.5) * 30,
+                    selectedType
+                ));
+            }
+        };
+        
+        document.getElementById('perm').oninput = e => {
+            permeability = e.target.value / 100;
+            document.getElementById('perm-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('diff').oninput = e => {
+            diffusionRate = e.target.value / 100;
+            document.getElementById('diff-val').textContent = e.target.value;
+        };
+        
+        document.getElementById('membrane-btn').onclick = () => {
+            membranes.push(new Membrane(
+                W * 0.3 + Math.random() * W * 0.4,
+                H * 0.3 + Math.random() * H * 0.4
+            ));
+        };
+        
+        document.getElementById('flood-btn').onclick = () => {
+            for (let i = 0; i < 50; i++) {
+                particles.push(new Particle(
+                    Math.random() * W,
+                    Math.random() * H,
+                    Math.floor(Math.random() * PARTICLE_TYPES.length)
+                ));
+            }
+        };
+        
+        document.getElementById('clear-btn').onclick = () => {
+            particles.length = 0;
+            membranes.length = 0;
+        };
+        
+        membranes.push(new Membrane(W * 0.5, H * 0.5));
+        for (let i = 0; i < 30; i++) {
+            particles.push(new Particle(
+                Math.random() * W,
+                Math.random() * H,
+                Math.floor(Math.random() * PARTICLE_TYPES.length)
+            ));
+        }
+        
+        animate();
+    </script>
+</body>
+</html>

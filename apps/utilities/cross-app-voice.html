@@ -1,0 +1,579 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🤖%3C/text%3E%3C/svg%3E">
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cross-App Voice — Speak to the Whole Gallery</title>
+    <meta name="description" content="Hold to speak. Voice command resolves to an app via fuzzy match against the registry, then opens it OR publishes the intent on the telepathy bus so other apps can react. The whole gallery, voice-controllable.">
+    <meta name="keywords" content="voice,speech-recognition,telepathy,broadcastchannel,intent">
+    <meta name="icon" content="🎙️">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --bg-0: #0a0a0f;
+            --bg-1: #14141d;
+            --bg-2: #1d1d2a;
+            --bg-3: #2a2a3a;
+            --fg-0: #f0f0f5;
+            --fg-1: #b8b8c8;
+            --fg-2: #6a6a7a;
+            --accent: #06ffa5;
+            --accent-2: #ff00aa;
+            --warn: #ffb800;
+            --fail: #ff4060;
+            --border: rgba(255,255,255,0.08);
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-0);
+            color: var(--fg-0);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+        body::before {
+            content: '';
+            position: fixed;
+            inset: 0;
+            background: radial-gradient(circle at 30% 20%, rgba(255,0,170,0.15), transparent 50%),
+                        radial-gradient(circle at 70% 80%, rgba(6,255,165,0.12), transparent 50%);
+            z-index: -1;
+            animation: drift 30s ease-in-out infinite;
+        }
+        @keyframes drift {
+            0%, 100% { transform: scale(1); }
+            50% { transform: scale(1.1); }
+        }
+        header {
+            padding: 28px 24px 14px;
+            text-align: center;
+        }
+        header h1 { font-size: 32px; font-weight: 200; margin-bottom: 4px; letter-spacing: -0.5px; }
+        header h1 .accent {
+            background: linear-gradient(135deg, var(--accent), var(--accent-2));
+            -webkit-background-clip: text;
+            background-clip: text;
+            color: transparent;
+        }
+        header .sub { color: var(--fg-1); font-size: 13px; max-width: 600px; margin: 0 auto; line-height: 1.6; }
+
+        .mic-stage {
+            padding: 32px 24px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 18px;
+        }
+        .mic {
+            width: 140px;
+            height: 140px;
+            border-radius: 50%;
+            background: var(--bg-1);
+            border: 2px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            user-select: none;
+            transition: all 0.2s;
+            position: relative;
+            font-size: 56px;
+        }
+        .mic:hover { border-color: var(--accent); transform: scale(1.03); }
+        .mic.listening {
+            border-color: var(--accent-2);
+            background: rgba(255,0,170,0.1);
+            animation: pulse 1.2s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(255,0,170,0.5); }
+            50% { box-shadow: 0 0 0 22px rgba(255,0,170,0); }
+        }
+        .mic.error { border-color: var(--fail); }
+        .hint { color: var(--fg-2); font-size: 12px; text-align: center; }
+        kbd {
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 2px 6px;
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 11px;
+        }
+        .heard {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px 20px;
+            min-width: 280px;
+            max-width: 600px;
+            text-align: center;
+            font-size: 18px;
+            color: var(--fg-1);
+            min-height: 56px;
+            transition: all 0.2s;
+        }
+        .heard.has-content {
+            color: var(--fg-0);
+            border-color: var(--accent);
+        }
+        .heard .interim {
+            color: var(--fg-2);
+            font-style: italic;
+        }
+
+        .candidates {
+            padding: 0 24px 60px;
+            max-width: 700px;
+            margin: 0 auto;
+        }
+        .candidates h2 {
+            font-size: 12px;
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 10px;
+        }
+        .candidate {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 8px;
+            display: flex;
+            align-items: center;
+            gap: 14px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        .candidate:hover { border-color: var(--accent); background: var(--bg-2); }
+        .candidate.top { border-color: var(--accent); }
+        .candidate-icon { font-size: 22px; width: 32px; text-align: center; }
+        .candidate-body { flex: 1; min-width: 0; }
+        .candidate-title { font-weight: 500; font-size: 14px; }
+        .candidate-desc { color: var(--fg-2); font-size: 12px; margin-top: 2px; }
+        .candidate-score {
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 11px;
+            color: var(--fg-2);
+        }
+        .candidate-score.top { color: var(--accent); }
+
+        .panel {
+            background: var(--bg-1);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 14px 18px;
+            margin-bottom: 12px;
+        }
+        .panel h3 {
+            font-size: 11px;
+            color: var(--fg-2);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 10px;
+        }
+        .panel p { color: var(--fg-1); font-size: 13px; line-height: 1.55; }
+        .panel code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 11px; background: var(--bg-2); padding: 2px 5px; border-radius: 3px; }
+
+        .controls {
+            padding: 0 24px 32px;
+            max-width: 700px;
+            margin: 0 auto;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+        button {
+            background: var(--bg-2);
+            border: 1px solid var(--border);
+            color: var(--fg-0);
+            padding: 8px 14px;
+            border-radius: 6px;
+            font-size: 13px;
+            cursor: pointer;
+            font-family: inherit;
+            transition: all 0.15s;
+        }
+        button:hover { background: var(--bg-3); border-color: var(--accent); }
+        button.toggled { background: var(--accent); color: var(--bg-0); border-color: var(--accent); font-weight: 600; }
+
+        .bus-log {
+            max-height: 200px;
+            overflow: auto;
+            font-family: ui-monospace, "SF Mono", Menlo, monospace;
+            font-size: 11px;
+            color: var(--fg-1);
+        }
+        .bus-log .entry {
+            padding: 4px 0;
+            border-bottom: 1px solid rgba(255,255,255,0.04);
+        }
+        .bus-log .ts { color: var(--fg-2); margin-right: 8px; }
+        .bus-log .ch { color: var(--accent); }
+        .bus-log .pl { color: var(--fg-1); }
+
+        .toast {
+            position: fixed;
+            bottom: 24px;
+            right: 24px;
+            background: var(--bg-2);
+            border: 1px solid var(--accent);
+            color: var(--accent);
+            padding: 12px 18px;
+            border-radius: 6px;
+            font-size: 13px;
+            opacity: 0;
+            transform: translateY(20px);
+            transition: all 0.2s;
+            z-index: 1000;
+        }
+        .toast.show { opacity: 1; transform: translateY(0); }
+        .toast.error { border-color: var(--fail); color: var(--fail); }
+    </style>
+</head>
+<body>
+
+<header>
+    <h1>🎙️ Cross-App <span class="accent">Voice</span></h1>
+    <p class="sub">
+        Hold the mic, say the name of any app. We fuzzy-match against the registry, open the top hit, AND publish the
+        recognized text on the telepathy <code>intent</code> channel so other apps in this origin can subscribe.
+        Try saying <em>"open snake"</em>, <em>"play balatro"</em>, <em>"show portal hub"</em>.
+    </p>
+</header>
+
+<div class="mic-stage">
+    <div class="mic" id="mic" title="Hold to speak (Space)">🎙️</div>
+    <div class="hint">
+        Click & hold the mic, or press <kbd>Space</kbd>.
+        Toggle <kbd>Always-listening</kbd> for hands-free operation.
+    </div>
+    <div class="heard" id="heard">…</div>
+</div>
+
+<div class="controls">
+    <button id="toggle-listen">🔊 Always-listening: off</button>
+    <button id="toggle-bus">📡 Publish to bus: on</button>
+    <button id="toggle-open">🚀 Auto-open top hit: on</button>
+    <button id="clear-log">🧹 Clear log</button>
+</div>
+
+<div class="candidates">
+    <h2>Top matches</h2>
+    <div id="candidates-list"></div>
+
+    <div class="panel" style="margin-top:24px">
+        <h3>Telepathy bus log <code>intent</code> + <code>navigation</code></h3>
+        <div class="bus-log" id="bus-log"><div class="entry"><span class="ts">—</span> <span class="ch">…</span></div></div>
+    </div>
+
+    <div class="panel">
+        <h3>How it works</h3>
+        <p>
+            Recognition uses <code>SpeechRecognition</code> (Web Speech API) — built into Chromium-based browsers, no model download.
+            For each transcript, a token-overlap score against every registered app's <code>title + description + tags</code> picks the top hit.
+            We then publish <code>{transcript, top, candidates}</code> on <code>BroadcastChannel('telepathy')</code> with channel <code>intent</code>,
+            which the <code>telepathy-bus.html</code> inspector and any subscribing app sees.
+            Auto-open performs <code>window.open(top.path)</code>; turn it off to use voice for routing only.
+        </p>
+    </div>
+
+    <div class="panel" id="recog-fallback" style="display:none">
+        <h3>Web Speech API not available</h3>
+        <p>
+            Your browser doesn't expose <code>SpeechRecognition</code>. Use a Chromium-based browser, or paste a transcript below to test the matching engine:
+        </p>
+        <input type="text" id="manual-input" placeholder="Type or paste a phrase..." style="width:100%;background:var(--bg-2);border:1px solid var(--border);color:var(--fg-0);padding:8px 12px;border-radius:6px;font-family:inherit;font-size:13px;margin-top:8px">
+    </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+// ---------- registry ----------
+let apps = [];
+let busSubs = []; // listeners for our own published events
+
+async function loadApps() {
+    try {
+        const r = await fetch('../../vibe_gallery_config.json');
+        if (r.ok) {
+            const cfg = await r.json();
+            const list = [];
+            for (const [k, c] of Object.entries(cfg.vibeGallery?.categories || {})) {
+                for (const app of (c.apps || [])) {
+                    list.push({
+                        title: app.title || app.filename,
+                        path: app.path || app.filename,
+                        description: app.description || '',
+                        category: app.category || k,
+                        tags: app.tags || [],
+                        icon: app.icon || '📱',
+                        featured: !!app.featured,
+                    });
+                }
+            }
+            return list;
+        }
+    } catch (e) {}
+    try {
+        const r = await fetch('../../data/config/utility_apps_config.json');
+        if (r.ok) return (await r.json()).apps || [];
+    } catch (e) {}
+    return [];
+}
+
+// ---------- token-overlap fuzzy match ----------
+function tokenize(s) {
+    return String(s || '').toLowerCase()
+        .replace(/[^\w\s]/g, ' ')
+        .split(/\s+/)
+        .filter(Boolean)
+        .filter(t => t.length > 1);
+}
+
+const STOP = new Set(['the','a','an','of','to','in','on','for','and','or','open','show','launch','start','play','run']);
+
+function score(query, app) {
+    const qTokens = tokenize(query).filter(t => !STOP.has(t));
+    if (qTokens.length === 0) return 0;
+    const text = (app.title + ' ' + (app.description || '') + ' ' + (app.tags || []).join(' ') + ' ' + (app.path || '').replace(/\.html$/, '').replace(/[\/-_]/g, ' '));
+    const tTokens = tokenize(text);
+    const tSet = new Set(tTokens);
+    let s = 0;
+    for (const q of qTokens) {
+        if (tSet.has(q)) {
+            // Title hit weighs more
+            if (tokenize(app.title).includes(q)) s += 5;
+            else s += 2;
+            continue;
+        }
+        // Substring fallback (e.g. "snake" matches "snake3")
+        for (const t of tTokens) {
+            if (t.includes(q) || q.includes(t)) { s += 1; break; }
+        }
+    }
+    if (app.featured) s += 0.5;
+    return s;
+}
+
+function searchTop(query, n) {
+    n = n || 5;
+    if (!query.trim()) return [];
+    const ranked = apps.map(a => ({ app: a, s: score(query, a) }))
+        .filter(r => r.s > 0)
+        .sort((a, b) => b.s - a.s);
+    return ranked.slice(0, n);
+}
+
+// ---------- telepathy bus publish ----------
+let bc = null;
+let busHistory = [];
+function busInit() {
+    try {
+        if (typeof BroadcastChannel !== 'undefined') {
+            bc = new BroadcastChannel('telepathy');
+            bc.onmessage = ev => logBus('IN ', ev.data && ev.data.channel, ev.data && ev.data.payload);
+        }
+    } catch (e) {}
+    // Listen to localStorage events as fallback
+    try {
+        window.addEventListener('storage', e => {
+            if (!e.key || !e.key.startsWith('telepathy:msg:')) return;
+            try {
+                const m = JSON.parse(e.newValue);
+                logBus('IN ', m.channel, m.payload);
+            } catch (_) {}
+        });
+    } catch (_) {}
+}
+
+function busPublish(channel, payload) {
+    const id = Date.now() + '-' + Math.random().toString(36).slice(2, 8);
+    const msg = { id, channel, payload, ts: Date.now(), src: location.pathname };
+    try { bc && bc.postMessage(msg); } catch (_) {}
+    try { localStorage.setItem('telepathy:msg:' + channel, JSON.stringify(msg)); } catch (_) {}
+    try {
+        const k = 'telepathy:history:' + channel;
+        const h = JSON.parse(localStorage.getItem(k)) || [];
+        h.push(msg); while (h.length > 50) h.shift();
+        localStorage.setItem(k, JSON.stringify(h));
+    } catch (_) {}
+    logBus('OUT', channel, payload);
+}
+
+function logBus(dir, channel, payload) {
+    busHistory.push({ dir, channel, payload, ts: Date.now() });
+    if (busHistory.length > 100) busHistory.shift();
+    renderBusLog();
+}
+
+function renderBusLog() {
+    const el = document.getElementById('bus-log');
+    el.innerHTML = busHistory.slice(-20).reverse().map(e => {
+        const ts = new Date(e.ts).toISOString().slice(11, 19);
+        const pl = typeof e.payload === 'string' ? e.payload : JSON.stringify(e.payload);
+        return `<div class="entry"><span class="ts">${ts} ${e.dir}</span> <span class="ch">${escapeHtml(e.channel || '?')}</span> <span class="pl">${escapeHtml(pl ? pl.slice(0, 200) : '')}</span></div>`;
+    }).join('') || '<div class="entry"><span class="ts">—</span> <span class="ch">no traffic yet</span></div>';
+}
+
+// ---------- recognition ----------
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+let alwaysListening = false;
+let busPublishOn = true;
+let autoOpenOn = true;
+
+function setupRecog() {
+    if (!SpeechRecognition) {
+        document.getElementById('mic').classList.add('error');
+        document.getElementById('mic').textContent = '🚫';
+        document.getElementById('recog-fallback').style.display = 'block';
+        return;
+    }
+    recog = new SpeechRecognition();
+    recog.continuous = true;
+    recog.interimResults = true;
+    recog.lang = 'en-US';
+    recog.onresult = ev => {
+        let interim = '', final = '';
+        for (let i = ev.resultIndex; i < ev.results.length; i++) {
+            const transcript = ev.results[i][0].transcript;
+            if (ev.results[i].isFinal) final += transcript;
+            else interim += transcript;
+        }
+        const heard = document.getElementById('heard');
+        heard.classList.add('has-content');
+        heard.innerHTML = (final ? '<strong>' + escapeHtml(final.trim()) + '</strong>' : '') + (interim ? ' <span class="interim">' + escapeHtml(interim.trim()) + '</span>' : '');
+        if (final.trim()) processTranscript(final.trim());
+    };
+    recog.onerror = ev => {
+        toast('Recognition error: ' + ev.error, 'error');
+        document.getElementById('mic').classList.remove('listening');
+        document.getElementById('mic').classList.add('error');
+        setTimeout(() => document.getElementById('mic').classList.remove('error'), 800);
+    };
+    recog.onend = () => {
+        document.getElementById('mic').classList.remove('listening');
+        if (alwaysListening) {
+            try { recog.start(); document.getElementById('mic').classList.add('listening'); } catch (_) {}
+        }
+    };
+}
+
+function startRecog() {
+    if (!recog) return;
+    try { recog.start(); document.getElementById('mic').classList.add('listening'); } catch (_) {}
+}
+function stopRecog() {
+    if (!recog) return;
+    try { recog.stop(); } catch (_) {}
+    document.getElementById('mic').classList.remove('listening');
+}
+
+function processTranscript(text) {
+    const top = searchTop(text, 5);
+    renderCandidates(text, top);
+    if (busPublishOn) busPublish('intent', { transcript: text, top: top[0]?.app, candidates: top.slice(0, 3).map(t => ({ title: t.app.title, path: t.app.path, score: t.s })) });
+    if (autoOpenOn && top[0] && top[0].s >= 4) {
+        const app = top[0].app;
+        toast(`Opening ${app.title}…`);
+        if (busPublishOn) busPublish('navigation', { action: 'open', path: app.path, title: app.title, source: 'cross-app-voice' });
+        setTimeout(() => window.open('../../' + app.path.replace(/^\.?\//, ''), '_blank'), 600);
+    }
+}
+
+function renderCandidates(query, top) {
+    const el = document.getElementById('candidates-list');
+    if (top.length === 0) {
+        el.innerHTML = '<div class="candidate" style="opacity:0.5;cursor:default"><div class="candidate-icon">🤷</div><div class="candidate-body"><div class="candidate-title">No matches for ' + escapeHtml(query) + '</div></div></div>';
+        return;
+    }
+    el.innerHTML = top.map((t, i) => {
+        const a = t.app;
+        return `<div class="candidate ${i === 0 ? 'top' : ''}" data-i="${i}">
+            <div class="candidate-icon">${escapeHtml(a.icon || '📱')}</div>
+            <div class="candidate-body">
+                <div class="candidate-title">${escapeHtml(a.title)}</div>
+                <div class="candidate-desc">${escapeHtml((a.description || '').slice(0, 100))}${a.description && a.description.length > 100 ? '…' : ''}</div>
+            </div>
+            <div class="candidate-score ${i === 0 ? 'top' : ''}">${t.s.toFixed(1)}</div>
+        </div>`;
+    }).join('');
+    el.querySelectorAll('.candidate').forEach(c => {
+        c.onclick = () => {
+            const i = +c.dataset.i;
+            const app = top[i].app;
+            if (busPublishOn) busPublish('navigation', { action: 'open', path: app.path, title: app.title, source: 'cross-app-voice:click' });
+            window.open('../../' + app.path.replace(/^\.?\//, ''), '_blank');
+        };
+    });
+}
+
+// ---------- UI wiring ----------
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function toast(msg, kind) {
+    const t = document.getElementById('toast');
+    t.className = 'toast' + (kind ? ' ' + kind : '');
+    t.textContent = msg;
+    t.classList.add('show');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+const mic = document.getElementById('mic');
+mic.addEventListener('mousedown', () => { if (!alwaysListening) startRecog(); });
+mic.addEventListener('mouseup', () => { if (!alwaysListening) stopRecog(); });
+mic.addEventListener('mouseleave', () => { if (!alwaysListening) stopRecog(); });
+mic.addEventListener('touchstart', e => { e.preventDefault(); if (!alwaysListening) startRecog(); }, { passive: false });
+mic.addEventListener('touchend', e => { e.preventDefault(); if (!alwaysListening) stopRecog(); }, { passive: false });
+window.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space' && !e.repeat) { e.preventDefault(); if (!alwaysListening) startRecog(); }
+});
+window.addEventListener('keyup', e => {
+    if (e.target.tagName === 'INPUT') return;
+    if (e.code === 'Space') { e.preventDefault(); if (!alwaysListening) stopRecog(); }
+});
+
+document.getElementById('toggle-listen').onclick = function () {
+    alwaysListening = !alwaysListening;
+    this.classList.toggle('toggled', alwaysListening);
+    this.textContent = alwaysListening ? '🔊 Always-listening: on' : '🔊 Always-listening: off';
+    if (alwaysListening) startRecog();
+    else stopRecog();
+};
+document.getElementById('toggle-bus').onclick = function () {
+    busPublishOn = !busPublishOn;
+    this.classList.toggle('toggled', busPublishOn);
+    this.textContent = busPublishOn ? '📡 Publish to bus: on' : '📡 Publish to bus: off';
+};
+document.getElementById('toggle-open').onclick = function () {
+    autoOpenOn = !autoOpenOn;
+    this.classList.toggle('toggled', autoOpenOn);
+    this.textContent = autoOpenOn ? '🚀 Auto-open top hit: on' : '🚀 Auto-open top hit: off';
+};
+document.getElementById('clear-log').onclick = () => { busHistory = []; renderBusLog(); };
+
+document.getElementById('manual-input')?.addEventListener('input', e => {
+    document.getElementById('heard').classList.add('has-content');
+    document.getElementById('heard').innerHTML = '<strong>' + escapeHtml(e.target.value) + '</strong>';
+    if (e.target.value.length > 2) processTranscript(e.target.value);
+});
+
+// initial state on toggle buttons
+document.getElementById('toggle-bus').classList.add('toggled');
+document.getElementById('toggle-open').classList.add('toggled');
+
+// kickoff
+busInit();
+(async () => {
+    apps = await loadApps();
+    if (apps.length === 0) toast('No registry found — voice match needs vibe_gallery_config.json', 'error');
+    setupRecog();
+})();
+</script>
+
+</body>
+</html>

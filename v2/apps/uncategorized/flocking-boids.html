@@ -1,0 +1,673 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Boids Flocking Simulation</title>
+    <meta name="description" content="High-performance Boids flocking simulation with Quadtree optimization, predator mechanics, and visual trails.">
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #0f172a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            color: #e2e8f0;
+        }
+        canvas {
+            display: block;
+        }
+        #controls {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(15, 23, 42, 0.8);
+            padding: 20px;
+            border-radius: 12px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            width: 280px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+        }
+        h1 {
+            margin: 0 0 15px 0;
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: #38bdf8;
+            letter-spacing: 0.5px;
+        }
+        .control-group {
+            margin-bottom: 12px;
+        }
+        label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.85rem;
+            margin-bottom: 4px;
+            color: #94a3b8;
+        }
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            background: #334155;
+            border-radius: 3px;
+            outline: none;
+            -webkit-appearance: none;
+        }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #38bdf8;
+            border-radius: 50%;
+            cursor: pointer;
+            transition: background 0.15s ease;
+        }
+        input[type="range"]::-webkit-slider-thumb:hover {
+            background: #0ea5e9;
+        }
+        .value-display {
+            color: #f1f5f9;
+            font-weight: 500;
+        }
+        .stats {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            font-size: 0.8rem;
+            color: #64748b;
+            display: flex;
+            justify-content: space-between;
+        }
+        button {
+            width: 100%;
+            padding: 8px;
+            margin-top: 10px;
+            background: #38bdf8;
+            color: #0f172a;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        button:hover {
+            background: #0ea5e9;
+            transform: translateY(-1px);
+        }
+        button.secondary {
+            background: transparent;
+            border: 1px solid #38bdf8;
+            color: #38bdf8;
+        }
+        button.secondary:hover {
+            background: rgba(56, 189, 248, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div id="controls">
+        <h1>Flocking Simulation</h1>
+        
+        <div class="control-group">
+            <label>Separation <span id="sep-val" class="value-display">1.5</span></label>
+            <input type="range" id="separation" min="0" max="5" step="0.1" value="1.5">
+        </div>
+        
+        <div class="control-group">
+            <label>Alignment <span id="ali-val" class="value-display">1.0</span></label>
+            <input type="range" id="alignment" min="0" max="5" step="0.1" value="1.0">
+        </div>
+        
+        <div class="control-group">
+            <label>Cohesion <span id="coh-val" class="value-display">1.0</span></label>
+            <input type="range" id="cohesion" min="0" max="5" step="0.1" value="1.0">
+        </div>
+
+        <div class="control-group">
+            <label>Visual Range <span id="range-val" class="value-display">50</span></label>
+            <input type="range" id="visual-range" min="20" max="150" step="5" value="50">
+        </div>
+
+        <div class="control-group">
+            <label>Boid Count <span id="count-val" class="value-display">500</span></label>
+            <input type="range" id="boid-count" min="100" max="1500" step="50" value="500">
+        </div>
+
+        <button id="toggle-predator">Spawn Predator</button>
+        <button id="toggle-trails" class="secondary">Toggle Trails</button>
+        <button id="reset" class="secondary">Reset Simulation</button>
+
+        <div class="stats">
+            <span id="fps">FPS: 60</span>
+            <span id="entity-count">Entities: 500</span>
+        </div>
+    </div>
+    <canvas id="canvas"></canvas>
+
+<script>
+/**
+ * Vector Utility Class
+ */
+class Vector {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+    }
+
+    add(v) {
+        this.x += v.x;
+        this.y += v.y;
+        return this;
+    }
+
+    sub(v) {
+        this.x -= v.x;
+        this.y -= v.y;
+        return this;
+    }
+
+    mult(n) {
+        this.x *= n;
+        this.y *= n;
+        return this;
+    }
+
+    div(n) {
+        if (n !== 0) {
+            this.x /= n;
+            this.y /= n;
+        }
+        return this;
+    }
+
+    mag() {
+        return Math.sqrt(this.x * this.x + this.y * this.y);
+    }
+
+    setMag(n) {
+        return this.normalize().mult(n);
+    }
+
+    normalize() {
+        const m = this.mag();
+        if (m !== 0) {
+            this.div(m);
+        }
+        return this;
+    }
+
+    limit(max) {
+        if (this.mag() > max) {
+            this.normalize().mult(max);
+        }
+        return this;
+    }
+
+    dist(v) {
+        const dx = this.x - v.x;
+        const dy = this.y - v.y;
+        return Math.sqrt(dx * dx + dy * dy);
+    }
+
+    static add(v1, v2) {
+        return new Vector(v1.x + v2.x, v1.y + v2.y);
+    }
+
+    static sub(v1, v2) {
+        return new Vector(v1.x - v2.x, v1.y - v2.y);
+    }
+    
+    copy() {
+        return new Vector(this.x, this.y);
+    }
+}
+
+/**
+ * Quadtree Spatial Partitioning
+ * Optimizes neighbor lookups from O(N^2) to O(N log N)
+ */
+class Rectangle {
+    constructor(x, y, w, h) {
+        this.x = x; // center x
+        this.y = y; // center y
+        this.w = w; // half width
+        this.h = h; // half height
+    }
+
+    contains(point) {
+        return (point.x >= this.x - this.w &&
+                point.x <= this.x + this.w &&
+                point.y >= this.y - this.h &&
+                point.y <= this.y + this.h);
+    }
+
+    intersects(range) {
+        return !(range.x - range.w > this.x + this.w ||
+                 range.x + range.w < this.x - this.w ||
+                 range.y - range.h > this.y + this.h ||
+                 range.y + range.h < this.y - this.h);
+    }
+}
+
+class QuadTree {
+    constructor(boundary, capacity) {
+        this.boundary = boundary;
+        this.capacity = capacity;
+        this.points = [];
+        this.divided = false;
+    }
+
+    insert(point) {
+        if (!this.boundary.contains(point.position)) {
+            return false;
+        }
+
+        if (this.points.length < this.capacity) {
+            this.points.push(point);
+            return true;
+        }
+
+        if (!this.divided) {
+            this.subdivide();
+        }
+
+        return (this.northeast.insert(point) ||
+                this.northwest.insert(point) ||
+                this.southeast.insert(point) ||
+                this.southwest.insert(point));
+    }
+
+    subdivide() {
+        const x = this.boundary.x;
+        const y = this.boundary.y;
+        const w = this.boundary.w / 2;
+        const h = this.boundary.h / 2;
+
+        const ne = new Rectangle(x + w, y - h, w, h);
+        this.northeast = new QuadTree(ne, this.capacity);
+        const nw = new Rectangle(x - w, y - h, w, h);
+        this.northwest = new QuadTree(nw, this.capacity);
+        const se = new Rectangle(x + w, y + h, w, h);
+        this.southeast = new QuadTree(se, this.capacity);
+        const sw = new Rectangle(x - w, y + h, w, h);
+        this.southwest = new QuadTree(sw, this.capacity);
+
+        this.divided = true;
+    }
+
+    query(range, found) {
+        if (!found) {
+            found = [];
+        }
+
+        if (!this.boundary.intersects(range)) {
+            return found;
+        }
+
+        for (let p of this.points) {
+            if (range.contains(p.position)) {
+                found.push(p);
+            }
+        }
+
+        if (this.divided) {
+            this.northwest.query(range, found);
+            this.northeast.query(range, found);
+            this.southwest.query(range, found);
+            this.southeast.query(range, found);
+        }
+
+        return found;
+    }
+}
+
+/**
+ * Boid Class
+ */
+class Boid {
+    constructor(x, y, isPredator = false) {
+        this.position = new Vector(x, y);
+        this.velocity = new Vector(Math.random() * 2 - 1, Math.random() * 2 - 1);
+        this.velocity.setMag(Math.random() * 2 + 2);
+        this.acceleration = new Vector(0, 0);
+        this.maxForce = isPredator ? 0.2 : 0.1;
+        this.maxSpeed = isPredator ? 5.5 : 4;
+        this.isPredator = isPredator;
+        this.color = isPredator ? '#ef4444' : `hsl(${Math.random() * 60 + 180}, 80%, 60%)`;
+        this.trail = [];
+        this.trailLength = isPredator ? 20 : 10;
+    }
+
+    edges(width, height) {
+        if (this.position.x > width) this.position.x = 0;
+        else if (this.position.x < 0) this.position.x = width;
+        if (this.position.y > height) this.position.y = 0;
+        else if (this.position.y < 0) this.position.y = height;
+    }
+
+    align(boids, perceptionRadius) {
+        let steering = new Vector(0, 0);
+        let total = 0;
+        for (let other of boids) {
+            let d = this.position.dist(other.position);
+            if (other !== this && d < perceptionRadius && !other.isPredator) {
+                steering.add(other.velocity);
+                total++;
+            }
+        }
+        if (total > 0) {
+            steering.div(total);
+            steering.setMag(this.maxSpeed);
+            steering.sub(this.velocity);
+            steering.limit(this.maxForce);
+        }
+        return steering;
+    }
+
+    cohesion(boids, perceptionRadius) {
+        let steering = new Vector(0, 0);
+        let total = 0;
+        for (let other of boids) {
+            let d = this.position.dist(other.position);
+            if (other !== this && d < perceptionRadius && !other.isPredator) {
+                steering.add(other.position);
+                total++;
+            }
+        }
+        if (total > 0) {
+            steering.div(total);
+            steering.sub(this.position);
+            steering.setMag(this.maxSpeed);
+            steering.sub(this.velocity);
+            steering.limit(this.maxForce);
+        }
+        return steering;
+    }
+
+    separation(boids, perceptionRadius) {
+        let steering = new Vector(0, 0);
+        let total = 0;
+        for (let other of boids) {
+            let d = this.position.dist(other.position);
+            if (other !== this && d < perceptionRadius) {
+                let diff = Vector.sub(this.position, other.position);
+                diff.div(d * d); // Weight by distance squared
+                
+                // Stronger repulsion from predators
+                if (other.isPredator) {
+                    diff.mult(20); 
+                }
+                
+                steering.add(diff);
+                total++;
+            }
+        }
+        if (total > 0) {
+            steering.div(total);
+            steering.setMag(this.maxSpeed);
+            steering.sub(this.velocity);
+            steering.limit(this.maxForce * 1.5); // Stronger separation force
+        }
+        return steering;
+    }
+
+    hunt(boids, perceptionRadius) {
+        let steering = new Vector(0, 0);
+        let closest = null;
+        let closestDist = Infinity;
+
+        for (let other of boids) {
+            let d = this.position.dist(other.position);
+            if (other !== this && !other.isPredator && d < perceptionRadius * 2) {
+                if (d < closestDist) {
+                    closestDist = d;
+                    closest = other;
+                }
+            }
+        }
+
+        if (closest) {
+            steering = Vector.sub(closest.position, this.position);
+            steering.setMag(this.maxSpeed);
+            steering.sub(this.velocity);
+            steering.limit(this.maxForce);
+        } else {
+            // Wander if no prey found
+            steering = new Vector(Math.random() * 2 - 1, Math.random() * 2 - 1);
+            steering.limit(this.maxForce);
+        }
+        return steering;
+    }
+
+    flock(boids, params) {
+        if (this.isPredator) {
+            let hunting = this.hunt(boids, params.perception);
+            this.acceleration.add(hunting);
+        } else {
+            let alignment = this.align(boids, params.perception);
+            let cohesion = this.cohesion(boids, params.perception);
+            let separation = this.separation(boids, params.perception);
+
+            alignment.mult(params.alignWeight);
+            cohesion.mult(params.cohWeight);
+            separation.mult(params.sepWeight);
+
+            this.acceleration.add(alignment);
+            this.acceleration.add(cohesion);
+            this.acceleration.add(separation);
+        }
+    }
+
+    update() {
+        this.position.add(this.velocity);
+        this.velocity.add(this.acceleration);
+        this.velocity.limit(this.maxSpeed);
+        this.acceleration.mult(0); // Reset acceleration
+
+        // Update trail
+        this.trail.push({x: this.position.x, y: this.position.y});
+        if (this.trail.length > this.trailLength) {
+            this.trail.shift();
+        }
+    }
+
+    show(ctx, showTrails) {
+        // Draw trail
+        if (showTrails) {
+            ctx.beginPath();
+            ctx.strokeStyle = this.isPredator ? 'rgba(239, 68, 68, 0.3)' : 'rgba(56, 189, 248, 0.15)';
+            ctx.lineWidth = this.isPredator ? 3 : 1;
+            for (let i = 0; i < this.trail.length - 1; i++) {
+                ctx.moveTo(this.trail[i].x, this.trail[i].y);
+                ctx.lineTo(this.trail[i+1].x, this.trail[i+1].y);
+            }
+            ctx.stroke();
+        }
+
+        // Draw boid
+        ctx.save();
+        ctx.translate(this.position.x, this.position.y);
+        ctx.rotate(Math.atan2(this.velocity.y, this.velocity.x));
+        
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        if (this.isPredator) {
+            // Predator shape (larger, sharper)
+            ctx.moveTo(10, 0);
+            ctx.lineTo(-8, 6);
+            ctx.lineTo(-4, 0);
+            ctx.lineTo(-8, -6);
+        } else {
+            // Boid shape
+            ctx.moveTo(6, 0);
+            ctx.lineTo(-4, 3);
+            ctx.lineTo(-2, 0);
+            ctx.lineTo(-4, -3);
+        }
+        ctx.closePath();
+        ctx.fill();
+        
+        // Glow effect
+        if (this.isPredator) {
+            ctx.shadowBlur = 15;
+            ctx.shadowColor = '#ef4444';
+        }
+        
+        ctx.restore();
+    }
+}
+
+/**
+ * Main Simulation
+ */
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+
+// Simulation State
+let boids = [];
+let width, height;
+let showTrails = true;
+let predatorActive = false;
+
+// Parameters
+const params = {
+    alignWeight: 1.0,
+    cohWeight: 1.0,
+    sepWeight: 1.5,
+    perception: 50
+};
+
+// UI Elements
+const sepInput = document.getElementById('separation');
+const aliInput = document.getElementById('alignment');
+const cohInput = document.getElementById('cohesion');
+const rangeInput = document.getElementById('visual-range');
+const countInput = document.getElementById('boid-count');
+const predatorBtn = document.getElementById('toggle-predator');
+const trailsBtn = document.getElementById('toggle-trails');
+const resetBtn = document.getElementById('reset');
+const fpsDisplay = document.getElementById('fps');
+const entityDisplay = document.getElementById('entity-count');
+
+// Event Listeners
+sepInput.addEventListener('input', (e) => {
+    params.sepWeight = parseFloat(e.target.value);
+    document.getElementById('sep-val').textContent = params.sepWeight.toFixed(1);
+});
+aliInput.addEventListener('input', (e) => {
+    params.alignWeight = parseFloat(e.target.value);
+    document.getElementById('ali-val').textContent = params.alignWeight.toFixed(1);
+});
+cohInput.addEventListener('input', (e) => {
+    params.cohWeight = parseFloat(e.target.value);
+    document.getElementById('coh-val').textContent = params.cohWeight.toFixed(1);
+});
+rangeInput.addEventListener('input', (e) => {
+    params.perception = parseInt(e.target.value);
+    document.getElementById('range-val').textContent = params.perception;
+});
+countInput.addEventListener('change', (e) => {
+    const count = parseInt(e.target.value);
+    document.getElementById('count-val').textContent = count;
+    initBoids(count);
+});
+
+predatorBtn.addEventListener('click', () => {
+    predatorActive = !predatorActive;
+    if (predatorActive) {
+        boids.push(new Boid(width/2, height/2, true));
+        predatorBtn.textContent = "Remove Predator";
+        predatorBtn.style.background = "#ef4444";
+    } else {
+        boids = boids.filter(b => !b.isPredator);
+        predatorBtn.textContent = "Spawn Predator";
+        predatorBtn.style.background = "#38bdf8";
+    }
+});
+
+trailsBtn.addEventListener('click', () => {
+    showTrails = !showTrails;
+    trailsBtn.textContent = showTrails ? "Hide Trails" : "Show Trails";
+});
+
+resetBtn.addEventListener('click', () => {
+    initBoids(parseInt(countInput.value));
+    if (predatorActive) {
+        boids.push(new Boid(width/2, height/2, true));
+    }
+});
+
+function resize() {
+    width = window.innerWidth;
+    height = window.innerHeight;
+    canvas.width = width;
+    canvas.height = height;
+}
+
+function initBoids(count) {
+    boids = [];
+    for (let i = 0; i < count; i++) {
+        boids.push(new Boid(Math.random() * width, Math.random() * height));
+    }
+    entityDisplay.textContent = `Entities: ${boids.length}`;
+}
+
+// Performance monitoring
+let lastTime = 0;
+let frameCount = 0;
+let lastFpsTime = 0;
+
+function animate(timestamp) {
+    // FPS Calculation
+    frameCount++;
+    if (timestamp - lastFpsTime >= 1000) {
+        fpsDisplay.textContent = `FPS: ${frameCount}`;
+        frameCount = 0;
+        lastFpsTime = timestamp;
+    }
+
+    // Clear canvas with fade effect for trails if enabled, or full clear
+    if (showTrails) {
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.3)'; // Trail fade
+        ctx.fillRect(0, 0, width, height);
+    } else {
+        ctx.clearRect(0, 0, width, height);
+    }
+
+    // Build Quadtree
+    let boundary = new Rectangle(width / 2, height / 2, width / 2, height / 2);
+    let qtree = new QuadTree(boundary, 4);
+    
+    for (let boid of boids) {
+        qtree.insert(boid);
+    }
+
+    // Update and Draw Boids
+    for (let boid of boids) {
+        // Query local boids using Quadtree
+        let range = new Rectangle(boid.position.x, boid.position.y, params.perception, params.perception);
+        let localBoids = qtree.query(range);
+
+        boid.edges(width, height);
+        boid.flock(localBoids, params);
+        boid.update();
+        boid.show(ctx, showTrails);
+    }
+    
+    // Update entity count display if changed (e.g. predator added)
+    if (boids.length !== parseInt(entityDisplay.textContent.split(' ')[1])) {
+        entityDisplay.textContent = `Entities: ${boids.length}`;
+    }
+
+    requestAnimationFrame(animate);
+}
+
+// Init
+window.addEventListener('resize', resize);
+resize();
+initBoids(500);
+requestAnimationFrame(animate);
+
+</script>
+</body>
+</html>
