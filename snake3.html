@@ -2,8 +2,12 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>3D Minecraft Worm Game</title>
+    <meta name="description" content="Classic snake reimagined in 3D voxel space — but YOU control the food. The worm chases automatically; your job is to lure it into surviving. WASD/arrows on desktop, swipe on mobile, click anywhere on the grid to teleport food. High scores persist locally; broadcasts on the telepathy 'score' channel for cross-app leaderboards.">
+    <meta name="keywords" content="3d,snake,game,three.js,worm,minecraft,score,multiplayer">
+    <meta name="icon" content="🐛">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E🐛%3C/text%3E%3C/svg%3E">
     <style>
         body {
             margin: 0;
@@ -96,6 +100,71 @@
         .stat-item {
             margin-bottom: 5px;
         }
+        /* === Improvements (May 2026): touch controls + accessibility === */
+        body { touch-action: none; user-select: none; -webkit-user-select: none; }
+        button { font-family: inherit; }
+        button:focus-visible { outline: 3px solid #FFD700; outline-offset: 2px; }
+        .touch-pad {
+            position: fixed;
+            bottom: 12px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: none;
+            grid-template-columns: 60px 60px 60px;
+            grid-template-rows: 60px 60px 60px;
+            gap: 4px;
+            z-index: 150;
+            user-select: none;
+            touch-action: none;
+        }
+        .touch-pad.show { display: grid; }
+        .touch-pad button {
+            background: rgba(0, 0, 0, 0.55);
+            border: 2px solid rgba(255, 255, 255, 0.4);
+            color: white;
+            border-radius: 12px;
+            font-size: 24px;
+            margin: 0;
+            padding: 0;
+            cursor: pointer;
+            backdrop-filter: blur(4px);
+        }
+        .touch-pad button:active {
+            background: rgba(76, 175, 80, 0.85);
+            transform: scale(0.92);
+        }
+        .touch-pad .pad-up    { grid-column: 2; grid-row: 1; }
+        .touch-pad .pad-left  { grid-column: 1; grid-row: 2; }
+        .touch-pad .pad-right { grid-column: 3; grid-row: 2; }
+        .touch-pad .pad-down  { grid-column: 2; grid-row: 3; }
+        .touch-pad .pad-pause { grid-column: 2; grid-row: 2; font-size: 22px; background: rgba(50, 50, 50, 0.7); }
+        .toast-msg {
+            position: fixed;
+            top: 80px;
+            left: 50%;
+            transform: translateX(-50%) translateY(-20px);
+            background: rgba(0, 0, 0, 0.85);
+            color: white;
+            padding: 10px 22px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-family: inherit;
+            opacity: 0;
+            transition: opacity .25s, transform .25s;
+            z-index: 1000;
+            pointer-events: none;
+        }
+        .toast-msg.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+        @media (max-width: 700px) {
+            #ui { font-size: 14px; }
+            #score { font-size: 18px; }
+            #stats { font-size: 12px; }
+            #controls { display: none; }
+        }
+        @media (prefers-reduced-motion: reduce) {
+            .touch-pad button { transition: none; }
+            .toast-msg { transition: none; }
+        }
     </style>
 </head>
 <body>
@@ -104,9 +173,9 @@
             <div id="score">Score: 0</div>
             <div id="controls">
                 🐛 Worm moves automatically<br>
-                🍔 Move food with WASD/Arrow Keys<br>
-                🖱️ Click to place food<br>
-                Space: Pause | R: Restart
+                🍔 Move food: WASD / Arrows / swipe<br>
+                🖱️ Click/tap grid to teleport food<br>
+                Space: Pause/Resume · R: Restart
             </div>
         </div>
 
@@ -127,12 +196,23 @@
             <button onclick="wormGame.startGame()">Start Game</button>
         </div>
         
-        <div id="gameOver">
-            <h2>Game Over!</h2>
+        <div id="gameOver" role="dialog" aria-modal="true" aria-labelledby="gameOverTitle">
+            <h2 id="gameOverTitle">Game Over!</h2>
             <p>Final Score: <span id="finalScore">0</span></p>
             <p>Final Length: <span id="finalLength">0</span></p>
-            <button onclick="wormGame.restart()">Play Again</button>
+            <button onclick="wormGame.restart()" autofocus>Play Again</button>
         </div>
+
+        <!-- On-screen directional pad — JS toggles .show on touch devices -->
+        <div class="touch-pad" id="touchPad" role="group" aria-label="Movement controls">
+            <button class="pad-up" data-dir="up" aria-label="Move food up">▲</button>
+            <button class="pad-left" data-dir="left" aria-label="Move food left">◀</button>
+            <button class="pad-pause" data-dir="pause" aria-label="Pause / resume">⏸</button>
+            <button class="pad-right" data-dir="right" aria-label="Move food right">▶</button>
+            <button class="pad-down" data-dir="down" aria-label="Move food down">▼</button>
+        </div>
+
+        <div class="toast-msg" id="toastMsg" role="status" aria-live="polite"></div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -142,7 +222,7 @@
                 this.gridSize = 20;
                 this.blockSize = 1;
                 this.score = 0;
-                this.highScore = 0;
+                this.highScore = parseInt(localStorage.getItem('snake3-highscore') || '0', 10) || 0;
                 this.gameRunning = false;
                 this.gamePaused = false;
                 this.gameStarted = false;
@@ -343,38 +423,42 @@
             
             setupControls() {
                 document.addEventListener('keydown', (event) => {
-                    if (!this.gameRunning || this.gamePaused) {
-                        if (event.code === 'Space' && this.gameRunning) {
-                            this.gamePaused = false;
-                        }
-                        if (event.code === 'KeyR') {
-                            this.restart();
+                    // Don't intercept while typing in inputs (none today, but defensive)
+                    if (event.target && (event.target.tagName === 'INPUT' || event.target.tagName === 'TEXTAREA')) return;
+
+                    // R always restarts; Space toggles pause regardless of state
+                    if (event.code === 'KeyR') { this.restart(); return; }
+                    if (event.code === 'Space') {
+                        event.preventDefault();
+                        if (this.gameRunning) {
+                            this.gamePaused = !this.gamePaused;
+                            this.toast(this.gamePaused ? '⏸ Paused' : '▶ Resumed');
                         }
                         return;
                     }
-                    
+
+                    if (!this.gameRunning || this.gamePaused) return;
+
                     switch (event.code) {
                         case 'ArrowUp':
                         case 'KeyW':
+                            event.preventDefault();
                             this.moveFood(this.food.x, this.food.z - 1);
                             break;
                         case 'ArrowDown':
                         case 'KeyS':
+                            event.preventDefault();
                             this.moveFood(this.food.x, this.food.z + 1);
                             break;
                         case 'ArrowLeft':
                         case 'KeyA':
+                            event.preventDefault();
                             this.moveFood(this.food.x - 1, this.food.z);
                             break;
                         case 'ArrowRight':
                         case 'KeyD':
+                            event.preventDefault();
                             this.moveFood(this.food.x + 1, this.food.z);
-                            break;
-                        case 'Space':
-                            this.gamePaused = true;
-                            break;
-                        case 'KeyR':
-                            this.restart();
                             break;
                     }
                 });
@@ -403,6 +487,79 @@
                     this.camera.updateProjectionMatrix();
                     this.renderer.setSize(window.innerWidth, window.innerHeight);
                 });
+
+                // === Touch / mobile support ===
+                const isTouch = 'ontouchstart' in window || navigator.maxTouchPoints > 0;
+                if (isTouch) {
+                    document.getElementById('touchPad').classList.add('show');
+                }
+
+                // On-screen d-pad
+                document.querySelectorAll('#touchPad button[data-dir]').forEach(btn => {
+                    const dir = btn.dataset.dir;
+                    const fire = (e) => {
+                        if (e) e.preventDefault();
+                        if (dir === 'pause') {
+                            if (this.gameRunning) {
+                                this.gamePaused = !this.gamePaused;
+                                this.toast(this.gamePaused ? '⏸ Paused' : '▶ Resumed');
+                            }
+                            return;
+                        }
+                        if (!this.gameRunning || this.gamePaused) return;
+                        switch (dir) {
+                            case 'up':    this.moveFood(this.food.x, this.food.z - 1); break;
+                            case 'down':  this.moveFood(this.food.x, this.food.z + 1); break;
+                            case 'left':  this.moveFood(this.food.x - 1, this.food.z); break;
+                            case 'right': this.moveFood(this.food.x + 1, this.food.z); break;
+                        }
+                    };
+                    btn.addEventListener('click', fire);
+                    btn.addEventListener('touchstart', fire, { passive: false });
+                });
+
+                // Canvas swipe gesture — slide finger to direct food
+                let swipeStart = null;
+                this.renderer.domElement.addEventListener('touchstart', e => {
+                    if (e.touches.length === 1) swipeStart = { x: e.touches[0].clientX, y: e.touches[0].clientY, t: Date.now() };
+                }, { passive: true });
+                this.renderer.domElement.addEventListener('touchend', e => {
+                    if (!swipeStart) return;
+                    const t = e.changedTouches && e.changedTouches[0];
+                    if (!t) { swipeStart = null; return; }
+                    const dx = t.clientX - swipeStart.x;
+                    const dy = t.clientY - swipeStart.y;
+                    const dist = Math.hypot(dx, dy);
+                    const dt = Date.now() - swipeStart.t;
+                    if (dist > 30 && dt < 600 && this.gameRunning && !this.gamePaused) {
+                        if (Math.abs(dx) > Math.abs(dy)) {
+                            this.moveFood(this.food.x + (dx > 0 ? 1 : -1), this.food.z);
+                        } else {
+                            this.moveFood(this.food.x, this.food.z + (dy > 0 ? 1 : -1));
+                        }
+                    }
+                    swipeStart = null;
+                });
+
+                // Pause when the tab is hidden — stops drift, saves CPU
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden && this.gameRunning && !this.gamePaused) {
+                        this.gamePaused = true;
+                        this._wasAutopaused = true;
+                    } else if (!document.hidden && this._wasAutopaused) {
+                        this.gamePaused = false;
+                        this._wasAutopaused = false;
+                    }
+                });
+            }
+
+            toast(msg) {
+                const el = document.getElementById('toastMsg');
+                if (!el) return;
+                el.textContent = msg;
+                el.classList.add('show');
+                clearTimeout(this._toastT);
+                this._toastT = setTimeout(() => el.classList.remove('show'), 1500);
             }
 
             moveFood(newX, newZ) {
@@ -534,14 +691,20 @@
             
             gameOver() {
                 this.gameRunning = false;
-                
+
+                let isNewBest = false;
                 if (this.score > this.highScore) {
                     this.highScore = this.score;
+                    isNewBest = true;
+                    try { localStorage.setItem('snake3-highscore', String(this.highScore)); } catch (e) {}
                 }
-                
+
                 document.getElementById('finalScore').textContent = this.score;
                 document.getElementById('finalLength').textContent = this.worm.length;
+                const titleEl = document.getElementById('gameOverTitle');
+                if (titleEl) titleEl.textContent = isNewBest ? '🏆 New High Score!' : 'Game Over!';
                 document.getElementById('gameOver').style.display = 'block';
+                this.updateUI();
             }
             
             restart() {
