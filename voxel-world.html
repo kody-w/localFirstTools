@@ -95,6 +95,20 @@
     opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
   #toast.show{opacity:1}
 
+  /* ===== ONBOARD COACH: first-90-seconds hint card (fresh players + QR arrivals) ===== */
+  #questHud{position:fixed;left:50%;bottom:calc(136px + env(safe-area-inset-bottom));transform:translateX(-50%);
+    background:rgba(0,0,0,.78);color:#fff;padding:9px 20px;border-radius:18px;z-index:35;
+    pointer-events:none;text-align:center;max-width:86vw;border:1px solid rgba(255,255,255,.18)}
+  #questHud .qStep{opacity:.72;font-size:11px;letter-spacing:.5px;text-transform:uppercase;margin-bottom:2px}
+  #questHud .qText{font-size:15px;font-weight:600;white-space:nowrap;text-shadow:0 1px 3px #000}
+  #questHudSkip{pointer-events:auto;position:absolute;right:-8px;top:-12px;background:rgba(10,16,26,.85);
+    border:1px solid rgba(255,255,255,.35);color:#cfe2f7;font-size:11px;border-radius:10px;
+    padding:2px 9px;cursor:pointer}
+  #questHudSkip:active{background:rgba(255,255,255,.25)}
+  @media (max-width:700px){
+    #questHud .qText{font-size:13.5px;white-space:normal}
+  }
+
   /* ===== NEIGHBORHOOD styles (RAPP kited neighborhood) ===== */
   .kiteMark{display:inline-block;width:84px;height:auto;transform-origin:top center;
     animation:kiteSway 3.4s ease-in-out infinite alternate}
@@ -257,7 +271,7 @@
       <li>Mouse &mdash; look around &bull; <kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> &mdash; move</li>
       <li><kbd>Space</kbd> &mdash; jump &bull; double-tap <kbd>Space</kbd> &mdash; toggle fly (then <kbd>Space</kbd>/<kbd>Shift</kbd> = up/down)</li>
       <li><kbd>Shift</kbd> &mdash; sprint (while walking)</li>
-      <li>Left click &mdash; break block &bull; Right click &mdash; place block</li>
+      <li>Hold left click &mdash; mine the block (cracks show progress; stone takes longer than leaves) &bull; Right click &mdash; place block</li>
       <li><kbd>1</kbd>&ndash;<kbd>6</kbd> or mouse wheel &mdash; choose block</li>
       <li><kbd>F3</kbd> &mdash; debug HUD &bull; <kbd>H</kbd> or <kbd>?</kbd> &mdash; this help</li>
       <li><kbd>`</kbd> (backquote) &mdash; vox console terminal (CLI for twins &amp; the String; also the <b>&gt;_</b> button)</li>
@@ -266,7 +280,7 @@
     <ul>
       <li>Left joystick &mdash; move (push to the edge to sprint)</li>
       <li>Drag on the right side &mdash; look around</li>
-      <li>Tap the screen &mdash; break <i>or</i> place at the crosshair (switch with the mode button)</li>
+      <li>Tap the screen &mdash; chip <i>or</i> place at the crosshair (switch with the mode button); <b>touch and hold</b> to mine tougher blocks straight through</li>
       <li><b>JUMP</b> &mdash; jump &bull; double-tap JUMP &mdash; toggle fly (&#9660; button descends)</li>
       <li>Tap a hotbar slot to choose a block</li>
     </ul>
@@ -352,6 +366,9 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkSound" checked> Sound effects</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkAutoQuality"> Auto quality <span class="small">(adapts resolution to keep fps smooth)</span></label>
     </div>
     <div class="row btns">
       <button id="btnExport">Export World</button>
@@ -470,6 +487,13 @@ the string IS the transport; Claude is the canonical string-holder)
     <input id="voxTermInput" type="text" autocomplete="off" autocapitalize="off" spellcheck="false"
       placeholder="type help &mdash; Up/Down history, Esc closes" aria-label="vox command input">
   </div>
+</div>
+
+<!-- ONBOARD COACH: bottom-center hint card; only the Skip button takes pointer events -->
+<div id="questHud" class="hidden" role="status" aria-label="Getting started tips">
+  <button id="questHudSkip" aria-label="Skip the getting-started tips">Skip</button>
+  <div class="qStep"></div>
+  <div class="qText"></div>
 </div>
 
 <div id="toast"></div>
@@ -731,6 +755,7 @@ function neighborsReady(c) {
 }
 
 function buildChunkMesh(chunk) {
+  const meshT0 = performance.now(); // F3 instrumentation: 'mesh ms (last)'
   const { cx, cz, data } = chunk;
   const nXm = chunks.get(chunkKey(cx - 1, cz));
   const nXp = chunks.get(chunkKey(cx + 1, cz));
@@ -803,6 +828,7 @@ function buildChunkMesh(chunk) {
     chunk.waterMesh = m;
   }
   chunk.dirty = false;
+  lastMeshMs = performance.now() - meshT0; // F3 instrumentation
 }
 
 function disposeChunkMeshes(c) {
@@ -992,7 +1018,80 @@ function makeAtlas() {
     if ((y + (x >> 2)) % 8 === 0) return rgb(96 + d, 158 + d, 232 + d);
     return rgb(52 + d, 110 + d, 200 + d);
   });
+  // 9-12: crack stages for hold-to-mine — progressively denser dark line networks
+  // on a TRANSPARENT background (stroked, NOT fillTile which paints opaque).
+  const crackTile = (tile, stage) => {
+    const ox = (tile % ATLAS_COLS) * ATLAS_TS, oy = Math.floor(tile / ATLAS_COLS) * ATLAS_TS;
+    ctx.clearRect(ox, oy, ATLAS_TS, ATLAS_TS);
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(ox, oy, ATLAS_TS, ATLAS_TS);
+    ctx.clip();
+    ctx.strokeStyle = 'rgba(18,14,10,0.7)';
+    ctx.lineWidth = 1.6;
+    ctx.lineCap = 'round';
+    const crng = mulberry32(4242); // SAME seed per stage: later stages extend earlier cracks
+    const branches = 3 + stage * 2; // 3 / 5 / 7 / 9 branching cracks
+    for (let bi = 0; bi < 9; bi++) {
+      let px = ox + ATLAS_TS / 2 + (crng() - 0.5) * 8;
+      let py = oy + ATLAS_TS / 2 + (crng() - 0.5) * 8;
+      let ang = crng() * Math.PI * 2;
+      const draw = bi < branches;
+      if (draw) { ctx.beginPath(); ctx.moveTo(px, py); }
+      const segs = 4 + stage;
+      for (let s = 0; s < segs; s++) {
+        ang += (crng() - 0.5) * 1.5;
+        const len = 2.5 + crng() * (3 + stage * 1.3);
+        px += Math.cos(ang) * len;
+        py += Math.sin(ang) * len;
+        if (draw) ctx.lineTo(px, py);
+      }
+      if (draw) ctx.stroke();
+    }
+    ctx.restore();
+  };
+  for (let cs = 0; cs < 4; cs++) crackTile(9 + cs, cs);
   return atlasCanvas;
+}
+
+// --- hold-to-mine crack overlay: ONE persistent box mesh skinned with atlas
+// tiles 9-12 (pattern of highlightBox). Local-only cosmetic — remote players
+// never see partial progress; the completed break syncs exactly as before.
+let crackMesh = null, crackBaseUV = null, crackStageShown = -1;
+
+function ensureCrackMesh() {
+  if (crackMesh || voxHeadless || !scene || !atlasTexture) return; // skip under headless
+  const geo = new THREE.BoxGeometry(1.004, 1.004, 1.004);
+  crackBaseUV = geo.attributes.uv.array.slice(); // the original 0/1 corner uvs
+  crackMesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    map: atlasTexture, transparent: true, depthWrite: false
+  }));
+  crackMesh.visible = false;
+  crackMesh.renderOrder = 2;
+  scene.add(crackMesh);
+}
+function setCrackStage(stage) {
+  const tile = 9 + Math.max(0, Math.min(3, stage));
+  const uvAttr = crackMesh.geometry.attributes.uv;
+  for (let i = 0; i < uvAttr.count; i++) {
+    const t = tileUV(tile, crackBaseUV[i * 2], crackBaseUV[i * 2 + 1]);
+    uvAttr.setXY(i, t[0], t[1]);
+  }
+  uvAttr.needsUpdate = true; // UVs touched ONLY on stage change
+  crackStageShown = stage;
+}
+function updateCrackOverlay() {
+  if (voxHeadless) return;
+  if (!breakState) {
+    if (crackMesh) crackMesh.visible = false;
+    return;
+  }
+  ensureCrackMesh();
+  if (!crackMesh) return;
+  const stage = Math.max(0, Math.min(3, Math.floor(breakState.progress * 4)));
+  if (stage !== crackStageShown) setCrackStage(stage);
+  crackMesh.position.set(breakState.x + 0.5, breakState.y + 0.5, breakState.z + 0.5);
+  crackMesh.visible = true;
 }
 
 // --- particles (break/place puffs) ------------------------------------------
@@ -1099,8 +1198,9 @@ function playSound(kind) {
 // --- day/night environment ----------------------------------------------------
 let scene = null, camera = null, renderer = null, canvasEl = null;
 let sunLight = null, hemiLight = null, highlightBox = null;
-let solidMat = null, waterMat = null;
+let solidMat = null, waterMat = null, atlasTexture = null;
 let colDay = null, colNight = null, colDusk = null, skyTmp = null;
+let lastMeshMs = 0; // F3 instrumentation: last buildChunkMesh duration (ms)
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
@@ -1145,6 +1245,8 @@ const keys = new Set();
 let joyVec = { x: 0, y: 0 };       // touch joystick, each in [-1,1]
 let touchJumpHeld = false;
 let touchDownHeld = false;
+let touchMineHeld = false;        // hold-to-mine: stationary look-touch held past ~280ms (Break mode)
+let touchMineTimer = null;
 let lastSpaceTime = 0;
 let lastJumpTapTime = 0;
 let heldMouseBtn = null;
@@ -1310,14 +1412,85 @@ function blockIntersectsAnyEntity(bx, by, bz) {
   return false;
 }
 
-function doBreak() {
+// --- hold-to-mine: progressive block breaking (LOCAL PLAYER only) -----------
+// Damage accumulates while the mine input is held on one block; releasing or
+// looking away decays it (3x speed). Completion runs the EXACT same path the
+// old instant break did — setBlock(..., true) + particles + sound — so sparse-
+// diff saves and the neighborhood 'edit' op stay byte-identical. Bots
+// (bot.dig) and the vox CLI (dig x y z) keep INSTANT single-call semantics.
+let breakState = null;            // null | { x, y, z, id, progress, stage }
+let lastTapT = -1e9;              // touch quick-tap timestamp: decay pauses ~0.4s after a tap
+const BLOCK_HARDNESS = { 1: 0.35, 2: 0.35, 3: 0.9, 4: 0.3, 5: 0.6, 6: 0.18 }; // seconds to break
+function blockHardness(id) { return BLOCK_HARDNESS[id] || 0.35; }
+
+function completePlayerBreak() {
+  const { x, y, z, id } = breakState;
+  breakState = null;
+  setBlock(x, y, z, B.AIR, true); // same path as the old instant break (sync + save)
+  spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14);
+  playSound('break');
+  voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // VOX hook
+  coachBreakCount++; // ONBOARD: the BREAK step counts completed player breaks
+}
+function applyMineDamage(hit, amount) {
+  if (!breakState || breakState.x !== hit.x || breakState.y !== hit.y || breakState.z !== hit.z) {
+    breakState = { x: hit.x, y: hit.y, z: hit.z, id: hit.id, progress: 0, stage: -1 };
+  }
+  breakState.progress += amount;
+  const q = Math.min(3, Math.floor(breakState.progress * 4));
+  if (q > breakState.stage) { // quarter-stage transitions only — NEVER per-frame
+    breakState.stage = q;
+    voxEvent('dig_progress', {
+      x: breakState.x, y: breakState.y, z: breakState.z,
+      progress: Math.round(Math.min(1, breakState.progress) * 100) / 100
+    });
+  }
+  if (breakState.progress >= 1) completePlayerBreak();
+}
+function decayMineDamage(dt) {
+  if (!breakState) return;
+  // tap grace window: a quick tap's damage must survive long enough for the
+  // next tap to land (~0.4s), or multi-tap blocks (wood/stone) could never
+  // accumulate — decay at 3/s would erase a tap before any human re-taps
+  if (performance.now() - lastTapT < 400) return;
+  breakState.progress -= 3 * dt;
+  if (breakState.progress <= 0) breakState = null;
+}
+// one tap's worth of damage (touch quick-tap): leaves/sand/grass/dirt break in
+// one tap (0.36/0.35 >= 1), wood in 2, stone in ~3 quick taps — or one hold
+function touchTapMine() {
   const hit = targetBlock();
   if (!hit) return;
-  const color = BLOCK_COLORS[hit.id] || 0xffffff;
-  setBlock(hit.x, hit.y, hit.z, B.AIR, true);
-  spawnParticles(hit.x, hit.y, hit.z, color, 14);
-  playSound('break');
+  if (breakState && (breakState.x !== hit.x || breakState.y !== hit.y || breakState.z !== hit.z)) {
+    breakState = null; // tapping a different block restarts on the new one
+  }
+  lastTapT = performance.now();
+  applyMineDamage(hit, Math.min(1, 0.36 / blockHardness(hit.id)));
 }
+// per-frame from gameTick: accrue while held on-target, decay otherwise
+function updateMining(dt) {
+  if (breakState) {
+    if (panelOpen()) { breakState = null; return; } // panels / chat / terminal cancel mining
+    if (getBlock(breakState.x, breakState.y, breakState.z) !== breakState.id) {
+      breakState = null; // a bot or neighbor changed the block under us
+    }
+  }
+  const desktopMining = heldMouseBtn === 0 && isLocked();
+  const touchMining = touchMineHeld && actionMode === 'break';
+  if ((desktopMining || touchMining) && !panelOpen()) {
+    const hit = targetBlock();
+    if (hit && breakState && hit.x === breakState.x && hit.y === breakState.y && hit.z === breakState.z) {
+      applyMineDamage(hit, dt / blockHardness(breakState.id));
+    } else if (hit && !breakState) {
+      applyMineDamage(hit, dt / blockHardness(hit.id)); // start on the new target
+    } else {
+      decayMineDamage(dt); // crosshair moved off the block: decay, then re-target
+    }
+  } else {
+    decayMineDamage(dt); // button/finger released: decay
+  }
+}
+
 function doPlace() {
   const hit = targetBlock();
   if (!hit) return;
@@ -1328,6 +1501,7 @@ function doPlace() {
   if (blockIntersectsAnyEntity(px, py, pz)) return; // never place inside yourself or a bot
   const id = PLACEABLE[selSlot];
   if (!setBlock(px, py, pz, id, true)) return;
+  coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
   playSound('place');
 }
@@ -1363,14 +1537,55 @@ let hudTimer = 0;
 let fpsFrames = 0, fpsAcc = 0, fpsVal = 0;
 let lastPCX = null, lastPCZ = null;
 
+// --- adaptive resolution governor (fps-driven pixel-ratio scaling) -----------
+let basePR = 1;                 // boot pixel ratio: min(devicePixelRatio, 2)
+let renderScale = 1.0;          // 0.6..1.0 in 0.1 steps; applied as basePR * renderScale
+let autoQuality = IS_TOUCH;     // 'Auto quality' setting (default ON for touch, OFF desktop)
+let fpsLowStreak = 0, fpsHighStreak = 0; // consecutive 1s windows below/above thresholds
+let lastScaleStepT = 0;         // hysteresis: max one step per second
+let mainBootT = 0;              // no governor changes in the first 3s after boot
+
+function applyRenderScale() {
+  if (!renderer) return;
+  renderer.setPixelRatio(basePR * renderScale);
+  renderer.setSize(window.innerWidth, window.innerHeight, false); // CSS keeps the canvas full-screen
+}
+// runs on the existing 1s fps tick. Drop fast (2s under 45), raise slow (4s
+// over 55), never during boot/loading/panels, never touches renderDist or
+// texture filtering, and a no-op while headless OR while the tab is hidden
+// (no frames to measure either way — hidden ticks would read as fps=10).
+function qualityGovernorTick(now) {
+  if (!autoQuality || voxHeadless) { fpsLowStreak = 0; fpsHighStreak = 0; return; }
+  if (now - mainBootT < 3000 || loadingVisible || panelOpen() || document.hidden) {
+    fpsLowStreak = 0; fpsHighStreak = 0; // chunk-stream hitches, modal pauses & hidden-tab ticks (no frames rendered) don't count
+    return;
+  }
+  if (fpsVal < 45) { fpsLowStreak++; fpsHighStreak = 0; }
+  else if (fpsVal > 55) { fpsHighStreak++; fpsLowStreak = 0; }
+  else { fpsLowStreak = 0; fpsHighStreak = 0; }
+  if (now - lastScaleStepT < 1000) return; // max one step per second
+  if (fpsLowStreak >= 2 && renderScale > 0.65) {
+    renderScale = Math.round(Math.max(0.6, renderScale - 0.1) * 10) / 10;
+    applyRenderScale();
+    lastScaleStepT = now;
+    fpsLowStreak = 0;
+  } else if (fpsHighStreak >= 4 && renderScale < 0.95) {
+    renderScale = Math.round(Math.min(1, renderScale + 0.1) * 10) / 10;
+    applyRenderScale();
+    lastScaleStepT = now;
+    fpsHighStreak = 0;
+  }
+}
+
 function $(id) { return document.getElementById(id); }
 
 function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'btnExport', 'btnImportBtn', 'importFile',
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
+   'questHud', 'questHudSkip', // ONBOARD coach
    // NEIGHBORHOOD DOM
    'btnKite', 'kiteHud', 'kiteHudMark', 'kiteHudCount', 'btnNeighborhood',
    'nbPanel', 'nbOffline', 'nbStatusNote', 'nbIdle', 'nbNameInput', 'nbColorInput',
@@ -1461,7 +1676,11 @@ function updateHud(dayFrac) {
     'seed ' + worldSeed + '  |  day ' + Math.round(dayFrac * 100) + '%\n' +
     'mode ' + (player.fly ? 'fly' : 'walk') + '  |  ground ' + (player.onGround ? 'yes' : 'no') +
     '  |  water ' + (isInWater() ? 'yes' : 'no') + '\n' +
-    'render distance ' + renderDist + '  |  tris ' + renderer.info.render.triangles;
+    'render distance ' + renderDist + '  |  tris ' + renderer.info.render.triangles + '\n' +
+    'frame ms (avg) ' + (1000 / Math.max(1, fpsVal)).toFixed(1) +
+    '  |  pixel ratio (eff) ' + (basePR * renderScale).toFixed(2) +
+    (autoQuality ? ' (auto)' : '') + '\n' +
+    'mesh ms (last) ' + lastMeshMs.toFixed(1);
 }
 
 function showHelp() {
@@ -1541,7 +1760,7 @@ function initDesktopInput() {
   window.addEventListener('blur', () => keys.clear());
 
   document.addEventListener('pointerlockchange', () => {
-    if (!isLocked()) { heldMouseBtn = null; keys.clear(); }
+    if (!isLocked()) { heldMouseBtn = null; keys.clear(); breakState = null; } // lock loss cancels mining
     refreshLockHint();
   });
   document.addEventListener('pointerlockerror', () => { refreshLockHint(); });
@@ -1563,7 +1782,8 @@ function initDesktopInput() {
     if (IS_TOUCH && e.pointerType === 'touch') return;
     if (voxTermOpen) { voxTermToggle(false); return; } // clicking the game closes the vox terminal (matches touch-path guard)
     if (!isLocked()) { requestLock(); return; }
-    if (e.button === 0) { doBreak(); heldMouseBtn = 0; heldRepeatT = 0; }
+    // hold-to-mine: button 0 no longer instant-breaks — damage accrues in updateMining
+    if (e.button === 0) { heldMouseBtn = 0; heldRepeatT = 0; }
     else if (e.button === 2) { doPlace(); heldMouseBtn = 2; heldRepeatT = 0; }
   });
   document.addEventListener('mouseup', () => { heldMouseBtn = null; });
@@ -1639,6 +1859,11 @@ function initTouchInput() {
     lookLX = t.clientX; lookLY = t.clientY;
     lookMoved = 0;
     lookT0 = performance.now();
+    // hold-to-mine: a stationary look-touch held past ~280ms mines continuously (Break mode)
+    clearTimeout(touchMineTimer);
+    touchMineTimer = setTimeout(() => {
+      if (lookId !== null && lookMoved < 14 && actionMode === 'break' && !panelOpen()) touchMineHeld = true;
+    }, 280);
   }, { passive: false });
   canvasEl.addEventListener('touchmove', (e) => {
     e.preventDefault();
@@ -1647,6 +1872,7 @@ function initTouchInput() {
       const dx = t.clientX - lookLX, dy = t.clientY - lookLY;
       lookLX = t.clientX; lookLY = t.clientY;
       lookMoved += Math.abs(dx) + Math.abs(dy);
+      if (lookMoved >= 14) touchMineHeld = false; // the touch became a drag-to-look
       const sens = 0.0052;
       player.yaw -= dx * sens;
       player.pitch -= dy * sens;
@@ -1659,8 +1885,12 @@ function initTouchInput() {
     for (const t of e.changedTouches) {
       if (t.identifier !== lookId) continue;
       const dur = performance.now() - lookT0;
+      touchMineHeld = false;
+      clearTimeout(touchMineTimer);
       if (lookMoved < 14 && dur < 350 && !panelOpen()) {
-        if (actionMode === 'break') doBreak(); else doPlace();
+        // quick tap: one fixed chunk of mine damage (leaves/dirt in one tap,
+        // stone ~3 taps) — place mode is unchanged
+        if (actionMode === 'break') touchTapMine(); else doPlace();
       }
       lookId = null;
     }
@@ -1702,11 +1932,121 @@ function initUiButtons() {
 
   ui.renderDistInput.addEventListener('input', () => setRenderDistance(parseInt(ui.renderDistInput.value, 10)));
   ui.chkSound.addEventListener('change', () => { soundOn = ui.chkSound.checked; saveSettings(); });
+  ui.chkAutoQuality.addEventListener('change', () => {
+    autoQuality = ui.chkAutoQuality.checked;
+    fpsLowStreak = 0; fpsHighStreak = 0;
+    if (!autoQuality && renderScale !== 1) { renderScale = 1.0; applyRenderScale(); } // unchecking restores full res
+    saveSettings();
+  });
 
   ui.btnExport.addEventListener('click', exportWorld);
   ui.btnImportBtn.addEventListener('click', () => ui.importFile.click());
   ui.importFile.addEventListener('change', onImportFile);
   ui.btnNewWorld.addEventListener('click', newWorldPrompt);
+}
+
+// ===== ONBOARD COACH =====
+// ---------------------------------------------------------------------------
+// First-90-seconds onboarding: a five-step hint card (LOOK → MOVE → BREAK →
+// PLACE → TOWER) for fresh players AND scan-to-join QR arrivals, who used to
+// get zero guidance (the help modal is suppressed on join links). Purely
+// additive DOM + counters: never steals pointer lock, never pauses the game,
+// never blocks input. Suppressed under ?headless=1 / ?console=1. Skip is
+// immediate and permanent. Counters run from session start, so out-of-order
+// actions retroactively clear steps when reached.
+// ---------------------------------------------------------------------------
+
+const ONBOARD_KEY = 'voxel-world-onboard-v1';
+let coachState = null;                // { step, lookAcc, prevYaw, prevPitch, startX, startZ, lastText }
+let coachStartedThisSession = false;  // private-mode fallback: degrade to once per session
+let coachBreakCount = 0;              // completed player breaks since session start
+let coachPlaceCount = 0;              // successful player places since session start
+
+const COACH_STEPS_TOUCH = [
+  'Drag right side to look',
+  'Left stick to walk',
+  'Touch and hold a block to break it',
+  'Switch to ■ Place, then tap',
+  'Stack 3 blocks — build anything'
+];
+const COACH_STEPS_DESKTOP = [
+  'Move mouse to look',
+  'WASD to walk',
+  'Hold click on a block',
+  'Right-click to place',
+  'Stack 3 blocks — build anything'
+];
+
+function shouldShowCoach() {
+  if (voxBootParams.headless || voxBootParams.console) return false;
+  if (coachStartedThisSession) return false;
+  try { return localStorage.getItem(ONBOARD_KEY) !== '1'; } catch (e) { return true; }
+}
+function startCoach() {
+  if (!ui.questHud) return;
+  coachStartedThisSession = true;
+  coachState = {
+    step: 0, lookAcc: 0,
+    prevYaw: player.yaw, prevPitch: player.pitch,
+    startX: player.pos.x, startZ: player.pos.z,
+    lastText: ''
+  };
+  ui.questHud.classList.remove('hidden');
+  coachRender();
+}
+function coachFinish(skipped) {
+  coachState = null;
+  try { localStorage.setItem(ONBOARD_KEY, '1'); } catch (e) { /* private mode: session flag covers it */ }
+  try { localStorage.setItem(HELP_KEY, '1'); } catch (e) { /* private mode */ }
+  if (ui.questHud) { ui.questHud.remove(); ui.questHud = null; }
+  if (!skipped) toast('You’ve got it — the world is yours (? for more)');
+}
+function coachAdvance() {
+  coachState.step++;
+  if (coachState.step === 1) { // MOVE measures from the moment the step starts
+    coachState.startX = player.pos.x;
+    coachState.startZ = player.pos.z;
+  }
+}
+function coachRender() {
+  if (!coachState || !ui.questHud) return;
+  const steps = IS_TOUCH ? COACH_STEPS_TOUCH : COACH_STEPS_DESKTOP;
+  let text = steps[coachState.step] || '';
+  // point at the mode button when the touch player is stuck in Place mode
+  if (IS_TOUCH && coachState.step === 2 && actionMode === 'place') text += ' — tap ⛏ Break first';
+  const render = coachState.step + '|' + text;
+  if (render === coachState.lastText) return; // touch the DOM only on change
+  coachState.lastText = render;
+  ui.questHud.querySelector('.qStep').textContent = 'Getting started · ' + (coachState.step + 1) + ' / 5';
+  ui.questHud.querySelector('.qText').textContent = text;
+}
+function coachTick() {
+  if (!coachState || !ui.questHud) return;
+  const blocked = panelOpen() || loadingVisible;
+  ui.questHud.classList.toggle('hidden', blocked); // hidden (never advanced) while panels/chat are up
+  let dy = player.yaw - coachState.prevYaw;
+  const dp = player.pitch - coachState.prevPitch;
+  coachState.prevYaw = player.yaw;   // keep tracking so a panel close never counts a jump
+  coachState.prevPitch = player.pitch;
+  if (blocked) return;
+  dy = Math.atan2(Math.sin(dy), Math.cos(dy)); // wrap-safe yaw delta
+  coachState.lookAcc += Math.abs(dy) + Math.abs(dp);
+  const s = coachState.step;
+  if (s === 0 && coachState.lookAcc > 0.6) coachAdvance();
+  else if (s === 1 && Math.hypot(player.pos.x - coachState.startX, player.pos.z - coachState.startZ) > 3) coachAdvance();
+  else if (s === 2 && coachBreakCount >= 1) coachAdvance();
+  else if (s === 3 && coachPlaceCount >= 1) coachAdvance();
+  else if (s === 4 && coachPlaceCount >= 3) { coachFinish(false); return; }
+  coachRender();
+}
+function initCoach() {
+  if (!ui.questHudSkip) return;
+  ui.questHudSkip.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    coachFinish(true);
+    toast('Tips skipped — ? opens the full help anytime');
+  });
 }
 
 // ===== PERSISTENCE =====
@@ -1769,7 +2109,9 @@ function scheduleSave() {
 }
 function saveSettings() {
   try {
-    localStorage.setItem(SETTINGS_KEY, JSON.stringify({ renderDistance: renderDist, sound: soundOn }));
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify({
+      renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality
+    }));
   } catch (e) { /* ignore */ }
 }
 function loadSettings() {
@@ -1778,6 +2120,7 @@ function loadSettings() {
     if (s && typeof s === 'object') {
       if (Number.isFinite(s.renderDistance)) renderDist = Math.max(2, Math.min(8, s.renderDistance | 0));
       if (typeof s.sound === 'boolean') soundOn = s.sound;
+      if (typeof s.autoQuality === 'boolean') autoQuality = s.autoQuality; // older blobs default by IS_TOUCH
     }
   } catch (e) { /* ignore */ }
 }
@@ -2676,6 +3019,12 @@ function nbApplySnapshot(p, env) {
     addChatMsg(null, 'You joined the neighborhood — the host’s world replaced your view. ' +
       'Your solo world is untouched; this session saves separately.', null, true);
     toast('Joined the neighborhood! (solo world untouched)');
+    // ONBOARD: name the host — the welcome/snapshot's first roster entry IS the host
+    const hostPl = Array.isArray(p.players) && p.players.length ? p.players[0] : null;
+    if (hostPl && typeof hostPl.name === 'string') {
+      const hostName = nbCleanName(hostPl.name);
+      setTimeout(() => toast('You’re in ' + hostName + '’s world'), 2000);
+    }
     setTimeout(hideNb, 1600);
   } else {
     addChatMsg(null, 'The host refreshed the world snapshot.', null, true);
@@ -3121,6 +3470,7 @@ function vfSpawnBot(opts) {
       spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14); // same break feedback
       playSound('break');
       this.emit('dig_complete', { x, y, z, id });
+      voxEvent('dig_complete', { x, y, z, blockId: id, by: name }); // VOX hook: ring-buffer mirror
       return true;
     },
 
@@ -4229,6 +4579,8 @@ function voxCmdStatus() {
     seed: worldSeed,
     mode: Neighborhood.enabled ? (Neighborhood.role === 'kite' ? 'kited' : 'neighbor') : 'solo',
     fps: fpsVal,
+    renderScale: renderScale,             // adaptive resolution governor (1.0 = full)
+    autoQuality: autoQuality,
     drawCalls: renderer.info.render.calls,
     chunks: chunks.size,
     position: {
@@ -4391,6 +4743,7 @@ function voxCmdDig(x, y, z) {
   }
   spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14);
   playSound('break');
+  voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // completion signal in the command form
   return { ok: true, subject: 'player', target: { x, y, z }, removed: BLOCK_NAMES[id] };
 }
 
@@ -4883,8 +5236,9 @@ function main() {
     window.__voxelShowBootError('WebGL is unavailable in this browser, so the 3D engine cannot start.');
     return;
   }
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-  renderer.setSize(window.innerWidth, window.innerHeight);
+  basePR = Math.min(window.devicePixelRatio || 1, 2);
+  applyRenderScale(); // basePR * renderScale (1.0 at boot) + setSize
+  mainBootT = performance.now(); // governor stays quiet for the first 3s
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x79b8ec);
   scene.fog = new THREE.Fog(0x79b8ec, 30, 60);
@@ -4909,6 +5263,7 @@ function main() {
   atlasTex.minFilter = THREE.NearestFilter;
   atlasTex.generateMipmaps = false;
   atlasTex.colorSpace = THREE.SRGBColorSpace;
+  atlasTexture = atlasTex; // shared by the hold-to-mine crack overlay
   solidMat = new THREE.MeshLambertMaterial({ map: atlasTex });
   waterMat = new THREE.MeshLambertMaterial({
     map: atlasTex, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide
@@ -4937,11 +5292,13 @@ function main() {
   ui.renderDistInput.value = String(renderDist);
   ui.renderDistVal.textContent = String(renderDist);
   ui.chkSound.checked = soundOn;
+  ui.chkAutoQuality.checked = autoQuality;
   updateFog();
   buildHotbar();
   initDesktopInput();
   initTouchInput();
   initUiButtons();
+  initCoach(); // ONBOARD: skip-button wiring (the coach itself starts after loading)
   initNeighborhood();
   initVoxelflayer(); // VOXELFLAYER: twin console, brains, window.voxelflayer
   if (IS_TOUCH) ui.touchUI.classList.remove('hidden');
@@ -4949,9 +5306,32 @@ function main() {
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
-    renderer.setSize(window.innerWidth, window.innerHeight);
+    applyRenderScale(); // keeps a governor-stepped pixel ratio across resize/rotate/fullscreen
   });
-  document.addEventListener('visibilitychange', () => { if (document.hidden) saveNow(); });
+  // HIDDEN-TAB DRIVER: browsers stop firing rAF in hidden tabs, so a coarse
+  // interval keeps gameTick alive (twins, bots, neighborhood broadcasts) with
+  // zero GPU spend — same pattern as the headless driver (voxSetHeadless).
+  // Background timers get throttled to >=1s by the browser; the dt clamp in
+  // gameTick bounds each catch-up step. Cleared as soon as the tab is visible.
+  // ?headless=1 already has its own 50ms driver, so this stays off there.
+  let hiddenTickTimer = null;
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      saveNow();
+      if (!voxHeadless && !hiddenTickTimer) {
+        hiddenTickTimer = setInterval(() => {
+          try { if (document.hidden && !voxHeadless) gameTick(performance.now()); } catch (e) { /* never dies */ }
+        }, 250);
+      }
+    } else if (hiddenTickTimer) {
+      clearInterval(hiddenTickTimer);
+      hiddenTickTimer = null;
+      // hidden ticks rendered zero frames but still bumped the fps accumulator
+      // (dt-clamped fake "frames") — flush so the first visible 1s window and
+      // the governor measure only real rendered frames
+      fpsFrames = 0; fpsAcc = 0; fpsLowStreak = 0; fpsHighStreak = 0;
+    }
+  });
   window.addEventListener('pagehide', saveNow);
   setInterval(() => { if (!document.hidden) saveNow(); }, 9000);
 
@@ -4988,14 +5368,15 @@ function main() {
     }
     processStreaming();
 
-    // hold-to-repeat break/place (desktop)
-    if (heldMouseBtn !== null && isLocked()) {
+    // hold-to-repeat place (desktop) — breaking is now damage-based (hold-to-mine)
+    if (heldMouseBtn === 2 && isLocked()) {
       heldRepeatT += dt;
       if (heldRepeatT > 0.27) {
         heldRepeatT = 0;
-        if (heldMouseBtn === 0) doBreak(); else doPlace();
+        doPlace();
       }
     }
+    updateMining(dt); // hold-to-mine: accrue/decay break progress for the local player
 
     // camera follows the player eye
     camera.position.set(player.pos.x, player.pos.y + player.eye, player.pos.z);
@@ -5010,21 +5391,29 @@ function main() {
     } else {
       highlightBox.visible = false;
     }
+    updateCrackOverlay(); // hold-to-mine: 4-stage crack visual on the mined block
 
     const dayFrac = updateEnvironment(dt);
     updateParticles(dt);
     nbTick(dt); // NEIGHBORHOOD: avatar lerp + throttled pos broadcast
     vfTick(dt); // VOXELFLAYER: path following, walk bob, twin pos stream, remote twins
+    if (coachState) coachTick(); // ONBOARD: O(1) step poll
     ui.underwater.classList.toggle('hidden', !cameraInWater());
 
     // fps + debug hud
     fpsFrames++;
     fpsAcc += dt;
-    if (fpsAcc >= 1) { fpsVal = Math.round(fpsFrames / fpsAcc); fpsFrames = 0; fpsAcc = 0; }
+    if (fpsAcc >= 1) {
+      fpsVal = Math.round(fpsFrames / fpsAcc);
+      fpsFrames = 0; fpsAcc = 0;
+      qualityGovernorTick(now); // adaptive resolution: rides the existing 1s fps tick
+    }
     hudTimer += dt;
     if (hudVisible && hudTimer > 0.25) { hudTimer = 0; updateHud(dayFrac); }
 
-    if (!voxHeadless) renderer.render(scene, camera); // VOX: headless skips ONLY the render
+    // VOX: headless skips ONLY the render; a hidden tab keeps ticking twins/networking
+    // without GPU spend (the dt clamp bounds any catch-up on return)
+    if (!voxHeadless && !document.hidden) renderer.render(scene, camera);
 
     // loading screen drops once the ground under the player is meshed
     if (loadingVisible) {
@@ -5034,9 +5423,17 @@ function main() {
         ui.loading.classList.add('hidden');
         let seen = false;
         try { seen = localStorage.getItem(HELP_KEY) === '1'; } catch (e) { seen = false; }
-        // VOX hook: ?headless=1 / ?console=1 suppress the first-run help overlay
-        if (!seen && !nbJoinParams && !voxBootParams.headless && !voxBootParams.console) showHelp();
-        else refreshLockHint();
+        // ONBOARD: the coach replaces the auto help modal for fresh players —
+        // INCLUDING scan-to-join arrivals (nbJoinParams), who used to get nothing.
+        // VOX hook: ?headless=1 / ?console=1 suppress both.
+        if (shouldShowCoach()) {
+          startCoach();
+          refreshLockHint();
+        } else if (!seen && !nbJoinParams && !voxBootParams.headless && !voxBootParams.console) {
+          showHelp();
+        } else {
+          refreshLockHint();
+        }
         nbMaybeAutoJoin(); // NEIGHBORHOOD: ?join=…#k=… links connect once the world is up
       }
     }
