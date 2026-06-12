@@ -86,6 +86,14 @@
     pointer-events:auto;touch-action:none}
   #joyKnob{position:absolute;left:50%;top:50%;width:58px;height:58px;border-radius:50%;
     background:rgba(255,255,255,.33);transform:translate(-50%,-50%);pointer-events:none}
+  /* FLOATING JOYSTICK (touch comfort, default mode): the ring hides until a touch lands in
+     the lower-left region of the CANVAS, then appears centered on the thumb. pointer-events
+     none here is load-bearing — it guarantees #joyZone's own legacy touchstart can never
+     double-claim a touch the canvas handler already owns. Unchecking 'Fixed joystick
+     position' OFF (i.e. fixed mode) removes .floating and everything above behaves
+     byte-identically to the old fixed circle. */
+  #joyZone.floating{pointer-events:none;opacity:0;transition:opacity .18s ease-out}
+  #joyZone.floating.live{opacity:1}
   .tbtn{position:absolute;border:2px solid rgba(255,255,255,.32);background:rgba(0,0,0,.42);color:#fff;
     pointer-events:auto;touch-action:none;font-weight:700;font-size:14px}
   .tbtn:active{background:rgba(255,255,255,.3)}
@@ -113,6 +121,26 @@
   @media (max-width:700px){
     #questHud .qText{font-size:13.5px;white-space:normal}
   }
+
+  /* ===== FIELD GUIDE: achievements pill + panel =====
+     A small persistent '🏅 N/10' pill (top-center, clear of the touch button cluster,
+     joystick and hotbar). Styling copied from #questHud — NEVER the same node: the
+     coach REMOVES #questHud from the DOM when it finishes. Only the pill (and the
+     panel it opens) take pointer events; both are hidden while the coach is active
+     and never shown under ?headless=1 / ?console=1. */
+  #achPill{position:fixed;left:50%;top:calc(46px + env(safe-area-inset-top));transform:translateX(-50%);
+    background:rgba(0,0,0,.78);color:#fff;padding:3px 12px;border-radius:14px;z-index:30;
+    font-size:12.5px;border:1px solid rgba(255,255,255,.18);cursor:pointer;pointer-events:auto;
+    white-space:nowrap;text-shadow:0 1px 3px #000}
+  #achPill:active{background:rgba(255,255,255,.25)}
+  #achPanel{position:fixed;left:50%;top:calc(80px + env(safe-area-inset-top));transform:translateX(-50%);
+    background:rgba(7,11,18,.94);border:1px solid #2c3f57;border-radius:10px;padding:10px 14px;
+    z-index:36;width:min(300px,86vw);font-size:13px;line-height:1.7;pointer-events:auto;
+    box-shadow:0 8px 30px rgba(0,0,0,.5);max-height:50vh;overflow-y:auto}
+  #achPanel .achTitle{font-weight:600;color:#9cc4ee;margin-bottom:4px}
+  #achPanel .achGot{color:#9fe3bd}
+  #achPanel .achHint{color:#f2cc8f}
+  #achPanel .achLock{opacity:.45}
 
   /* ===== NEIGHBORHOOD styles (RAPP kited neighborhood) ===== */
   .kiteMark{display:inline-block;width:84px;height:auto;transform-origin:top center;
@@ -303,7 +331,7 @@
     </ul>
     <h3>Touch</h3>
     <ul>
-      <li>Left joystick &mdash; move (push to the edge to sprint)</li>
+      <li>Touch the lower-left &mdash; the move stick appears under your thumb (push to the edge to sprint; a classic fixed stick is in &#9881; Settings)</li>
       <li>Drag on the right side &mdash; look around</li>
       <li>Tap the screen &mdash; chip <i>or</i> place at the crosshair (switch with the mode button); <b>touch and hold</b> to mine tougher blocks straight through</li>
       <li><b>JUMP</b> &mdash; jump &bull; double-tap JUMP &mdash; toggle fly (&#9660; button descends)</li>
@@ -352,6 +380,7 @@ Twin-chat bot ops (phase-2 dispatcher, payload.app = "voxel-world/1.0"):
   { op:"bot-act", botName, actions:[ {op:"goto",x,y,z}, {op:"goto",waypoint:"home"},
       {op:"dig",x,y,z}, {op:"place",x,y,z,blockId}, {op:"chat",text}, {op:"look",x,y,z},
       {op:"remember",key,value}, {op:"waypoint",name,x,y,z},
+      {op:"find",block,maxDistance,count},   // reports nearest matching blocks via chat
       {op:"wander"}, {op:"follow",name}, {op:"stop"} ] }
   Memory persists for TWINS across saves: obs.memory = { facts, waypoints, stats } (capped).
   { op:"bot-release", botName }
@@ -403,6 +432,16 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row hidden" id="rowHaptics">
       <label><input type="checkbox" id="chkHaptics" checked> Haptics <span class="small">(vibrate + crosshair flash on break / place / mode / fly / ping)</span></label>
+    </div>
+    <div class="row hidden" id="rowFixedJoy">
+      <label><input type="checkbox" id="chkFixedJoy"> Fixed joystick position <span class="small">(unchecked: the stick floats to wherever your left thumb lands)</span></label>
+    </div>
+    <div class="row">
+      <label for="lookSensInput">Look sensitivity: <b id="lookSensVal">1.00</b>&times;</label>
+      <input type="range" id="lookSensInput" min="0.4" max="2" step="0.05" value="1">
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkInvertY"> Invert vertical look</label>
     </div>
     <div class="row btns">
       <button id="btnExport">Export World</button>
@@ -529,6 +568,12 @@ the string IS the transport; Claude is the canonical string-holder)
   <div class="qStep"></div>
   <div class="qText"></div>
 </div>
+
+<!-- FIELD GUIDE: achievements pill (tap opens the panel). NOT #questHud — the coach
+     removes that node from the DOM when it finishes; this is a separate element that
+     merely copies its styling. Hidden while the coach runs and under headless/console. -->
+<div id="achPill" class="hidden" role="status" aria-label="Field Guide — achievements">&#127941; 0/10</div>
+<div id="achPanel" class="hidden" role="dialog" aria-label="Field Guide"></div>
 
 <div id="toast"></div>
 
@@ -1975,6 +2020,7 @@ function completePlayerBreak() {
   haptic(18); flashCrosshair(); // TOUCH FEEDBACK: confirm the block actually broke (visual on iOS where vibrate is a no-op)
   voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // VOX hook
   coachBreakCount++; // ONBOARD: the BREAK step counts completed player breaks
+  achOnBreak(id); // FIELD GUIDE: first_cut / prospector (ore) / goldfinger (gold) — player breaks only
 }
 function applyMineDamage(hit, amount) {
   if (!breakState || breakState.x !== hit.x || breakState.y !== hit.y || breakState.z !== hit.z) {
@@ -2046,6 +2092,7 @@ function doPlace() {
   const id = PLACEABLE[selSlot];
   if (!setBlock(px, py, pz, id, true, true)) return; // localEditFast = instant remesh of the player's own chunk
   coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
+  achOnPlace(px, py, pz); // FIELD GUIDE: builder/architect (via coachPlaceCount) + homesteader (chunk spread)
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
   playSound('place');
   addTrauma(0.05); // SHAKE: a small, satisfying tick when a block lands
@@ -2290,6 +2337,17 @@ let hapticsOn = IS_TOUCH;       // 'Haptics' setting (touch-only; default ON for
 function haptic(ms) {
   try { if (IS_TOUCH && hapticsOn) navigator.vibrate && navigator.vibrate(ms); } catch (e) { /* ignore */ }
 }
+// --- touch comfort: floating joystick + look sensitivity + invert-Y ----------
+// Cycle-1's never-shipped runner-up. fixedJoy default FALSE = the joystick ring
+// appears wherever the left thumb lands (the one default change; 'Fixed joystick
+// position' in settings restores the exact old circle). lookSens/invertY are pure
+// input-site scalars: defaults (1.0, non-inverted) reproduce today's behavior
+// exactly. All three persist in the existing settings blob with typeof guards.
+let fixedJoy = false;     // 'Fixed joystick position' (touch-only row; default floating)
+let lookSens = 1.0;       // look sensitivity multiplier, 0.4..2.0 (touch AND mouse)
+let invertY = false;      // invert vertical look (flips ONLY the pitch delta sign)
+let joyApplyMode = null;  // assigned by initTouchInput (the joystick state lives in its closure)
+
 let crosshairFlashTimer = null; // single debounce token so rapid mining never stacks timers
 function flashCrosshair() {
   if (!ui.crosshair || voxHeadless) return; // never on hidden/headless ticks (these sites are input edges anyway)
@@ -2337,8 +2395,10 @@ function grabDom() {
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
    'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
+   'rowFixedJoy', 'chkFixedJoy', 'lookSensInput', 'lookSensVal', 'chkInvertY', // TOUCH COMFORT (cycle-9)
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'questHud', 'questHudSkip', // ONBOARD coach
+   'achPill', 'achPanel', // FIELD GUIDE achievements (separate node — never #questHud)
    // NEIGHBORHOOD DOM
    'btnKite', 'kiteHud', 'kiteHudMark', 'kiteHudCount', 'btnNeighborhood',
    'nbPanel', 'nbOffline', 'nbStatusNote', 'nbIdle', 'nbNameInput', 'nbColorInput',
@@ -2532,9 +2592,11 @@ function initDesktopInput() {
 
   document.addEventListener('mousemove', (e) => {
     if (!isLocked()) return; // camera NEVER moves while unlocked
-    const sens = 0.0023;
+    // LOOK COMFORT: lookSens is a pure scalar (default 1.0 reproduces 0.0023 exactly);
+    // invertY flips ONLY the pitch delta sign — the clamp below is untouched.
+    const sens = 0.0023 * lookSens;
     player.yaw -= e.movementX * sens;
-    player.pitch -= e.movementY * sens;
+    player.pitch += (invertY ? 1 : -1) * e.movementY * sens;
     const lim = Math.PI / 2 - 0.01;
     if (player.pitch > lim) player.pitch = lim;
     if (player.pitch < -lim) player.pitch = -lim;
@@ -2579,8 +2641,32 @@ function initTouchInput() {
   if (!IS_TOUCH) return;
   ui.touchUI.classList.remove('hidden');
 
+  // FLOATING JOYSTICK: safe-area insets for the anchor clamp (the ring must stay fully
+  // on-screen even against a notch / home indicator). Measured via a throwaway probe
+  // (env() is CSS-only); refreshed on resize/orientation change. Zeros on failure.
+  let safeInsets = { t: 0, r: 0, b: 0, l: 0 };
+  const readSafeInsets = () => {
+    try {
+      const probe = document.createElement('div');
+      probe.style.cssText = 'position:fixed;visibility:hidden;pointer-events:none;' +
+        'padding:env(safe-area-inset-top) env(safe-area-inset-right) ' +
+        'env(safe-area-inset-bottom) env(safe-area-inset-left)';
+      document.body.appendChild(probe);
+      const cs = getComputedStyle(probe);
+      safeInsets = {
+        t: parseFloat(cs.paddingTop) || 0, r: parseFloat(cs.paddingRight) || 0,
+        b: parseFloat(cs.paddingBottom) || 0, l: parseFloat(cs.paddingLeft) || 0
+      };
+      probe.remove();
+    } catch (e) { /* keep zeros */ }
+  };
+  readSafeInsets();
+  window.addEventListener('resize', readSafeInsets);
+
   // virtual joystick (left thumb)
   let joyTouchId = null;
+  let joyFloating = false;          // true while the live claim came from the floating (canvas) path
+  const joyAnchor = { x: 0, y: 0 }; // floating mode: the (clamped) touchdown point — the math's center
   const joyRadius = 50;
   const joyCenter = () => {
     const r = ui.joyZone.getBoundingClientRect();
@@ -2589,6 +2675,35 @@ function initTouchInput() {
   const setKnob = (dx, dy) => {
     ui.joyKnob.style.transform = 'translate(-50%,-50%) translate(' + dx + 'px,' + dy + 'px)';
   };
+  // EXACT existing joystick math, parameterized on the center point so the floating path
+  // (center = anchor) and the fixed path (center = ring center) can never diverge:
+  // joyRadius 50, same normalization, the joySprint >0.92 edge in stepPhysics untouched.
+  const joyDriveFrom = (cx2, cy2, tx, ty) => {
+    const dx = tx - cx2, dy = ty - cy2;
+    const len = Math.hypot(dx, dy) || 1;
+    const cl = Math.min(len, joyRadius);
+    joyVec.x = (dx / len) * (cl / joyRadius);
+    joyVec.y = (dy / len) * (cl / joyRadius);
+    setKnob((dx / len) * cl, (dy / len) * cl);
+  };
+  // mode switch: .floating sets pointer-events:none + opacity 0 on #joyZone (its legacy
+  // touchstart can never double-claim); fixed mode clears the inline position so the
+  // stylesheet's original left/bottom circle returns byte-identically.
+  const applyJoyMode = () => {
+    ui.joyZone.classList.toggle('floating', !fixedJoy);
+    ui.joyZone.classList.remove('live');
+    ui.joyZone.style.left = '';
+    ui.joyZone.style.top = '';
+    ui.joyZone.style.bottom = '';
+    if (joyFloating) { // a mode flip mid-drag releases the floating claim cleanly
+      joyTouchId = null;
+      joyFloating = false;
+      joyVec.x = 0; joyVec.y = 0;
+      setKnob(0, 0);
+    }
+  };
+  joyApplyMode = applyJoyMode; // settings checkbox calls this (module-level hook)
+  applyJoyMode();
   ui.joyZone.addEventListener('touchstart', (e) => {
     e.preventDefault();
     ensureAudio();
@@ -2632,6 +2747,29 @@ function initTouchInput() {
   canvasEl.addEventListener('touchstart', (e) => {
     e.preventDefault();
     ensureAudio();
+    // FLOATING JOYSTICK CLAIM — BEFORE the look-claim logic. A touch landing in the
+    // lower-left region (x < 45vw, below the ~90px top-HUD band) becomes the stick:
+    // the ring repositions to the (clamped) touchdown point and fades in, and we
+    // return WITHOUT setting lookId, so look/tap/hold-to-mine logic never sees it.
+    // A second left-region touch while joyTouchId is held falls through (single-claim).
+    if (!fixedJoy && joyTouchId === null) {
+      const t0 = e.changedTouches[0];
+      if (t0.clientX < window.innerWidth * 0.45 && t0.clientY > 90 + safeInsets.t) {
+        joyTouchId = t0.identifier;
+        joyFloating = true;
+        const zw = ui.joyZone.offsetWidth || 140, zh = ui.joyZone.offsetHeight || 140;
+        joyAnchor.x = Math.max(safeInsets.l + zw / 2 + 6,
+          Math.min(window.innerWidth - safeInsets.r - zw / 2 - 6, t0.clientX));
+        joyAnchor.y = Math.max(safeInsets.t + zh / 2 + 6,
+          Math.min(window.innerHeight - safeInsets.b - zh / 2 - 6, t0.clientY));
+        ui.joyZone.style.left = (joyAnchor.x - zw / 2) + 'px';
+        ui.joyZone.style.top = (joyAnchor.y - zh / 2) + 'px';
+        ui.joyZone.style.bottom = 'auto';
+        ui.joyZone.classList.add('live');
+        joyDriveFrom(joyAnchor.x, joyAnchor.y, t0.clientX, t0.clientY);
+        return;
+      }
+    }
     if (lookId !== null) return;
     const t = e.changedTouches[0];
     lookId = t.identifier;
@@ -2647,14 +2785,21 @@ function initTouchInput() {
   canvasEl.addEventListener('touchmove', (e) => {
     e.preventDefault();
     for (const t of e.changedTouches) {
+      // FLOATING JOYSTICK drag: drive joyVec from the ANCHOR with the exact fixed-mode math
+      if (joyFloating && t.identifier === joyTouchId) {
+        joyDriveFrom(joyAnchor.x, joyAnchor.y, t.clientX, t.clientY);
+        continue;
+      }
       if (t.identifier !== lookId) continue;
       const dx = t.clientX - lookLX, dy = t.clientY - lookLY;
       lookLX = t.clientX; lookLY = t.clientY;
       lookMoved += Math.abs(dx) + Math.abs(dy);
       if (lookMoved >= 14) touchMineHeld = false; // the touch became a drag-to-look
-      const sens = 0.0052;
+      // LOOK COMFORT: lookSens scalar (default 1.0 = the old 0.0052); invertY flips ONLY
+      // the pitch delta sign — the clamp below is untouched.
+      const sens = 0.0052 * lookSens;
       player.yaw -= dx * sens;
-      player.pitch -= dy * sens;
+      player.pitch += (invertY ? 1 : -1) * dy * sens;
       const lim = Math.PI / 2 - 0.01;
       if (player.pitch > lim) player.pitch = lim;
       if (player.pitch < -lim) player.pitch = -lim;
@@ -2662,6 +2807,16 @@ function initTouchInput() {
   }, { passive: false });
   const lookEnd = (e) => {
     for (const t of e.changedTouches) {
+      // FLOATING JOYSTICK release: zero the vector and fade the ring out. The touch was
+      // claimed at start, so releasing over a button fires nothing (it never sets lookId).
+      if (joyFloating && t.identifier === joyTouchId) {
+        joyTouchId = null;
+        joyFloating = false;
+        joyVec.x = 0; joyVec.y = 0;
+        setKnob(0, 0);
+        ui.joyZone.classList.remove('live');
+        continue;
+      }
       if (t.identifier !== lookId) continue;
       const dur = performance.now() - lookT0;
       touchMineHeld = false;
@@ -2732,6 +2887,22 @@ function initUiButtons() {
   });
   ui.chkHaptics.addEventListener('change', () => {
     hapticsOn = ui.chkHaptics.checked;
+    saveSettings();
+  });
+  // TOUCH COMFORT (cycle-9): floating-vs-fixed joystick, look sensitivity, invert-Y.
+  ui.chkFixedJoy.addEventListener('change', () => {
+    fixedJoy = ui.chkFixedJoy.checked;
+    if (joyApplyMode) joyApplyMode(); // live mode flip (releases any in-flight floating drag)
+    saveSettings();
+  });
+  ui.lookSensInput.addEventListener('input', () => {
+    const v = parseFloat(ui.lookSensInput.value);
+    lookSens = Number.isFinite(v) ? Math.max(0.4, Math.min(2, v)) : 1;
+    ui.lookSensVal.textContent = lookSens.toFixed(2);
+    saveSettings();
+  });
+  ui.chkInvertY.addEventListener('change', () => {
+    invertY = ui.chkInvertY.checked;
     saveSettings();
   });
 
@@ -2845,6 +3016,138 @@ function initCoach() {
   });
 }
 
+// ===== FIELD GUIDE (achievements) =====
+// ---------------------------------------------------------------------------
+// A 10-entry goal ladder that surfaces the unsurfaced: caves (cycle-2) and ores
+// (cycle-4) are invisible to players who never dig down — the locked hints
+// deliberately point at them. Hooks live ONLY at existing action edges
+// (completePlayerBreak / doPlace / kite+join success) plus the once-per-second
+// fps tick for the spatial/time predicates — zero new per-frame work. Persists
+// ONLY the {id:true} unlock map (private mode degrades to RAM-only). Entirely
+// inert under ?headless=1 / ?console=1 (mirrors the coach gates): no DOM
+// writes, no listeners, no unlocks, no events. Never touches collectSave/
+// validateSave/wire/roster; never steals pointer lock.
+// ---------------------------------------------------------------------------
+
+const ACH_KEY = 'voxel-world-achievements-v1';
+const ACHIEVEMENTS = [
+  { id: 'first_cut',   name: 'First Cut',   hint: 'Break any block' },
+  { id: 'builder',     name: 'Builder',     hint: 'Place 10 blocks' },
+  { id: 'architect',   name: 'Architect',   hint: 'Place 50 blocks' },
+  { id: 'homesteader', name: 'Homesteader', hint: 'Build in 4 different parts of the world' },
+  { id: 'spelunker',   name: 'Spelunker',   hint: 'Dig below the waterline to find caves' },
+  { id: 'prospector',  name: 'Prospector',  hint: 'Mine the dark speckled stone' },
+  { id: 'goldfinger',  name: 'Goldfinger',  hint: 'Strike gold, deep underground' },
+  { id: 'treetop',     name: 'Treetop',     hint: 'Get 8 blocks above the terrain' },
+  { id: 'night_owl',   name: 'Night Owl',   hint: 'Stay up past midnight' },
+  { id: 'neighbor',    name: 'Neighbor',    hint: 'Fly a kite, or join one' }
+];
+let achUnlocked = {};      // id -> true (persisted at ACH_KEY; RAM-only in private mode)
+let achInert = false;      // set in achInit: headless/console = the whole system is a no-op
+let achPlaceChunks = null; // small capped Set of chunkKeys for homesteader (session RAM only)
+
+function achCount() {
+  let n = 0;
+  for (const a of ACHIEVEMENTS) if (achUnlocked[a.id]) n++;
+  return n;
+}
+function achRenderPill() {
+  if (!ui.achPill) return;
+  ui.achPill.textContent = '🏅 ' + achCount() + '/' + ACHIEVEMENTS.length;
+}
+function achUnlock(id) {
+  if (achInert || achUnlocked[id]) return;
+  let def = null;
+  for (const a of ACHIEVEMENTS) if (a.id === id) { def = a; break; }
+  if (!def) return;
+  achUnlocked[id] = true;
+  try { localStorage.setItem(ACH_KEY, JSON.stringify(achUnlocked)); } catch (e) { /* private mode: RAM-only */ }
+  toast('🏅 ' + def.name);
+  haptic(15);
+  addTrauma(0.06);
+  addChatMsg(null, '🏅 Achievement: ' + def.name, null, true); // one sys-style chat line
+  achRenderPill();
+}
+// hook: completePlayerBreak (the only caller) — knows the broken block id
+function achOnBreak(id) {
+  if (achInert) return;
+  achUnlock('first_cut');
+  if (id === B.COAL_ORE || id === B.IRON_ORE || id === B.GOLD_ORE) achUnlock('prospector');
+  if (id === B.GOLD_ORE) achUnlock('goldfinger');
+}
+// hook: doPlace success — rides the EXISTING coachPlaceCount session counter
+function achOnPlace(gx, gy, gz) {
+  if (achInert) return;
+  if (coachPlaceCount >= 10) achUnlock('builder');
+  if (coachPlaceCount >= 50) achUnlock('architect');
+  if (!achUnlocked.homesteader) {
+    if (!achPlaceChunks) achPlaceChunks = new Set();
+    if (achPlaceChunks.size < 8) achPlaceChunks.add(chunkKey(gx >> 4, gz >> 4)); // capped tiny
+    if (achPlaceChunks.size >= 4) { achUnlock('homesteader'); achPlaceChunks = null; }
+  }
+}
+// once-per-second (folded into the existing fps tick): pill visibility + the
+// spatial/time predicates, testing ONLY still-locked entries (O(1), no new timer).
+function achTick() {
+  if (achInert || !ui.achPill) return;
+  ui.achPill.classList.toggle('hidden', !!coachState || loadingVisible); // hidden while the coach runs
+  if (!achUnlocked.spelunker && player.pos.y < SEA - 6) achUnlock('spelunker');
+  if (!achUnlocked.treetop &&
+      player.pos.y >= terrainHeightAt(Math.floor(player.pos.x), Math.floor(player.pos.z)) + 8) {
+    achUnlock('treetop');
+  }
+  if (!achUnlocked.night_owl) {
+    const frac = (worldTime / DAY_LEN) % 1; // midnight = 0.75; the 1s poll can't miss a ±0.03 window
+    if (frac > 0.72 && frac < 0.78) achUnlock('night_owl');
+  }
+}
+function achTogglePanel(force) {
+  if (!ui.achPanel) return;
+  const want = force === undefined ? ui.achPanel.classList.contains('hidden') : !!force;
+  if (!want) { ui.achPanel.classList.add('hidden'); return; }
+  ui.achPanel.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'achTitle';
+  title.textContent = 'Field Guide · ' + achCount() + '/' + ACHIEVEMENTS.length;
+  ui.achPanel.appendChild(title);
+  let hintsLeft = 2; // unlocked names + the NEXT 2 locked hints; the rest stay '???'
+  for (const a of ACHIEVEMENTS) {
+    const row = document.createElement('div');
+    if (achUnlocked[a.id]) {
+      row.className = 'achGot';
+      row.textContent = '🏅 ' + a.name;
+    } else if (hintsLeft > 0) {
+      hintsLeft--;
+      row.className = 'achHint';
+      row.textContent = '🔒 ' + a.name + ' — ' + a.hint;
+    } else {
+      row.className = 'achLock';
+      row.textContent = '🔒 ???';
+    }
+    ui.achPanel.appendChild(row);
+  }
+  ui.achPanel.classList.remove('hidden');
+}
+function achInit() {
+  achInert = !!(voxBootParams.headless || voxBootParams.console); // mirror the coach gates exactly
+  try {
+    const o = JSON.parse(localStorage.getItem(ACH_KEY) || 'null');
+    if (o && typeof o === 'object' && !Array.isArray(o)) {
+      for (const a of ACHIEVEMENTS) if (o[a.id] === true) achUnlocked[a.id] = true;
+    }
+  } catch (e) { /* private mode: degrade to RAM-only */ }
+  if (achInert) return; // headless/console: zero DOM writes, zero listeners, pill stays hidden
+  achRenderPill();
+  if (ui.achPill) {
+    ui.achPill.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      achTogglePanel(); // never steals pointer lock (no exitPointerLock here)
+    });
+  }
+  if (ui.achPanel) ui.achPanel.addEventListener('click', () => achTogglePanel(false));
+}
+
 // ===== PERSISTENCE =====
 // ---------------------------------------------------------------------------
 // Save shape: { version, seed, playerPosition, edits } where edits is a sparse
@@ -2907,7 +3210,8 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
-      cameraMotion: cameraMotion, haptics: hapticsOn
+      cameraMotion: cameraMotion, haptics: hapticsOn,
+      fixedJoy: fixedJoy, lookSens: lookSens, invertY: invertY // touch comfort (cycle-9)
     }));
   } catch (e) { /* ignore */ }
 }
@@ -2925,6 +3229,11 @@ function loadSettings() {
       if (typeof s.autoQuality === 'boolean') autoQuality = s.autoQuality; // older blobs default by IS_TOUCH
       if (typeof s.cameraMotion === 'boolean') cameraMotion = s.cameraMotion; // older blobs default ON / reduced-motion
       if (typeof s.haptics === 'boolean') hapticsOn = s.haptics; // older blobs default ON for touch (IS_TOUCH)
+      // TOUCH COMFORT (cycle-9): same typeof guards as autoQuality/cameraMotion/haptics so
+      // old blobs fall back cleanly (floating stick, 1.0 sens, non-inverted).
+      if (typeof s.fixedJoy === 'boolean') fixedJoy = s.fixedJoy;
+      if (Number.isFinite(s.lookSens)) lookSens = Math.max(0.4, Math.min(2, s.lookSens));
+      if (typeof s.invertY === 'boolean') invertY = s.invertY;
     }
   } catch (e) { /* ignore */ }
 }
@@ -3500,6 +3809,68 @@ function nbEditFencePass(from) {
   b.tokens -= 1;
   return true;
 }
+// --- SPATIAL FENCE (cycle-9: the radius bound cycle-6 explicitly punted) -----------
+// Rate-limit + ceiling (above) cannot stop a PATIENT attacker: 1 edit/sec runs
+// unthrottled forever and can methodically delete a distant base. The fence bounds
+// every remote edit to a generous Chebyshev box (NB_EDIT_RADIUS=96, ~6 chunks — far
+// past REACH=6 and any reasonable build; y deliberately ignored) around the SENDER's
+// last-known anchors: their player position (nbLastPos, ~1s heartbeat) AND each of
+// their own twins' positions (nbBotPos, ~0.15s bot pos stream). Bot anchors are
+// load-bearing, not a courtesy: a sender's bots legally roam/edit out to renderDist+2
+// chunks (~111-175 blocks) from their owner — far past a player-only box — and a
+// headless console-twin tab suppresses nbSendPos entirely (its twin's pos stream IS
+// its presence), so a player-only fence silently dropped legitimate twin edits at
+// every receiver while the sender persisted them locally: silent world divergence.
+// Both anchor kinds ride the same identity-bound wire (nbHostOnData binds
+// env.from_rappid at hello), so neither is more spoofable than the other. The box
+// TRAVELS with the heartbeats, so far-traveling neighbors (and their twins) are
+// never fenced out of their own surroundings; on heartbeat
+// lapse the last-known pos is kept with NO expiry (never reject-all). A sender who has
+// never sent pos falls back to nbSpawnRef — the local player's pos captured when the
+// session began (host: at kite-up; joiner: at snapshot-apply) — so a pos-withholding
+// client stays confined to the join area. Local/solo identity is NEVER fenced (same
+// rule as nbEditFencePass). Violations only ever DROP (identical drop path to the rate
+// limiter: nbEditLastAccepted stays false, so the host neither applies NOR relays) —
+// never a disconnect, never a per-drop toast. Wire shape unchanged.
+const NB_EDIT_RADIUS = 96;     // Chebyshev half-width of the allowed box (~6 chunks)
+const nbLastPos = new Map();   // from_rappid -> {x,z}; cleared in nbResetSession alongside nbEditRx
+const nbBotPos = new Map();    // from_rappid -> Map(botName -> {x,z,t}); the sender's own twins
+                               // anchor the box too (≤VF_MAX_BOTS/sender, LRU; cleared with nbLastPos)
+let nbSpawnRef = null;         // {x,z} captured at session start; fallback for pos-less senders
+let nbEditGeoDrops = 0;        // observability: surfaced as editGeoDrops in vox('status')
+let nbEditGeoLastEv = 0;       // throttle: at most one voxEvent('edit_geofence')/sec
+function nbEditGeoPass(from, x, z) {
+  if (!from || from === Neighborhood.rappid) return true; // local/solo: never fenced
+  const lp = nbLastPos.get(from) || nbSpawnRef;
+  const bm = nbBotPos.get(from); // the sender's own twins anchor the box too (see header comment)
+  if (!lp && !(bm && bm.size)) return true; // no reference at all (no live session?) — never reject-all
+  if (lp && Math.max(Math.abs(x - lp.x), Math.abs(z - lp.z)) <= NB_EDIT_RADIUS) return true;
+  if (bm) {
+    for (const bp of bm.values()) {
+      if (Math.max(Math.abs(x - bp.x), Math.abs(z - bp.z)) <= NB_EDIT_RADIUS) return true;
+    }
+  }
+  nbEditGeoDrops++;
+  const now = performance.now();
+  if (now - nbEditGeoLastEv >= 1000) {
+    nbEditGeoLastEv = now;
+    voxEvent('edit_geofence', { x, z }); // throttled so a flood can't spam the ring buffer
+  }
+  return false;
+}
+// bot-act mirror: drop individual dig/place ops carrying EXPLICIT x/z outside the
+// claimant's box. Coordless ops act at the bot's own position (already bounded by
+// REACH/pathing); goto/chat/remember/waypoint/look/etc. pass untouched. String coords
+// are coerced for the CHECK only (vfExecuteOp re-coerces for execution).
+function nbGeoFilterBotActs(actions, from) {
+  if (!from || from === Neighborhood.rappid) return actions;
+  return actions.filter((a) => {
+    if (!a || typeof a !== 'object' || (a.op !== 'dig' && a.op !== 'place')) return true;
+    const ax = Number(a.x), az = Number(a.z);
+    if (!Number.isFinite(ax) || !Number.isFinite(az)) return true; // coordless: bot-position-bound
+    return nbEditGeoPass(from, ax, az);
+  });
+}
 nbRegisterOp('edit', (p, env) => {
   nbEditLastAccepted = false; // default: refused (the relay won't forward unless we accept)
   if (!Number.isInteger(p.x) || !Number.isInteger(p.y) || !Number.isInteger(p.z)) return;
@@ -3507,6 +3878,10 @@ nbRegisterOp('edit', (p, env) => {
   const from = env && env.from_rappid;
   // (1) RATE LIMIT: drop the edit (no apply, no relay) if this sender is over budget
   if (!nbEditFencePass(from)) return;
+  // (1.5) SPATIAL FENCE: Chebyshev-bound to the sender's last-known pos (y ignored).
+  //       Identical drop path to the rate limiter: nbEditLastAccepted stays false,
+  //       so a violating edit is neither applied locally NOR relayed to other leaves.
+  if (!nbEditGeoPass(from, p.x, p.z)) return;
   // (2) HARD CEILING: a NEW edit key past MAX_EDITS is refused (an overwrite is always fine,
   //     since replacing an existing key never grows the count). Mirrors validateSave's gate.
   if (!Object.prototype.hasOwnProperty.call(edits, p.x + ',' + p.y + ',' + p.z) &&
@@ -3776,6 +4151,8 @@ async function nbFlyKite() {
   Neighborhood.link = nbBaseUrl() + '?join=' + encodeURIComponent(peer.id) +
     (brokerIdx ? '&b=' + brokerIdx : '') + '#k=' + Neighborhood.token;
   nbShowKitedUi();
+  nbSpawnRef = { x: player.pos.x, z: player.pos.z }; // SPATIAL FENCE: session-start fallback ref
+  achUnlock('neighbor'); // FIELD GUIDE: flying the kite counts (no-op when headless/already unlocked)
   addChatMsg(null, 'Kite is flying — neighbors can Scan-to-Join', null, true);
   toast('Kited! Share the QR or link');
   peer.on('connection', (conn) => nbHostOnConnection(conn));
@@ -4105,6 +4482,9 @@ function nbApplySnapshot(p, env) {
                  Number.isFinite(p.spawn.z)) ? p.spawn : null;
   applyWorldState(p.seed, ed,
     spawn ? { x: spawn.x, y: spawn.y + 0.5, z: spawn.z, yaw: 0, pitch: 0, fly: false } : null);
+  // SPATIAL FENCE: the joiner's session-start fallback ref = where we landed in the
+  // host's world (re-captured on every snapshot so a host world-replace stays sane).
+  nbSpawnRef = { x: player.pos.x, z: player.pos.z };
   if (Array.isArray(p.players)) {
     for (const pl of p.players) {
       if (!pl || typeof pl !== 'object' || pl.rappid === Neighborhood.rappid) continue;
@@ -4123,6 +4503,7 @@ function nbApplySnapshot(p, env) {
     addChatMsg(null, 'You joined the neighborhood — the host’s world replaced your view. ' +
       'Your solo world is untouched; this session saves separately.', null, true);
     toast('Joined the neighborhood! (solo world untouched)');
+    achUnlock('neighbor'); // FIELD GUIDE: join success edge (no-op when headless/already unlocked)
     // ONBOARD: name the host — the welcome/snapshot's first roster entry IS the host
     const hostPl = Array.isArray(p.players) && p.players.length ? p.players[0] : null;
     if (hostPl && typeof hostPl.name === 'string') {
@@ -4190,6 +4571,9 @@ function nbResetSession() {
   Neighborhood.pings.clear();
   nbPingLastRx.clear();
   nbEditRx.clear();   // ANTI-GRIEF: per-sender edit token buckets start clean each session
+  nbLastPos.clear();  // SPATIAL FENCE: last-known sender positions die with the session
+  nbBotPos.clear();   // SPATIAL FENCE: per-sender bot anchors die with it too
+  nbSpawnRef = null;  // SPATIAL FENCE: the session-start fallback ref dies with the session
   vfOnSessionReset(); // VOXELFLAYER: drop remote twin visuals + claims with the session
   Neighborhood.conns.clear();
   if (Neighborhood.peer) { try { Neighborhood.peer.destroy(); } catch (e) {} }
@@ -5211,6 +5595,26 @@ function vfExecuteOp(bot, a) {
         }
       }
       break;
+    case 'find': {
+      // ORE PERCEPTION (cycle-9): {op:'find', block, maxDistance?, count?} — the preamble
+      // above already coerced block/blockId via voxBlockIdFrom (names, string ids, ints all
+      // work). Reports via bot.chat — which lands in recentChat via the vfNotifyChat fan-in,
+      // so the SENDING brain sees its own result next turn — plus a voxEvent. A bad/unknown
+      // block chats 'unknown block'; this case never throws.
+      const fid = Number.isInteger(a.blockId) ? a.blockId : null;
+      if (fid === null || !BLOCK_NAMES[fid]) { bot.chat('unknown block'); break; }
+      const maxD = Math.max(1, Math.min(16, Math.floor(Number(a.maxDistance) || 12)));
+      const cnt = Math.max(1, Math.min(6, Math.floor(Number(a.count) || 3)));
+      const hits = bot.findBlocks({ matching: fid, maxDistance: maxD, count: cnt });
+      if (hits.length) {
+        bot.chat('found ' + hits.length + ' ' + BLOCK_NAMES[fid] + ': ' +
+          hits.map((h) => '(' + h.x + ',' + h.y + ',' + h.z + ')').join(' '));
+      } else {
+        bot.chat('no ' + BLOCK_NAMES[fid] + ' within ' + maxD);
+      }
+      voxEvent('find', { name: bot.name, block: BLOCK_NAMES[fid], count: hits.length });
+      break;
+    }
     case 'dig': vfDigSmart(bot, a); break;
     case 'place':
       if (Number.isFinite(a.x) && Number.isFinite(a.y) && Number.isFinite(a.z)) {
@@ -5325,7 +5729,39 @@ function vfFaceName(nx, ny, nz) {
 const VF_OBS_NEAR_N = 6;      // cap nearby players/bots to the N closest
 const VF_OBS_NEAR_R2 = 64 * 64; // within ~64 blocks (squared) of the subject
 const VF_OBS_PING_R2 = 64 * 64; // pings within ~64 blocks
+// ORE PERCEPTION (cycle-9): the cycle-4 ores were invisible to twins — obs.notable
+// surfaces the nearest few so an LLM brain can decide to mine without a map call.
+const VF_NOTABLE_IDS = [B.COAL_ORE, B.IRON_ORE, B.GOLD_ORE];
+const VF_NOTABLE_R = 10;      // bounded scan radius around the subject (cube side 21)
 function vfNameOf(id) { return id === B.AIR ? 'Air' : (BLOCK_NAMES[id] || 'Block'); }
+
+// Pure bounded block scan shared by obs.notable and vox('find'). Mirrors bot.findBlocks'
+// bounds EXACTLY (y clamped to [0, WORLD_H-1], cube of side 2r+1 centered one block above
+// the feet) and returns nearest-first [{x,y,z,id,d2}]. bot.findBlocks itself is untouched
+// (protected layer); this is a sibling that also reports the matched id. Sub-ms at r=10.
+function vfScanBlocks(ent, matchFn, maxD, count) {
+  const bx = Math.floor(ent.pos.x), by = Math.floor(ent.pos.y + 1), bz = Math.floor(ent.pos.z);
+  const found = [];
+  const yMin = Math.max(0, by - maxD), yMax = Math.min(WORLD_H - 1, by + maxD);
+  for (let y = yMin; y <= yMax; y++) {
+    for (let z = bz - maxD; z <= bz + maxD; z++) {
+      for (let x = bx - maxD; x <= bx + maxD; x++) {
+        const id = getBlock(x, y, z);
+        if (id === B.AIR) continue;
+        let ok = false;
+        try { ok = !!matchFn(id); } catch (e) { ok = false; }
+        if (ok) {
+          found.push({
+            x, y, z, id,
+            d2: (x - bx) * (x - bx) + (y - by) * (y - by) + (z - bz) * (z - bz)
+          });
+        }
+      }
+    }
+  }
+  found.sort((a, b) => a.d2 - b.d2);
+  return found.slice(0, count);
+}
 
 function vfObservation(bot) {
   const e = bot.ent;
@@ -5449,6 +5885,18 @@ function vfObservation(bot) {
     };
   } catch (err) { memory = vfFreshMemory(); }
 
+  // (6) notable: nearest ore blocks within VF_NOTABLE_R, up to 6, nearest-first. STRICTLY
+  // ADDITIVE and ALWAYS present (empty array when none) so the shape is stable; integers
+  // only, bounded — CDP returnByValue-safe. Same y-clamped bounds as bot.findBlocks.
+  let notable = [];
+  try {
+    notable = vfScanBlocks(e, (id) => VF_NOTABLE_IDS.includes(id), VF_NOTABLE_R, 6)
+      .map((f) => ({
+        block: BLOCK_NAMES[f.id], x: f.x, y: f.y, z: f.z,
+        dist: Math.round(Math.sqrt(f.d2))
+      }));
+  } catch (err) { notable = []; }
+
   return {
     you: {
       name: bot.name,
@@ -5464,6 +5912,7 @@ function vfObservation(bot) {
     groundProfile,  // ADD (3): {standingOn, headroom, drop, aheadDrop}
     aheadStrip,     // ADD (4): [+1,+2,+3] facing strip at eye level
     memory,         // ADD (5): bounded { facts(<=8), waypoints, stats } — persists for twins
+    notable,        // ADD (6, cycle-9): nearest ores {block,x,y,z,dist}[] (<=6, always present)
     groundBelow,    // backward-compat: alias of groundProfile.standingOn (kept this cycle)
     blocksAhead,    // backward-compat / DEPRECATED (see note above; kept this cycle)
     recentChat: vfRecentChat.slice(-5),
@@ -5520,6 +5969,7 @@ async function vfTwinThink(twin) {
     '[{"op":"goto","x":1,"y":40,"z":2},{"op":"goto","waypoint":"home"},{"op":"dig","x":0,"y":39,"z":2},' +
     '{"op":"place","x":0,"y":40,"z":2,"blockId":3},{"op":"chat","text":"hi"},' +
     '{"op":"remember","key":"base","value":"x12 z-4"},{"op":"waypoint","name":"home","x":12,"y":40,"z":-4},' +
+    '{"op":"find","block":"Iron Ore"},' +
     '{"op":"look","x":4,"y":41,"z":2},{"op":"wander"},{"op":"follow","name":"Ada"},{"op":"stop"}]';
   let raw = null;
   try {
@@ -5693,7 +6143,40 @@ function vfRemoveRemoteBot(k) {
 // extend the phase-2 'pos' op: payloads flagged with .bot render as remote twins
 const vfBasePosHandler = Neighborhood.opHandlers['pos'];
 nbRegisterOp('pos', (p, env, fromEntry, sealed) => {
-  if (p && p.bot) { vfRemoteBotPos(p, env); return; }
+  if (p && p.bot) {
+    // SPATIAL FENCE: a sender's bots are fence anchors too (nbBotPos — kept SEPARATE from
+    // nbLastPos, so a twin still never moves its OWNER's player box). Bots legally edit out
+    // to renderDist+2 chunks from their owner (past NB_EDIT_RADIUS of the player), and a
+    // headless console-twin tab suppresses nbSendPos entirely — without bot anchors those
+    // edits were applied+persisted at the sender but silently dropped at the host and every
+    // leaf (world divergence). Same identity-bound wire as player pos (nbHostOnData binds
+    // env.from_rappid at hello), capped at VF_MAX_BOTS anchors/sender with LRU eviction so
+    // a hostile sender claims no more boxes than a real fleet. Tracked even when the avatar
+    // is scene-less (headless) or cap/rate-refused in vfRemoteBotPos — anchoring is not visual.
+    if (env && env.from_rappid && env.from_rappid !== Neighborhood.rappid &&
+        Number.isFinite(p.x) && Number.isFinite(p.z)) {
+      let bm = nbBotPos.get(env.from_rappid);
+      if (!bm) { bm = new Map(); nbBotPos.set(env.from_rappid, bm); }
+      const bn = nbCleanName(p.bot);
+      if (!bm.has(bn) && bm.size >= VF_MAX_BOTS) {
+        let oldK = null, oldT = Infinity; // at cap: evict the stalest anchor (a cycled-out bot)
+        for (const [k2, v2] of bm) { if (v2.t < oldT) { oldT = v2.t; oldK = k2; } }
+        if (oldK !== null) bm.delete(oldK);
+      }
+      bm.set(bn, { x: p.x, z: p.z, t: performance.now() });
+    }
+    vfRemoteBotPos(p, env);
+    return;
+  }
+  // SPATIAL FENCE: track each sender's last-known position so the edit-fence box travels
+  // with their ~1s pos heartbeat. NON-BOT payloads only (bot pos anchors nbBotPos above), so a
+  // twin's broadcast position can never move its OWNER's fence box. Because the host
+  // relays pos to every leaf, nbLastPos populates on host AND leaves — the fence works
+  // at every receiver. Never updated for our own echoes.
+  if (env && env.from_rappid && env.from_rappid !== Neighborhood.rappid &&
+      p && Number.isFinite(p.x) && Number.isFinite(p.z)) {
+    nbLastPos.set(env.from_rappid, { x: p.x, z: p.z });
+  }
   if (vfBasePosHandler) vfBasePosHandler(p, env, fromEntry, sealed);
 });
 // extend 'bye': a departing neighbor takes their twins and claims with them
@@ -5739,7 +6222,10 @@ nbRegisterOp('bot-act', (p, env) => {
   if (vfClaims.get(bn) !== env.from_rappid) return; // only the claim holder drives
   const bot = vfBots.find((b) => b.name === bn);
   if (!bot) return; // not our bot — its owner executes
-  vfExecuteOps(bot, p.actions);
+  // SPATIAL FENCE mirror: drop individual dig/place ops with explicit coords outside the
+  // CLAIMANT's 96-box (their last-known pos / spawn ref) before execution. Coordless ops
+  // and goto/chat/remember/waypoint/look/etc. pass untouched. Local claims are never fenced.
+  vfExecuteOps(bot, nbGeoFilterBotActs(p.actions, env.from_rappid));
 });
 
 // outbound claim/act for THIS peer driving a bot that lives on another peer
@@ -6076,6 +6562,7 @@ function voxCmdStatus() {
     },
     kited: Neighborhood.enabled && Neighborhood.role === 'kite',
     neighbors: Neighborhood.avatars.size,
+    editGeoDrops: nbEditGeoDrops, // SPATIAL FENCE: operators can spot false positives here
     link: Neighborhood.link || null,
     tetherUrl: voxTetherUrl,
     cloudUrl: voxCloudUrl || null,
@@ -6116,7 +6603,16 @@ function voxCmdMap(radius, ySlice) {
   const subj = voxBot();
   const ent = subj ? subj.ent : player;
   const cx = Math.floor(ent.pos.x), cz = Math.floor(ent.pos.z);
-  const CHARS = { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~' };
+  // ORE GLYPHS (cycle-9): c/i/o collide with no existing glyph (g d s S w L ~ . P T B N).
+  // The ore entries exist ONLY in slice mode: cave-mouth shafts can leave the cave FLOOR
+  // as a column's topmost block, and seedOres (running after carveCaves, band [2..h-4])
+  // can turn that floor into ore — measured 13 of 1,730,560 columns across 40 seeds. A
+  // shared map would render those 'c'/'i'/'o' where HEAD rendered '?', breaking the
+  // cycle-2 non-slice byte-identity guarantee; gating on `sliced` keeps the non-slice
+  // text and return JSON byte-identical (ids 8-10 fall through to '?' exactly as before).
+  const CHARS = sliced
+    ? { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~', 8: 'c', 9: 'i', 10: 'o' }
+    : { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~' };
   const rows = [];
   for (let z = cz - r; z <= cz + r; z++) {
     const row = [];
@@ -6154,7 +6650,8 @@ function voxCmdMap(radius, ySlice) {
     '        P player  T console twin  B bot  N neighbor';
   if (sliced) {
     text += '\n        slice y=' + sliceY +
-      ": '.' = open air at this height (tunnels/caverns); entities marked only within +/-2 of the slice";
+      ": '.' = open air at this height (tunnels/caverns); entities marked only within +/-2 of the slice" +
+      '\n        c coal  i iron  o gold';
   }
   const out = { ok: true, text, center: { x: cx, z: cz }, radius: r, subject: subj ? subj.name : 'player' };
   if (sliced) out.slice = sliceY; // the ONLY return-shape change, and only in slice mode
@@ -6290,6 +6787,24 @@ function voxCmdBlock(x, y, z) {
   if (![x, y, z].every(Number.isFinite)) return { ok: false, error: 'usage: block x y z' };
   const id = getBlock(x, y, z);
   return { ok: true, x, y, z, id, name: id === B.AIR ? 'Air' : (BLOCK_NAMES[id] || 'Block') };
+}
+
+// ORE PERCEPTION (cycle-9): 'find <block> [r]' — nearest blocks of a type around the
+// subject (console twin, else player). Multi-word block names work ('find Gold Ore 8');
+// a trailing integer is the radius. Same bounded scan obs.notable uses; r clamped 1..16.
+function voxCmdFind(...args) {
+  if (!voxReady()) return voxNotReady('world still booting');
+  args = args.map((a) => String(a)).filter((s) => s.trim() !== '');
+  if (!args.length) return { ok: false, error: 'usage: find <block> [r]' };
+  let r = 12;
+  if (args.length > 1 && /^\d+$/.test(args[args.length - 1])) r = parseInt(args.pop(), 10);
+  r = Math.max(1, Math.min(16, r));
+  const id = voxBlockIdFrom(args.join(' ').trim());
+  if (id === null || !BLOCK_NAMES[id]) return { ok: false, error: 'unknown block' };
+  const subj = voxResolveSubject();
+  const found = vfScanBlocks(subj.ent, (bid) => bid === id, r, 6)
+    .map((f) => ({ x: f.x, y: f.y, z: f.z }));
+  return { ok: true, block: BLOCK_NAMES[id], radius: r, subject: subj.name, found };
 }
 
 function voxCmdGoto(x, y, z) {
@@ -6569,6 +7084,7 @@ const VOX_COMMANDS = {
   dig:       { usage: 'dig x y z', desc: 'break a block (a twin walks closer if out of reach)', fn: voxCmdDig },
   place:     { usage: 'place x y z <blockName|id>', desc: 'place a block (Grass/Dirt/Stone/Sand/Wood/Leaves)', fn: voxCmdPlace },
   block:     { usage: 'block x y z', desc: 'query a block', fn: voxCmdBlock },
+  find:      { usage: 'find <block> [r=12]', desc: 'nearest blocks of a type around the subject (r<=16, up to 6) — e.g. find Gold Ore', fn: voxCmdFind },
   goto:      { usage: 'goto x y z', desc: 'pathfind via the existing bot A* (console twin)', fn: voxCmdGoto },
   say:       { usage: 'say <text...>', desc: 'neighborhood chat as the console twin (else as player)', fn: voxCmdSay, rawRest: true },
   ping:      { usage: 'ping [here|look|danger]', desc: 'waypoint ping at the crosshair target — neighbors see the marker for 8s (solo: local marker)', fn: voxCmdPing },
@@ -6845,12 +7361,20 @@ function main() {
   ui.chkCameraMotion.checked = cameraMotion;
   ui.chkHaptics.checked = hapticsOn;
   if (IS_TOUCH) ui.rowHaptics.classList.remove('hidden'); // Haptics setting is touch-only
+  // TOUCH COMFORT (cycle-9): joystick row is touch-only (mirrors #rowHaptics);
+  // look sensitivity + invert-Y show on desktop too (they scale the mouse as well).
+  ui.chkFixedJoy.checked = fixedJoy;
+  if (IS_TOUCH) ui.rowFixedJoy.classList.remove('hidden');
+  ui.lookSensInput.value = String(lookSens);
+  ui.lookSensVal.textContent = lookSens.toFixed(2);
+  ui.chkInvertY.checked = invertY;
   updateFog();
   buildHotbar();
   initDesktopInput();
   initTouchInput();
   initUiButtons();
   initCoach(); // ONBOARD: skip-button wiring (the coach itself starts after loading)
+  achInit(); // FIELD GUIDE: load unlocks + wire the pill (inert under headless/console)
   initNeighborhood();
   initVoxelflayer(); // VOXELFLAYER: twin console, brains, window.voxelflayer
   if (IS_TOUCH) ui.touchUI.classList.remove('hidden');
@@ -6970,6 +7494,7 @@ function main() {
       fpsVal = Math.round(fpsFrames / fpsAcc);
       fpsFrames = 0; fpsAcc = 0;
       qualityGovernorTick(now); // adaptive resolution: rides the existing 1s fps tick
+      achTick(); // FIELD GUIDE: pill visibility + spatial/time predicates (locked-only, O(1))
     }
     hudTimer += dt;
     if (hudVisible && hudTimer > 0.25) { hudTimer = 0; updateHud(dayFrac); }
