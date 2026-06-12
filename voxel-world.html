@@ -328,9 +328,11 @@ window.rapp &mdash; the String (rapp-neighborhood-protocol/1.0)
 
 Twin-chat bot ops (phase-2 dispatcher, payload.app = "voxel-world/1.0"):
   { op:"bot-claim", botName }    // one controller per bot; the host arbitrates
-  { op:"bot-act", botName, actions:[ {op:"goto",x,y,z}, {op:"dig",x,y,z},
-      {op:"place",x,y,z,blockId}, {op:"chat",text}, {op:"look",x,y,z},
+  { op:"bot-act", botName, actions:[ {op:"goto",x,y,z}, {op:"goto",waypoint:"home"},
+      {op:"dig",x,y,z}, {op:"place",x,y,z,blockId}, {op:"chat",text}, {op:"look",x,y,z},
+      {op:"remember",key,value}, {op:"waypoint",name,x,y,z},
       {op:"wander"}, {op:"follow",name}, {op:"stop"} ] }
+  Memory persists for TWINS across saves: obs.memory = { facts, waypoints, stats } (capped).
   { op:"bot-release", botName }
   Bot positions ride the existing "pos" op with a bot flag, so neighbors SEE the twins playing.
 
@@ -3321,9 +3323,57 @@ nbRegisterOp('pos', (p, env) => {
   if (Number.isFinite(p.yaw)) av.target.yaw = p.yaw;
   if (Number.isFinite(p.pitch)) av.target.pitch = p.pitch;
 });
-nbRegisterOp('edit', (p) => {
+// --- ANTI-GRIEF EDIT FENCE (per-sender rate limit + MAX_EDITS ceiling) ----------
+// Cycle-6: the lone uncapped world-mutation ingress. The old 'edit' handler validated
+// only integer coords + blockId<=MAX_BLOCK_ID, then applied with NO rate limit and NO
+// live ceiling — so a single bad peer could flood every neighbor's persisted world and
+// exhaust localStorage (the MAX_EDITS ceiling was enforced only at import/snapshot via
+// validateSave). Cited as the single most-deferred wish in cycles 1-5.
+//
+// PLACEMENT: a small receive-side guard the 'edit' handler calls BEFORE setBlock/recordEdit.
+// (1) RATE LIMIT — a per-sender token bucket (model: nbPingLastRx + vfRemoteNewRx):
+//     ~30 tokens/sec sustained, 60 burst ceiling. Generous: well above any human tower-
+//     spam or bot edit cadence (which already coalesces to one remesh/chunk/frame). On
+//     overflow the edit is DROPPED (neither applied locally nor relayed). Local/solo
+//     identity (from_rappid === Neighborhood.rappid, or no rappid) is NEVER fenced —
+//     local edits ride nbOnLocalEdit, not this op, but the bypass is belt-and-suspenders.
+// (2) HARD CEILING — before recordEdit/setBlock, if this edit would ADD a new edit key
+//     (not overwrite an existing one) and edits is already at MAX_EDITS, drop it. Same
+//     MAX_EDITS=250000 single source of truth validateSave uses; an overwrite never grows
+//     the key count, so it's always allowed.
+// (3) HOST RELAY — the host runs nbDispatch (the edit handler, hence this fence) BEFORE
+//     the hub-relay block. The handler stamps nbEditLastAccepted; the relay reads it and
+//     skips a refused edit, so a dropped edit is neither applied locally NOR forwarded to
+//     other leaves. Headless host enforces identically (no UI dependency).
+const NB_EDIT_RATE = 30;        // sustained tokens/sec refill
+const NB_EDIT_BURST = 60;       // burst ceiling (bucket capacity)
+const nbEditRx = new Map();     // from_rappid -> { tokens, t } token bucket (cleared in nbResetSession)
+let nbEditLastAccepted = false; // host relay reads this: was the last dispatched edit applied?
+function nbEditFencePass(from) {
+  // local/solo edits are never fenced (identity match OR no neighborhood identity yet)
+  if (!from || from === Neighborhood.rappid) return true;
+  const now = performance.now();
+  let b = nbEditRx.get(from);
+  if (!b) { b = { tokens: NB_EDIT_BURST, t: now }; nbEditRx.set(from, b); }
+  // refill: NB_EDIT_RATE tokens/sec since last touch, capped at the burst ceiling
+  b.tokens = Math.min(NB_EDIT_BURST, b.tokens + ((now - b.t) / 1000) * NB_EDIT_RATE);
+  b.t = now;
+  if (b.tokens < 1) return false; // bucket empty — DROP (do not apply, do not relay)
+  b.tokens -= 1;
+  return true;
+}
+nbRegisterOp('edit', (p, env) => {
+  nbEditLastAccepted = false; // default: refused (the relay won't forward unless we accept)
   if (!Number.isInteger(p.x) || !Number.isInteger(p.y) || !Number.isInteger(p.z)) return;
   if (!Number.isInteger(p.blockId) || p.blockId < 0 || p.blockId > MAX_BLOCK_ID) return;
+  const from = env && env.from_rappid;
+  // (1) RATE LIMIT: drop the edit (no apply, no relay) if this sender is over budget
+  if (!nbEditFencePass(from)) return;
+  // (2) HARD CEILING: a NEW edit key past MAX_EDITS is refused (an overwrite is always fine,
+  //     since replacing an existing key never grows the count). Mirrors validateSave's gate.
+  if (!Object.prototype.hasOwnProperty.call(edits, p.x + ',' + p.y + ',' + p.z) &&
+      Object.keys(edits).length >= MAX_EDITS) return;
+  nbEditLastAccepted = true; // accepted: applied here AND eligible for hub relay
   nbApplyRemoteEdit(p.x, p.y, p.z, p.blockId);
 });
 nbRegisterOp('chat', (p, env) => {
@@ -3658,8 +3708,13 @@ async function nbHostOnData(entry, wire) {
   // wire verbatim. Reject BEFORE both local dispatch and the hub relay.
   if (env.from_rappid !== entry.rappid) return;
   nbDispatch(env, entry, sealed);
-  // hub relay (§10): forward the ORIGINAL wire to every other neighbor
-  if (p.op === 'pos' || p.op === 'edit' || p.op === 'chat' || p.op === 'ping' ||
+  // hub relay (§10): forward the ORIGINAL wire to every other neighbor.
+  // ANTI-GRIEF: a rate-limited / ceiling-refused 'edit' was dropped by nbDispatch (the edit
+  // handler clears nbEditLastAccepted by default and sets it only when the edit is applied),
+  // so it must NOT be forwarded to other leaves either. Every other relayed op is unchanged.
+  if (p.op === 'edit') {
+    if (nbEditLastAccepted) nbBroadcastWire(wire, entry.conn.peer); // accepted -> relay; refused -> drop
+  } else if (p.op === 'pos' || p.op === 'chat' || p.op === 'ping' ||
       p.op === 'bot-claim' || p.op === 'bot-act' || p.op === 'bot-release') {
     nbBroadcastWire(wire, entry.conn.peer);
   }
@@ -3751,6 +3806,25 @@ async function nbJoin(link) {
   return nbJoinWith(peerId, token, broker);
 }
 
+// JOINER WATCHDOG TUNING (cycle-6): mirrors nbCreatePeer's proven `settled` discipline.
+// The host path walks NB_BROKER_CONFIGS with a 12s/broker timeout + fallback chain; the
+// joiner path used to create a SINGLE Peer at the link's &b= broker with NO timeout and NO
+// fallback — so a slow broker or a gone host left the QR scan-to-join flow stuck on
+// 'connecting…' forever with zero error and zero recovery. Now: a 13s primary watchdog
+// (broker never opens) + an 8s second-stage watchdog (broker opened but host never answered),
+// both cleared the instant the sealed handshake's conn 'open' fires, plus a SINGLE alternate-
+// broker retry (the joiner's network may block the link's broker, or the host may have fallen
+// back). Cited in cycles 1, 3, 5.
+const NB_JOIN_WD_MS = 13000;       // primary: broker peer never opens
+const NB_JOIN_STAGE2_MS = 8000;    // secondary: broker open, but host (conn) never opens
+// Broker-unreachable PeerJS error types warrant the single alternate-broker retry. A clean
+// 'peer-unavailable' (a REACHABLE broker telling us the host is gone) does NOT — falling back
+// to a pinned broker on a host-gone signal would just chase a host that isn't there.
+const NB_JOIN_BROKER_ERRS = new Set([
+  'network', 'server-error', 'socket-error', 'socket-closed',
+  'browser-incompatible', 'ssl-unavailable', 'webrtc'
+]);
+
 async function nbJoinWith(peerId, token, brokerIdx) {
   if (Neighborhood.enabled) { toast('Already in a neighborhood — leave it first'); return false; }
   if (!(await nbEnsureLibs())) return false;
@@ -3762,32 +3836,90 @@ async function nbJoinWith(peerId, token, brokerIdx) {
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
     return false;
   }
-  const peer = nbNewPeerAt(NB_BROKER_CONFIGS[brokerIdx] !== undefined ? brokerIdx : 0);
-  Neighborhood.peer = peer;
-  Neighborhood.hostPeerId = peerId;
-  peer.on('error', (err) => {
-    const t = err && err.type ? err.type : String(err);
-    if (!Neighborhood.enabled) {
+  const linkIdx = NB_BROKER_CONFIGS[brokerIdx] !== undefined ? brokerIdx : 0;
+  let triedAlternate = false; // single-alternate guard: at most ONE fallback, never a storm
+
+  // attempt(): create a Peer at one broker index with the full watchdog discipline. Re-runs
+  // exactly once on the OTHER broker for a broker-unreachable failure (reusing the already-
+  // derived Neighborhood.key/token — only the Peer is re-created at the alternate index).
+  const attempt = (idx) => {
+    const peer = nbNewPeerAt(idx);
+    Neighborhood.peer = peer;
+    Neighborhood.hostPeerId = peerId;
+    let settled = false;     // copied verbatim from nbCreatePeer: every transition is idempotent
+    let wd = null, wd2 = null;
+    const clearWatchdogs = () => { if (wd) { clearTimeout(wd); wd = null; } if (wd2) { clearTimeout(wd2); wd2 = null; } };
+
+    // Fall back to the alternate broker ONCE; otherwise surface the terminal failure.
+    const failOrFallback = (canFallback) => {
+      if (settled) return;     // a connected/handshaken session must never be torn down here
+      settled = true;
+      clearWatchdogs();
+      // null out FIRST so any synchronous close/error from destroy() sees this peer as stale
+      // (the conn handlers gate on Neighborhood.peer === peer) and can't trip nbOnHostLost.
+      if (Neighborhood.peer === peer) Neighborhood.peer = null;
+      try { peer.destroy(); } catch (e) {} // dispose the failed peer so it can't keep retrying
+      if (canFallback && !triedAlternate && NB_BROKER_CONFIGS.length > 1) {
+        triedAlternate = true;
+        const altIdx = idx === 0 ? 1 : 0; // the OTHER NB_BROKER_CONFIGS entry
+        nbSetStatus('Scan-to-Join — trying an alternate broker…');
+        attempt(altIdx);
+        return;
+      }
       nbResetSession();
-      nbSetStatus('Could not reach the kite (' + t + ') — is it still flying?');
+      nbSetStatus('Could not reach the kite — is it still flying?');
       toast('Could not reach the kite');
-    } else {
-      nbSetStatus('Network hiccup: ' + t);
-    }
-  });
-  peer.on('open', () => {
-    const conn = peer.connect(peerId, { reliable: true });
-    Neighborhood.hostConn = conn;
-    conn.on('open', async () => {
-      await nbSendToHost(envelope('say', {
-        app: NB_APP_ID, op: 'hello', name: Neighborhood.name, skinColor: Neighborhood.color
-      }), true);
-      nbSetStatus('Sealed hello sent — waiting for the world snapshot…');
+    };
+
+    // PRIMARY watchdog: the broker peer never fired 'open' (nor a terminal error). Treat a
+    // never-firing broker as unreachable -> eligible for the single alternate-broker retry.
+    wd = setTimeout(() => failOrFallback(true), NB_JOIN_WD_MS);
+
+    peer.on('error', (err) => {
+      const t = err && err.type ? err.type : String(err);
+      if (settled) { // already connected (or already failed): only annotate live hiccups
+        if (Neighborhood.enabled) nbSetStatus('Network hiccup: ' + t);
+        return;
+      }
+      // broker-unreachable -> retry the alternate once; host-gone on a reachable broker -> fail.
+      failOrFallback(NB_JOIN_BROKER_ERRS.has(t));
     });
-    conn.on('data', (wire) => nbClientOnData(wire));
-    conn.on('close', () => nbOnHostLost());
-    conn.on('error', () => nbOnHostLost());
-  });
+
+    peer.on('open', () => {
+      if (settled) return;                 // late 'open' after a watchdog/error reset — ignore
+      if (wd) { clearTimeout(wd); wd = null; } // broker reachable; the primary watchdog is done
+      // SECOND-STAGE watchdog: broker is up but the host (conn 'open') may never answer. If the
+      // sealed handshake doesn't land in time, treat it as host-unreachable and reset (no
+      // fallback — a reachable broker that can't find the host won't be fixed by switching brokers).
+      wd2 = setTimeout(() => failOrFallback(false), NB_JOIN_STAGE2_MS);
+      const conn = peer.connect(peerId, { reliable: true });
+      Neighborhood.hostConn = conn;
+      conn.on('open', async () => {
+        if (settled) return;               // a stray late open after reset must not re-arm the session
+        if (Neighborhood.peer !== peer) return; // we've moved on to the alternate peer — ignore
+        settled = true;                    // CONNECTED: clear every watchdog so a later 'close'
+        clearWatchdogs();                  //   is handled by nbOnHostLost, never a stale watchdog
+        await nbSendToHost(envelope('say', {
+          app: NB_APP_ID, op: 'hello', name: Neighborhood.name, skinColor: Neighborhood.color
+        }), true);
+        nbSetStatus('Sealed hello sent — waiting for the world snapshot…');
+      });
+      conn.on('data', (wire) => nbClientOnData(wire));
+      conn.on('close', () => {
+        // a destroyed-peer 'close' during fallback must not tear down the NEW attempt:
+        // only act if this conn still belongs to the live peer.
+        if (Neighborhood.peer !== peer) return;
+        nbOnHostLost();
+      });
+      conn.on('error', () => {
+        if (Neighborhood.peer !== peer) return;           // stale conn from a superseded peer — ignore
+        if (!settled) { failOrFallback(false); return; }  // conn died pre-handshake -> host-gone fail
+        nbOnHostLost();                                    // post-handshake -> normal host-lost path
+      });
+    });
+  };
+
+  attempt(linkIdx);
   return true;
 }
 
@@ -3902,6 +4034,7 @@ function nbResetSession() {
   for (const rec of Neighborhood.pings.values()) nbDisposePing(rec); // PING markers die with the session
   Neighborhood.pings.clear();
   nbPingLastRx.clear();
+  nbEditRx.clear();   // ANTI-GRIEF: per-sender edit token buckets start clean each session
   vfOnSessionReset(); // VOXELFLAYER: drop remote twin visuals + claims with the session
   Neighborhood.conns.clear();
   if (Neighborhood.peer) { try { Neighborhood.peer.destroy(); } catch (e) {} }
@@ -4083,6 +4216,56 @@ const VF_TWINS_KEY = 'voxel-world-twins-v1';
 const VF_TETHER_DEFAULT = 'http://localhost:7071/chat';
 const VF_BRAINS = ['wanderer', 'miner', 'builder', 'follower'];
 const VF_PALETTE = ['#81b29a', '#e07a5f', '#6d9dc5', '#f2cc8f', '#b56576', '#9c89b8', '#5ad17d', '#e3b505'];
+
+// --- PERSISTENT BOT/TWIN MEMORY (cycle-6) ----------------------------------------
+// THE longest-standing twin-pilot wish, cited in EVERY cycle 0-5 field note ("bot memory
+// across saves"). bot.memory survives reloads/imports for TWINS (records persist via the
+// roster); built-in bots with no twin record keep memory in RAM only (acceptable per spec).
+// CAPS are enforced on BOTH the write side (vfExecuteOp's remember/waypoint ops) AND the
+// import side (validateTwinRecord), so neither a runaway brain nor a hostile export can
+// exceed them — the same MAX_EDITS-style defense. NEVER persist twin.history (it holds full
+// prompts) — only this distilled, capped memory.
+const VF_MEM_FACTS_CAP = 24;     // FIFO ring of short fact strings
+const VF_MEM_FACT_LEN = 120;     // per-fact char clamp
+const VF_MEM_WP_CAP = 16;        // named waypoints {name -> {x,y,z}}
+const VF_MEM_OBS_FACTS = 8;      // facts.slice(-8) in the observation (keeps it bounded)
+function vfFreshMemory() {
+  return { facts: [], waypoints: {}, stats: { dug: 0, placed: 0, chats: 0 } };
+}
+// Coerce/validate an arbitrary (possibly hostile or oversized) memory blob into the capped
+// shape. Used by validateTwinRecord (import gate) so a malicious export can NEVER smuggle a
+// giant blob, and to rehydrate a saved twin's memory onto its bot. Always returns a fresh,
+// safe object; an absent/invalid input yields empty memory (so pre-change rosters import clean).
+function vfSanitizeMemory(m) {
+  const out = vfFreshMemory();
+  if (!m || typeof m !== 'object' || Array.isArray(m)) return out;
+  if (Array.isArray(m.facts)) {
+    for (const f of m.facts) {
+      if (out.facts.length >= VF_MEM_FACTS_CAP) break;          // drop facts beyond the cap
+      if (typeof f === 'string' && f) out.facts.push(f.slice(0, VF_MEM_FACT_LEN)); // clamp length
+    }
+  }
+  if (m.waypoints && typeof m.waypoints === 'object' && !Array.isArray(m.waypoints)) {
+    for (const name of Object.keys(m.waypoints)) {
+      if (Object.keys(out.waypoints).length >= VF_MEM_WP_CAP) break; // drop waypoints beyond the cap
+      const w = m.waypoints[name];
+      if (!w || typeof w !== 'object') continue;
+      // drop non-finite / non-integer coords (never store a bad waypoint)
+      if (!Number.isInteger(w.x) || !Number.isInteger(w.y) || !Number.isInteger(w.z)) continue;
+      const nm = String(name).replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 32);
+      if (!nm) continue;
+      out.waypoints[nm] = { x: w.x, y: w.y, z: w.z };
+    }
+  }
+  const s = m.stats;
+  if (s && typeof s === 'object') {
+    const clampStat = (v) => { const n = Math.floor(Number(v)); return Number.isFinite(n) && n > 0 ? n : 0; };
+    out.stats.dug = clampStat(s.dug);
+    out.stats.placed = clampStat(s.placed);
+    out.stats.chats = clampStat(s.chats);
+  }
+  return out;
+}
 
 // --- network-twin consent gate (cycle-2 PRIORITY-SECURITY) --------------------
 // Tether/cloud twins POST full world observations to twin.url. That loop may
@@ -4289,6 +4472,9 @@ function vfSpawnBot(opts) {
     path: null, gotoTarget: null, pathTime: 0, repathCooldown: 0,
     home: { x: ent.pos.x, y: ent.pos.y, z: ent.pos.z },
     brainState: {},
+    // PERSISTENT MEMORY: facts (FIFO, capped), named waypoints, and action stats. Survives
+    // saves for TWINS (rehydrated from the roster in vfHatchTwin); RAM-only for built-in bots.
+    memory: vfFreshMemory(),
     walkPhase: 0,
     _events: Object.create(null),
 
@@ -4382,6 +4568,7 @@ function vfSpawnBot(opts) {
       playSound('break');
       this.emit('dig_complete', { x, y, z, id });
       voxEvent('dig_complete', { x, y, z, blockId: id, by: name }); // VOX hook: ring-buffer mirror
+      if (this.memory) this.memory.stats.dug++; // MEMORY: count at the REAL action site (every path)
       return true;
     },
 
@@ -4400,12 +4587,14 @@ function vfSpawnBot(opts) {
       this.lookAt({ x: x + 0.5, y: y + 0.5, z: z + 0.5 });
       spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 8);
       playSound('place');
+      if (this.memory) this.memory.stats.placed++; // MEMORY: count at the REAL action site
       return true;
     },
 
     chat(text) {
       text = String(text == null ? '' : text).trim().slice(0, 240);
       if (!text) return;
+      if (this.memory) this.memory.stats.chats++; // MEMORY: count every successful chat
       addChatMsg(name, text, color, false); // goes through vfNotifyChat -> recentChat
       if (Neighborhood.enabled) {
         const env = envelope('say', { app: NB_APP_ID, op: 'chat', text, name });
@@ -4825,9 +5014,46 @@ function vfExecuteOp(bot, a) {
   }
   switch (a.op) {
     case 'goto':
-      if (Number.isFinite(a.x) && Number.isFinite(a.z)) {
+      // WAYPOINT NAV: {op:'goto', waypoint:'home'} resolves a named coord from bot.memory;
+      // a missing name chats 'no such waypoint' rather than silently failing. Otherwise the
+      // existing {x,y,z} A* goto is unchanged (the same chunk-fenced path; no new physics).
+      if (typeof a.waypoint === 'string') {
+        const wp = bot.memory && bot.memory.waypoints && bot.memory.waypoints[a.waypoint];
+        if (wp) { bot.behavior = null; bot.goto({ x: wp.x, y: wp.y, z: wp.z }); }
+        else bot.chat('no such waypoint: ' + a.waypoint.slice(0, 32));
+      } else if (Number.isFinite(a.x) && Number.isFinite(a.z)) {
         bot.behavior = null;
         bot.goto({ x: a.x, y: a.y, z: a.z });
+      }
+      break;
+    case 'remember':
+      // MEMORY: append a short fact (FIFO ring, capped). Caps enforced HERE (write side) AND
+      // on import (validateTwinRecord) so neither a runaway brain nor a hostile file overflows.
+      if (bot.memory && a.value !== undefined) {
+        const v = String(a.value).slice(0, VF_MEM_FACT_LEN);
+        const fact = (typeof a.key === 'string' && a.key.trim())
+          ? (a.key.trim().slice(0, 40) + ': ' + v).slice(0, VF_MEM_FACT_LEN) : v;
+        if (fact) {
+          bot.memory.facts.push(fact);
+          while (bot.memory.facts.length > VF_MEM_FACTS_CAP) bot.memory.facts.shift(); // drop oldest
+          vfSaveRoster();
+        }
+      }
+      break;
+    case 'waypoint':
+      // MEMORY: record a named coord (finite-integer-clamped, capped, drop-oldest over cap).
+      if (bot.memory && typeof a.name === 'string') {
+        const nm = a.name.replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 32);
+        const wx = Math.floor(Number(a.x)), wy = Math.floor(Number(a.y)), wz = Math.floor(Number(a.z));
+        if (nm && Number.isFinite(wx) && Number.isFinite(wy) && Number.isFinite(wz)) {
+          const wp = bot.memory.waypoints;
+          if (!Object.prototype.hasOwnProperty.call(wp, nm)) {
+            // new name past the cap: evict the oldest key (insertion order) before adding
+            while (Object.keys(wp).length >= VF_MEM_WP_CAP) delete wp[Object.keys(wp)[0]];
+          }
+          wp[nm] = { x: wx, y: wy, z: wz };
+          vfSaveRoster();
+        }
       }
       break;
     case 'dig': vfDigSmart(bot, a); break;
@@ -4881,6 +5107,9 @@ function vfHatchTwin(cfg) {
     brain: mode === 'local' ? brain : null
   });
   if (!bot) return null;
+  // MEMORY: rehydrate a saved twin's facts/waypoints/stats onto its fresh bot. Always re-
+  // sanitized (defends against a hand-tampered localStorage roster). Absent -> fresh empty.
+  if (cfg.memory !== undefined) bot.memory = vfSanitizeMemory(cfg.memory);
   const twin = {
     name: bot.name,
     color: bot.color,
@@ -5051,6 +5280,20 @@ function vfObservation(bot) {
     }
   }
 
+  // (5) memory: bounded + CDP-returnByValue-safe snapshot of bot.memory so an LLM brain
+  // recalls its facts/waypoints/stats across turns (and, for twins, across saves). STRICTLY
+  // ADDITIVE — existing personas/CDP scripts are unaffected. facts.slice(-8) keeps it small
+  // even when 24 are stored; waypoints/stats are already capped + integer-clamped.
+  let memory;
+  try {
+    const m = bot.memory || vfFreshMemory();
+    memory = {
+      facts: (m.facts || []).slice(-VF_MEM_OBS_FACTS),
+      waypoints: Object.assign({}, m.waypoints),
+      stats: { dug: m.stats.dug | 0, placed: m.stats.placed | 0, chats: m.stats.chats | 0 }
+    };
+  } catch (err) { memory = vfFreshMemory(); }
+
   return {
     you: {
       name: bot.name,
@@ -5065,6 +5308,7 @@ function vfObservation(bot) {
     pings,          // ADD (2): nearest-first waypoint pings, <=4
     groundProfile,  // ADD (3): {standingOn, headroom, drop, aheadDrop}
     aheadStrip,     // ADD (4): [+1,+2,+3] facing strip at eye level
+    memory,         // ADD (5): bounded { facts(<=8), waypoints, stats } — persists for twins
     groundBelow,    // backward-compat: alias of groundProfile.standingOn (kept this cycle)
     blocksAhead,    // backward-compat / DEPRECATED (see note above; kept this cycle)
     recentChat: vfRecentChat.slice(-5),
@@ -5116,9 +5360,11 @@ async function vfTwinThink(twin) {
     (twin.persona ? twin.persona + '\n' : '') +
     'You are playing a Minecraft-like voxel game as character ' + twin.name + '. ' +
     'Observation: ' + JSON.stringify(obs) + '. ' +
+    'Your observation.memory persists across sessions — reuse facts and waypoints instead of re-deriving them. ' +
     'Reply ONLY with a JSON array of actions, e.g. ' +
-    '[{"op":"goto","x":1,"y":40,"z":2},{"op":"dig","x":0,"y":39,"z":2},' +
+    '[{"op":"goto","x":1,"y":40,"z":2},{"op":"goto","waypoint":"home"},{"op":"dig","x":0,"y":39,"z":2},' +
     '{"op":"place","x":0,"y":40,"z":2,"blockId":3},{"op":"chat","text":"hi"},' +
+    '{"op":"remember","key":"base","value":"x12 z-4"},{"op":"waypoint","name":"home","x":12,"y":40,"z":-4},' +
     '{"op":"look","x":4,"y":41,"z":2},{"op":"wander"},{"op":"follow","name":"Ada"},{"op":"stop"}]';
   let raw = null;
   try {
@@ -5169,7 +5415,11 @@ function vfSetTwinStatus(twin, status) {
 function vfRosterData() {
   return vfTwins.map((t) => ({
     name: t.name, color: t.color, persona: t.persona, mode: t.mode,
-    url: t.url, interval: t.intervalS, brain: t.brain
+    url: t.url, interval: t.intervalS, brain: t.brain,
+    // MEMORY: emit ONLY the serializable, capped parts (via the same sanitizer the import
+    // gate uses) so a save/export can never carry an oversized blob. twin.history (full
+    // prompts) is NEVER persisted. The key is optional — older exports lacking it import clean.
+    memory: vfSanitizeMemory(t.bot && t.bot.memory)
   }));
 }
 function vfSaveRoster() {
@@ -5198,7 +5448,12 @@ function validateTwinRecord(r) {
     mode,
     url,
     intervalS: Math.max(3, Math.min(120, Math.round(Number(r.interval) || 6))),
-    brain: VF_BRAINS.includes(r.brain) ? r.brain : 'wanderer'
+    brain: VF_BRAINS.includes(r.brain) ? r.brain : 'wanderer',
+    // MEMORY (OPTIONAL): coerce through vfSanitizeMemory so a hostile export can NEVER smuggle
+    // an oversized blob (>24 facts / >120-char values / >16 waypoints / bad coords / negative
+    // stats are all dropped or clamped). A record with no memory key yields empty memory — so
+    // a roster exported before this change still validates and imports clean (additive).
+    memory: vfSanitizeMemory(r.memory)
   };
 }
 function vfImportRoster(arr, replace) {
@@ -5217,6 +5472,7 @@ function vfImportRoster(arr, replace) {
     vfHatchTwin({
       name: rec.name, color: rec.color, persona: rec.persona, mode: rec.mode,
       url: rec.url, intervalS: rec.intervalS, brain: rec.brain,
+      memory: rec.memory, // MEMORY: rehydrate the saved facts/waypoints/stats onto the bot
       fromImport: true // consent gate: imports auto-start ONLY via the allowlist — never a prompt
     });
   }
