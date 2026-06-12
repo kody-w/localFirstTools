@@ -681,6 +681,31 @@ let meshQueue = [];              // [{cx,cz,d2}]
 // chunk synchronously in setBlock for instant input feel; only its up-to-4 border
 // neighbors defer here.
 const dirtyMeshSet = new Set();  // chunkKey -> needs buildChunkMesh
+// TYPED-ARRAY MESH BUILDER: module-level reusable scratch buffers shared across every
+// chunk built in a frame. buildChunkMesh counts visible faces first, then writes vertex
+// data directly by index into these (no .push() reallocations, no JS-number boxing). The
+// committed attribute owns a right-sized .slice() of the scratch, so the scratch is free to
+// reuse for the NEXT chunk immediately — never retained past a single build (no aliasing).
+let scratchPos = new Float32Array(0); // 3 floats / vert
+let scratchNor = new Float32Array(0); // 3 floats / vert
+let scratchUv  = new Float32Array(0); // 2 floats / vert
+let scratchInd = new Uint32Array(0);  // 6 indices / face — Uint32: a full chunk can exceed 65535 verts
+// grow geometrically so the buffers stabilize after the first few chunks of a session
+function ensureMeshScratch(faceCount) {
+  const verts = faceCount * 4, inds = faceCount * 6;
+  if (scratchPos.length < verts * 3) {
+    let cap = scratchPos.length / 3 || 1024;
+    while (cap < verts) cap *= 2;
+    scratchPos = new Float32Array(cap * 3);
+    scratchNor = new Float32Array(cap * 3);
+    scratchUv  = new Float32Array(cap * 2);
+  }
+  if (scratchInd.length < inds) {
+    let cap = scratchInd.length || 1536;
+    while (cap < inds) cap *= 2;
+    scratchInd = new Uint32Array(cap);
+  }
+}
 let renderDist = 4;              // chunks (2..8)
 let worldTime = DAY_LEN * 0.22;  // start mid-morning
 
@@ -957,9 +982,33 @@ function genChunk(cx, cz) {
   if (cellEdits) {
     for (const [i, id] of cellEdits) data[i] = id;
   }
-  const chunk = { cx, cz, data, solidMesh: null, waterMesh: null, dirty: true };
+  // VERTICAL-EXTENT SKIP: record this chunk's solid Y-span (WATER counts as non-air)
+  // over the FINAL data — after caves/ores/trees AND the edits overlay — so buildChunkMesh
+  // can skip the always-air upper layers. A scan here is correct regardless of pass order;
+  // setBlock widens the span on edits that cross it (a stale-high yMax is harmless — a few
+  // extra all-air layers get scanned, never a visibility error).
+  const ext = chunkExtent(data);
+  const chunk = { cx, cz, data, solidMesh: null, waterMesh: null, dirty: true, yMin: ext.yMin, yMax: ext.yMax };
   chunks.set(k, chunk);
   return chunk;
+}
+
+// scan a chunk's voxel buffer for its solid Y-span (WATER counts as non-air). Returns
+// {yMin,yMax}; an all-air chunk yields yMin=0,yMax=-1 (the mesh loop then runs zero rows).
+function chunkExtent(data) {
+  let yMax = -1, yMin = WORLD_H;
+  for (let ly = WORLD_H - 1; ly >= 0; ly--) {
+    const base = ly * 256;
+    for (let i = 0; i < 256; i++) {
+      if (data[base + i] !== B.AIR) {
+        if (ly > yMax) yMax = ly;
+        if (ly < yMin) yMin = ly;
+        break;
+      }
+    }
+  }
+  if (yMax < 0) yMin = 0; // empty chunk: keep yMin<=yMax invariant false so the loop is a no-op
+  return { yMin, yMax };
 }
 
 function getBlock(gx, gy, gz) {
@@ -982,6 +1031,13 @@ function setBlock(gx, gy, gz, id, record, localEditFast) {
   if (!c) return false;
   const lx = gx & 15, lz = gz & 15;
   c.data[voxIndex(lx, gy, lz)] = id;
+  // VERTICAL-EXTENT SKIP: widen the chunk's solid Y-span when an edit places a non-air
+  // block beyond the current extent. Breaking (id=AIR) never narrows it — a stale-high
+  // yMax just scans a few extra all-air rows, never a correctness error.
+  if (id !== B.AIR) {
+    if (gy > c.yMax) c.yMax = gy;
+    if (gy < c.yMin) c.yMin = gy;
+  }
   if (record) {
     recordEdit(gx, gy, gz, id);
     scheduleSave();
@@ -1034,9 +1090,36 @@ function buildChunkMesh(chunk) {
     if (lz < 0)  return nZm ? nZm.data[lx + (lz + 16) * 16 + ly * 256] : B.AIR;
     return nZp ? nZp.data[lx + (lz - 16) * 16 + ly * 256] : B.AIR;
   };
-  const pos = [], nor = [], uv = [], ind = [];
+  // VERTICAL-EXTENT SKIP: only scan the rows where THIS chunk has a solid cell (yMin..yMax,
+  // WATER counts as non-air). The cross-chunk neighbor lookup is unchanged, so border faces
+  // at the extent edge stay correct — yMin/yMax guarantee the loop covers every y with a
+  // solid cell here. An all-air chunk has yMax<yMin so both loops are no-ops.
+  const yLo = (chunk.yMin == null) ? 0 : chunk.yMin;
+  const yHi = (chunk.yMax == null) ? WORLD_H - 1 : chunk.yMax;
+  // PASS 1 (solid only): count visible faces with the EXACT same 6-direction check the
+  // build uses, so the scratch is sized to the worst case and we write by index.
+  let solidFaces = 0;
+  for (let ly = yLo; ly <= yHi; ly++) {
+    for (let lz = 0; lz < 16; lz++) {
+      for (let lx = 0; lx < 16; lx++) {
+        const id = data[lx + lz * 16 + ly * 256];
+        if (id === B.AIR || id === B.WATER) continue;
+        for (let f = 0; f < 6; f++) {
+          const face = FACES[f];
+          const nb = blockAt(lx + face.dir[0], ly + face.dir[1], lz + face.dir[2]);
+          if (nb === B.AIR || nb === B.WATER) solidFaces++;
+        }
+      }
+    }
+  }
+  ensureMeshScratch(solidFaces);
+  const P = scratchPos, N = scratchNor, U = scratchUv, I = scratchInd;
+  let vp = 0, np = 0, up = 0, ip = 0, vert = 0; // write cursors (float/index offsets)
+  // water stays on the old growable-array path (few faces — not worth a count pass)
   const wpos = [], wnor = [], wuv = [], wind = [];
-  for (let ly = 0; ly < WORLD_H; ly++) {
+  // PASS 2: emit faces in the EXACT same order/winding as before — face culling and
+  // flat-shaded MeshLambert lighting are byte-for-byte identical.
+  for (let ly = yLo; ly <= yHi; ly++) {
     for (let lz = 0; lz < 16; lz++) {
       for (let lx = 0; lx < 16; lx++) {
         const id = data[lx + lz * 16 + ly * 256];
@@ -1049,17 +1132,29 @@ function buildChunkMesh(chunk) {
           const visible = water ? nb === B.AIR : (nb === B.AIR || nb === B.WATER);
           if (!visible) continue;
           const tile = face.dir[1] === 1 ? tiles.top : face.dir[1] === -1 ? tiles.bottom : tiles.side;
-          const P = water ? wpos : pos, N = water ? wnor : nor;
-          const U = water ? wuv : uv, I = water ? wind : ind;
-          const base = P.length / 3;
-          for (let ci = 0; ci < 4; ci++) {
-            const c2 = face.corners[ci];
-            P.push(lx + c2.pos[0], ly + c2.pos[1], lz + c2.pos[2]);
-            N.push(face.dir[0], face.dir[1], face.dir[2]);
-            const tuv = tileUV(tile, c2.uv[0], c2.uv[1]);
-            U.push(tuv[0], tuv[1]);
+          if (water) {
+            const base = wpos.length / 3;
+            for (let ci = 0; ci < 4; ci++) {
+              const c2 = face.corners[ci];
+              wpos.push(lx + c2.pos[0], ly + c2.pos[1], lz + c2.pos[2]);
+              wnor.push(face.dir[0], face.dir[1], face.dir[2]);
+              const tuv = tileUV(tile, c2.uv[0], c2.uv[1]);
+              wuv.push(tuv[0], tuv[1]);
+            }
+            wind.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
+          } else {
+            const base = vert;
+            for (let ci = 0; ci < 4; ci++) {
+              const c2 = face.corners[ci];
+              P[vp++] = lx + c2.pos[0]; P[vp++] = ly + c2.pos[1]; P[vp++] = lz + c2.pos[2];
+              N[np++] = face.dir[0]; N[np++] = face.dir[1]; N[np++] = face.dir[2];
+              const tuv = tileUV(tile, c2.uv[0], c2.uv[1]);
+              U[up++] = tuv[0]; U[up++] = tuv[1];
+            }
+            I[ip++] = base; I[ip++] = base + 1; I[ip++] = base + 2;
+            I[ip++] = base + 2; I[ip++] = base + 1; I[ip++] = base + 3;
+            vert += 4;
           }
-          I.push(base, base + 1, base + 2, base + 2, base + 1, base + 3);
         }
       }
     }
@@ -1067,12 +1162,14 @@ function buildChunkMesh(chunk) {
   // swap in new geometry
   if (chunk.solidMesh) { scene.remove(chunk.solidMesh); chunk.solidMesh.geometry.dispose(); chunk.solidMesh = null; }
   if (chunk.waterMesh) { scene.remove(chunk.waterMesh); chunk.waterMesh.geometry.dispose(); chunk.waterMesh = null; }
-  if (ind.length) {
+  if (ip) {
     const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
-    g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-    g.setIndex(ind);
+    // .slice() into a right-sized OWNED buffer so the scratch is free for the next chunk
+    // (the attribute owns its data — no retained-scratch aliasing). Indices are Uint32.
+    g.setAttribute('position', new THREE.BufferAttribute(P.slice(0, vp), 3));
+    g.setAttribute('normal', new THREE.BufferAttribute(N.slice(0, np), 3));
+    g.setAttribute('uv', new THREE.BufferAttribute(U.slice(0, up), 2));
+    g.setIndex(new THREE.BufferAttribute(I.slice(0, ip), 1));
     const m = new THREE.Mesh(g, solidMat);
     m.position.set(cx * 16, 0, cz * 16);
     scene.add(m);
@@ -2315,8 +2412,23 @@ function initDesktopInput() {
     if (IS_TOUCH && e.pointerType === 'touch') return;
     if (voxTermOpen) { voxTermToggle(false); return; } // clicking the game closes the vox terminal (matches touch-path guard)
     if (!isLocked()) { requestLock(); return; }
-    // hold-to-mine: button 0 no longer instant-breaks — damage accrues in updateMining
-    if (e.button === 0) { heldMouseBtn = 0; heldRepeatT = 0; }
+    // hold-to-mine: button 0 accrues damage in updateMining while held; the
+    // mousedown EDGE also fires the same quick-tap chunk as touch (touchTapMine)
+    // so one click one-shots leaves/dirt/grass/sand, 2 wood, 3 stone — the 400ms
+    // lastTapT grace gates this exactly like touch so a held click never double-counts.
+    if (e.button === 0) {
+      heldMouseBtn = 0; heldRepeatT = 0;
+      if (!panelOpen()) {
+        const hit = targetBlock();
+        if (hit) {
+          if (breakState && (breakState.x !== hit.x || breakState.y !== hit.y || breakState.z !== hit.z)) {
+            breakState = null; // clicking a different block restarts on the new one (mirrors touchTapMine)
+          }
+          lastTapT = performance.now();
+          applyMineDamage(hit, Math.min(1, 0.36 / blockHardness(hit.id)));
+        }
+      }
+    }
     else if (e.button === 1) { e.preventDefault(); nbSendPing(); } // middle-click: waypoint ping
     else if (e.button === 2) { doPlace(); heldMouseBtn = 2; heldRepeatT = 0; }
   });
@@ -4042,6 +4154,14 @@ function vfResumeTwin(twin, interactive) {
 const vfBots = [];                 // local bot objects (see vfSpawnBot)
 const vfTwins = [];                // twin records driving bots via /chat or local brains
 const vfRemoteBots = new Map();    // ownerRappid + '/' + name -> remote twin visual
+// remote-twin avatar ingress is the one ungoverned receive path (edits/pings/local
+// bots are all capped) — cap allocations so a peer cycling p.bot strings can't leak
+// unbounded Groups + CanvasTextures. These guards apply ONLY to NEW keys; updates to
+// existing rb entries (lerp targets) are never refused or rate-limited.
+const VF_REMOTE_BOTS_MAX = VF_MAX_BOTS * 4; // global ceiling across ALL owners
+const VF_REMOTE_NEW_WINDOW_MS = 1000;       // new-allocation rate-limit window per sender
+const VF_REMOTE_NEW_PER_WINDOW = 4;         // max new keys a sender may allocate per window
+const vfRemoteNewRx = new Map();   // from_rappid -> { t, count } new-allocation rate-limit (cleared in nbResetSession via vfOnSessionReset)
 const vfClaims = new Map();        // botName -> controller rappid (twin-chat claims)
 const vfRecentChat = [];           // [{name,text}] — rides into twin observations
 let vfBrainTimer = null;           // ~250ms built-in brain tick
@@ -4055,6 +4175,7 @@ function vfOnBlockChanged(gx, gy, gz) {
 function vfOnSessionReset() {
   for (const k of [...vfRemoteBots.keys()]) vfRemoveRemoteBot(k);
   vfClaims.clear();
+  vfRemoteNewRx.clear(); // new-allocation rate-limit state starts clean on session reset / world reload
 }
 function vfNotifyChat(name, text, system) {
   if (system || !name) return;
@@ -4330,6 +4451,7 @@ function vfSpawnBot(opts) {
 }
 
 function vfRemoveBot(name) {
+  if (voxConsoleBotName === name) voxConsoleBotName = null; // clear the console-twin pointer so voxBot()/status never go stale (matches voxCmdImport cleanup)
   const i = vfBots.findIndex((b) => b.name === name);
   if (i < 0) return false;
   const bot = vfBots[i];
@@ -5120,6 +5242,20 @@ function vfRemoteBotPos(p, env) {
   let rb = vfRemoteBots.get(k);
   if (!rb) {
     if (!scene) return;
+    // NEW-KEY GUARDS (existing entries are never gated — they fall through to the lerp writes below):
+    // (a) global cap — never grow past VF_REMOTE_BOTS_MAX across all owners
+    if (vfRemoteBots.size >= VF_REMOTE_BOTS_MAX) return;
+    // (b) per-owner cap — a single owner can never exceed VF_MAX_BOTS twins (the real client max)
+    let ownerCount = 0;
+    for (const ex of vfRemoteBots.values()) { if (ex.owner === env.from_rappid) ownerCount++; }
+    if (ownerCount >= VF_MAX_BOTS) return;
+    // (c) per-sender new-allocation rate limit — mirrors nbPingLastRx; drop bursts of new keys
+    const now = performance.now();
+    let rl = vfRemoteNewRx.get(env.from_rappid);
+    if (!rl || now - rl.t >= VF_REMOTE_NEW_WINDOW_MS) { rl = { t: now, count: 0 }; vfRemoteNewRx.set(env.from_rappid, rl); }
+    if (rl.count >= VF_REMOTE_NEW_PER_WINDOW) return;
+    rl.count++;
+    // all guards passed — allocate (nothing was added to the scene before this point)
     const parts = vfMakeBotAvatar(nbCleanName(p.bot), nbCleanColor(p.color || '#81b29a'));
     scene.add(parts.group);
     rb = {
