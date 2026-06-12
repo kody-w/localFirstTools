@@ -3,7 +3,7 @@
 <head>
 <!-- 3d, webgl, game, voxel, sandbox, multiplayer, webrtc, ai, three.js -->
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
 <title>Voxel World — Minecraft-style Sandbox</title>
 <meta name="description" content="A first-person Minecraft-style voxel sandbox: dig anywhere, build anything. Seeded infinite terrain, day/night cycle, touch + desktop controls, and local-first world saves with JSON export/import.">
 <script type="importmap">
@@ -39,6 +39,10 @@
     mix-blend-mode:difference}
   #crosshair::before{left:9px;top:0;width:2px;height:20px}
   #crosshair::after{top:9px;left:0;height:2px;width:20px}
+  /* break/place hit confirmation: a 1-frame transform/opacity-only pulse (no layout).
+     A single debounce token clears it (see flashCrosshair) so rapid mining never stacks. */
+  #crosshair.hit{transform:translate(-50%,-50%) scale(1.18);transition:transform .04s ease-out}
+  #crosshair.hit::before,#crosshair.hit::after{background:#7ec3ff;mix-blend-mode:normal}
 
   #hotbar{position:fixed;left:50%;bottom:calc(10px + env(safe-area-inset-bottom));transform:translateX(-50%);
     display:flex;gap:4px;z-index:25;background:rgba(0,0,0,.4);padding:5px;border-radius:10px}
@@ -202,6 +206,23 @@
     #joyKnob{width:50px;height:50px}
     #chatPanel{bottom:calc(238px + env(safe-area-inset-bottom));width:min(300px,62vw)}
     #chatLog{max-height:120px}
+  }
+
+  /* SAFE-AREA SIDE INSETS (viewport-fit=cover): in LANDSCAPE the notch / home-indicator
+     sits on a SHORT edge and collides with the left thumbstick + the right button cluster.
+     Portrait keeps today's exact spacing (no rule here). On desktop every inset is 0, so the
+     calc() collapses to the original px and the layout is byte-identical to before. Only
+     genuinely edge-hugging fixed elements get a side inset (#kiteHud is centered with
+     left:50% + translateX(-50%) so it hugs NO side edge — adding a left inset would mis-center
+     it; it is intentionally left alone, per the audit-the-edge-it-hugs rule). */
+  @media (orientation:landscape){
+    #joyZone{left:calc(16px + env(safe-area-inset-left))}
+    #debugHud{left:calc(10px + env(safe-area-inset-left))}
+    #topBar{right:calc(10px + env(safe-area-inset-right))}
+    #btnJump{right:calc(18px + env(safe-area-inset-right))}
+    #btnDown{right:calc(106px + env(safe-area-inset-right))}
+    #btnMode{right:calc(18px + env(safe-area-inset-right))}
+    #btnPing{right:calc(18px + env(safe-area-inset-right))}
   }
 </style>
 </head>
@@ -379,6 +400,9 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkCameraMotion" checked> Camera motion <span class="small">(view-bob, landing dip, jump lift)</span></label>
+    </div>
+    <div class="row hidden" id="rowHaptics">
+      <label><input type="checkbox" id="chkHaptics" checked> Haptics <span class="small">(vibrate + crosshair flash on break / place / mode / fly / ping)</span></label>
     </div>
     <div class="row btns">
       <button id="btnExport">Export World</button>
@@ -1870,6 +1894,7 @@ function toggleFly() {
   player.fly = !player.fly;
   player.vel.y = 0;
   if (ui.btnDown) ui.btnDown.classList.toggle('hidden', !(IS_TOUCH && player.fly));
+  haptic([10, 30, 10, 30, 25]); // TOUCH FEEDBACK: a distinct longer fly-toggle rumble (felt, not block-like)
   toast(player.fly ? 'Fly mode ON (Space/Shift or JUMP/▼ = up/down)' : 'Fly mode OFF');
 }
 
@@ -1915,6 +1940,7 @@ function completePlayerBreak() {
   setBlock(x, y, z, B.AIR, true, true); // same path as the old instant break (sync + save); localEditFast = instant remesh
   spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14);
   playSound('break');
+  haptic(18); flashCrosshair(); // TOUCH FEEDBACK: confirm the block actually broke (visual on iOS where vibrate is a no-op)
   voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // VOX hook
   coachBreakCount++; // ONBOARD: the BREAK step counts completed player breaks
 }
@@ -1990,6 +2016,7 @@ function doPlace() {
   coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
   playSound('place');
+  haptic(10); flashCrosshair(); // TOUCH FEEDBACK: confirm a block landed
 }
 
 // Deterministic check that the two blocks above the column surface (h+1, h+2) are clear of
@@ -2177,6 +2204,25 @@ let fpsLowStreak = 0, fpsHighStreak = 0; // consecutive 1s windows below/above t
 let lastScaleStepT = 0;         // hysteresis: max one step per second
 let mainBootT = 0;              // no governor changes in the first 3s after boot
 
+// --- touch haptic + visual hit-confirmation ----------------------------------
+// On touch there is no cursor, so block break/place/mode/fly/ping land with zero
+// tactile feedback and a tap that hits nothing looks identical to one that broke a
+// block. haptic() fires a short vibration ONLY at real user-input action edges
+// (never per-frame during hold-to-mine, never from bots / vox / remote edits — those
+// are not the local touch user). vibrate is a documented no-op on iOS Safari, so the
+// crosshair flash (flashCrosshair) is the universal visual half of the confirmation.
+let hapticsOn = IS_TOUCH;       // 'Haptics' setting (touch-only; default ON for touch)
+function haptic(ms) {
+  try { if (IS_TOUCH && hapticsOn) navigator.vibrate && navigator.vibrate(ms); } catch (e) { /* ignore */ }
+}
+let crosshairFlashTimer = null; // single debounce token so rapid mining never stacks timers
+function flashCrosshair() {
+  if (!ui.crosshair || voxHeadless) return; // never on hidden/headless ticks (these sites are input edges anyway)
+  ui.crosshair.classList.add('hit');
+  clearTimeout(crosshairFlashTimer);
+  crosshairFlashTimer = setTimeout(() => { if (ui.crosshair) ui.crosshair.classList.remove('hit'); }, 120);
+}
+
 function applyRenderScale() {
   if (!renderer) return;
   renderer.setPixelRatio(basePR * renderScale);
@@ -2215,7 +2261,7 @@ function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'questHud', 'questHudSkip', // ONBOARD coach
    // NEIGHBORHOOD DOM
@@ -2568,6 +2614,7 @@ function initTouchInput() {
     e.preventDefault();
     actionMode = actionMode === 'break' ? 'place' : 'break';
     ui.btnMode.innerHTML = actionMode === 'break' ? '&#9935; Break' : '&#9632; Place';
+    haptic([8, 40, 8]); // TOUCH FEEDBACK: a distinct double-tick so Break-vs-Place mode is FELT (cuts wrong-mode mistaps)
     toast(actionMode === 'break' ? 'Tap to BREAK blocks' : 'Tap to PLACE blocks');
   }, { passive: false });
 }
@@ -2596,6 +2643,10 @@ function initUiButtons() {
     // freeze the camera immediately when turning motion off (the per-frame update also
     // enforces this); bobPhase keeps running so footstep audio is unaffected.
     if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; landDip = 0; landDipVel = 0; }
+    saveSettings();
+  });
+  ui.chkHaptics.addEventListener('change', () => {
+    hapticsOn = ui.chkHaptics.checked;
     saveSettings();
   });
 
@@ -2771,7 +2822,7 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
-      cameraMotion: cameraMotion
+      cameraMotion: cameraMotion, haptics: hapticsOn
     }));
   } catch (e) { /* ignore */ }
 }
@@ -2788,6 +2839,7 @@ function loadSettings() {
       if (typeof s.sound === 'boolean') soundOn = s.sound;
       if (typeof s.autoQuality === 'boolean') autoQuality = s.autoQuality; // older blobs default by IS_TOUCH
       if (typeof s.cameraMotion === 'boolean') cameraMotion = s.cameraMotion; // older blobs default ON / reduced-motion
+      if (typeof s.haptics === 'boolean') hapticsOn = s.haptics; // older blobs default ON for touch (IS_TOUCH)
     }
   } catch (e) { /* ignore */ }
 }
@@ -3495,6 +3547,7 @@ function nbSendPing(kindArg) {
   const name = Neighborhood.name || 'Player';
   // local echo first (solo: this IS the personal marker)
   nbShowPing(Neighborhood.rappid || 'local', name, Neighborhood.color, t.x, t.y, t.z, kind);
+  haptic(15); // TOUCH FEEDBACK: single confirm pulse on a ping (IS_TOUCH-gated, so vox/desktop never buzz)
   addChatMsg(null, name + ' pinged a spot (' + t.x + ', ' + t.y + ', ' + t.z + ')', null, true);
   toast('Pinged (' + t.x + ', ' + t.y + ', ' + t.z + ')');
   voxEvent('ping', { rappid: Neighborhood.rappid || null, name, x: t.x, y: t.y, z: t.z, kind });
@@ -4021,8 +4074,23 @@ function nbLeave(skipToast) {
     activeSaveKey = SAVE_KEY;
     let save = null;
     try { save = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { save = null; }
-    if (validateSave(save)) applyWorldState(save.seed, save.edits, save.playerPosition);
-    else applyWorldState(randomSeed(), {}, null);
+    if (validateSave(save)) {
+      applyWorldState(save.seed, save.edits, save.playerPosition);
+      // ROSTER RECONCILE (twin-leak fix): the JOIN switched activeSaveKey to the -nb- session
+      // key, so any twin hatched/run during the session was NOT in the solo SAVE_KEY blob — and
+      // unlike onImportFile / voxCmdImport, leave never rebuilt the roster, leaving session twins
+      // (incl. any network twin still POSTing world observations to its url) running against the
+      // restored solo world. vfImportRoster(replace=true) tears those session twins down via
+      // vfRemoveBot and re-hatches the solo set through the SAME validateTwinRecord + consent gate
+      // the other two import funnels trust — no new write path. (A non-localhost network twin that
+      // ran solo re-hatches PAUSED: the cycle-2 consent gate re-confirms on re-hatch, which is correct.)
+      vfImportRoster(save.twins || [], true);
+    } else {
+      applyWorldState(randomSeed(), {}, null);
+      // No valid solo save → fresh world: still tear down session twins so none keep running
+      // (and none keep POSTing observations) against a random new world.
+      vfImportRoster([], true);
+    }
     if (!skipToast) toast('Left the neighborhood — back in your solo world');
   } else if (wasKite && !skipToast) {
     toast('Kite reeled in — neighborhood closed');
@@ -6688,6 +6756,8 @@ function main() {
   ui.chkSound.checked = soundOn;
   ui.chkAutoQuality.checked = autoQuality;
   ui.chkCameraMotion.checked = cameraMotion;
+  ui.chkHaptics.checked = hapticsOn;
+  if (IS_TOUCH) ui.rowHaptics.classList.remove('hidden'); // Haptics setting is touch-only
   updateFog();
   buildHotbar();
   initDesktopInput();
