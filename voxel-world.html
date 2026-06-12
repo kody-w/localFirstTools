@@ -1928,8 +1928,9 @@ const nbJoinParams = (() => {
   try {
     const u = new URL(location.href);
     const peerId = u.searchParams.get('join');
+    const broker = parseInt(u.searchParams.get('b') || '0', 10) || 0;
     const m = (u.hash || '').match(/[#&]k=([A-Za-z0-9_-]+)/);
-    if (peerId && m) return { peerId, token: m[1] };
+    if (peerId && m) return { peerId, token: m[1], broker };
   } catch (e) { /* malformed URL — ignore */ }
   return null;
 })();
@@ -2008,25 +2009,33 @@ function nbCleanColor(c) {
 function nbLoadProfile() {
   let p = null;
   try { p = JSON.parse(localStorage.getItem(RAPP_PROFILE_KEY) || 'null'); } catch (e) { p = null; }
-  if (!p || typeof p !== 'object' || typeof p.rappid !== 'string' || !p.rappid) {
+  if (!p || typeof p !== 'object') p = {};
+  if (typeof p.name !== 'string' || !p.name) p.name = 'Neighbor-' + Math.floor(1000 + Math.random() * 9000);
+  if (typeof p.color !== 'string' || !p.color) {
+    const palette = ['#e07a5f', '#81b29a', '#3d5a80', '#f2cc8f', '#b56576', '#6d9dc5'];
+    p.color = palette[Math.floor(Math.random() * palette.length)];
+  }
+  // rappid is PER-TAB (sessionStorage): localStorage is shared by every tab of the same
+  // origin, and two neighbors with one identity silently eat each other's envelopes via
+  // echo suppression. Same tab keeps its identity across reloads; new tab = new neighbor.
+  let rid = null;
+  try { rid = sessionStorage.getItem(RAPP_PROFILE_KEY + '-rappid'); } catch (e) { rid = null; }
+  if (!rid) {
     const b = new Uint8Array(12);
     crypto.getRandomValues(b);
-    const palette = ['#e07a5f', '#81b29a', '#3d5a80', '#f2cc8f', '#b56576', '#6d9dc5'];
-    p = {
-      rappid: 'rp_' + nbB64Url(b),
-      name: 'Neighbor-' + Math.floor(1000 + Math.random() * 9000),
-      color: palette[Math.floor(Math.random() * palette.length)]
-    };
+    rid = 'rp_' + nbB64Url(b);
+    try { sessionStorage.setItem(RAPP_PROFILE_KEY + '-rappid', rid); } catch (e) { /* private mode */ }
   }
-  Neighborhood.rappid = p.rappid;
+  Neighborhood.rappid = rid;
   Neighborhood.name = nbCleanName(p.name);
   Neighborhood.color = nbCleanColor(p.color);
   nbSaveProfile();
 }
 function nbSaveProfile() {
   try {
+    // name/color are the shared profile; rappid is per-tab (sessionStorage, see nbLoadProfile)
     localStorage.setItem(RAPP_PROFILE_KEY, JSON.stringify({
-      rappid: Neighborhood.rappid, name: Neighborhood.name, color: Neighborhood.color
+      name: Neighborhood.name, color: Neighborhood.color
     }));
   } catch (e) { /* private mode */ }
 }
@@ -2357,6 +2366,44 @@ function nbApplyRemoteEdit(x, y, z, id) {
 // --- HOST: Fly the Kite (§9 handshake, §10 hub relay) -----------------------------------
 function nbBaseUrl() { return location.href.split(/[?#]/)[0]; }
 
+// Signaling brokers (§5a-tether: the broker carries signaling ONLY; data is DTLS P2P and
+// envelopes are sealed on top, so the broker is untrusted by design). The default PeerJS
+// cloud is flaky, so fall back to a community PeerServer. The kite link carries &b=<idx>
+// so neighbors meet the host at the SAME broker.
+const NB_BROKER_CONFIGS = [
+  null, // PeerJS cloud default (0.peerjs.com)
+  { host: 'peerjs.92k.de', port: 443, secure: true, path: '/' },
+];
+function nbNewPeerAt(idx) {
+  const cfg = NB_BROKER_CONFIGS[idx];
+  return cfg ? new window.Peer(cfg) : new window.Peer();
+}
+function nbCreatePeer() {
+  return new Promise((resolve, reject) => {
+    let i = 0;
+    const tryNext = () => {
+      if (i >= NB_BROKER_CONFIGS.length) { reject(new Error('all signaling brokers unreachable')); return; }
+      const brokerIdx = i++;
+      const p = nbNewPeerAt(brokerIdx);
+      let settled = false;
+      const giveUp = () => {
+        if (settled) return;
+        settled = true;
+        try { p.destroy(); } catch (e) {}
+        tryNext();
+      };
+      const t = setTimeout(giveUp, 12000);
+      p.on('open', () => {
+        if (settled) return;
+        settled = true; clearTimeout(t);
+        resolve({ peer: p, brokerIdx });
+      });
+      p.on('error', () => { clearTimeout(t); giveUp(); });
+    };
+    tryNext();
+  });
+}
+
 async function nbFlyKite() {
   if (Neighborhood.enabled) { showNb(); return; }
   nbSetStatus('Raising the kite…');
@@ -2368,26 +2415,27 @@ async function nbFlyKite() {
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
     return;
   }
-  const peer = new window.Peer();
+  let peer, brokerIdx;
+  try {
+    ({ peer, brokerIdx } = await nbCreatePeer());
+  } catch (e) {
+    nbResetSession();
+    nbSetStatus('Could not raise the kite (no signaling broker reachable). Check your connection and try again.');
+    return;
+  }
   Neighborhood.peer = peer;
-  peer.on('open', (id) => {
-    Neighborhood.enabled = true;
-    Neighborhood.role = 'kite';
-    Neighborhood.hostPeerId = id;
-    Neighborhood.link = nbBaseUrl() + '?join=' + encodeURIComponent(id) + '#k=' + Neighborhood.token;
-    nbShowKitedUi();
-    addChatMsg(null, 'Kite is flying — neighbors can Scan-to-Join', null, true);
-    toast('Kited! Share the QR or link');
-  });
+  Neighborhood.enabled = true;
+  Neighborhood.role = 'kite';
+  Neighborhood.hostPeerId = peer.id;
+  Neighborhood.link = nbBaseUrl() + '?join=' + encodeURIComponent(peer.id) +
+    (brokerIdx ? '&b=' + brokerIdx : '') + '#k=' + Neighborhood.token;
+  nbShowKitedUi();
+  addChatMsg(null, 'Kite is flying — neighbors can Scan-to-Join', null, true);
+  toast('Kited! Share the QR or link');
   peer.on('connection', (conn) => nbHostOnConnection(conn));
   peer.on('error', (err) => {
     const t = err && err.type ? err.type : String(err);
-    if (!Neighborhood.enabled) {
-      nbResetSession();
-      nbSetStatus('Could not raise the kite (' + t + '). Check your connection and try again.');
-    } else {
-      nbSetStatus('Kite turbulence: ' + t);
-    }
+    nbSetStatus('Kite turbulence: ' + t);
   });
   peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
 }
@@ -2513,10 +2561,11 @@ async function nbAfterWorldReplaced() {
 
 // --- NEIGHBOR: Scan-to-Join (§9) ----------------------------------------------------------
 async function nbJoin(link) {
-  let peerId = null, token = null;
+  let peerId = null, token = null, broker = 0;
   try {
     const u = new URL(String(link), location.href);
     peerId = u.searchParams.get('join');
+    broker = parseInt(u.searchParams.get('b') || '0', 10) || 0;
     const m = (u.hash || '').match(/[#&]k=([A-Za-z0-9_-]+)/);
     if (m) token = m[1];
   } catch (e) { /* not a URL */ }
@@ -2524,10 +2573,10 @@ async function nbJoin(link) {
     toast('That does not look like a kite link (need ?join=…#k=…)');
     return false;
   }
-  return nbJoinWith(peerId, token);
+  return nbJoinWith(peerId, token, broker);
 }
 
-async function nbJoinWith(peerId, token) {
+async function nbJoinWith(peerId, token, brokerIdx) {
   if (Neighborhood.enabled) { toast('Already in a neighborhood — leave it first'); return false; }
   if (!(await nbEnsureLibs())) return false;
   nbSetStatus('Scan-to-Join — connecting to the kite…');
@@ -2538,7 +2587,7 @@ async function nbJoinWith(peerId, token) {
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
     return false;
   }
-  const peer = new window.Peer();
+  const peer = nbNewPeerAt(NB_BROKER_CONFIGS[brokerIdx] !== undefined ? brokerIdx : 0);
   Neighborhood.peer = peer;
   Neighborhood.hostPeerId = peerId;
   peer.on('error', (err) => {
@@ -2731,7 +2780,7 @@ function nbMaybeAutoJoin() {
   toast('Scan-to-Join — connecting to the neighborhood…');
   // VOX hook: ?headless=1 / ?console=1 suppress modals (the snapshot auto-applies anyway)
   if (!voxHeadless && !voxBootParams.console) showNb();
-  nbJoinWith(nbJoinParams.peerId, nbJoinParams.token);
+  nbJoinWith(nbJoinParams.peerId, nbJoinParams.token, nbJoinParams.broker);
 }
 
 // --- UI wiring + window.rapp console surface ("the String", transport 5a-kite) ------------
@@ -4359,7 +4408,7 @@ async function voxCmdKite() {
   }
   if (Neighborhood.enabled) return { ok: false, error: 'already joined a neighborhood — vox("unkite") first' };
   nbFlyKite();
-  const up = await voxWaitFor(() => Neighborhood.enabled && Neighborhood.role === 'kite' && Neighborhood.link, 15000);
+  const up = await voxWaitFor(() => Neighborhood.enabled && Neighborhood.role === 'kite' && Neighborhood.link, 30000); // covers broker-fallback chain (12s timeout per broker)
   if (!up) return { ok: false, error: 'kite did not launch (offline? PeerJS broker unreachable?)' };
   console.log('%c[vox] KITE LINK (scan-to-join):\n' + Neighborhood.link, 'font-weight:bold;font-size:13px');
   return { ok: true, peerId: Neighborhood.hostPeerId, link: Neighborhood.link };
