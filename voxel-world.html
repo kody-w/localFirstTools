@@ -375,6 +375,9 @@ the string IS the transport; Claude is the canonical string-holder)
     <div class="row">
       <label><input type="checkbox" id="chkAutoQuality"> Auto quality <span class="small">(adapts resolution to keep fps smooth)</span></label>
     </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkCameraMotion" checked> Camera motion <span class="small">(view-bob, landing dip, jump lift)</span></label>
+    </div>
     <div class="row btns">
       <button id="btnExport">Export World</button>
       <button id="btnImportBtn">Import World</button>
@@ -651,6 +654,14 @@ let worldSeed = 1;
 const chunks = new Map();        // "cx,cz" -> { cx, cz, data, solidMesh, waterMesh, dirty }
 let genQueue = [];               // [{cx,cz,d2}]
 let meshQueue = [];              // [{cx,cz,d2}]
+// ASYNC REMESH: chunk keys whose mesh needs rebuilding, drained nearest-first in
+// processStreaming() under the same per-frame ms budget. Edits set c.dirty + add the
+// key here instead of remeshing synchronously, so a bot/neighbor/vox loop firing many
+// setBlocks in one frame coalesces to ONE rebuild per chunk per frame (Set keying
+// collapses duplicates). The LOCAL player's own break/place still remeshes its own
+// chunk synchronously in setBlock for instant input feel; only its up-to-4 border
+// neighbors defer here.
+const dirtyMeshSet = new Set();  // chunkKey -> needs buildChunkMesh
 let renderDist = 4;              // chunks (2..8)
 let worldTime = DAY_LEN * 0.22;  // start mid-morning
 
@@ -877,7 +888,11 @@ function getBlock(gx, gy, gz) {
   return c.data[voxIndex(gx & 15, gy, gz & 15)];
 }
 
-function setBlock(gx, gy, gz, id, record) {
+// localEditFast: the LOCAL player's break/place callers pass true so THIS chunk
+// remeshes synchronously (instant input feel). All other edits — remote ('edit' op),
+// bot (bot.dig/place), and vox-command — leave it false and route only through
+// dirtyMeshSet, so bursts coalesce to one rebuild/chunk/frame and never double-mesh.
+function setBlock(gx, gy, gz, id, record, localEditFast) {
   if (gy < 0 || gy >= WORLD_H) return false;
   const cx = gx >> 4, cz = gz >> 4;
   const c = chunks.get(chunkKey(cx, cz));
@@ -893,16 +908,23 @@ function setBlock(gx, gy, gz, id, record) {
   }
   c.dirty = true;
   vfOnBlockChanged(gx, gy, gz); // VOXELFLAYER hook: bots repath when the world changes near them
-  buildChunkMesh(c); // remesh only this chunk (<16ms), never the world
-  // border edits also refresh the adjacent chunk's culled faces
-  const touch = (ncx, ncz) => {
+  // REMESH: the local player's own chunk rebuilds synchronously so the edit feels
+  // instant; everything else (including this chunk for bot/remote/vox edits, and the
+  // up-to-4 border neighbors for ALL edits) is deferred to dirtyMeshSet, drained
+  // nearest-first under budget in processStreaming(). Face-visibility decisions and the
+  // record/save/edit-op ordering above are unchanged — only WHEN the rebuild happens.
+  if (localEditFast) buildChunkMesh(c);          // human local edit: instant
+  else dirtyMeshSet.add(chunkKey(cx, cz));       // remote/bot/vox: deferred + coalesced
+  // border edits also need the adjacent chunk's culled faces refreshed (always deferred).
+  // Mark the neighbor dirty so the drain's "already meshed" guard doesn't skip it.
+  const markNeighbor = (ncx, ncz) => {
     const n = chunks.get(chunkKey(ncx, ncz));
-    if (n && n.solidMesh) { n.dirty = true; buildChunkMesh(n); }
+    if (n) { n.dirty = true; dirtyMeshSet.add(chunkKey(ncx, ncz)); }
   };
-  if (lx === 0) touch(cx - 1, cz);
-  if (lx === 15) touch(cx + 1, cz);
-  if (lz === 0) touch(cx, cz - 1);
-  if (lz === 15) touch(cx, cz + 1);
+  if (lx === 0) markNeighbor(cx - 1, cz);
+  if (lx === 15) markNeighbor(cx + 1, cz);
+  if (lz === 0) markNeighbor(cx, cz - 1);
+  if (lz === 15) markNeighbor(cx, cz + 1);
   return true;
 }
 
@@ -999,6 +1021,7 @@ function disposeAllChunks() {
   chunks.clear();
   genQueue = [];
   meshQueue = [];
+  dirtyMeshSet.clear(); // ASYNC REMESH: stale keys from a previous world must never mesh into the new one
 }
 
 // --- chunk streaming: generate lazily around the player, ~8ms/frame budget --
@@ -1056,6 +1079,33 @@ function processStreaming() {
     buildChunkMesh(c);
   }
   meshQueue = leftovers.concat(meshQueue);
+  drainDirtyMeshes(endT, pcx, pcz);
+}
+
+// ASYNC REMESH: rebuild edited chunks deferred from setBlock, nearest-first, under
+// the SAME per-frame budget the streaming queues use (8ms in-game). Coalesced by Set
+// keying — multiple edits to one chunk in a frame collapse to a single rebuild. A key
+// whose chunk was unloaded before drain is silently dropped; a re-bump within the same
+// drain can't re-run because we delete the key the moment we mesh it.
+function drainDirtyMeshes(endT, pcx, pcz) {
+  if (!dirtyMeshSet.size) return;
+  // sort nearest-to-player first (same squared-distance metric the streaming queues use)
+  // so on-screen neighbors resolve any one-frame border seam within a frame or two
+  const keys = [...dirtyMeshSet];
+  keys.sort((ka, kb) => {
+    const ca = chunks.get(ka), cb = chunks.get(kb);
+    const da = ca ? (ca.cx - pcx) * (ca.cx - pcx) + (ca.cz - pcz) * (ca.cz - pcz) : Infinity;
+    const db = cb ? (cb.cx - pcx) * (cb.cx - pcx) + (cb.cz - pcz) * (cb.cz - pcz) : Infinity;
+    return da - db;
+  });
+  for (const k of keys) {
+    if (performance.now() >= endT) break;   // budget spent — finish the rest next frame
+    const c = chunks.get(k);
+    dirtyMeshSet.delete(k);                  // remove first: can't re-mesh this key this drain
+    if (!c) continue;                        // gone (unloaded before drain) -> just dropped
+    if (c.solidMesh && !c.dirty) continue;   // already rebuilt this frame (e.g. via meshQueue) -> skip
+    buildChunkMesh(c);
+  }
 }
 
 // --- DDA voxel raycast (NOT THREE.Raycaster) --------------------------------
@@ -1353,6 +1403,65 @@ function playSound(kind) {
   } catch (e) { /* never let audio break gameplay */ }
 }
 
+// --- movement SFX (footstep / land / splash): procedurally synthesized, NO files ---
+// Material-aware footstep timbre, ±12% per-step pitch jitter, low gains so steps never
+// drown the calibrated break/place sounds. Honors soundOn + the ensureAudio gesture
+// gate; callers already guard headless/hidden, but it's safe to call any time.
+function playMoveSound(kind, intensity, blockUnder) {
+  if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+  const amt = Math.max(0, Math.min(1, Number.isFinite(intensity) ? intensity : 0.5));
+  try {
+    const t0 = audioCtx.currentTime;
+    // per-material footstep character; defaults cover dirt/grass-ish ground
+    let dur, cutoff, hp = false, toneF = 0, noiseGain, toneGain = 0;
+    if (kind === 'splash') {
+      dur = 0.22; cutoff = 1600; hp = true; noiseGain = 0.14 + amt * 0.08; toneF = 0; toneGain = 0;
+    } else if (kind === 'land') {
+      // land thud: heavier/lower on stone, scaled by impact
+      const stone = blockUnder === B.STONE;
+      dur = 0.16 + amt * 0.06; cutoff = stone ? 520 : 700; noiseGain = 0.12 + amt * 0.16;
+      toneF = stone ? 90 : 120; toneGain = 0.12 + amt * 0.14;
+    } else { // 'step'
+      const m = blockUnder;
+      if (m === B.GRASS || m === B.LEAVES) { dur = 0.075; cutoff = 2600; hp = true; noiseGain = 0.05; toneF = 0; toneGain = 0; }
+      else if (m === B.SAND) { dur = 0.07; cutoff = 1400; noiseGain = 0.055; toneF = 0; toneGain = 0; }
+      else if (m === B.STONE) { dur = 0.05; cutoff = 3200; noiseGain = 0.05; toneF = 220; toneGain = 0.035; }
+      else { dur = 0.08; cutoff = 900; noiseGain = 0.055; toneF = 140; toneGain = 0.05; } // dirt/wood: muffled thud
+      // ±12% per-step pitch jitter on both the filter and the tone
+      const jit = 1 + (Math.random() - 0.5) * 0.24;
+      cutoff *= jit; if (toneF) toneF *= jit;
+      noiseGain *= 0.85 + amt * 0.3;
+    }
+    // noise burst through the material filter
+    const n = Math.max(1, Math.floor(audioCtx.sampleRate * dur));
+    const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = (Math.random() * 2 - 1) * (1 - i / n);
+    const src = audioCtx.createBufferSource();
+    src.buffer = buf;
+    const filt = audioCtx.createBiquadFilter();
+    filt.type = hp ? 'highpass' : 'lowpass';
+    filt.frequency.value = cutoff;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(noiseGain, t0);
+    g.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+    src.connect(filt); filt.connect(g); g.connect(audioCtx.destination);
+    src.start(t0);
+    // optional low tone under the noise (land thud / stone click / dirt thud)
+    if (toneF && toneGain) {
+      const osc = audioCtx.createOscillator();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(toneF, t0);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(40, toneF * 0.55), t0 + dur);
+      const og = audioCtx.createGain();
+      og.gain.setValueAtTime(toneGain, t0);
+      og.gain.exponentialRampToValueAtTime(0.0008, t0 + dur);
+      osc.connect(og); og.connect(audioCtx.destination);
+      osc.start(t0); osc.stop(t0 + dur + 0.02);
+    }
+  } catch (e) { /* never let audio break gameplay */ }
+}
+
 // --- day/night environment ----------------------------------------------------
 let scene = null, camera = null, renderer = null, canvasEl = null;
 let sunLight = null, hemiLight = null, highlightBox = null;
@@ -1584,7 +1693,7 @@ function blockHardness(id) { return BLOCK_HARDNESS[id] || 0.35; }
 function completePlayerBreak() {
   const { x, y, z, id } = breakState;
   breakState = null;
-  setBlock(x, y, z, B.AIR, true); // same path as the old instant break (sync + save)
+  setBlock(x, y, z, B.AIR, true, true); // same path as the old instant break (sync + save); localEditFast = instant remesh
   spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14);
   playSound('break');
   voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // VOX hook
@@ -1658,7 +1767,7 @@ function doPlace() {
   if (existing !== B.AIR && existing !== B.WATER) return;
   if (blockIntersectsAnyEntity(px, py, pz)) return; // never place inside yourself or a bot
   const id = PLACEABLE[selSlot];
-  if (!setBlock(px, py, pz, id, true)) return;
+  if (!setBlock(px, py, pz, id, true, true)) return; // localEditFast = instant remesh of the player's own chunk
   coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
   playSound('place');
@@ -1674,6 +1783,117 @@ function findSpawn() {
     }
   }
   return { x: 0.5, y: terrainHeightAt(0, 0) + 1.02, z: 0.5 };
+}
+
+// --- view-bob + landing dip + jump lift + material-aware footstep audio --------
+// CAMERA-AND-AUDIO ONLY. This block reads player.pos/vel/onGround but writes ONLY
+// camera.position/rotation (via the camFx accumulator, applied AFTER the eye pin)
+// and the WebAudio graph. camFx NEVER feeds back into player.pos, so targetBlock()'s
+// eyeRay and ALL physics stay locked to the crosshair / true position. Honors the
+// 'Camera motion' setting (default ON, auto-OFF under prefers-reduced-motion) and the
+// existing soundOn flag; fully skipped under headless and while the tab is hidden.
+let cameraMotion = true;             // 'Camera motion' setting (bob/dip/lift)
+const camFx = { dy: 0, dx: 0, roll: 0 };
+let bobPhase = 0;
+let wasOnGround = false;             // landing-dip edge detector
+let prevVelY = 0;                    // pre-land vertical speed (impact magnitude)
+let landDip = 0;                     // current critically-damped landing-dip offset (blocks)
+let landDipVel = 0;                  // its velocity for the spring integrator
+let suppressDipFrames = 0;           // teleport guard: skip the dip for a frame after a tp
+let lastFootstepT = -1e9;            // hard rate cap between footstep sounds (ms)
+let bobHalfCycle = 0;               // tracks bobPhase half-cycles to fire one step each
+let wasInWater = false;             // splash edge detector (player entInWater transition)
+
+// Called whenever the player is teleported (safe tp / world load) so a large
+// positional jump never registers as a "landing" thud on the next frame.
+function camFxNotifyTeleport() {
+  suppressDipFrames = 2;
+  landDip = 0; landDipVel = 0;
+  wasOnGround = false; prevVelY = 0;
+  wasInWater = entInWater(player);
+}
+
+// Advance the bob/dip/lift accumulators and fire movement audio. dt is the frame dt.
+function updateCamFx(dt) {
+  // detect transitions BEFORE any early-out so audio/dip still latch correctly
+  const onGround = player.onGround;
+  const inWater = entInWater(player);
+  const speed = Math.hypot(player.vel.x, player.vel.z);
+  const audible = !document.hidden; // hidden ticks emit nothing (spec)
+
+  // landing dip + land thud on the onGround false->true transition
+  if (onGround && !wasOnGround) {
+    const impact = Math.min(1, Math.abs(prevVelY) / 14); // 0..1 over a ~14 b/s fall
+    if (suppressDipFrames <= 0 && cameraMotion && impact > 0.04) {
+      landDip = -(0.012 + impact * 0.05); // downward kick; springs back below
+      landDipVel = 0;
+    }
+    if (impact > 0.06 && audible) playMoveSound('land', impact);
+  }
+  // jump-lift kick: detect the airborne launch (onGround just dropped while rising)
+  if (!onGround && wasOnGround && player.vel.y > 0.5 && cameraMotion && suppressDipFrames <= 0) {
+    landDip += 0.018; // small upward lift, decays with the same spring
+  }
+  // splash when the player enters water
+  if (inWater && !wasInWater && audible) playMoveSound('splash', 0.6);
+
+  wasOnGround = onGround;
+  prevVelY = player.vel.y;
+  wasInWater = inWater;
+  if (suppressDipFrames > 0) suppressDipFrames--;
+
+  // critically-damped spring for the landing dip / jump lift (~0.18s settle)
+  if (landDip !== 0 || landDipVel !== 0) {
+    const k = 240, c = 2 * Math.sqrt(k); // critical damping
+    landDipVel += (-k * landDip - c * landDipVel) * dt;
+    landDip += landDipVel * dt;
+    if (Math.abs(landDip) < 1e-4 && Math.abs(landDipVel) < 1e-3) { landDip = 0; landDipVel = 0; }
+  }
+
+  // step cadence: advance the gait phase whenever grounded, moving, and not flying —
+  // this drives BOTH the visual bob and the footstep audio. Footsteps stay on soundOn
+  // alone (independent of the 'Camera motion' setting, per spec), so the phase advances
+  // even when cameraMotion is off; only the camera OFFSET below is gated by cameraMotion.
+  const stepping = onGround && !player.fly && speed > 0.5;
+  if (stepping) {
+    bobPhase += speed * dt * 2.4; // pace scales with horizontal speed
+    // footstep audio on each half-cycle (sin sign flip) — one step per footfall
+    const half = Math.floor(bobPhase / Math.PI);
+    if (half !== bobHalfCycle) {
+      bobHalfCycle = half;
+      maybeFootstep(speed);
+    }
+  } else {
+    bobHalfCycle = Math.floor(bobPhase / Math.PI); // keep in sync so resuming fires cleanly
+  }
+
+  // build the camera offset from bob + dip, amplitude-scaled by speed and clamped.
+  // The visual bob is gated by cameraMotion; the landing dip / jump lift already are.
+  let dy = 0, dx = 0, roll = 0;
+  if (stepping && cameraMotion) {
+    const amp = Math.min(1, speed / 7); // 0..1 over walk..sprint
+    dy = Math.sin(bobPhase) * 0.045 * amp;
+    dx = Math.sin(bobPhase * 0.5) * 0.05 * amp;
+    roll = Math.sin(bobPhase * 0.5) * 0.01 * amp;
+  }
+  dy += landDip; // landDip is only ever non-zero while cameraMotion is on (gated above)
+  // hard clamps (spec): |dy|,|dx| < 0.06 blocks; |roll| < 0.012 rad
+  camFx.dy = Math.max(-0.0599, Math.min(0.0599, dy));
+  camFx.dx = Math.max(-0.0599, Math.min(0.0599, dx));
+  camFx.roll = Math.max(-0.0119, Math.min(0.0119, roll));
+  // when motion is disabled, force a perfectly still camera (safety belt). bobPhase is
+  // NOT reset here — it keeps advancing to drive footstep cadence (audio is independent).
+  if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; }
+}
+
+// footstep with hard rate cap + material filter + ±12% pitch randomization
+function maybeFootstep(speed) {
+  if (voxHeadless || document.hidden) return;
+  const now = performance.now();
+  if (now - lastFootstepT < 370) return; // HARD cap so it never machine-guns
+  lastFootstepT = now;
+  const under = getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y - 0.1), Math.floor(player.pos.z));
+  playMoveSound('step', Math.min(1, speed / 7), under);
 }
 
 // ===== UI =====
@@ -1741,7 +1961,7 @@ function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'btnExport', 'btnImportBtn', 'importFile',
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'questHud', 'questHudSkip', // ONBOARD coach
    // NEIGHBORHOOD DOM
@@ -1838,7 +2058,7 @@ function updateHud(dayFrac) {
     'frame ms (avg) ' + (1000 / Math.max(1, fpsVal)).toFixed(1) +
     '  |  pixel ratio (eff) ' + (basePR * renderScale).toFixed(2) +
     (autoQuality ? ' (auto)' : '') + '\n' +
-    'mesh ms (last) ' + lastMeshMs.toFixed(1);
+    'mesh ms (last) ' + lastMeshMs.toFixed(1) + '  |  dirty ' + dirtyMeshSet.size;
 }
 
 function showHelp() {
@@ -2102,6 +2322,13 @@ function initUiButtons() {
     if (!autoQuality && renderScale !== 1) { renderScale = 1.0; applyRenderScale(); } // unchecking restores full res
     saveSettings();
   });
+  ui.chkCameraMotion.addEventListener('change', () => {
+    cameraMotion = ui.chkCameraMotion.checked;
+    // freeze the camera immediately when turning motion off (the per-frame update also
+    // enforces this); bobPhase keeps running so footstep audio is unaffected.
+    if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; landDip = 0; landDipVel = 0; }
+    saveSettings();
+  });
 
   ui.btnExport.addEventListener('click', exportWorld);
   ui.btnImportBtn.addEventListener('click', () => ui.importFile.click());
@@ -2274,22 +2501,34 @@ function scheduleSave() {
 function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
-      renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality
+      renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
+      cameraMotion: cameraMotion
     }));
   } catch (e) { /* ignore */ }
 }
 function loadSettings() {
+  // CAMERA MOTION default: ON, but auto-OFF on first run if the OS asks for reduced
+  // motion. Older blobs lacking the key keep the ON default (or reduced-motion default).
+  try {
+    cameraMotion = !(typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
+  } catch (e) { cameraMotion = true; }
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
     if (s && typeof s === 'object') {
       if (Number.isFinite(s.renderDistance)) renderDist = Math.max(2, Math.min(8, s.renderDistance | 0));
       if (typeof s.sound === 'boolean') soundOn = s.sound;
       if (typeof s.autoQuality === 'boolean') autoQuality = s.autoQuality; // older blobs default by IS_TOUCH
+      if (typeof s.cameraMotion === 'boolean') cameraMotion = s.cameraMotion; // older blobs default ON / reduced-motion
     }
   } catch (e) { /* ignore */ }
 }
 
 const EDIT_KEY_RE = /^-?\d+,-?\d+,-?\d+$/;
+// TRUST: hard ceiling on the number of edit keys a save/import/snapshot may carry.
+// ~10MB of JSON, far above any hand-built world but near localStorage practicality —
+// a giant edits object fast-fails here instead of being fully scanned then rebuilt
+// (which would hang the tab and bloat localStorage to quota-fail).
+const MAX_EDITS = 250000;
 function validateSave(o) {
   if (!o || typeof o !== 'object' || Array.isArray(o)) return false;
   if (!Number.isFinite(o.seed)) return false;
@@ -2297,6 +2536,7 @@ function validateSave(o) {
   if (!p || typeof p !== 'object' ||
       !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return false;
   if (o.edits == null || typeof o.edits !== 'object' || Array.isArray(o.edits)) return false;
+  if (Object.keys(o.edits).length > MAX_EDITS) return false; // TRUST: reject before the per-key scan
   for (const k of Object.keys(o.edits)) {
     if (!EDIT_KEY_RE.test(k)) return false;
     const v = o.edits[k];
@@ -2325,6 +2565,7 @@ function applyWorldState(seed, newEdits, ppos) {
   if (ui.btnDown) ui.btnDown.classList.toggle('hidden', !(IS_TOUCH && player.fly));
   ui.seedLabel.textContent = String(worldSeed);
   lastPCX = null; lastPCZ = null;
+  camFxNotifyTeleport(); // CAMERA: a world load/import is a large jump, not a landing
   scanChunks();
   saveNow();
   // NEIGHBORHOOD hook: a kited host whose world was replaced re-snapshots all neighbors
@@ -3138,6 +3379,13 @@ async function nbHostOnData(entry, wire) {
   const p = env.payload || {};
   if (p.app !== NB_APP_ID) return;
   if (!sealed && p.op !== 'pos') return; // plaintext is allowed only for pos (perf)
+  // TRUST: bind the envelope's claimed sender to the identity captured at hello
+  // (nbHostWelcome). A ready neighbor that forges from_rappid=someone-else would
+  // otherwise spoof 'bye' (evict another avatar), 'bot-claim'/'bot-release' (steal
+  // a controller's claim — those handlers key entirely off env.from_rappid), or
+  // chat/ping impersonation — and the host would dispatch it locally AND relay the
+  // wire verbatim. Reject BEFORE both local dispatch and the hub relay.
+  if (env.from_rappid !== entry.rappid) return;
   nbDispatch(env, entry, sealed);
   // hub relay (§10): forward the ORIGINAL wire to every other neighbor
   if (p.op === 'pos' || p.op === 'edit' || p.op === 'chat' || p.op === 'ping' ||
@@ -3147,6 +3395,18 @@ async function nbHostOnData(entry, wire) {
 }
 
 async function nbHostWelcome(entry, env, helloWire) {
+  // TRUST: reject a hello whose from_rappid collides with an already-ready entry —
+  // an attacker must not be able to assume another connected neighbor's identity at
+  // the handshake (which would let the from_rappid binding above accept their forged
+  // ops). A legit client uses a STABLE per-tab rappid (sessionStorage), so reconnect
+  // reuses its own id and the old entry is already gone by then; this never rejects
+  // legitimate traffic.
+  for (const [, e] of Neighborhood.conns) {
+    if (e !== entry && e.ready && e.rappid === env.from_rappid) {
+      try { entry.conn.close(); } catch (e2) {}
+      return;
+    }
+  }
   entry.ready = true;
   entry.rappid = env.from_rappid;
   entry.name = nbCleanName(env.payload.name);
@@ -5119,6 +5379,7 @@ function voxCmdTp(x, y, z, exact) {
   ent.pos.x = x; ent.pos.y = y; ent.pos.z = z;
   ent.vel.x = 0; ent.vel.y = 0; ent.vel.z = 0;
   if (b) { b.path = null; b.gotoTarget = null; }
+  else camFxNotifyTeleport(); // CAMERA: a player tp must not register as a landing thud
   const r = { ok: true, subject: b ? b.name : 'player', position: { x, y, z } };
   if (snapped) r.note = 'destination was inside solid blocks — snapped to walkable ground at y=' + Math.floor(y);
   return r;
@@ -5777,6 +6038,7 @@ function main() {
   ui.renderDistVal.textContent = String(renderDist);
   ui.chkSound.checked = soundOn;
   ui.chkAutoQuality.checked = autoQuality;
+  ui.chkCameraMotion.checked = cameraMotion;
   updateFog();
   buildHotbar();
   initDesktopInput();
@@ -5865,6 +6127,16 @@ function main() {
     // camera follows the player eye
     camera.position.set(player.pos.x, player.pos.y + player.eye, player.pos.z);
     camera.rotation.set(player.pitch, player.yaw, 0);
+    // VIEW-BOB / DIP / LIFT: camera-only juice applied AFTER the eye pin. Reads
+    // player.pos/vel but NEVER writes them, so DDA targeting + physics stay locked.
+    // Skipped entirely under headless (no camera, audioCtx suspended anyway).
+    if (!voxHeadless) {
+      updateCamFx(dt);
+      camera.position.x += Math.cos(player.yaw) * camFx.dx; // lateral sway in world space
+      camera.position.z += -Math.sin(player.yaw) * camFx.dx;
+      camera.position.y += camFx.dy;
+      camera.rotation.z = camFx.roll; // tiny roll
+    }
 
     // block-target highlight (DDA, reach-limited)
     const canAct = isLocked() || IS_TOUCH;
