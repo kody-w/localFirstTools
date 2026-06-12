@@ -707,6 +707,15 @@ let meshQueue = [];              // [{cx,cz,d2}]
 // chunk synchronously in setBlock for instant input feel; only its up-to-4 border
 // neighbors defer here.
 const dirtyMeshSet = new Set();  // chunkKey -> needs buildChunkMesh
+// RENDERER PERF: hard per-frame cap on NON-LOCAL chunk-mesh rebuilds, layered ON TOP of
+// the existing ms budget so a big edit burst or a renderDist increase can never blow a
+// single frame's budget (mesh-ms spikes flatten). Capped chunks stay in meshQueue/
+// dirtyMeshSet for the next frame (the leftovers/Set patterns preserve them). The local
+// player's own synchronous own-chunk rebuild (the localEditFast path in setBlock) is
+// EXEMPT — it never goes through these loops — so input feel never regresses. Reset at
+// the top of processStreaming each frame; surfaced as 'meshed/frame' in the F3 HUD.
+const MESH_CAP_PER_FRAME = 2;
+let meshedThisFrame = 0;
 // TYPED-ARRAY MESH BUILDER: module-level reusable scratch buffers shared across every
 // chunk built in a frame. buildChunkMesh counts visible faces first, then writes vertex
 // data directly by index into these (no .push() reallocations, no JS-number boxing). The
@@ -1198,6 +1207,7 @@ function buildChunkMesh(chunk) {
     g.setIndex(new THREE.BufferAttribute(I.slice(0, ip), 1));
     const m = new THREE.Mesh(g, solidMat);
     m.position.set(cx * 16, 0, cz * 16);
+    m.matrixAutoUpdate = false; m.updateMatrix(); // RENDERER PERF: chunk meshes are static — auto-update intentionally off (every rebuild re-runs position.set + updateMatrix, so a repositioned chunk always refreshes)
     scene.add(m);
     chunk.solidMesh = m;
   }
@@ -1209,6 +1219,7 @@ function buildChunkMesh(chunk) {
     g.setIndex(wind);
     const m = new THREE.Mesh(g, waterMat);
     m.position.set(cx * 16, 0, cz * 16);
+    m.matrixAutoUpdate = false; m.updateMatrix(); // RENDERER PERF: static chunk water — auto-update intentionally off (rebuild always re-runs position.set + updateMatrix)
     m.renderOrder = 1;
     scene.add(m);
     chunk.waterMesh = m;
@@ -1268,6 +1279,11 @@ function processStreaming() {
   const budget = loadingVisible ? 24 : 8; // ms; bigger while the loading screen is up
   const endT = performance.now() + budget;
   const pcx = playerChunkX(), pcz = playerChunkZ();
+  meshedThisFrame = 0; // RENDERER PERF: reset the per-frame mesh-rebuild counter
+  // The hard cap applies only IN-GAME (not under the loading screen, which intentionally
+  // floods chunks under a 24ms budget so the world appears fast). In-game, a renderDist
+  // increase or edit burst is capped to MESH_CAP_PER_FRAME non-local rebuilds/frame.
+  const capActive = !loadingVisible;
   while (genQueue.length && performance.now() < endT) {
     const it = genQueue.shift();
     if (chunks.has(chunkKey(it.cx, it.cz))) continue;
@@ -1276,6 +1292,7 @@ function processStreaming() {
   }
   const leftovers = [];
   while (meshQueue.length && performance.now() < endT) {
+    if (capActive && meshedThisFrame >= MESH_CAP_PER_FRAME) break; // cap reached: leave the rest in meshQueue for next frame
     const it = meshQueue.shift();
     const c = chunks.get(chunkKey(it.cx, it.cz));
     if (Math.max(Math.abs(it.cx - pcx), Math.abs(it.cz - pcz)) > renderDist) continue;
@@ -1283,6 +1300,7 @@ function processStreaming() {
     if (c.solidMesh && !c.dirty) continue;
     if (!neighborsReady(c)) { leftovers.push(it); continue; }
     buildChunkMesh(c);
+    meshedThisFrame++;
   }
   meshQueue = leftovers.concat(meshQueue);
   drainDirtyMeshes(endT, pcx, pcz);
@@ -1304,13 +1322,16 @@ function drainDirtyMeshes(endT, pcx, pcz) {
     const db = cb ? (cb.cx - pcx) * (cb.cx - pcx) + (cb.cz - pcz) * (cb.cz - pcz) : Infinity;
     return da - db;
   });
+  const capActive = !loadingVisible; // hard cap is in-game only (see processStreaming)
   for (const k of keys) {
     if (performance.now() >= endT) break;   // budget spent — finish the rest next frame
+    if (capActive && meshedThisFrame >= MESH_CAP_PER_FRAME) break; // RENDERER PERF: hard cap reached — key stays in dirtyMeshSet (NOT yet deleted) for next frame
     const c = chunks.get(k);
     dirtyMeshSet.delete(k);                  // remove first: can't re-mesh this key this drain
     if (!c) continue;                        // gone (unloaded before drain) -> just dropped
     if (c.solidMesh && !c.dirty) continue;   // already rebuilt this frame (e.g. via meshQueue) -> skip
     buildChunkMesh(c);
+    meshedThisFrame++;                       // counts toward the shared per-frame cap
   }
 }
 
@@ -1733,6 +1754,16 @@ function updateFog() {
   const far = Math.max(40, renderDist * 16 - 6);
   scene.fog.near = far * 0.45;
   scene.fog.far = far;
+  // RENDERER PERF: pull the camera far-plane down to fog.far + one chunk of margin so
+  // fully-fogged chunks fall outside the frustum and Three drops them to zero draw calls
+  // (the camera was created at far=600, drawing fogged terrain that's invisible anyway).
+  // The +1-chunk margin guarantees the nearest visible chunk can never pop into the fog
+  // discontinuity. Runs on EVERY fog change (slider, world load/import, initial setup),
+  // since every applyWorldState calls updateFog. Near plane (0.1) is left untouched.
+  if (camera) {
+    camera.far = Math.ceil((far / 16) + 1) * 16;
+    camera.updateProjectionMatrix();
+  }
 }
 
 // ===== PLAYER =====
@@ -1940,6 +1971,7 @@ function completePlayerBreak() {
   setBlock(x, y, z, B.AIR, true, true); // same path as the old instant break (sync + save); localEditFast = instant remesh
   spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14);
   playSound('break');
+  addTrauma(id >= B.COAL_ORE && id <= B.GOLD_ORE ? 0.18 : 0.12); // SHAKE: ore breaks hit harder (ids 8/9/10)
   haptic(18); flashCrosshair(); // TOUCH FEEDBACK: confirm the block actually broke (visual on iOS where vibrate is a no-op)
   voxEvent('dig_complete', { x, y, z, blockId: id, by: 'player' }); // VOX hook
   coachBreakCount++; // ONBOARD: the BREAK step counts completed player breaks
@@ -2016,6 +2048,7 @@ function doPlace() {
   coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
   playSound('place');
+  addTrauma(0.05); // SHAKE: a small, satisfying tick when a block lands
   haptic(10); flashCrosshair(); // TOUCH FEEDBACK: confirm a block landed
 }
 
@@ -2075,6 +2108,16 @@ function findSpawn() {
 // existing soundOn flag; fully skipped under headless and while the tab is hidden.
 let cameraMotion = true;             // 'Camera motion' setting (bob/dip/lift)
 const camFx = { dy: 0, dx: 0, roll: 0 };
+// SCREEN-SHAKE (trauma): a RAM-only [0..1] scalar fed into the SAME camFx
+// accumulator so shake composes with bob/dip and is governed by the same gates.
+// trauma is READ only inside updateCamFx and only while cameraMotion is on, so it
+// NEVER touches player.pos / eyeRay / DDA targeting. It decays fully in <1s and is
+// internal-only: zero wire/op/save/observation change. addTrauma is called at clean
+// single user/event edges (break, place, hard land, ping); bot/remote/vox edits go
+// through setBlock directly and so never add trauma.
+let trauma = 0;                      // accumulated shake energy, clamped to 1
+let shakeT = 0;                      // deterministic shake phase (advanced by dt*22)
+function addTrauma(a) { trauma = Math.min(1, trauma + a); }
 let bobPhase = 0;
 let wasOnGround = false;             // landing-dip edge detector
 let prevVelY = 0;                    // pre-land vertical speed (impact magnitude)
@@ -2091,6 +2134,7 @@ function camFxNotifyTeleport() {
   suppressDipFrames = 2;
   landDip = 0; landDipVel = 0;
   wasOnGround = false; prevVelY = 0;
+  trauma = 0; // SHAKE: a positional jump (safe tp / world-load) must never shake
   wasInWater = entInWater(player);
 }
 
@@ -2109,6 +2153,9 @@ function updateCamFx(dt) {
       landDip = -(0.012 + impact * 0.05); // downward kick; springs back below
       landDipVel = 0;
     }
+    // SHAKE: a big fall lands HARD; gated by suppressDipFrames so a teleport/world-load
+    // (which sets suppressDipFrames=2) never shakes on the next frame.
+    if (suppressDipFrames <= 0 && impact > 0.04) addTrauma(0.10 + impact * 0.35);
     if (impact > 0.06 && audible) playMoveSound('land', impact);
   }
   // jump-lift kick: detect the airborne launch (onGround just dropped while rising)
@@ -2158,10 +2205,38 @@ function updateCamFx(dt) {
     roll = Math.sin(bobPhase * 0.5) * 0.01 * amp;
   }
   dy += landDip; // landDip is only ever non-zero while cameraMotion is on (gated above)
-  // hard clamps (spec): |dy|,|dx| < 0.06 blocks; |roll| < 0.012 rad
-  camFx.dy = Math.max(-0.0599, Math.min(0.0599, dy));
-  camFx.dx = Math.max(-0.0599, Math.min(0.0599, dx));
-  camFx.roll = Math.max(-0.0119, Math.min(0.0119, roll));
+  // BOB CLAMP FIRST (spec): the existing |dy|,|dx| < 0.06 / |roll| < 0.012 caps applied
+  // to the bob+dip term. These bounds are byte-identical to today when trauma == 0.
+  dy = Math.max(-0.0599, Math.min(0.0599, dy));
+  dx = Math.max(-0.0599, Math.min(0.0599, dx));
+  roll = Math.max(-0.0119, Math.min(0.0119, roll));
+  // SCREEN-SHAKE: deterministic shake ADDED on top of the clamped bob, only when motion
+  // is on and there is energy to spend. shake = trauma^2 so small traumas barely register
+  // and decay is felt as a quick falloff. Two summed sines per axis (incommensurate
+  // frequencies) read as organic, not periodic. Max axis offset ~0.10 blocks, roll ~0.04.
+  if (cameraMotion && trauma > 0) {
+    const shake = trauma * trauma;
+    shakeT += dt * 22;
+    const sx = (Math.sin(shakeT) + Math.sin(shakeT * 2.7)) * 0.5;
+    const sy = (Math.sin(shakeT * 1.3 + 11) + Math.sin(shakeT * 3.1 + 5)) * 0.5;
+    const sr = Math.sin(shakeT * 2.2 + 3);
+    dx += shake * 0.10 * sx;
+    dy += shake * 0.10 * sy;
+    roll += shake * 0.04 * sr;
+    // wider final clamp ONLY while shaking, so the added shake is actually visible.
+    // (When trauma == 0 this branch is skipped and the 0.0599/0.0119 caps above stand,
+    // keeping the no-shake path byte-identical to before.)
+    dy = Math.max(-0.16, Math.min(0.16, dy));
+    dx = Math.max(-0.16, Math.min(0.16, dx));
+    roll = Math.max(-0.05, Math.min(0.05, roll));
+  }
+  camFx.dy = dy;
+  camFx.dx = dx;
+  camFx.roll = roll;
+  // trauma decays every frame (full decay in <1s) so rapid mining can never accumulate
+  // into a seizure. Decay runs regardless of cameraMotion — trauma is just never READ
+  // unless cameraMotion is on (the shake block above is gated on it).
+  trauma = Math.max(0, trauma - dt * 1.6);
   // when motion is disabled, force a perfectly still camera (safety belt). bobPhase is
   // NOT reset here — it keeps advancing to drive footstep cadence (audio is independent).
   if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; }
@@ -2358,7 +2433,8 @@ function updateHud(dayFrac) {
     'frame ms (avg) ' + (1000 / Math.max(1, fpsVal)).toFixed(1) +
     '  |  pixel ratio (eff) ' + (basePR * renderScale).toFixed(2) +
     (autoQuality ? ' (auto)' : '') + '\n' +
-    'mesh ms (last) ' + lastMeshMs.toFixed(1) + '  |  dirty ' + dirtyMeshSet.size;
+    'mesh ms (last) ' + lastMeshMs.toFixed(1) + '  |  dirty ' + dirtyMeshSet.size +
+    '  |  meshed/frame ' + meshedThisFrame;
 }
 
 function showHelp() {
@@ -2402,7 +2478,10 @@ function initDesktopInput() {
       return;
     }
     if (e.code === 'KeyH' || e.key === '?') {
-      if (panelOpen()) { hideHelp(); hideSettings(); } else showHelp();
+      // close WHICHEVER panel is open (mirroring Escape) — hideNb() was missing, so
+      // H/? could not close the Neighborhood/kite panel. hideNb() is a no-op when
+      // nbPanel is already hidden, so adding it is safe.
+      if (panelOpen()) { hideHelp(); hideSettings(); hideNb(); } else showHelp();
       return;
     }
     if (e.code === 'Escape') {
@@ -2411,10 +2490,16 @@ function initDesktopInput() {
       else if (!ui.nbPanel.classList.contains('hidden')) hideNb();
       return;
     }
-    // NEIGHBORHOOD: T or Enter opens chat (Esc closes); never fights game keys.
-    // VOXELFLAYER: chat also opens solo while twins are hatched (they read recentChat).
-    if ((e.code === 'KeyT' || e.code === 'Enter' || e.code === 'NumpadEnter') &&
-        (Neighborhood.enabled || vfBots.length > 0) && !panelOpen()) {
+    // CHAT OPENER. T is the UNIVERSAL opener whenever chat is reachable (a live
+    // neighborhood OR any solo twin hatched — twins read recentChat). BARE Enter/
+    // NumpadEnter is confined to LIVE neighborhood sessions only, so hatching a single
+    // solo twin no longer hijacks bare Enter (which would interrupt the onboarding coach
+    // and fire right after a native prompt/modal closes). Enter inside the chat input
+    // field never reaches here — that handler stopPropagation()s and this listener also
+    // early-returns on INPUT/TEXTAREA targets.
+    if (((e.code === 'KeyT' && (Neighborhood.enabled || vfBots.length > 0)) ||
+         ((e.code === 'Enter' || e.code === 'NumpadEnter') && Neighborhood.enabled)) &&
+        !panelOpen()) {
       e.preventDefault();
       openChatInput();
       return;
@@ -2891,6 +2976,7 @@ function applyWorldState(seed, newEdits, ppos) {
   ui.seedLabel.textContent = String(worldSeed);
   lastPCX = null; lastPCZ = null;
   camFxNotifyTeleport(); // CAMERA: a world load/import is a large jump, not a landing
+  updateFog(); // RENDERER PERF: re-derive camera.far for the import/load (re-meshes under the cap)
   scanChunks();
   saveNow();
   // NEIGHBORHOOD hook: a kited host whose world was replaced re-snapshots all neighbors
@@ -3547,6 +3633,7 @@ function nbSendPing(kindArg) {
   const name = Neighborhood.name || 'Player';
   // local echo first (solo: this IS the personal marker)
   nbShowPing(Neighborhood.rappid || 'local', name, Neighborhood.color, t.x, t.y, t.z, kind);
+  addTrauma(0.06); // SHAKE: a light pulse on placing your own ping (RAM-only; never read under headless)
   haptic(15); // TOUCH FEEDBACK: single confirm pulse on a ping (IS_TOUCH-gated, so vox/desktop never buzz)
   addChatMsg(null, name + ' pinged a spot (' + t.x + ', ' + t.y + ', ' + t.z + ')', null, true);
   toast('Pinged (' + t.x + ', ' + t.y + ', ' + t.z + ')');
