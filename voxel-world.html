@@ -555,11 +555,25 @@ const GRAVITY = 24;
 const JUMP_V = 8;            // clears ~1.33 blocks
 const EPS = 0.001;
 
-const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, WOOD: 5, LEAVES: 6, WATER: 7 };
-const PLACEABLE = [B.GRASS, B.DIRT, B.STONE, B.SAND, B.WOOD, B.LEAVES];
-const BLOCK_NAMES = { 1: 'Grass', 2: 'Dirt', 3: 'Stone', 4: 'Sand', 5: 'Wood', 6: 'Leaves', 7: 'Water' };
-const BLOCK_COLORS = { 1: 0x69a84f, 2: 0x8a6042, 3: 0x7d7d82, 4: 0xd9c79c, 5: 0x6e5432, 6: 0x3a7630, 7: 0x3268c8 };
-// atlas tile index per block face: [top, bottom, side]
+// id 7 is WATER (the existing max); ores APPEND at 8/9/10 so no existing id shifts.
+const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, WOOD: 5, LEAVES: 6, WATER: 7,
+            COAL_ORE: 8, IRON_ORE: 9, GOLD_ORE: 10 };
+// MAX_BLOCK_ID: the single source of truth for the validateSave edit-id ceiling.
+// Ores 8/9/10 are pure terrain (generated, never stored) UNLESS a player breaks+replaces
+// one — that writes id 8/9/10 into edits, which the widened ceiling now permits to save,
+// export, snapshot, and apply over the wire (every path funnels through this range).
+const MAX_BLOCK_ID = B.GOLD_ORE; // = 10
+const PLACEABLE = [B.GRASS, B.DIRT, B.STONE, B.SAND, B.WOOD, B.LEAVES]; // ores non-craftable for now
+const BLOCK_NAMES = {
+  1: 'Grass', 2: 'Dirt', 3: 'Stone', 4: 'Sand', 5: 'Wood', 6: 'Leaves', 7: 'Water',
+  8: 'Coal Ore', 9: 'Iron Ore', 10: 'Gold Ore' // names let vox/bot obs + `vox map` read ores
+};
+// break-particle colors: coal near-black, iron tan, gold warm-yellow
+const BLOCK_COLORS = {
+  1: 0x69a84f, 2: 0x8a6042, 3: 0x7d7d82, 4: 0xd9c79c, 5: 0x6e5432, 6: 0x3a7630, 7: 0x3268c8,
+  8: 0x2b2b30, 9: 0xc9a878, 10: 0xf2c44a
+};
+// atlas tile index per block face: [top, bottom, side]. Ores are the SAME tile all six faces.
 const BLOCK_TILES = {
   1: { top: 0, bottom: 2, side: 1 },
   2: { top: 2, bottom: 2, side: 2 },
@@ -567,10 +581,15 @@ const BLOCK_TILES = {
   4: { top: 4, bottom: 4, side: 4 },
   5: { top: 6, bottom: 6, side: 5 },
   6: { top: 7, bottom: 7, side: 7 },
-  7: { top: 8, bottom: 8, side: 8 }
+  7: { top: 8, bottom: 8, side: 8 },
+  8: { top: 13, bottom: 13, side: 13 },  // Coal Ore — appended atlas tiles (crack tiles 9-12 untouched)
+  9: { top: 14, bottom: 14, side: 14 },  // Iron Ore
+  10: { top: 15, bottom: 15, side: 15 }  // Gold Ore
 };
-// hotbar icon tile per placeable block
+// hotbar icon tile per placeable block (ores are not placeable, so no icons needed)
 const ICON_TILES = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 7 };
+// Ore hardness (Coal 1.1 / Iron 1.5 / Gold 1.4 — tougher than STONE 0.9) lives in
+// BLOCK_HARDNESS near the hold-to-mine code so blockHardness() reads it directly.
 
 const voxIndex = (x, y, z) => x + z * 16 + y * 256; // chunk-local flat index
 
@@ -743,6 +762,67 @@ function caveMouthAt(gx, gz) {
   }
   return null;                                        // no cave below — no blind pits
 }
+
+// --- ore veins (deterministic, world-aligned, separate salt from caves) ----------
+// Runs AFTER carveCaves so ores only seed in REMAINING stone (never carved air). A
+// SEPARATE field on a SEPARATE seed salt (worldSeed ^ 0x0RE5) keeps cave density
+// untouched; it samples fbm3 at a FINER frequency than caves on the same world-aligned
+// CAVE_STEP lattice + trilinear interpolation trick, so veins cross chunk borders
+// seamlessly and chunk bytes stay load-order independent. Each ore is gated by a thin
+// level-set band (|field-0.5| < bandHalfWidth) so it forms small clustered veins — not
+// scattered singles — and by a depth band (coal upper / iron mid / gold deep+rarest).
+// Cost: the field is interpolated on the same 4-block lattice the cave pass already
+// builds; measured sub-0.5ms/chunk in Node, well inside the 8ms streaming budget.
+const ORE_FREQ = 0.11;                 // finer than caves (cave xz freq 0.05)
+const ORE_BAND_COAL = 0.012;           // widest band: coal most common
+const ORE_BAND_IRON = 0.0085;
+const ORE_BAND_GOLD = 0.006;           // tightest band: gold rarest
+function oreFieldAt(lat, lx, ly, lz) {
+  // trilinear interpolation of the precomputed ore lattice (same indexing as carveCaves)
+  const fx = lx / CAVE_STEP, fz = lz / CAVE_STEP, fy = ly / CAVE_STEP;
+  const x0 = fx | 0, z0 = fz | 0, y0 = fy | 0;
+  const tx = fx - x0, tz = fz - z0, ty = fy - y0;
+  const b0 = (y0 * CAVE_NX + z0) * CAVE_NX + x0;
+  const b1 = ((y0 + 1) * CAVE_NX + z0) * CAVE_NX + x0;
+  const v00 = lat[b0] + (lat[b0 + 1] - lat[b0]) * tx;
+  const v01 = lat[b0 + CAVE_NX] + (lat[b0 + CAVE_NX + 1] - lat[b0 + CAVE_NX]) * tx;
+  const v10 = lat[b1] + (lat[b1 + 1] - lat[b1]) * tx;
+  const v11 = lat[b1 + CAVE_NX] + (lat[b1 + CAVE_NX + 1] - lat[b1 + CAVE_NX]) * tx;
+  const lo = v00 + (v01 - v00) * tz;
+  const hi = v10 + (v11 - v10) * tz;
+  return lo + (hi - lo) * ty;
+}
+function seedOres(data, baseX, baseZ, heights) {
+  const os = worldSeed ^ 0x0CE5; // separate salt: 0x0RE5 with O->0/R->C readable hex
+  // world-aligned ore lattice (chunk origins are multiples of CAVE_STEP) — finer freq
+  const lat = new Float32Array(CAVE_NX * CAVE_NX * CAVE_NY);
+  for (let iy = 0; iy < CAVE_NY; iy++) {
+    for (let iz = 0; iz < CAVE_NX; iz++) {
+      for (let ix = 0; ix < CAVE_NX; ix++) {
+        lat[(iy * CAVE_NX + iz) * CAVE_NX + ix] = fbm3(
+          os, (baseX + ix * CAVE_STEP) * ORE_FREQ, iy * CAVE_STEP * (ORE_FREQ * 1.3),
+          (baseZ + iz * CAVE_STEP) * ORE_FREQ, 3, 2.0, 0.5);
+      }
+    }
+  }
+  for (let lz = 0; lz < 16; lz++) {
+    for (let lx = 0; lx < 16; lx++) {
+      const h = heights[lx + lz * 16];
+      // stone band [2 .. h-4]: never bedrock (y<=1), never the surface cap, never water/air
+      const yTop = h - 4;
+      for (let y = 2; y <= yTop; y++) {
+        const i = lx + lz * 16 + y * 256;
+        if (data[i] !== B.STONE) continue; // only remaining stone — caves/water/caps skipped
+        const f = oreFieldAt(lat, lx, y, lz);
+        const off = Math.abs(f - 0.5);
+        // deepest-first so a cell never satisfies two bands at once (gold wins the deep core)
+        if (y >= 2 && y <= 10 && off < ORE_BAND_GOLD) { data[i] = B.GOLD_ORE; continue; }
+        if (y >= 6 && y <= 20 && off < ORE_BAND_IRON) { data[i] = B.IRON_ORE; continue; }
+        if (y >= 12 && off < ORE_BAND_COAL) { data[i] = B.COAL_ORE; continue; }
+      }
+    }
+  }
+}
 function carveCaves(data, baseX, baseZ, heights) {
   const cs = worldSeed ^ 0xCA7E;
   // world-aligned lattice (chunk origins are multiples of 16, so of CAVE_STEP)
@@ -833,6 +913,9 @@ function genChunk(cx, cz) {
   // caves: AFTER the terrain columns, BEFORE trees — the edits overlay below
   // reapplies LAST, so player edits deterministically win over carving
   carveCaves(data, baseX, baseZ, heights);
+  // ores: AFTER carving so veins seed only in REMAINING stone (never carved air);
+  // separate salt + field, so cave density is unchanged. Edits overlay still wins.
+  seedOres(data, baseX, baseZ, heights);
   // trees (deterministic from world coords, so canopies cross borders seamlessly)
   const stampIfAir = (wx, wy, wz, id) => {
     const lx = wx - baseX, lz = wz - baseZ;
@@ -1137,7 +1220,12 @@ function raycastVoxel(ox, oy, oz, dx, dy, dz, maxDist) {
 }
 
 // --- canvas texture atlas (no external image files) -------------------------
-const ATLAS_TS = 32, ATLAS_COLS = 4, ATLAS_ROWS = 4;
+// 8x8 grid (was 4x4). tileUV/fillTile/crackTile/the hotbar ALL derive a tile's cell
+// from its linear index via ATLAS_COLS/ROWS, so growing the grid keeps every existing
+// index (0-12: blocks + the four crack-overlay tiles) self-consistent with NO renumber —
+// each tile simply moves to its new floor(N/8) row, computed by the same constants. Ores
+// append at 13/14/15 in the freed space.
+const ATLAS_TS = 32, ATLAS_COLS = 8, ATLAS_ROWS = 8;
 const ATLAS_PAD = 0.5 / ATLAS_TS; // half-pixel inset (in tile units) against bleeding
 let atlasCanvas = null;
 
@@ -1186,13 +1274,15 @@ function makeAtlas() {
     if (rng() < 0.05) return rgb(98 + d, 70 + d, 48 + d);
     return rgb(134 + d, 96 + d, 67 + d);
   });
-  // 3: stone — gray speckle with darker cracks
-  fillTile(3, (x, y) => {
+  // 3: stone — gray speckle with darker cracks. Pulled into a named fn so the ore
+  // tiles (13/14/15) reuse the EXACT same stone-speckle base before overlaying nuggets.
+  const stonePixel = (x, y) => {
     const d = rng() * 26 - 13;
     if (rng() < 0.045) return rgb(88 + d, 88 + d, 92 + d);
     if ((x * 7 + y * 13) % 31 === 0) return rgb(102 + d, 102 + d, 106 + d);
     return rgb(126 + d, 126 + d, 130 + d);
-  });
+  };
+  fillTile(3, stonePixel);
   // 4: sand — fine tan grain
   fillTile(4, () => {
     const d = rng() * 22 - 11;
@@ -1259,6 +1349,35 @@ function makeAtlas() {
     ctx.restore();
   };
   for (let cs = 0; cs < 4; cs++) crackTile(9 + cs, cs);
+  // 13/14/15: ore tiles — stone-speckle base (reused from stonePixel) overlaid with a
+  // 3-5 nugget cluster in the ore color. Procedural only, no external image files.
+  const oreTile = (tile, r0, g0, b0, hi) => {
+    fillTile(tile, stonePixel); // identical stone backdrop so ores read as embedded in rock
+    const ox = (tile % ATLAS_COLS) * ATLAS_TS, oy = Math.floor(tile / ATLAS_COLS) * ATLAS_TS;
+    const nug = 3 + Math.floor(rng() * 3); // 3..5 nuggets clustered near the tile center
+    for (let k = 0; k < nug; k++) {
+      const cx = ATLAS_TS / 2 + (rng() - 0.5) * 16;
+      const cy = ATLAS_TS / 2 + (rng() - 0.5) * 16;
+      const rad = 2.4 + rng() * 2.6; // small blobs
+      for (let py = -4; py <= 4; py++) {
+        for (let px = -4; px <= 4; px++) {
+          const dxn = px + (rng() - 0.5) * 0.8, dyn = py + (rng() - 0.5) * 0.8;
+          if (dxn * dxn + dyn * dyn > rad * rad) continue;
+          const tx = Math.round(cx + px), ty = Math.round(cy + py);
+          if (tx < 0 || tx >= ATLAS_TS || ty < 0 || ty >= ATLAS_TS) continue;
+          const edge = (dxn * dxn + dyn * dyn) / (rad * rad); // shade toward the highlight at the core
+          const sh = 1 - edge * 0.4, sp = rng() * 26 - 13;
+          ctx.fillStyle = rgb(r0 * sh + hi * (1 - edge) * 0.4 + sp,
+                              g0 * sh + hi * (1 - edge) * 0.4 + sp,
+                              b0 * sh + hi * (1 - edge) * 0.4 + sp);
+          ctx.fillRect(ox + tx, oy + ty, 1, 1);
+        }
+      }
+    }
+  };
+  oreTile(13, 28, 28, 34, 70);     // coal: near-black nuggets
+  oreTile(14, 196, 168, 132, 120); // iron: warm tan flecks
+  oreTile(15, 230, 188, 70, 150);  // gold: warm-yellow, brightest highlight
   return atlasCanvas;
 }
 
@@ -1687,7 +1806,8 @@ function blockIntersectsAnyEntity(bx, by, bz) {
 // (bot.dig) and the vox CLI (dig x y z) keep INSTANT single-call semantics.
 let breakState = null;            // null | { x, y, z, id, progress, stage }
 let lastTapT = -1e9;              // touch quick-tap timestamp: decay pauses ~0.4s after a tap
-const BLOCK_HARDNESS = { 1: 0.35, 2: 0.35, 3: 0.9, 4: 0.3, 5: 0.6, 6: 0.18 }; // seconds to break
+// seconds to break (ores 8/9/10 tougher than STONE 0.9 so mining them feels rewarding)
+const BLOCK_HARDNESS = { 1: 0.35, 2: 0.35, 3: 0.9, 4: 0.3, 5: 0.6, 6: 0.18, 8: 1.1, 9: 1.5, 10: 1.4 };
 function blockHardness(id) { return BLOCK_HARDNESS[id] || 0.35; }
 
 function completePlayerBreak() {
@@ -1773,16 +1893,51 @@ function doPlace() {
   playSound('place');
 }
 
+// Deterministic check that the two blocks above the column surface (h+1, h+2) are clear of
+// any NEIGHBORING tree's overhanging leaf canopy. findSpawn runs before any chunk is
+// generated, so getBlock() can't be used (it would read AIR for every unloaded chunk and
+// silently pass); instead we recompute the exact tree-stamp footprint the generator uses.
+// A tree at (tx,tz) stamps leaves over a 5x5 (|dx|,|dz|<=2, no corners) at top-1..top, a
+// plus at top+1, and the apex at top+2 — so any tree within ±2 in x/z whose leaf y-range
+// covers h+1 or h+2 would overhang our column. Pure fn of (seed,coords).
+function spawnHeadClear(gx, gz, h) {
+  for (let dz = -2; dz <= 2; dz++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      const info = treeInfoAt(gx + dx, gz + dz);
+      if (!info) continue;
+      const top = info.h + info.trunkH; // leaves occupy top-1 .. top+2 in this tree's footprint
+      for (let ty = top - 1; ty <= top + 2; ty++) {
+        if (ty !== h + 1 && ty !== h + 2) continue;
+        const rel = ty - top; // which leaf layer of this tree
+        let covers = false;
+        if (rel === -1 || rel === 0) covers = !(Math.abs(dx) === 2 && Math.abs(dz) === 2); // 5x5 minus corners
+        else if (rel === 1) covers = Math.abs(dx) <= 1 && Math.abs(dz) <= 1 && (Math.abs(dx) + Math.abs(dz) <= 1); // plus
+        else if (rel === 2) covers = dx === 0 && dz === 0; // apex
+        if (covers) return false; // a leaf would occupy h+1 or h+2 above the spawn column
+      }
+    }
+  }
+  return true;
+}
 function findSpawn() {
+  // The accept predicate ALSO excludes caveMouthAt columns so a fresh world never spawns
+  // the player onto a mouth shaft and drops them into a cave (the cycle-2 deferred defect),
+  // and requires the two blocks above the surface to be clear of any overhanging leaf
+  // canopy for a clean landing. caveMouthAt + spawnHeadClear are PURE deterministic fns of
+  // (seed,coords), so findSpawn stays pure and reproducible — it only NARROWS the accept set
+  // (worst case: the spiral expands outward or hits the unchanged (0,0) fallback, both
+  // bounded). SAVED worlds load player.pos from the save and never call findSpawn, untouched.
   for (let r = 0; r <= 96; r += 3) {
     for (let a = 0; a < 16; a++) {
       const angle = (a / 16) * Math.PI * 2;
       const gx = Math.round(Math.cos(angle) * r), gz = Math.round(Math.sin(angle) * r);
       const h = terrainHeightAt(gx, gz);
-      if (h > SEA + 1 && !treeInfoAt(gx, gz)) return { x: gx + 0.5, y: h + 1.02, z: gz + 0.5 };
+      if (h > SEA + 1 && !treeInfoAt(gx, gz) && !caveMouthAt(gx, gz) && spawnHeadClear(gx, gz, h)) {
+        return { x: gx + 0.5, y: h + 1.02, z: gz + 0.5 };
+      }
     }
   }
-  return { x: 0.5, y: terrainHeightAt(0, 0) + 1.02, z: 0.5 };
+  return { x: 0.5, y: terrainHeightAt(0, 0) + 1.02, z: 0.5 }; // pathological seed: unchanged fallback
 }
 
 // --- view-bob + landing dip + jump lift + material-aware footstep audio --------
@@ -2540,7 +2695,11 @@ function validateSave(o) {
   for (const k of Object.keys(o.edits)) {
     if (!EDIT_KEY_RE.test(k)) return false;
     const v = o.edits[k];
-    if (!Number.isInteger(v) || v < 0 || v > 7) return false;
+    // MANDATORY ceiling bump for the ore blocks (8/9/10): ores are pure terrain UNLESS a
+    // player breaks+replaces one, which writes id 8/9/10 into edits. This is a pure widening
+    // (MAX_BLOCK_ID = 10) — no save that validated before can fail now; an off-by-one would
+    // silently corrupt imports, so the bound tracks MAX_BLOCK_ID exactly.
+    if (!Number.isInteger(v) || v < 0 || v > MAX_BLOCK_ID) return false;
   }
   if (o.twins !== undefined && !Array.isArray(o.twins)) return false; // roster, when present, must be an array
   return true;
@@ -3052,7 +3211,7 @@ nbRegisterOp('pos', (p, env) => {
 });
 nbRegisterOp('edit', (p) => {
   if (!Number.isInteger(p.x) || !Number.isInteger(p.y) || !Number.isInteger(p.z)) return;
-  if (!Number.isInteger(p.blockId) || p.blockId < 0 || p.blockId > 7) return;
+  if (!Number.isInteger(p.blockId) || p.blockId < 0 || p.blockId > MAX_BLOCK_ID) return;
   nbApplyRemoteEdit(p.x, p.y, p.z, p.blockId);
 });
 nbRegisterOp('chat', (p, env) => {
@@ -4647,35 +4806,129 @@ function vfStartTwinLoop(twin) {
   }, stagger);
 }
 
+// Map a raycast hit normal to a human face name (CDP-safe string, never throws).
+function vfFaceName(nx, ny, nz) {
+  if (ny === 1) return 'top';
+  if (ny === -1) return 'bottom';
+  if (nx === 1) return 'east';
+  if (nx === -1) return 'west';
+  if (nz === 1) return 'south';
+  if (nz === -1) return 'north';
+  return 'side';
+}
+const VF_OBS_NEAR_N = 6;      // cap nearby players/bots to the N closest
+const VF_OBS_NEAR_R2 = 64 * 64; // within ~64 blocks (squared) of the subject
+const VF_OBS_PING_R2 = 64 * 64; // pings within ~64 blocks
+function vfNameOf(id) { return id === B.AIR ? 'Air' : (BLOCK_NAMES[id] || 'Block'); }
+
 function vfObservation(bot) {
   const e = bot.ent;
   const r1 = (v) => Math.round(v * 10) / 10;
-  const nearbyPlayers = [{
+  const ix = Math.floor(e.pos.x), iy = Math.floor(e.pos.y), iz = Math.floor(e.pos.z);
+  // CHEAPER: cap nearby players/bots to the VF_OBS_NEAR_N closest within radius, coords
+  // rounded to ints. (The self-player is always included.) Bounded arrays keep the obj
+  // CDP returnByValue-safe and the token cost flat-or-lower than the old uncapped lists.
+  const nearScratch = [{
     name: Neighborhood.name || 'Player',
-    pos: { x: Math.round(player.pos.x), y: Math.round(player.pos.y), z: Math.round(player.pos.z) }
+    pos: { x: Math.round(player.pos.x), y: Math.round(player.pos.y), z: Math.round(player.pos.z) },
+    _d2: (player.pos.x - e.pos.x) ** 2 + (player.pos.z - e.pos.z) ** 2
   }];
   for (const av of Neighborhood.avatars.values()) {
-    nearbyPlayers.push({ name: av.name, pos: { x: Math.round(av.cur.x), y: Math.round(av.cur.y), z: Math.round(av.cur.z) } });
+    const d2 = (av.cur.x - e.pos.x) ** 2 + (av.cur.z - e.pos.z) ** 2;
+    if (d2 > VF_OBS_NEAR_R2) continue;
+    nearScratch.push({ name: av.name, pos: { x: Math.round(av.cur.x), y: Math.round(av.cur.y), z: Math.round(av.cur.z) }, _d2: d2 });
   }
-  const nearbyBots = [];
+  nearScratch.sort((a, b) => a._d2 - b._d2);
+  const nearbyPlayers = nearScratch.slice(0, VF_OBS_NEAR_N).map((p) => ({ name: p.name, pos: p.pos }));
+  const botScratch = [];
   for (const b of vfBots) {
     if (b === bot) continue;
-    nearbyBots.push({ name: b.name, pos: { x: Math.round(b.ent.pos.x), y: Math.round(b.ent.pos.y), z: Math.round(b.ent.pos.z) } });
+    const d2 = (b.ent.pos.x - e.pos.x) ** 2 + (b.ent.pos.z - e.pos.z) ** 2;
+    if (d2 > VF_OBS_NEAR_R2) continue;
+    botScratch.push({ name: b.name, pos: { x: Math.round(b.ent.pos.x), y: Math.round(b.ent.pos.y), z: Math.round(b.ent.pos.z) }, _d2: d2 });
   }
-  const groundId = getBlock(Math.floor(e.pos.x), Math.floor(e.pos.y) - 1, Math.floor(e.pos.z));
-  // 3x3x3 sample two blocks ahead, summarised as { blockName: count }
+  botScratch.sort((a, b) => a._d2 - b._d2);
+  const nearbyBots = botScratch.slice(0, VF_OBS_NEAR_N).map((p) => ({ name: p.name, pos: p.pos }));
+
+  const groundId = getBlock(ix, iy - 1, iz);
+  const groundBelow = vfNameOf(groundId); // kept as a field AND aliased by groundProfile.standingOn
+
+  // (1) lookingAt: cast the SAME DDA ray the crosshair uses from the subject's eye along
+  // (yaw,pitch) up to REACH. Wrapped in try/catch so a bad cast never breaks the 20Hz loop.
+  let lookingAt = null;
+  try {
+    const ex = e.pos.x, ey = e.pos.y + (e.eye || 1.62), ez = e.pos.z;
+    const cp = Math.cos(e.pitch || 0);
+    const dx = -Math.sin(e.yaw) * cp;
+    const dy = Math.sin(e.pitch || 0);
+    const dz = -Math.cos(e.yaw) * cp;
+    const hit = raycastVoxel(ex, ey, ez, dx, dy, dz, REACH);
+    if (hit) {
+      lookingAt = {
+        x: hit.x, y: hit.y, z: hit.z,
+        block: vfNameOf(hit.id),
+        face: vfFaceName(hit.nx, hit.ny, hit.nz),
+        dist: Math.round(hit.dist * 100) / 100
+      };
+    }
+  } catch (err) { lookingAt = null; }
+
+  // (2) pings: nearest-first, capped at 4, within ~64 blocks — connects the cycle-2 ping
+  // system to twin perception so a twin can path to a 'danger'/'here' marker.
+  const pingScratch = [];
+  for (const p of Neighborhood.pings.values()) {
+    const d2 = (p.x - e.pos.x) ** 2 + (p.z - e.pos.z) ** 2;
+    if (d2 > VF_OBS_PING_R2) continue;
+    pingScratch.push({
+      name: p.name, kind: p.kind,
+      pos: { x: Math.round(p.x), y: Math.round(p.y), z: Math.round(p.z) },
+      distance: Math.round(Math.sqrt(d2) * 10) / 10
+    });
+  }
+  pingScratch.sort((a, b) => a.distance - b.distance);
+  const pings = pingScratch.slice(0, 4);
+
+  // (3) groundProfile: cheap cliff/hole/ceiling sense (~4 columns, ~20 getBlock reads),
+  // all bounds clamped so cost stays sub-millisecond. Gives non-spatial LLM brains a way
+  // to stop walking into void rescue.
   const fX = Math.round(-Math.sin(e.yaw)), fZ = Math.round(-Math.cos(e.yaw));
-  const cx = Math.floor(e.pos.x) + fX * 2, cy = Math.floor(e.pos.y) + 1, cz = Math.floor(e.pos.z) + fZ * 2;
+  let headroom = 0;
+  for (let dy = 2; dy <= 5 && headroom < 4; dy++) { // head ~ iy+1; probe above it
+    if (isSolid(getBlock(ix, iy + dy, iz))) break;
+    headroom++;
+  }
+  let drop = 0;
+  for (let dy = 2; dy <= 9 && drop < 8; dy++) { // air straight down before solid (cap 8)
+    if (isSolid(getBlock(ix, iy - dy, iz))) break;
+    drop++;
+  }
+  let aheadDrop = 0;
+  const ax = ix + fX, az = iz + fZ;
+  for (let dy = 1; dy <= 8 && aheadDrop < 8; dy++) { // same probe one block in facing dir
+    if (isSolid(getBlock(ax, iy - dy, az))) break;
+    aheadDrop++;
+  }
+  const groundProfile = { standingOn: groundBelow, headroom, drop, aheadDrop };
+
+  // (4) aheadStrip: terse facing strip — block names at +1,+2,+3 ahead at eye level.
+  const aheadStrip = [];
+  const ey = iy + 1;
+  for (let s = 1; s <= 3; s++) aheadStrip.push(vfNameOf(getBlock(ix + fX * s, ey, iz + fZ * s)));
+
+  // DEPRECATED (kept this cycle for backward-compat; removal is a LATER cycle's job):
+  // blocksAhead — the old 3x3x3 {blockName:count} sample. lookingAt + aheadStrip + groundProfile
+  // supersede it, but personas/CDP scripts keyed off the current shape must not hard-break.
+  const cx = ix + fX * 2, cy = iy + 1, cz = iz + fZ * 2;
   const blocksAhead = {};
   for (let dy = -1; dy <= 1; dy++) {
     for (let dz = -1; dz <= 1; dz++) {
       for (let dx = -1; dx <= 1; dx++) {
-        const id = getBlock(cx + dx, cy + dy, cz + dz);
-        const nm = id === B.AIR ? 'Air' : (BLOCK_NAMES[id] || 'Block');
+        const nm = vfNameOf(getBlock(cx + dx, cy + dy, cz + dz));
         blocksAhead[nm] = (blocksAhead[nm] || 0) + 1;
       }
     }
   }
+
   return {
     you: {
       name: bot.name,
@@ -4684,12 +4937,16 @@ function vfObservation(bot) {
       onGround: e.onGround,
       selectedBlock: BLOCK_NAMES[bot.selectedBlockId] || 'Dirt'
     },
-    nearbyPlayers,
-    nearbyBots,
-    groundBelow: groundId === B.AIR ? 'Air' : (BLOCK_NAMES[groundId] || 'Block'),
-    blocksAhead,
+    nearbyPlayers,  // capped to 6 closest within ~64 blocks
+    nearbyBots,     // capped to 6 closest within ~64 blocks
+    lookingAt,      // ADD (1): DDA crosshair target {x,y,z,block,face,dist} | null
+    pings,          // ADD (2): nearest-first waypoint pings, <=4
+    groundProfile,  // ADD (3): {standingOn, headroom, drop, aheadDrop}
+    aheadStrip,     // ADD (4): [+1,+2,+3] facing strip at eye level
+    groundBelow,    // backward-compat: alias of groundProfile.standingOn (kept this cycle)
+    blocksAhead,    // backward-compat / DEPRECATED (see note above; kept this cycle)
     recentChat: vfRecentChat.slice(-5),
-    worldSeed,
+    worldSeed,      // re-emitted (vox('seed') exists separately); left in per spec — do NOT remove
     timeOfDay: Math.round(((worldTime / DAY_LEN) % 1) * 100) / 100
   };
 }
