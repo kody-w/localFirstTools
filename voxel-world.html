@@ -88,6 +88,7 @@
   #btnJump{right:18px;bottom:calc(108px + env(safe-area-inset-bottom));width:76px;height:76px;border-radius:50%}
   #btnDown{right:106px;bottom:calc(98px + env(safe-area-inset-bottom));width:58px;height:58px;border-radius:50%}
   #btnMode{right:18px;bottom:calc(202px + env(safe-area-inset-bottom));height:46px;padding:0 16px;border-radius:23px}
+  #btnPing{right:18px;bottom:calc(260px + env(safe-area-inset-bottom));height:46px;padding:0 16px;border-radius:23px}
 
   #underwater{position:fixed;inset:0;background:rgba(22,58,148,.38);z-index:15;pointer-events:none}
   #toast{position:fixed;left:50%;bottom:calc(86px + env(safe-area-inset-bottom));transform:translateX(-50%);
@@ -158,6 +159,7 @@
   .twinDot.live{background:#5ad17d}
   .twinDot.thinking{background:#f2cc8f;animation:twinPulse 1s ease-in-out infinite alternate}
   .twinDot.unreachable{background:#e05f5f}
+  .twinDot.paused{background:#e0a832}
   .twinDot.local{background:#6d9dc5}
   @keyframes twinPulse{from{opacity:.4}to{opacity:1}}
   #twinList .twinRow{display:flex;align-items:center;gap:8px;background:#0f1722;border:1px solid #2c3f57;
@@ -242,6 +244,7 @@
 <div id="touchUI" class="hidden">
   <div id="joyZone"><div id="joyKnob"></div></div>
   <button id="btnMode" class="tbtn" aria-label="Toggle break or place mode">&#9935; Break</button>
+  <button id="btnPing" class="tbtn" aria-label="Ping a waypoint marker for the neighborhood">PING</button>
   <button id="btnJump" class="tbtn" aria-label="Jump">JUMP</button>
   <button id="btnDown" class="tbtn hidden" aria-label="Fly down">&#9660;</button>
 </div>
@@ -272,6 +275,7 @@
       <li><kbd>Space</kbd> &mdash; jump &bull; double-tap <kbd>Space</kbd> &mdash; toggle fly (then <kbd>Space</kbd>/<kbd>Shift</kbd> = up/down)</li>
       <li><kbd>Shift</kbd> &mdash; sprint (while walking)</li>
       <li>Hold left click &mdash; mine the block (cracks show progress; stone takes longer than leaves) &bull; Right click &mdash; place block</li>
+      <li><kbd>Middle click</kbd> &mdash; ping a waypoint at the crosshair (everyone in the neighborhood sees the marker for 8s)</li>
       <li><kbd>1</kbd>&ndash;<kbd>6</kbd> or mouse wheel &mdash; choose block</li>
       <li><kbd>F3</kbd> &mdash; debug HUD &bull; <kbd>H</kbd> or <kbd>?</kbd> &mdash; this help</li>
       <li><kbd>`</kbd> (backquote) &mdash; vox console terminal (CLI for twins &amp; the String; also the <b>&gt;_</b> button)</li>
@@ -282,6 +286,7 @@
       <li>Drag on the right side &mdash; look around</li>
       <li>Tap the screen &mdash; chip <i>or</i> place at the crosshair (switch with the mode button); <b>touch and hold</b> to mine tougher blocks straight through</li>
       <li><b>JUMP</b> &mdash; jump &bull; double-tap JUMP &mdash; toggle fly (&#9660; button descends)</li>
+      <li><b>PING</b> &mdash; drop a waypoint marker at the crosshair that the whole neighborhood sees</li>
       <li>Tap a hotbar slot to choose a block</li>
     </ul>
     <h3>Your world</h3>
@@ -603,6 +608,34 @@ function fbm2(seed, x, z, octaves, lacunarity, gain) {
   }
   return sum / norm; // [0,1)
 }
+// 3D value noise for cave carving: the existing ihash extended with a y-salt,
+// so it stays a PURE function of (seed, x, y, z) — no Math.random, no time.
+function valueNoise3(seed, x, y, z) {
+  const xi = Math.floor(x), yi = Math.floor(y), zi = Math.floor(z);
+  const xf = x - xi, yf = y - yi, zf = z - zi;
+  const u = xf * xf * (3 - 2 * xf);
+  const v = yf * yf * (3 - 2 * yf);
+  const w = zf * zf * (3 - 2 * zf);
+  const sy0 = seed ^ Math.imul(yi, 0x9E3779B1);
+  const sy1 = seed ^ Math.imul(yi + 1, 0x9E3779B1);
+  const a0 = ihash(sy0, xi, zi), b0 = ihash(sy0, xi + 1, zi);
+  const c0 = ihash(sy0, xi, zi + 1), d0 = ihash(sy0, xi + 1, zi + 1);
+  const a1 = ihash(sy1, xi, zi), b1 = ihash(sy1, xi + 1, zi);
+  const c1 = ihash(sy1, xi, zi + 1), d1 = ihash(sy1, xi + 1, zi + 1);
+  const n0 = a0 + (b0 - a0) * u + (c0 - a0) * w + (a0 - b0 - c0 + d0) * u * w;
+  const n1 = a1 + (b1 - a1) * u + (c1 - a1) * w + (a1 - b1 - c1 + d1) * u * w;
+  return n0 + (n1 - n0) * v; // [0,1)
+}
+function fbm3(seed, x, y, z, octaves, lacunarity, gain) {
+  let amp = 1, freq = 1, sum = 0, norm = 0;
+  for (let o = 0; o < octaves; o++) {
+    sum += valueNoise3(seed + o * 1013, x * freq, y * freq, z * freq) * amp;
+    norm += amp;
+    amp *= gain;
+    freq *= lacunarity;
+  }
+  return sum / norm; // [0,1)
+}
 function mulberry32(seed) {
   let s = seed >>> 0;
   return function () {
@@ -640,13 +673,135 @@ function treeInfoAt(gx, gz) {
   return { h, trunkH };
 }
 
+// --- 3D cave carving (deterministic, world-aligned) ---------------------------
+// fbm3 is evaluated ONLY on a lattice whose WORLD coords are divisible by
+// CAVE_STEP (4) — aligned to world space, not chunk space — and trilinearly
+// interpolated per cell, so adjacent chunks share boundary lattice points and
+// carve identically regardless of load order. The main band turns STONE (only)
+// into AIR where the noise sits in a thin band around its midline: level-set
+// sheets read as winding tunnels and rooms. SAFETY BY CONSTRUCTION: the
+// grass/dirt/sand cap at y in [h-3..h] is never stone, so flat surface tops can
+// NEVER open straight down; ocean/seabed columns (h < SEA) are never carved;
+// y <= 1 (bedrock floor) is never carved; WATER is never touched (a cave that
+// meets the sea just shows a static water face). FIELD-MEASURED at these
+// constants (node prototype, 6 seeds): 7.5-18% of underground stone carved,
+// zero flat-top holes, gen cost ~0.1-0.2ms/chunk.
+//
+// MOUTH PASS: this terrain's adjacent-column height delta never exceeds 1, so
+// a stone-only band can never daylight on its own (every column wears a
+// 4-block soft cap). Sparse deterministic cave mouths fix that: hash-gated
+// hillside grass columns (never beaches, never flat tops, never under a tree)
+// get a 1-block shaft down to a cave the field CONFIRMS exists 4-7 blocks
+// below — no blind pits. Margin-scanned like trees so shafts cross chunk
+// borders seamlessly. Measured: 2-9 mouths within ~96 blocks of spawn.
+const CAVE_STEP = 4;
+const CAVE_NX = CHUNK_W / CAVE_STEP + 1;  // 5 lattice points across a chunk
+const CAVE_NY = (WORLD_H >> 2) + 1;       // 17 lattice planes up the column
+const CAVE_T0 = 0.018, CAVE_TD = 0.0008, CAVE_TMAX = 0.034; // band half-width vs depth
+const CAVE_MOUTH_P = 0.0045;              // per-column mouth-site probability
+function caveBand(depth) { return Math.min(CAVE_TMAX, CAVE_T0 + depth * CAVE_TD); }
+// the exact field the in-chunk fast path interpolates, computable anywhere —
+// used by the mouth pass to confirm a connecting cave below a candidate shaft
+function caveFieldAt(cs, gx, gy, gz) {
+  const x0 = Math.floor(gx / CAVE_STEP) * CAVE_STEP;
+  const y0 = Math.floor(gy / CAVE_STEP) * CAVE_STEP;
+  const z0 = Math.floor(gz / CAVE_STEP) * CAVE_STEP;
+  const tx = (gx - x0) / CAVE_STEP, ty = (gy - y0) / CAVE_STEP, tz = (gz - z0) / CAVE_STEP;
+  const L = (X, Y, Z) => fbm3(cs, X * 0.05, Y * 0.07, Z * 0.05, 3, 2.0, 0.5);
+  const s = CAVE_STEP;
+  const v00 = L(x0, y0, z0) + (L(x0 + s, y0, z0) - L(x0, y0, z0)) * tx;
+  const v01 = L(x0, y0, z0 + s) + (L(x0 + s, y0, z0 + s) - L(x0, y0, z0 + s)) * tx;
+  const v10 = L(x0, y0 + s, z0) + (L(x0 + s, y0 + s, z0) - L(x0, y0 + s, z0)) * tx;
+  const v11 = L(x0, y0 + s, z0 + s) + (L(x0 + s, y0 + s, z0 + s) - L(x0, y0 + s, z0 + s)) * tx;
+  const lo = v00 + (v01 - v00) * tz;
+  const hi = v10 + (v11 - v10) * tz;
+  return lo + (hi - lo) * ty;
+}
+function caveMouthAt(gx, gz) {
+  if (ihash(worldSeed ^ 0x6b0ca, gx, gz) > CAVE_MOUTH_P) return null;
+  const h = terrainHeightAt(gx, gz);
+  if (h <= SEA + 1 || h >= WORLD_H - 12) return null; // grass columns only, never beach
+  if (treeInfoAt(gx, gz)) return null;                // never under a tree trunk
+  const hillside =
+    terrainHeightAt(gx + 1, gz) < h || terrainHeightAt(gx - 1, gz) < h ||
+    terrainHeightAt(gx, gz + 1) < h || terrainHeightAt(gx, gz - 1) < h;
+  if (!hillside) return null;                         // flat tops NEVER open
+  const cs = worldSeed ^ 0xCA7E;
+  for (let y = h - 4; y >= h - 7 && y >= 2; y--) {
+    if (Math.abs(caveFieldAt(cs, gx, y, gz) - 0.5) < caveBand(h - y)) return { h, yConnect: y };
+  }
+  return null;                                        // no cave below — no blind pits
+}
+function carveCaves(data, baseX, baseZ, heights) {
+  const cs = worldSeed ^ 0xCA7E;
+  // world-aligned lattice (chunk origins are multiples of 16, so of CAVE_STEP)
+  const lat = new Float32Array(CAVE_NX * CAVE_NX * CAVE_NY);
+  for (let iy = 0; iy < CAVE_NY; iy++) {
+    for (let iz = 0; iz < CAVE_NX; iz++) {
+      for (let ix = 0; ix < CAVE_NX; ix++) {
+        lat[(iy * CAVE_NX + iz) * CAVE_NX + ix] = fbm3(
+          cs, (baseX + ix * CAVE_STEP) * 0.05, iy * CAVE_STEP * 0.07,
+          (baseZ + iz * CAVE_STEP) * 0.05, 3, 2.0, 0.5);
+      }
+    }
+  }
+  for (let lz = 0; lz < 16; lz++) {
+    for (let lx = 0; lx < 16; lx++) {
+      const h = heights[lx + lz * 16];
+      if (h < SEA) continue; // oceans/seabed never swiss-cheesed
+      const x0 = (lx / CAVE_STEP) | 0, z0 = (lz / CAVE_STEP) | 0;
+      const tx = lx / CAVE_STEP - x0, tz = lz / CAVE_STEP - z0;
+      for (let y = 2; y < h; y++) { // [2..h-1]: bedrock floor stays intact
+        const i = lx + lz * 16 + y * 256;
+        if (data[i] !== B.STONE) continue; // STONE only — water and caps untouched
+        const fy = y / CAVE_STEP;
+        const y0 = fy | 0, ty = fy - y0;
+        const b0 = (y0 * CAVE_NX + z0) * CAVE_NX + x0;
+        const b1 = ((y0 + 1) * CAVE_NX + z0) * CAVE_NX + x0;
+        const v00 = lat[b0] + (lat[b0 + 1] - lat[b0]) * tx;
+        const v01 = lat[b0 + CAVE_NX] + (lat[b0 + CAVE_NX + 1] - lat[b0 + CAVE_NX]) * tx;
+        const v10 = lat[b1] + (lat[b1 + 1] - lat[b1]) * tx;
+        const v11 = lat[b1 + CAVE_NX] + (lat[b1 + CAVE_NX + 1] - lat[b1 + CAVE_NX]) * tx;
+        const lo = v00 + (v01 - v00) * tz;
+        const hi = v10 + (v11 - v10) * tz;
+        const n = lo + (hi - lo) * ty;
+        if (Math.abs(n - 0.5) < caveBand(h - y)) data[i] = B.AIR;
+      }
+    }
+  }
+  // mouth pass — margin-scanned like trees so shafts cross borders seamlessly
+  const carveCell = (wx, wy, wz, interiorOnly) => {
+    const lx = wx - baseX, lz = wz - baseZ;
+    if (lx < 0 || lx > 15 || lz < 0 || lz > 15 || wy < 2 || wy >= WORLD_H) return;
+    if (interiorOnly && wy >= terrainHeightAt(wx, wz)) return; // never open ANOTHER column's top
+    const i = voxIndex(lx, wy, lz);
+    const id = data[i];
+    if (id === B.GRASS || id === B.DIRT || id === B.STONE) data[i] = B.AIR;
+  };
+  for (let mz = baseZ - 1; mz < baseZ + 17; mz++) {
+    for (let mx = baseX - 1; mx < baseX + 17; mx++) {
+      const m = caveMouthAt(mx, mz);
+      if (!m) continue;
+      for (let y = m.h; y >= m.yConnect; y--) carveCell(mx, y, mz, false); // the shaft
+      for (let d = 0; d < 4; d++) {                                        // belled lip
+        const dx = d === 0 ? 1 : d === 1 ? -1 : 0;
+        const dz = d === 2 ? 1 : d === 3 ? -1 : 0;
+        carveCell(mx + dx, m.h - 1, mz + dz, true);
+        carveCell(mx + dx, m.h - 2, mz + dz, true);
+      }
+    }
+  }
+}
+
 function genChunk(cx, cz) {
   const data = new Uint8Array(CHUNK_W * CHUNK_W * WORLD_H);
   const baseX = cx * 16, baseZ = cz * 16;
+  const heights = new Uint8Array(CHUNK_W * CHUNK_W); // column surface y, reused by the cave pass
   // terrain columns
   for (let lz = 0; lz < 16; lz++) {
     for (let lx = 0; lx < 16; lx++) {
       const h = terrainHeightAt(baseX + lx, baseZ + lz);
+      heights[lx + lz * 16] = h;
       const beach = h <= SEA + 1;
       for (let y = 0; y <= h; y++) {
         let id;
@@ -664,6 +819,9 @@ function genChunk(cx, cz) {
       }
     }
   }
+  // caves: AFTER the terrain columns, BEFORE trees — the edits overlay below
+  // reapplies LAST, so player edits deterministically win over carving
+  carveCaves(data, baseX, baseZ, heights);
   // trees (deterministic from world coords, so canopies cross borders seamlessly)
   const stampIfAir = (wx, wy, wz, id) => {
     const lx = wx - baseX, lz = wz - baseZ;
@@ -1582,7 +1740,7 @@ function $(id) { return document.getElementById(id); }
 function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
-   'btnMode', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
+   'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
    'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'btnExport', 'btnImportBtn', 'importFile',
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'questHud', 'questHudSkip', // ONBOARD coach
@@ -1784,6 +1942,7 @@ function initDesktopInput() {
     if (!isLocked()) { requestLock(); return; }
     // hold-to-mine: button 0 no longer instant-breaks — damage accrues in updateMining
     if (e.button === 0) { heldMouseBtn = 0; heldRepeatT = 0; }
+    else if (e.button === 1) { e.preventDefault(); nbSendPing(); } // middle-click: waypoint ping
     else if (e.button === 2) { doPlace(); heldMouseBtn = 2; heldRepeatT = 0; }
   });
   document.addEventListener('mouseup', () => { heldMouseBtn = null; });
@@ -1911,6 +2070,11 @@ function initTouchInput() {
     lastJumpTapTime = now;
   }, () => { touchJumpHeld = false; });
   bindHold(ui.btnDown, () => { touchDownHeld = true; }, () => { touchDownHeld = false; });
+  ui.btnPing.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    ensureAudio();
+    if (!panelOpen()) nbSendPing(); // same waypoint ping as desktop middle-click
+  }, { passive: false });
   ui.btnMode.addEventListener('touchstart', (e) => {
     e.preventDefault();
     actionMode = actionMode === 'break' ? 'place' : 'break';
@@ -2138,6 +2302,7 @@ function validateSave(o) {
     const v = o.edits[k];
     if (!Number.isInteger(v) || v < 0 || v > 7) return false;
   }
+  if (o.twins !== undefined && !Array.isArray(o.twins)) return false; // roster, when present, must be an array
   return true;
 }
 
@@ -2251,6 +2416,7 @@ const Neighborhood = {
   link: null,            // kite link (host)
   conns: new Map(),      // (host) peerId -> { conn, ready, rappid, name, color }
   avatars: new Map(),    // rappid -> remote-player avatar record
+  pings: new Map(),      // rappid -> live waypoint ping marker (ONE per sender)
   rappid: null,          // persistent identity (localStorage)
   name: null,
   color: '#e07a5f',
@@ -2661,6 +2827,141 @@ nbRegisterOp('bye', (p) => {
 // PHASE 3: the ===== VOXELFLAYER ===== section below registers the real handlers
 // for 'bot-claim' / 'bot-act' / 'bot-release' and extends 'pos' + 'bye' with bot flags.
 
+// --- waypoint pings (op 'ping' on the rapp-twin-chat wire) ---------------------
+// Point at a block, ping, everyone sees it: middle-click (desktop), the PING
+// touch button, or vox('ping [kind]'). The marker is a billboard sprite (ring +
+// sender name in the sender's avatar color) ~2 blocks above the target plus a
+// thin vertical beam that reads through terrain. ONE live ping per sender
+// (keyed by rappid; a re-ping replaces the old marker), 8s expiry checked
+// per-frame against a timestamp, hard cap of 16 markers. Pings never touch
+// world state, physics, or saves — visuals are scene-only, so DDA targeting
+// can never 'hit' a marker. Leaf->host rides SEALED; host fans out sealed via
+// the hub relay. Solo pings still render as a personal local marker.
+const NB_PING_KINDS = ['here', 'look', 'danger'];
+const NB_PING_TTL_MS = 8000;
+const NB_PING_MAX = 16;
+const nbPingLastRx = new Map(); // rappid -> last accepted ping time (receive-side rate limit)
+
+function nbDisposePing(rec) {
+  if (!rec || !rec.group) return;
+  if (scene) scene.remove(rec.group);
+  rec.group.traverse((o) => {
+    if (o.geometry) o.geometry.dispose();
+    if (o.material) {
+      if (o.material.map) o.material.map.dispose(); // CanvasTexture
+      o.material.dispose();
+    }
+  });
+}
+function nbShowPing(rappid, name, color, x, y, z, kind) {
+  if (voxHeadless || !scene) return; // headless: events + chat only, zero scene objects
+  const old = Neighborhood.pings.get(rappid);
+  if (old) { nbDisposePing(old); Neighborhood.pings.delete(rappid); } // replace, never stack
+  while (Neighborhood.pings.size >= NB_PING_MAX) { // hard cap: evict the oldest
+    let oldestK = null, oldestT = Infinity;
+    for (const [k, p] of Neighborhood.pings) if (p.born < oldestT) { oldestT = p.born; oldestK = k; }
+    if (oldestK === null) break;
+    nbDisposePing(Neighborhood.pings.get(oldestK));
+    Neighborhood.pings.delete(oldestK);
+  }
+  const col = nbCleanColor(color);
+  const group = new THREE.Group();
+  // billboard: ring + kind glyph + sender name, in the sender's avatar color
+  const cnv = document.createElement('canvas');
+  cnv.width = 256; cnv.height = 128;
+  const ctx = cnv.getContext('2d');
+  ctx.lineWidth = 9;
+  ctx.strokeStyle = col;
+  ctx.beginPath();
+  ctx.arc(128, 40, 26, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = col;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font = 'bold 32px system-ui, sans-serif';
+  ctx.fillText(kind === 'danger' ? '!' : kind === 'look' ? '?' : '•', 128, 41);
+  ctx.font = 'bold 24px system-ui, sans-serif';
+  const w = Math.min(244, ctx.measureText(name).width + 22);
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(128 - w / 2, 86, w, 34);
+  ctx.fillStyle = col;
+  ctx.fillText(name, 128, 103);
+  const tex = new THREE.CanvasTexture(cnv);
+  const spr = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthTest: false }));
+  spr.scale.set(2.6, 1.3, 1);
+  spr.position.y = y + 2.2; // ~2 blocks above the target
+  spr.renderOrder = 3;
+  // thin vertical beam: reads through terrain occlusion
+  const beam = new THREE.Mesh(
+    new THREE.BoxGeometry(0.14, WORLD_H, 0.14),
+    new THREE.MeshBasicMaterial({
+      color: parseInt(col.slice(1), 16), transparent: true, opacity: 0.28,
+      depthWrite: false, depthTest: false
+    })
+  );
+  beam.position.y = WORLD_H / 2;
+  beam.renderOrder = 2;
+  group.add(beam);
+  group.add(spr);
+  group.position.set(x + 0.5, 0, z + 0.5);
+  scene.add(group);
+  Neighborhood.pings.set(rappid, { rappid, name, kind, x, y, z, group, born: performance.now() });
+}
+function nbPingTick() { // per-frame expiry (timestamp-based: robust vs hidden-tab throttling)
+  if (!Neighborhood.pings.size) return;
+  const now = performance.now();
+  for (const [k, rec] of Neighborhood.pings) {
+    if (now - rec.born >= NB_PING_TTL_MS) {
+      nbDisposePing(rec);
+      Neighborhood.pings.delete(k);
+    }
+  }
+}
+function nbPingTarget() {
+  const hit = targetBlock(); // the same DDA/REACH machinery as break/place
+  if (hit) return { x: hit.x, y: hit.y, z: hit.z };
+  const r = eyeRay(); // no hit: 12 blocks ahead along the view ray, y clamped
+  return {
+    x: Math.floor(r.ex + r.dx * 12),
+    y: Math.max(0, Math.min(WORLD_H, Math.floor(r.ey + r.dy * 12))),
+    z: Math.floor(r.ez + r.dz * 12)
+  };
+}
+function nbSendPing(kindArg) {
+  const kind = NB_PING_KINDS.includes(kindArg) ? kindArg : 'here';
+  const t = nbPingTarget();
+  const name = Neighborhood.name || 'Player';
+  // local echo first (solo: this IS the personal marker)
+  nbShowPing(Neighborhood.rappid || 'local', name, Neighborhood.color, t.x, t.y, t.z, kind);
+  addChatMsg(null, name + ' pinged a spot (' + t.x + ', ' + t.y + ', ' + t.z + ')', null, true);
+  toast('Pinged (' + t.x + ', ' + t.y + ', ' + t.z + ')');
+  voxEvent('ping', { rappid: Neighborhood.rappid || null, name, x: t.x, y: t.y, z: t.z, kind });
+  if (Neighborhood.enabled) {
+    const env = envelope('say', { app: NB_APP_ID, op: 'ping', x: t.x, y: t.y, z: t.z, kind, name });
+    if (Neighborhood.role === 'kite') nbBroadcastSealed(env);
+    else nbSendToHost(env, true); // leaf -> host rides SEALED
+  }
+  return { x: t.x, y: t.y, z: t.z, kind };
+}
+nbRegisterOp('ping', (p, env) => {
+  if (env.from_rappid === Neighborhood.rappid) return;
+  // strict validation: malformed pings are silently ignored
+  if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return;
+  const x = Math.max(-1000000, Math.min(1000000, Math.round(p.x)));
+  const y = Math.max(0, Math.min(WORLD_H, Math.round(p.y)));
+  const z = Math.max(-1000000, Math.min(1000000, Math.round(p.z)));
+  const kind = NB_PING_KINDS.includes(p.kind) ? p.kind : 'here';
+  const now = performance.now();
+  if (now - (nbPingLastRx.get(env.from_rappid) || 0) < 1000) return; // rate limit per sender
+  nbPingLastRx.set(env.from_rappid, now);
+  const av = Neighborhood.avatars.get(env.from_rappid);
+  const name = nbCleanName(p.name || (av && av.name));
+  nbShowPing(env.from_rappid, name, av ? av.color : '#e07a5f', x, y, z, kind);
+  addChatMsg(null, name + ' pinged a spot (' + x + ', ' + y + ', ' + z + ')', null, true);
+  toast(name + ' pinged a spot');
+  voxEvent('ping', { rappid: env.from_rappid, name, x, y, z, kind });
+});
+
 // --- shared send helpers -----------------------------------------------------------
 function nbBroadcastWire(wire, exceptPeerId) {
   for (const [pid, e] of Neighborhood.conns) {
@@ -2839,7 +3140,7 @@ async function nbHostOnData(entry, wire) {
   if (!sealed && p.op !== 'pos') return; // plaintext is allowed only for pos (perf)
   nbDispatch(env, entry, sealed);
   // hub relay (§10): forward the ORIGINAL wire to every other neighbor
-  if (p.op === 'pos' || p.op === 'edit' || p.op === 'chat' ||
+  if (p.op === 'pos' || p.op === 'edit' || p.op === 'chat' || p.op === 'ping' ||
       p.op === 'bot-claim' || p.op === 'bot-act' || p.op === 'bot-release') {
     nbBroadcastWire(wire, entry.conn.peer);
   }
@@ -3067,6 +3368,9 @@ function nbLeave(skipToast) {
 
 function nbResetSession() {
   for (const rid of [...Neighborhood.avatars.keys()]) nbRemoveAvatar(rid);
+  for (const rec of Neighborhood.pings.values()) nbDisposePing(rec); // PING markers die with the session
+  Neighborhood.pings.clear();
+  nbPingLastRx.clear();
   vfOnSessionReset(); // VOXELFLAYER: drop remote twin visuals + claims with the session
   Neighborhood.conns.clear();
   if (Neighborhood.peer) { try { Neighborhood.peer.destroy(); } catch (e) {} }
@@ -3248,6 +3552,73 @@ const VF_TWINS_KEY = 'voxel-world-twins-v1';
 const VF_TETHER_DEFAULT = 'http://localhost:7071/chat';
 const VF_BRAINS = ['wanderer', 'miner', 'builder', 'follower'];
 const VF_PALETTE = ['#81b29a', '#e07a5f', '#6d9dc5', '#f2cc8f', '#b56576', '#9c89b8', '#5ad17d', '#e3b505'];
+
+// --- network-twin consent gate (cycle-2 PRIORITY-SECURITY) --------------------
+// Tether/cloud twins POST full world observations to twin.url. That loop may
+// only auto-start when the url's ORIGIN is approved on this device:
+// localhost/127.0.0.1 (any port) always is; anything else needs a one-time
+// explicit confirm (persisted below) or vox('twinallow <origin>'). Imported /
+// boot-re-hatched twins NEVER prompt (no confirm storms): unapproved ones land
+// 'paused' with a Resume button and fire ZERO network requests. Storage
+// failure degrades safely to localhost-only. 'paused' is derived at hatch and
+// never persisted — the roster JSON shape is unchanged.
+const VF_TWIN_ALLOW_KEY = 'voxel-world-twin-url-allow-v1';
+function vfTwinAllowList() {
+  try {
+    const a = JSON.parse(localStorage.getItem(VF_TWIN_ALLOW_KEY) || 'null');
+    return Array.isArray(a) ? a.filter((s) => typeof s === 'string') : [];
+  } catch (e) { return []; }
+}
+function vfAllowTwinOrigin(origin) {
+  origin = String(origin || '');
+  if (!origin) return false;
+  try {
+    const list = vfTwinAllowList();
+    if (!list.includes(origin)) {
+      list.push(origin);
+      localStorage.setItem(VF_TWIN_ALLOW_KEY, JSON.stringify(list));
+    }
+    return true;
+  } catch (e) { return false; }
+}
+function isAllowedTwinOrigin(url) {
+  let u = null;
+  try { u = new URL(String(url)); } catch (e) { return false; } // unparseable = not allowed
+  if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return true; // any port
+  return vfTwinAllowList().includes(u.origin);
+}
+// interactive consent: shows the EXACT origin; accepting persists the approval
+function vfConfirmTwinOrigin(url) {
+  let origin = null;
+  try { origin = new URL(String(url)).origin; } catch (e) { return false; }
+  let ok = false;
+  try {
+    ok = window.confirm(
+      'This twin will send world observations (positions, nearby blocks, recent chat) to:\n\n' +
+      origin +
+      '\n\nAllow twins to contact this origin from this device? (remembered here)'
+    );
+  } catch (e) { ok = false; }
+  if (ok) vfAllowTwinOrigin(origin);
+  return ok;
+}
+// shared by the per-row Resume button (interactive) and vox('resume') (never prompts)
+function vfResumeTwin(twin, interactive) {
+  if (!twin) return { ok: false, error: 'no such twin' };
+  if (twin.mode === 'local' || !twin.url) {
+    return { ok: false, error: twin.name + ' is a local-brain twin (always running, no URL)' };
+  }
+  if (!isAllowedTwinOrigin(twin.url)) {
+    if (!interactive || !vfConfirmTwinOrigin(twin.url)) {
+      return { ok: false, error: 'origin not approved' };
+    }
+  }
+  twin.failCount = 0;
+  twin.nextAllowed = 0;
+  vfSetTwinStatus(twin, 'live');
+  vfStartTwinLoop(twin); // existing stagger/backoff untouched
+  return { ok: true, name: twin.name, status: twin.status };
+}
 
 const vfBots = [];                 // local bot objects (see vfSpawnBot)
 const vfTwins = [];                // twin records driving bots via /chat or local brains
@@ -3979,17 +4350,30 @@ function vfHatchTwin(cfg) {
     brain,
     bot,
     timer: null,
-    status: mode === 'local' ? 'local' : 'live',
+    status: mode === 'local' ? 'local' : 'paused',
     history: [],
     failCount: 0,
     inFlight: false,
     nextAllowed: 0
   };
   vfTwins.push(twin);
-  if (mode !== 'local') vfStartTwinLoop(twin);
+  // CONSENT GATE: the /chat POST loop only auto-starts for approved origins.
+  // Imports/boot re-hatches NEVER prompt — they land paused (Resume to start).
+  // Interactive hatches confirm once, showing the exact origin; the approval
+  // persists in the allowlist. Local-brain twins are untouched (no URL).
+  if (mode !== 'local') {
+    if (isAllowedTwinOrigin(twin.url)) {
+      twin.status = 'live';
+      vfStartTwinLoop(twin);
+    } else if (!cfg.fromImport && vfConfirmTwinOrigin(twin.url)) {
+      twin.status = 'live';
+      vfStartTwinLoop(twin);
+    } // else: paused — zero network until Resume / vox('resume')
+  }
   vfSaveRoster();
   vfRefreshTwinUi();
-  toast('Twin hatched: ' + twin.name + (mode === 'local' ? ' (' + brain + ')' : ' (' + mode + ')'));
+  toast('Twin hatched: ' + twin.name + (mode === 'local' ? ' (' + brain + ')' :
+    ' (' + mode + (twin.status === 'paused' ? ' · paused — origin not approved' : '') + ')'));
   return twin;
 }
 
@@ -4152,6 +4536,32 @@ function vfRosterData() {
 function vfSaveRoster() {
   try { localStorage.setItem(VF_TWINS_KEY, JSON.stringify(vfRosterData())); } catch (e) { /* private mode */ }
 }
+// import-time validation: a malicious or mangled roster record must never
+// become a network-capable twin. Hard-DROP what cannot be made safe (no usable
+// name; mode outside {local,tether,cloud}; non-local url not http(s) or >200
+// chars — 'javascript:'/'data:' die here); COERCE the recoverable fields.
+function validateTwinRecord(r) {
+  if (!r || typeof r !== 'object') return null;
+  const name = typeof r.name === 'string'
+    ? r.name.replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 16) : '';
+  if (!name) return null;
+  const mode = r.mode;
+  if (mode !== 'local' && mode !== 'tether' && mode !== 'cloud') return null;
+  let url = '';
+  if (mode !== 'local') {
+    url = typeof r.url === 'string' ? r.url.trim() : '';
+    if (!/^https?:\/\//i.test(url) || url.length > 200) return null;
+  }
+  return {
+    name,
+    color: nbCleanColor(r.color),
+    persona: String(r.persona || '').slice(0, 800),
+    mode,
+    url,
+    intervalS: Math.max(3, Math.min(120, Math.round(Number(r.interval) || 6))),
+    brain: VF_BRAINS.includes(r.brain) ? r.brain : 'wanderer'
+  };
+}
 function vfImportRoster(arr, replace) {
   if (!Array.isArray(arr)) return;
   if (replace) {
@@ -4159,11 +4569,16 @@ function vfImportRoster(arr, replace) {
       if (vfTwins.some((t) => t.bot === b)) vfRemoveBot(b.name);
     }
   }
-  for (const r of arr.slice(0, VF_MAX_BOTS)) {
-    if (!r || typeof r !== 'object') continue;
+  const seen = new Set(vfBots.map((b) => b.name)); // skip duplicate names
+  for (const r of arr) {
+    if (vfBots.length >= VF_MAX_BOTS) break; // cap enforced across existing + incoming
+    const rec = validateTwinRecord(r);
+    if (!rec || seen.has(rec.name)) continue;
+    seen.add(rec.name);
     vfHatchTwin({
-      name: r.name, color: r.color, persona: r.persona, mode: r.mode,
-      url: r.url, intervalS: r.interval, brain: r.brain
+      name: rec.name, color: rec.color, persona: rec.persona, mode: rec.mode,
+      url: rec.url, intervalS: rec.intervalS, brain: rec.brain,
+      fromImport: true // consent gate: imports auto-start ONLY via the allowlist — never a prompt
     });
   }
 }
@@ -4347,6 +4762,14 @@ function vfRefreshTwinUi() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.appendChild(info);
+    if (t && t.status === 'paused') {
+      // consent gate: paused network twin — Resume runs the allow-or-confirm flow
+      const res = document.createElement('button');
+      res.textContent = 'Resume';
+      res.title = 'Approve this twin’s /chat origin on this device and start its loop';
+      res.addEventListener('click', () => { vfResumeTwin(t, true); });
+      row.appendChild(res);
+    }
     row.appendChild(rm);
     ui.twinList.appendChild(row);
   }
@@ -4613,11 +5036,19 @@ function voxCmdObs(name) {
   return vfObservation(subj); // the SAME observation JSON the brainstem twins receive
 }
 
-function voxCmdMap(radius) {
+function voxCmdMap(radius, ySlice) {
   if (!voxReady()) return voxNotReady('world still booting');
   let r = parseInt(radius, 10);
   if (!Number.isFinite(r)) r = 12;
   r = Math.max(2, Math.min(32, r));
+  // optional second arg: 'map [radius] [y]' renders the horizontal slice at
+  // that height — tunnels/caverns read as '.' so LLM brains can finally
+  // observe underground. WITHOUT a y, the output (text, legend, return shape)
+  // is byte-identical to the original surface map, so existing CDP scripts
+  // and twin prompts never break.
+  let sliceY = parseInt(ySlice, 10);
+  const sliced = Number.isFinite(sliceY);
+  if (sliced) sliceY = Math.max(0, Math.min(WORLD_H - 1, sliceY));
   const subj = voxBot();
   const ent = subj ? subj.ent : player;
   const cx = Math.floor(ent.pos.x), cz = Math.floor(ent.pos.z);
@@ -4627,29 +5058,43 @@ function voxCmdMap(radius) {
     const row = [];
     for (let x = cx - r; x <= cx + r; x++) {
       let ch = '.';
-      for (let y = WORLD_H - 1; y >= 0; y--) {
-        const id = getBlock(x, y, z);
-        if (id !== B.AIR) { ch = CHARS[id] || '?'; break; }
+      if (sliced) {
+        const id = getBlock(x, sliceY, z);
+        if (id !== B.AIR) ch = CHARS[id] || '?';
+      } else {
+        for (let y = WORLD_H - 1; y >= 0; y--) {
+          const id = getBlock(x, y, z);
+          if (id !== B.AIR) { ch = CHARS[id] || '?'; break; }
+        }
       }
       row.push(ch);
     }
     rows.push(row);
   }
-  const mark = (px, pz, ch) => {
+  const mark = (px, pz, ch, py) => {
+    // slice mode: mark entities only when they are within +/-2 of the slice
+    if (sliced && Number.isFinite(py) && Math.abs(Math.floor(py) - sliceY) > 2) return;
     const ix = Math.floor(px) - (cx - r), iz = Math.floor(pz) - (cz - r);
     if (iz >= 0 && iz < rows.length && ix >= 0 && ix < rows[iz].length) rows[iz][ix] = ch;
   };
-  for (const av of Neighborhood.avatars.values()) mark(av.cur.x, av.cur.z, 'N');
-  for (const rb of vfRemoteBots.values()) mark(rb.cur.x, rb.cur.z, 'B');
-  for (const b of vfBots) { if (b.name !== voxConsoleBotName) mark(b.ent.pos.x, b.ent.pos.z, 'B'); }
-  mark(player.pos.x, player.pos.z, 'P');
-  if (subj) mark(subj.ent.pos.x, subj.ent.pos.z, 'T');
-  const text =
-    'map @ (' + cx + ',' + cz + ') r=' + r + '   north = -z (top), east = +x (right)\n' +
+  for (const av of Neighborhood.avatars.values()) mark(av.cur.x, av.cur.z, 'N', av.cur.y);
+  for (const rb of vfRemoteBots.values()) mark(rb.cur.x, rb.cur.z, 'B', rb.cur.y);
+  for (const b of vfBots) { if (b.name !== voxConsoleBotName) mark(b.ent.pos.x, b.ent.pos.z, 'B', b.ent.pos.y); }
+  mark(player.pos.x, player.pos.z, 'P', player.pos.y);
+  if (subj) mark(subj.ent.pos.x, subj.ent.pos.z, 'T', subj.ent.pos.y);
+  let text =
+    'map @ (' + cx + ',' + cz + ') r=' + r + (sliced ? ' y=' + sliceY : '') +
+    '   north = -z (top), east = +x (right)\n' +
     rows.map((rw) => rw.join('')).join('\n') + '\n' +
     'legend: g grass  d dirt  s sand  S stone  w wood  L leaves  ~ water  . air/void\n' +
     '        P player  T console twin  B bot  N neighbor';
-  return { ok: true, text, center: { x: cx, z: cz }, radius: r, subject: subj ? subj.name : 'player' };
+  if (sliced) {
+    text += '\n        slice y=' + sliceY +
+      ": '.' = open air at this height (tunnels/caverns); entities marked only within +/-2 of the slice";
+  }
+  const out = { ok: true, text, center: { x: cx, z: cz }, radius: r, subject: subj ? subj.name : 'player' };
+  if (sliced) out.slice = sliceY; // the ONLY return-shape change, and only in slice mode
+  return out;
 }
 
 function voxCmdTp(x, y, z, exact) {
@@ -4805,6 +5250,12 @@ function voxCmdSay(text) {
   return { ok: true, as: b ? b.name : (Neighborhood.name || 'Player'), text: text.slice(0, 240) };
 }
 
+function voxCmdPing(kind) {
+  if (!voxReady()) return voxNotReady('world still booting');
+  const t = nbSendPing(typeof kind === 'string' ? kind.toLowerCase() : kind);
+  return { ok: true, x: t.x, y: t.y, z: t.z, kind: t.kind };
+}
+
 async function voxCmdKite() {
   if (!voxReady()) return voxNotReady('world still booting');
   if (Neighborhood.enabled && Neighborhood.role === 'kite') {
@@ -4916,6 +5367,36 @@ function voxCmdRelease(name) {
   return { ok: true, released: n };
 }
 
+function voxCmdResume(name) {
+  if (!voxReady()) return voxNotReady('world still booting');
+  if (!name) return { ok: false, error: 'usage: resume <name>' };
+  const n = nbCleanName(name);
+  const twin = vfTwins.find((t) => t.name === n);
+  if (!twin) return { ok: false, error: 'no twin named ' + n };
+  // the console resume NEVER prompts: approve the origin with twinallow first
+  return vfResumeTwin(twin, false);
+}
+
+function voxCmdTwinAllow(origin) {
+  origin = String(origin === undefined ? '' : origin).trim();
+  if (!origin) {
+    return {
+      ok: true, allowed: vfTwinAllowList(),
+      note: 'pass an origin (e.g. https://twin.example.com) to approve it; localhost is always allowed'
+    };
+  }
+  let u = null;
+  try { u = new URL(origin); } catch (e) { return { ok: false, error: 'not a valid URL/origin' }; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') {
+    return { ok: false, error: 'only http(s) origins can be approved' };
+  }
+  // console operator = already full-trust (5a-kite): persist without a prompt
+  if (!vfAllowTwinOrigin(u.origin)) {
+    return { ok: false, error: 'could not persist the allowlist (storage unavailable) — localhost-only until storage works' };
+  }
+  return { ok: true, origin: u.origin, allowed: vfTwinAllowList() };
+}
+
 function voxCmdBecome(name) {
   if (!voxReady()) return voxNotReady('world still booting');
   name = nbCleanName(name || 'Claude');
@@ -5014,7 +5495,7 @@ const VOX_COMMANDS = {
   help:      { usage: 'help', desc: 'list every command (also returned as data)', fn: voxCmdHelp },
   status:    { usage: 'status', desc: 'seed/mode/fps/chunks/position/kite/twins/bots/headless', fn: voxCmdStatus },
   obs:       { usage: 'obs [name]', desc: 'observation JSON — same builder the brainstem twins use', fn: voxCmdObs },
-  map:       { usage: 'map [radius=12]', desc: 'ASCII top-down map around the subject (with legend)', fn: voxCmdMap },
+  map:       { usage: 'map [radius=12] [y]', desc: 'ASCII top-down map around the subject; add a y for a horizontal slice (caves read as ".")', fn: voxCmdMap },
   tp:        { usage: 'tp x y z [exact]', desc: 'teleport the subject (console twin, else player); snaps out of solid blocks unless "exact"', fn: voxCmdTp },
   look:      { usage: 'look yaw pitch', desc: 'set view angles (radians)', fn: voxCmdLook },
   jump:      { usage: 'jump', desc: 'hop once', fn: voxCmdJump },
@@ -5025,6 +5506,7 @@ const VOX_COMMANDS = {
   block:     { usage: 'block x y z', desc: 'query a block', fn: voxCmdBlock },
   goto:      { usage: 'goto x y z', desc: 'pathfind via the existing bot A* (console twin)', fn: voxCmdGoto },
   say:       { usage: 'say <text...>', desc: 'neighborhood chat as the console twin (else as player)', fn: voxCmdSay, rawRest: true },
+  ping:      { usage: 'ping [here|look|danger]', desc: 'waypoint ping at the crosshair target — neighbors see the marker for 8s (solo: local marker)', fn: voxCmdPing },
   kite:      { usage: 'kite', desc: 'Fly the Kite — returns { peerId, link }', fn: voxCmdKite },
   unkite:    { usage: 'unkite', desc: 'reel in the kite / leave the neighborhood', fn: voxCmdUnkite },
   join:      { usage: 'join <link>', desc: 'Scan-to-Join a kite link (…?join=…#k=…)', fn: voxCmdJoin, rawRest: true },
@@ -5034,6 +5516,8 @@ const VOX_COMMANDS = {
   hatch:     { usage: 'hatch <brain|twin> <name> [persona...]', desc: 'hatch a built-in-brain bot, or a /chat-driven twin', fn: voxCmdHatch },
   bots:      { usage: 'bots', desc: 'roster of local + remote bots/twins', fn: voxCmdBots },
   release:   { usage: 'release <name>', desc: 'remove a hatched bot/twin', fn: voxCmdRelease },
+  resume:    { usage: 'resume <name>', desc: 'restart a paused network twin — its origin must already be approved (see twinallow)', fn: voxCmdResume },
+  twinallow: { usage: 'twinallow [origin]', desc: 'approve a twin /chat origin on this device (persisted allowlist; no arg lists approvals)', fn: voxCmdTwinAllow, rawRest: true },
   become:    { usage: 'become <name>', desc: 'BECOME your own kited twin — the console is its brain', fn: voxCmdBecome },
   act:       { usage: 'act <jsonArray>', desc: 'brainstem-schema action array on the console twin', fn: voxCmdAct },
   events:    { usage: 'events [n=20] [sinceSeq]', desc: 'drain the event ring buffer ({seq,t,type,data}, cap ' + VOX_EVENTS_CAP + '); pass your last seen seq to get only newer events + a dropped flag', fn: voxCmdEvents },
@@ -5396,6 +5880,7 @@ function main() {
     const dayFrac = updateEnvironment(dt);
     updateParticles(dt);
     nbTick(dt); // NEIGHBORHOOD: avatar lerp + throttled pos broadcast
+    nbPingTick(); // PING: expire waypoint markers (runs solo too — local markers)
     vfTick(dt); // VOXELFLAYER: path following, walk bob, twin pos stream, remote twins
     if (coachState) coachTick(); // ONBOARD: O(1) step poll
     ui.underwater.classList.toggle('hidden', !cameraInWater());
