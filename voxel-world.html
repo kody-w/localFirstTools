@@ -208,6 +208,9 @@
   .twinDot.thinking{background:#f2cc8f;animation:twinPulse 1s ease-in-out infinite alternate}
   .twinDot.unreachable{background:#e05f5f}
   .twinDot.paused{background:#e0a832}
+  /* MIXED-CONTENT (cycle-11): an https page can never fetch a remote http endpoint —
+     a DISTINCT amber-red 'blocked' state so it never reads as a transient 'unreachable' */
+  .twinDot.blocked{background:#ff8c42}
   .twinDot.local{background:#6d9dc5}
   @keyframes twinPulse{from{opacity:.4}to{opacity:1}}
   #twinList .twinRow{display:flex;align-items:center;gap:8px;background:#0f1722;border:1px solid #2c3f57;
@@ -1437,6 +1440,17 @@ function processStreaming() {
   // floods chunks under a 24ms budget so the world appears fast). In-game, a renderDist
   // increase or edit burst is capped to MESH_CAP_PER_FRAME non-local rebuilds/frame.
   const capActive = !loadingVisible;
+  // DIRTY-DRAIN RESERVATION (cycle-11 defect fix): while the player moves, scanChunks
+  // keeps meshQueue non-empty, so the meshQueue loop below consumed BOTH cap slots
+  // every frame and drainDirtyMeshes starved indefinitely — remote-neighbor edits,
+  // bot.dig/place edits and vox edits (all routed through dirtyMeshSet via setBlock's
+  // non-localEditFast path) stalled visually until the player stood still. Fix by
+  // RESERVATION, not a cap raise: whenever dirtyMeshSet has work, ONE of the cap's two
+  // slots is held back for the dirty drain; when it's empty the meshQueue keeps both.
+  // Total non-local rebuilds stay <= MESH_CAP_PER_FRAME (the cycle-8 no-hitch
+  // invariant). Loading-screen flood (capActive=false, 24ms budget) is byte-identical
+  // — the cap checks are skipped entirely there — and the 8ms endT guard is untouched.
+  const reserveDirty = capActive && dirtyMeshSet.size > 0 ? 1 : 0;
   while (genQueue.length && performance.now() < endT) {
     const it = genQueue.shift();
     if (chunks.has(chunkKey(it.cx, it.cz))) continue;
@@ -1445,7 +1459,7 @@ function processStreaming() {
   }
   const leftovers = [];
   while (meshQueue.length && performance.now() < endT) {
-    if (capActive && meshedThisFrame >= MESH_CAP_PER_FRAME) break; // cap reached: leave the rest in meshQueue for next frame
+    if (capActive && meshedThisFrame >= MESH_CAP_PER_FRAME - reserveDirty) break; // cap (minus the dirty reservation) reached: leave the rest in meshQueue for next frame
     const it = meshQueue.shift();
     const c = chunks.get(chunkKey(it.cx, it.cz));
     if (Math.max(Math.abs(it.cx - pcx), Math.abs(it.cz - pcz)) > renderDist) continue;
@@ -1958,6 +1972,221 @@ function playMoveSound(kind, intensity, blockUnder) {
       osc.start(t0); osc.stop(t0 + dur + 0.02);
     }
   } catch (e) { /* never let audio break gameplay */ }
+}
+
+// --- ambient audio bed (biome- and time-aware — cycle-11) ----------------------
+// A continuous, very quiet WebAudio bed under the one-shot SFX: wind that follows
+// the biome (soft high-passed in forests, steadier/higher on snowy+rocky, thin in
+// deserts, light on plains), a low drone + jittered water drips underground, a
+// muffled lowpassed hum underwater, bird chirps in forests by day and sparse
+// cricket/owl blips at night. Purely additive and COSMETIC: zero save keys, zero
+// wire ops, zero observation fields — multiplayer peers never hear your ambient.
+// The graph is built lazily ONCE, on the first 1Hz tick after the existing
+// ensureAudio() gesture unlock (mobile Safari: nothing before the first touch);
+// all node creation is wrapped in try/catch like the WebGL boot guard. Every gain
+// change rides a ~1.5s linearRampToValueAtTime (crossfade, never a hard set — no
+// clicks), and mood changes at most 1/s by construction (the selector IS the 1s
+// fps tick). HARD GATES (mirroring achInit): ?headless=1 / ?console=1 create zero
+// AudioNodes and zero timers, ever (ambNodesCreated stays 0 — the DoD assertion
+// hook); runtime `vox('headless on')`, a hidden tab, and soundOn=false all ramp
+// the master to 0 and cancel the pending chirp/drip timeouts (restored when the
+// condition clears — the selector is stateless off player.pos, so world reload /
+// import / tp / become need no reset). The break/place/footstep one-shot synths
+// and their calibration are UNTOUCHED; the bed's levels peak far below them
+// (master <= 1.0 over voice targets <= 0.034 vs break 0.42 / place 0.3) so action
+// feedback always reads over the bed.
+const AMB_RAMP_S = 1.5;            // gain crossfade seconds (linearRamp — click-free)
+let ambMasterGain = null;          // master ambient bus -> destination (null until built)
+let ambVoices = null;              // { windLow, windHigh, drone, hum } per-mood gain nodes
+let ambMood = null;                // currently applied mood key (null = needs re-apply)
+let ambSilenced = false;           // master ramped to 0 (hidden / soundOff / runtime headless)
+let ambBuildFailed = false;        // graph build threw once — stay silent forever, never retry
+let ambChirpTimer = null;          // forest bird / night cricket scheduler (jittered setTimeout)
+let ambDripTimer = null;           // cave water-drip scheduler (jittered setTimeout)
+let ambNodesCreated = 0;           // DoD assertion hook: MUST stay 0 under ?headless=1/?console=1
+// per-mood voice gain targets — calibrated LOW by design (well under break 0.42 / place 0.3)
+const AMB_MOODS = {
+  submerged:   { windLow: 0,     windHigh: 0,     drone: 0,     hum: 0.11 },
+  cave:        { windLow: 0.010, windHigh: 0,     drone: 0.055, hum: 0 },
+  forest:      { windLow: 0.012, windHigh: 0.022, drone: 0,     hum: 0 },
+  snowy_rocky: { windLow: 0.014, windHigh: 0.034, drone: 0,     hum: 0 },
+  desert:      { windLow: 0.006, windHigh: 0.016, drone: 0,     hum: 0 },
+  plains:      { windLow: 0.016, windHigh: 0.009, drone: 0,     hum: 0 }
+};
+
+// boot-time inert: zero objects, zero timers — mirrors achInit's headless/console gates
+function ambInert() { return !!(voxBootParams.headless || voxBootParams.console); }
+function ambClearTimers() {
+  if (ambChirpTimer) { clearTimeout(ambChirpTimer); ambChirpTimer = null; }
+  if (ambDripTimer) { clearTimeout(ambDripTimer); ambDripTimer = null; }
+}
+// every gain change goes through here: cancel pending ramps, pin the CURRENT value,
+// then linear-ramp to the target — a mid-crossfade retarget never clicks.
+function ambRamp(gainNode, target, secs) {
+  const t = audioCtx.currentTime;
+  gainNode.gain.cancelScheduledValues(t);
+  gainNode.gain.setValueAtTime(gainNode.gain.value, t);
+  gainNode.gain.linearRampToValueAtTime(target, t + (secs || AMB_RAMP_S));
+}
+function ambEnsureGraph() {
+  if (ambMasterGain || ambBuildFailed || ambInert()) return;
+  if (!audioCtx || audioCtx.state !== 'running') return;
+  try { // wrap ALL node creation like the WebGL boot guard — a failure stays cosmetic
+    const mk = (node) => { ambNodesCreated++; return node; };
+    const master = mk(audioCtx.createGain());
+    master.gain.value = 0; // fades in on the first mood apply
+    master.connect(audioCtx.destination);
+    // ONE shared looping noise source (3s buffer generated once with Math.random —
+    // cosmetic audio, determinism not required) feeds the three filtered noise voices.
+    const n = Math.floor(audioCtx.sampleRate * 3);
+    const buf = audioCtx.createBuffer(1, n, audioCtx.sampleRate);
+    const ch = buf.getChannelData(0);
+    for (let i = 0; i < n; i++) ch[i] = Math.random() * 2 - 1;
+    const noise = mk(audioCtx.createBufferSource());
+    noise.buffer = buf;
+    noise.loop = true;
+    const voice = (filterType, freq, q) => {
+      const f = mk(audioCtx.createBiquadFilter());
+      f.type = filterType;
+      f.frequency.value = freq;
+      if (q) f.Q.value = q;
+      const g = mk(audioCtx.createGain());
+      g.gain.value = 0;
+      noise.connect(f); f.connect(g); g.connect(master);
+      return g;
+    };
+    const windLow = voice('lowpass', 240);         // broad low wind rumble
+    const windHigh = voice('bandpass', 950, 0.7);  // airy whistle on top (high-passed feel)
+    const hum = voice('lowpass', 300);             // submerged hum: lowpassed ~300Hz
+    // cave drone: two detuned slow sines into one shared gain (reads as deep stillness)
+    const droneG = mk(audioCtx.createGain());
+    droneG.gain.value = 0;
+    droneG.connect(master);
+    for (const f0 of [55, 55.8]) {
+      const o = mk(audioCtx.createOscillator());
+      o.type = 'sine';
+      o.frequency.value = f0;
+      o.connect(droneG);
+      o.start();
+    }
+    noise.start();
+    ambMasterGain = master;
+    ambVoices = { windLow, windHigh, drone: droneG, hum };
+  } catch (e) {
+    ambBuildFailed = true; // never retry-throw: the game simply has no ambient bed
+    ambMasterGain = null;
+    ambVoices = null;
+  }
+}
+// daylight factor — the SAME formula updateEnvironment uses; scales bird-chirp
+// probability to ZERO at night (the night window plays sparse crickets/owls instead).
+function ambDaylight() {
+  const sunY = Math.sin(((worldTime / DAY_LEN) % 1) * Math.PI * 2);
+  return clamp01((sunY + 0.15) / 0.35);
+}
+// mood priority: underwater camera beats everything; then the cycle-9 spelunker
+// depth predicate (y < SEA-6); else the player's biome. Stateless off player.pos —
+// a reload/import/tp/become simply selects fresh next tick, nothing to reset.
+function ambSelectMood() {
+  if (cameraInWater()) return 'submerged';
+  if (player.pos.y < SEA - 6) return 'cave';
+  const b = biomeAt(Math.floor(player.pos.x), Math.floor(player.pos.z));
+  if (b === 'forest') return 'forest';
+  if (b === 'snowy' || b === 'rocky') return 'snowy_rocky';
+  if (b === 'desert') return 'desert';
+  return 'plains';
+}
+function ambApplyMood(mood) {
+  const tg = AMB_MOODS[mood] || AMB_MOODS.plains;
+  ambRamp(ambVoices.windLow, tg.windLow);
+  ambRamp(ambVoices.windHigh, tg.windHigh);
+  ambRamp(ambVoices.drone, tg.drone);
+  ambRamp(ambVoices.hum, tg.hum);
+  // submerged ducks the MASTER ~50% extra so the hum sits well under splash/break SFX
+  ambRamp(ambMasterGain, mood === 'submerged' ? 0.5 : 1.0);
+  ambMood = mood;
+  ambSilenced = false;
+  ambClearTimers(); // one live scheduler max — timers can never pile up
+  if (mood === 'forest') ambScheduleChirp();
+  else if (mood === 'cave') ambScheduleDrip();
+}
+// one-shot blips reuse the playSound tone-synth pattern but route through the
+// AMBIENT bus, so hidden/soundOff/headless muting silences them with the bed.
+function ambOneShot(kind) {
+  if (!ambMasterGain || !audioCtx || audioCtx.state !== 'running') return;
+  try {
+    const t0 = audioCtx.currentTime;
+    const blip = (type, f0, f1, dur, peak, at) => {
+      const o = audioCtx.createOscillator();
+      o.type = type;
+      o.frequency.setValueAtTime(f0, t0 + at);
+      o.frequency.exponentialRampToValueAtTime(Math.max(1, f1), t0 + at + dur);
+      const g = audioCtx.createGain();
+      g.gain.setValueAtTime(0.0001, t0 + at);
+      g.gain.exponentialRampToValueAtTime(peak, t0 + at + dur * 0.25);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + at + dur);
+      o.connect(g); g.connect(ambMasterGain);
+      o.start(t0 + at); o.stop(t0 + at + dur + 0.02);
+    };
+    if (kind === 'drip') {        // falling water plink
+      blip('sine', 1500 + Math.random() * 600, 320, 0.16, 0.05, 0);
+    } else if (kind === 'bird') { // two-osc descending chirp
+      blip('sine', 2600 + Math.random() * 700, 1500, 0.12, 0.035, 0);
+      blip('sine', 3200 + Math.random() * 500, 1900, 0.1, 0.028, 0.14);
+    } else if (kind === 'cricket') { // faint high pulse pair
+      blip('square', 4200, 4000, 0.045, 0.012, 0);
+      blip('square', 4200, 4000, 0.045, 0.012, 0.09);
+    } else if (kind === 'owl') {  // two soft low hoots
+      blip('sine', 340, 280, 0.22, 0.03, 0);
+      blip('sine', 320, 260, 0.28, 0.03, 0.35);
+    }
+  } catch (e) { /* cosmetic only — never breaks gameplay */ }
+}
+// jittered schedulers: handles live module-level (cleared on hidden/soundOff/headless
+// and on every mood change), and each callback re-checks every gate before playing.
+function ambScheduleChirp() {
+  ambChirpTimer = setTimeout(() => {
+    ambChirpTimer = null;
+    if (ambMood !== 'forest' || ambSilenced || document.hidden) return;
+    if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+    const day = ambDaylight();
+    if (day > 0.05) {
+      if (Math.random() < day) ambOneShot('bird'); // probability scales with daylight
+    } else {
+      ambOneShot(Math.random() < 0.25 ? 'owl' : 'cricket'); // sparse night chorus
+    }
+    ambScheduleChirp(); // re-jitter
+  }, 8000 + Math.random() * 12000); // every 8-20s
+}
+function ambScheduleDrip() {
+  ambDripTimer = setTimeout(() => {
+    ambDripTimer = null;
+    if (ambMood !== 'cave' || ambSilenced || document.hidden) return;
+    if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+    ambOneShot('drip');
+    ambScheduleDrip();
+  }, 6000 + Math.random() * 9000); // every 6-15s
+}
+// silence the bed (hidden tab / soundOn off / runtime headless): quick click-free
+// ramp + cancel one-shot timers; ambMood=null forces a full re-apply on restore.
+function ambSilence(secs) {
+  ambClearTimers();
+  ambMood = null;
+  if (!ambMasterGain || ambSilenced) return;
+  ambSilenced = true;
+  try { ambRamp(ambMasterGain, 0, secs || 0.4); } catch (e) { /* ignore */ }
+}
+// 1Hz mood selector — runs inside the existing fpsAcc>=1 tick beside
+// qualityGovernorTick/achTick (never per-frame). Guarded on every gate.
+function ambTick() {
+  if (ambInert()) return;                        // ?headless=1 / ?console=1: zero nodes, ever
+  if (voxHeadless) { ambSilence(0.4); return; }  // runtime headless: silent, timers cancelled
+  if (!audioCtx || audioCtx.state !== 'running') return; // pre-gesture: nothing yet
+  if (!soundOn || document.hidden) { ambSilence(soundOn ? 0.4 : 0.15); return; }
+  ambEnsureGraph(); // lazy, once, try/catch'd
+  if (!ambMasterGain) return;
+  const mood = ambSelectMood();
+  if (mood !== ambMood) ambApplyMood(mood); // at most one crossfade per second
 }
 
 // --- day/night environment ----------------------------------------------------
@@ -3070,7 +3299,11 @@ function initUiButtons() {
   ui.btnDebugTop.addEventListener('click', () => setDebugHud(!hudVisible));
 
   ui.renderDistInput.addEventListener('input', () => setRenderDistance(parseInt(ui.renderDistInput.value, 10)));
-  ui.chkSound.addEventListener('change', () => { soundOn = ui.chkSound.checked; saveSettings(); });
+  ui.chkSound.addEventListener('change', () => {
+    soundOn = ui.chkSound.checked;
+    if (!soundOn) ambSilence(0.15); // AMBIENT BED: off rides the existing toggle, immediately (restore = next 1Hz tick)
+    saveSettings();
+  });
   ui.chkAutoQuality.addEventListener('change', () => {
     autoQuality = ui.chkAutoQuality.checked;
     fpsLowStreak = 0; fpsHighStreak = 0;
@@ -3934,7 +4167,10 @@ function nbEnsureAvatar(rappid, name, color) {
   av = {
     rappid, name: nbCleanName(name), color: nbCleanColor(color), group, head,
     cur:    { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: 0, pitch: 0 },
-    target: { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: 0, pitch: 0 }
+    target: { x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: 0, pitch: 0 },
+    // WALK-BOB (cycle-11): per-avatar gait phase + previous SMOOTHED position so
+    // nbTick can derive speed from the lerped cur (never raw network targets).
+    walkPhase: 0, prevX: player.pos.x, prevZ: player.pos.z
   };
   Neighborhood.avatars.set(rappid, av);
   nbUpdateCounts();
@@ -4134,6 +4370,9 @@ const NB_PING_KINDS = ['here', 'look', 'danger'];
 const NB_PING_TTL_MS = 8000;
 const NB_PING_MAX = 16;
 const nbPingLastRx = new Map(); // rappid -> last accepted ping time (receive-side rate limit)
+// THINK ECONOMY (cycle-11): monotonic counter bumped whenever Neighborhood.pings gains an
+// entry — twins compare it per turn so a fresh ping resets their idle quiet-backoff.
+let nbPingSeq = 0;
 
 function nbDisposePing(rec) {
   if (!rec || !rec.group) return;
@@ -4199,6 +4438,7 @@ function nbShowPing(rappid, name, color, x, y, z, kind) {
   group.position.set(x + 0.5, 0, z + 0.5);
   scene.add(group);
   Neighborhood.pings.set(rappid, { rappid, name, kind, x, y, z, group, born: performance.now() });
+  nbPingSeq++; // THINK ECONOMY: pings.gained-an-entry resets twin quiet-backoff next turn
 }
 function nbPingTick() { // per-frame expiry (timestamp-based: robust vs hidden-tab throttling)
   if (!Neighborhood.pings.size) return;
@@ -4901,6 +5141,20 @@ function nbTick(dt) {
     av.cur.yaw += dyaw * k;
     av.cur.pitch += (av.target.pitch - av.cur.pitch) * k;
     av.group.position.set(av.cur.x, av.cur.y, av.cur.z);
+    // REMOTE-AVATAR WALK-BOB + IDLE-BREATHE (cycle-11): remote humans glided like
+    // statues while the local player and every bot visibly bobbed. Speed is derived
+    // from the lerp-SMOOTHED av.cur deltas (never the raw ~10/s network targets, so
+    // packet cadence can't stutter the bob); constants match the VoxelFlayer bots
+    // (>0.3 b/s threshold, 0.05 amplitude) so humans and bots read identically. bobY
+    // is applied ONLY to the scene group's y AFTER the position.set above — av.cur is
+    // NEVER written, so the welcome-roster/ping/observation distance math keeps
+    // reading the true logical position. Idle = a faint slow breathe instead.
+    const sp = dt > 0 ? Math.hypot(av.cur.x - av.prevX, av.cur.z - av.prevZ) / dt : 0;
+    av.prevX = av.cur.x; av.prevZ = av.cur.z;
+    av.walkPhase += sp * dt * 7;
+    const bobY = sp > 0.3 ? Math.abs(Math.sin(av.walkPhase)) * 0.05
+                          : Math.sin(performance.now() * 0.0016) * 0.008;
+    av.group.position.y += bobY;
     av.group.rotation.y = av.cur.yaw;
     if (av.head) av.head.rotation.x = av.cur.pitch * 0.7;
   }
@@ -5236,6 +5490,20 @@ function isAllowedTwinOrigin(url) {
   if (u.hostname === 'localhost' || u.hostname === '127.0.0.1') return true; // any port
   return vfTwinAllowList().includes(u.origin);
 }
+// MIXED-CONTENT HONESTY (cycle-11): true iff THIS page is https: AND the target is a
+// REMOTE http: endpoint — the browser blocks that fetch before any request leaves, so
+// the twin loop must not burn turns reporting a misleading generic 'unreachable'.
+// The localhost family is exempt (browsers treat it as potentially trustworthy, so the
+// working http://localhost tether path keeps working from https pages — e.g. GitHub
+// Pages); pages served over http:// are never affected. Same URL/hostname parsing
+// pattern as isAllowedTwinOrigin above.
+function vfUrlBlocked(url) {
+  if (location.protocol !== 'https:') return false;
+  let u = null;
+  try { u = new URL(String(url)); } catch (e) { return false; } // unparseable: not OUR error to report
+  if (u.protocol !== 'http:') return false;
+  return !(u.hostname === 'localhost' || u.hostname === '127.0.0.1' || u.hostname === '[::1]');
+}
 // interactive consent: shows the EXACT origin; accepting persists the approval
 function vfConfirmTwinOrigin(url) {
   let origin = null;
@@ -5282,6 +5550,9 @@ const VF_REMOTE_NEW_PER_WINDOW = 4;         // max new keys a sender may allocat
 const vfRemoteNewRx = new Map();   // from_rappid -> { t, count } new-allocation rate-limit (cleared in nbResetSession via vfOnSessionReset)
 const vfClaims = new Map();        // botName -> controller rappid (twin-chat claims)
 const vfRecentChat = [];           // [{name,text}] — rides into twin observations
+// THINK ECONOMY (cycle-11): monotonic chat-arrival counter (vfRecentChat is a capped ring,
+// so its length can't signal "new message arrived"); twins compare per turn to reset quiet.
+let vfChatSeq = 0;
 let vfBrainTimer = null;           // ~250ms built-in brain tick
 let vfLastBlockChange = null;      // {x,y,z,t} — bots repath when the world changes
 let vfBotPosTimer = 0;
@@ -5297,6 +5568,7 @@ function vfOnSessionReset() {
 }
 function vfNotifyChat(name, text, system) {
   if (system || !name) return;
+  vfChatSeq++; // THINK ECONOMY (cycle-11): a fresh chat arrival resets twin quiet-backoff next turn
   vfRecentChat.push({ name: String(name), text: String(text) });
   while (vfRecentChat.length > 8) vfRecentChat.shift();
   for (const b of vfBots) {
@@ -6079,9 +6351,25 @@ function vfHatchTwin(cfg) {
     history: [],
     failCount: 0,
     inFlight: false,
-    nextAllowed: 0
+    nextAllowed: 0,
+    // THINK ECONOMY (cycle-11) — ALL RAM-only (never in vfRosterData, so the persisted
+    // roster shape is unchanged): turnCount numbers the compact history stubs; _quiet
+    // counts consecutive empty-action turns (starts 0 — first turn after hatch is always
+    // full cadence); _lastChatSeq/_lastPingSeq baseline the salient-trigger detectors;
+    // _lastObsBytes feeds vox('status'); _mixedWarned gates the one-time mixed-content note.
+    turnCount: 0,
+    _quiet: 0,
+    _lastChatSeq: vfChatSeq,
+    _lastPingSeq: nbPingSeq,
+    _lastObsBytes: 0,
+    _mixedWarned: false
   };
   vfTwins.push(twin);
+  // MIXED-CONTENT (cycle-11): visible warning at hatch — the think loop will mark the
+  // twin 'blocked' without ever fetching; tell the operator up front why.
+  if (mode !== 'local' && vfUrlBlocked(twin.url)) {
+    toast(twin.name + ': HTTPS page cannot call an http:// endpoint — use https:// or run the page over http://localhost');
+  }
   // CONSENT GATE: the /chat POST loop only auto-starts for approved origins.
   // Imports/boot re-hatches NEVER prompt — they land paused (Resume to start).
   // Interactive hatches confirm once, showing the exact origin; the approval
@@ -6294,6 +6582,11 @@ function vfObservation(bot) {
   } catch (err) { notable = []; }
 
   return {
+    // ADD (cycle-11, strictly additive — ALL consumers): version signal for the obs
+    // contract. v2 = blocksAhead is deprecated and already absent on the NETWORK path
+    // (vfNetworkObs); vox('obs')/become keep emitting it one more cycle behind this
+    // signal so live personas/CDP scripts get a full cycle to migrate.
+    schemaVersion: 2,
     you: {
       name: bot.name,
       position: { x: r1(e.pos.x), y: r1(e.pos.y), z: r1(e.pos.z) },
@@ -6349,14 +6642,70 @@ function vfExtractActions(text) {
   return null;
 }
 
+// --- network-only observation wrapper (cycle-11 think-loop economy) -------------
+// ONLY the brainstem POST path (vfTwinThink) serializes this trimmed copy; vox('obs'),
+// vox('become') and every headless CDP surface keep the FULL untrimmed vfObservation.
+// (d) SCHEMA: blocksAhead has been deprecated since cycle 4 with no in-repo consumer —
+// the network prompt path now ALWAYS drops it; vox('obs')/become keep emitting it one
+// more cycle behind the new schemaVersion:2 signal, per the proposal's risk mitigation.
+// (c) CHAR BUDGET: when the serialized obs exceeds VF_OBS_BUDGET chars, trim THIS fresh
+// per-call object in a FIXED deterministic order, re-measuring after each step (stop the
+// moment it fits). you/position, memory, lookingAt, biome and groundProfile are NEVER
+// touched. obs._trimmed=true is stamped whenever any trim fired so brains can tell.
+const VF_OBS_BUDGET = 1400;
+function vfNetworkObs(bot) {
+  const obs = vfObservation(bot);
+  delete obs.blocksAhead; // ALWAYS dropped on the wire (deprecated; see header note)
+  let trimmed = false;
+  const over = () => JSON.stringify(obs).length > VF_OBS_BUDGET;
+  if (over() && Array.isArray(obs.recentChat) && obs.recentChat.length > 3) { obs.recentChat = obs.recentChat.slice(-3); trimmed = true; }
+  if (over() && Array.isArray(obs.notable) && obs.notable.length > 3) { obs.notable = obs.notable.slice(0, 3); trimmed = true; }
+  if (over() && Array.isArray(obs.nearbyPlayers) && obs.nearbyPlayers.length > 3) { obs.nearbyPlayers = obs.nearbyPlayers.slice(0, 3); trimmed = true; }
+  if (over() && Array.isArray(obs.nearbyBots) && obs.nearbyBots.length > 3) { obs.nearbyBots = obs.nearbyBots.slice(0, 3); trimmed = true; }
+  if (over() && Array.isArray(obs.pings) && obs.pings.length > 2) { obs.pings = obs.pings.slice(0, 2); trimmed = true; }
+  if (trimmed) obs._trimmed = true;
+  return obs;
+}
+// THINK ECONOMY: does the obs show any player or bot within ~r blocks of the subject?
+// nearbyPlayers/nearbyBots are nearest-first, so the post-trim lists are equivalent for
+// a within-r test (a within-r entity is always among the nearest kept entries).
+function vfObsHasNearby(obs, r) {
+  try {
+    const me = obs.you.position;
+    const near = (list) => Array.isArray(list) && list.some((p) =>
+      p && p.pos && Math.hypot(p.pos.x - me.x, p.pos.z - me.z) <= r);
+    return near(obs.nearbyPlayers) || near(obs.nearbyBots);
+  } catch (e) { return false; }
+}
+
 async function vfTwinThink(twin) {
   if (!twin.bot || twin.inFlight || !twin.url) return;
   if (performance.now() < twin.nextAllowed) return; // backoff after failures
   // a neighbor's claim outranks the brainstem (one controller per bot)
   if (vfClaims.has(twin.name) && vfClaims.get(twin.name) !== Neighborhood.rappid) return;
+  // (e) MIXED-CONTENT HONESTY (cycle-11): an https page can never fetch a remote http
+  // endpoint — the browser blocks it before any request leaves, so the old path burned a
+  // doomed fetch into a misleading generic 'unreachable' forever. Surface the REAL cause:
+  // a DISTINCT 'blocked' status, a one-time explanation per twin, a 60s backoff, and
+  // return WITHOUT fetching. http://localhost stays exempt (vfUrlBlocked) so the working
+  // localhost tether path keeps working from https pages. The claim guard above still
+  // runs first, so become/claimed bots are unaffected.
+  if (vfUrlBlocked(twin.url)) {
+    vfSetTwinStatus(twin, 'blocked');
+    voxEvent('twin-turn', { name: twin.name, ok: false, error: 'mixed-content' }); // VOX hook
+    if (!twin._mixedWarned) {
+      twin._mixedWarned = true;
+      const note = 'HTTPS page cannot call an http:// endpoint — use https:// or run the page over http://localhost';
+      addChatMsg(null, twin.name + ': ' + note, null, true);
+      toast(twin.name + ' blocked: mixed content');
+    }
+    twin.nextAllowed = performance.now() + 60000;
+    return;
+  }
   twin.inFlight = true;
   vfSetTwinStatus(twin, 'thinking');
-  const obs = vfObservation(twin.bot);
+  const obs = vfNetworkObs(twin.bot); // network-trimmed copy (vox obs/become stay full)
+  twin._lastObsBytes = JSON.stringify(obs).length; // OBSERVABILITY: surfaced in vox('status')
   const userInput =
     (twin.persona ? twin.persona + '\n' : '') +
     'You are playing a Minecraft-like voxel game as character ' + twin.name + '. ' +
@@ -6397,7 +6746,35 @@ async function vfTwinThink(twin) {
     twin.nextAllowed = 0;
     const actions = vfExtractActions(String(raw == null ? '' : raw));
     if (actions) vfExecuteOps(twin.bot, actions);
-    twin.history.push({ role: 'user', content: userInput });
+    // (b) IDLE BACKOFF (cycle-11): a turn that yielded no actions stretches the next
+    // think to min(4, 1+_quiet) x intervalS (mirrors the failure-backoff math below;
+    // the nextAllowed guard at the top enforces it — no timer changes). _quiet resets
+    // to full cadence on ANY salient trigger: actions executed, a chat arrival since
+    // the last turn (vfChatSeq), a fresh waypoint ping (nbPingSeq), or any player/bot
+    // within ~12 blocks in the freshly built obs. Failure backoff (the catch above)
+    // is untouched and takes precedence — this branch only runs on a successful turn.
+    const executed = !!(actions && actions.length);
+    const salient = executed ||
+      vfChatSeq !== twin._lastChatSeq ||
+      nbPingSeq !== twin._lastPingSeq ||
+      vfObsHasNearby(obs, 12);
+    twin._lastChatSeq = vfChatSeq;
+    twin._lastPingSeq = nbPingSeq;
+    if (salient) {
+      twin._quiet = 0; // nextAllowed already 0 above — full cadence
+    } else {
+      twin._quiet++;
+      twin.nextAllowed = performance.now() +
+        twin.intervalS * 1000 * Math.min(4, 1 + twin._quiet); // cap 4x intervalS
+    }
+    // (a) HISTORY COMPACTION (cycle-11): retain a COMPACT stub for the user turn instead
+    // of the full persona+obs+schema prompt (the old slice(-10) re-sent ~5 full prior
+    // observations per request). The {role,content} shape is preserved so existing /chat
+    // brainstems parse unchanged; request bodies now carry exactly ONE full observation
+    // (the current turn's user_input). twin.history remains never-persisted.
+    twin.turnCount++;
+    const tp = obs && obs.you && obs.you.position ? obs.you.position : { x: 0, y: 0, z: 0 };
+    twin.history.push({ role: 'user', content: '[obs turn ' + twin.turnCount + ' @' + tp.x + ',' + tp.y + ',' + tp.z + ']' });
     twin.history.push({ role: 'assistant', content: String(raw == null ? '' : raw).slice(0, 2000) });
     while (twin.history.length > 10) twin.history.shift(); // trim to last 10 turns
     vfSetTwinStatus(twin, 'live');
@@ -6965,7 +7342,9 @@ function voxCmdStatus() {
     tetherUrl: voxTetherUrl,
     cloudUrl: voxCloudUrl || null,
     twins: vfTwins.map((t) => ({
-      name: t.name, mode: t.mode, status: t.status, interval: t.intervalS, brain: t.brain
+      name: t.name, mode: t.mode, status: t.status, interval: t.intervalS, brain: t.brain,
+      // THINK ECONOMY (cycle-11): operators see per-twin turn cost + idle cadence here
+      lastObsBytes: t._lastObsBytes || 0, quiet: t._quiet || 0
     })),
     bots: vfBots.map((b) => ({
       name: b.name,
@@ -7299,7 +7678,14 @@ function voxCmdGraduate(url) {
   }
   if (!/^https?:\/\//i.test(url)) return { ok: false, error: 'graduate needs an http(s) URL (HTTPS for a true Cloud Neighborhood)' };
   voxCloudUrl = url;
-  return { ok: true, cloudUrl: voxCloudUrl, https: /^https:/i.test(url), note: 'vox("hatch twin …") now hatches CLOUDED twins' };
+  const out = { ok: true, cloudUrl: voxCloudUrl, https: /^https:/i.test(url), note: 'vox("hatch twin …") now hatches CLOUDED twins' };
+  // MIXED-CONTENT (cycle-11): visible warning at graduate time — twins hatched at this
+  // URL will land 'blocked' (the browser refuses https-page -> remote-http fetches).
+  if (vfUrlBlocked(url)) {
+    out.warning = 'mixed content: this HTTPS page cannot call an http:// endpoint — use https:// or run the page over http://localhost';
+    try { toast('graduate: ' + out.warning); } catch (e) { /* pre-boot */ }
+  }
+  return out;
 }
 
 function voxCmdHatch(kind, name, ...personaParts) {
@@ -7801,6 +8187,7 @@ function main() {
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
       saveNow();
+      ambSilence(0.4); // AMBIENT BED: hidden tab goes silent within ~1s; chirp/drip timers cancelled (the 1Hz tick restores on return)
       if (!voxHeadless && !hiddenTickTimer) {
         hiddenTickTimer = setInterval(() => {
           try { if (document.hidden && !voxHeadless) gameTick(performance.now()); } catch (e) { /* never dies */ }
@@ -7902,6 +8289,7 @@ function main() {
       fpsFrames = 0; fpsAcc = 0;
       qualityGovernorTick(now); // adaptive resolution: rides the existing 1s fps tick
       achTick(); // FIELD GUIDE: pill visibility + spatial/time predicates (locked-only, O(1))
+      ambTick(); // AMBIENT BED (cycle-11): 1Hz mood selector — never per-frame
     }
     hudTimer += dt;
     if (hudVisible && hudTimer > 0.25) { hudTimer = 0; updateHud(dayFrac); }
