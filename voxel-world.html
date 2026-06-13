@@ -142,6 +142,22 @@
   #achPanel .achHint{color:#f2cc8f}
   #achPanel .achLock{opacity:.45}
 
+  /* ===== JOIN HUD (cycle-10): QR-arrival auto-join status card =====
+     Centered above the canvas, BELOW #voxTerm (45) and the modals (50). The container
+     takes no pointer events — only the card itself does — and the whole node is
+     REMOVED (not hidden) on dismiss so it can never eat input afterwards. Safe-area
+     padded; spinner is pure CSS (reuses the vwspin keyframes — no assets). Created
+     ONLY by the ?join=…#k=… auto-join path; never for manual/vox joins. */
+  #nbJoinHud{position:fixed;inset:0;z-index:44;display:flex;align-items:center;justify-content:center;
+    padding:calc(14px + env(safe-area-inset-top)) calc(14px + env(safe-area-inset-right))
+            calc(14px + env(safe-area-inset-bottom)) calc(14px + env(safe-area-inset-left));
+    pointer-events:none}
+  #nbJoinHud .card{pointer-events:auto;max-width:340px;text-align:center}
+  .nbJoinSpin{width:34px;height:34px;border:4px solid #2b3c55;border-top-color:#7ec3ff;
+    border-radius:50%;margin:4px auto 12px;animation:vwspin 1s linear infinite}
+  #nbJoinHud .row.btns{justify-content:center}
+  #nbJoinHud button{min-height:44px;min-width:44px}
+
   /* ===== NEIGHBORHOOD styles (RAPP kited neighborhood) ===== */
   .kiteMark{display:inline-block;width:84px;height:auto;transform-origin:top center;
     animation:kiteSway 3.4s ease-in-out infinite alternate}
@@ -325,7 +341,7 @@
       <li><kbd>Shift</kbd> &mdash; sprint (while walking)</li>
       <li>Hold left click &mdash; mine the block (cracks show progress; stone takes longer than leaves) &bull; Right click &mdash; place block</li>
       <li><kbd>Middle click</kbd> &mdash; ping a waypoint at the crosshair (everyone in the neighborhood sees the marker for 8s)</li>
-      <li><kbd>1</kbd>&ndash;<kbd>6</kbd> or mouse wheel &mdash; choose block</li>
+      <li><kbd>1</kbd>&ndash;<kbd>7</kbd> or mouse wheel &mdash; choose block</li>
       <li><kbd>F3</kbd> &mdash; debug HUD &bull; <kbd>H</kbd> or <kbd>?</kbd> &mdash; this help</li>
       <li><kbd>`</kbd> (backquote) &mdash; vox console terminal (CLI for twins &amp; the String; also the <b>&gt;_</b> button)</li>
     </ul>
@@ -429,6 +445,9 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkCameraMotion" checked> Camera motion <span class="small">(view-bob, landing dip, jump lift)</span></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkShowHand" checked> First-person hand <span class="small">(held block + swing animation)</span></label>
     </div>
     <div class="row hidden" id="rowHaptics">
       <label><input type="checkbox" id="chkHaptics" checked> Haptics <span class="small">(vibrate + crosshair flash on break / place / mode / fly / ping)</span></label>
@@ -626,23 +645,25 @@ const GRAVITY = 24;
 const JUMP_V = 8;            // clears ~1.33 blocks
 const EPS = 0.001;
 
-// id 7 is WATER (the existing max); ores APPEND at 8/9/10 so no existing id shifts.
+// id 7 is WATER; ores APPEND at 8/9/10; SNOW appends at 11 (biome surface cap,
+// cycle-10) so no existing id shifts — ever.
 const B = { AIR: 0, GRASS: 1, DIRT: 2, STONE: 3, SAND: 4, WOOD: 5, LEAVES: 6, WATER: 7,
-            COAL_ORE: 8, IRON_ORE: 9, GOLD_ORE: 10 };
-// MAX_BLOCK_ID: the single source of truth for the validateSave edit-id ceiling.
-// Ores 8/9/10 are pure terrain (generated, never stored) UNLESS a player breaks+replaces
-// one — that writes id 8/9/10 into edits, which the widened ceiling now permits to save,
-// export, snapshot, and apply over the wire (every path funnels through this range).
-const MAX_BLOCK_ID = B.GOLD_ORE; // = 10
-const PLACEABLE = [B.GRASS, B.DIRT, B.STONE, B.SAND, B.WOOD, B.LEAVES]; // ores non-craftable for now
+            COAL_ORE: 8, IRON_ORE: 9, GOLD_ORE: 10, SNOW: 11 };
+// MAX_BLOCK_ID: the single source of truth for the validateSave edit-id ceiling AND the
+// wire 'edit' op blockId check. Pure widening (10 -> 11): no save that validated before
+// can newly fail; a broken+replaced SNOW round-trips save/export/snapshot/wire because
+// every path funnels through this range.
+const MAX_BLOCK_ID = B.SNOW; // = 11
+const PLACEABLE = [B.GRASS, B.DIRT, B.STONE, B.SAND, B.WOOD, B.LEAVES, B.SNOW]; // ores non-craftable for now
 const BLOCK_NAMES = {
   1: 'Grass', 2: 'Dirt', 3: 'Stone', 4: 'Sand', 5: 'Wood', 6: 'Leaves', 7: 'Water',
-  8: 'Coal Ore', 9: 'Iron Ore', 10: 'Gold Ore' // names let vox/bot obs + `vox map` read ores
+  8: 'Coal Ore', 9: 'Iron Ore', 10: 'Gold Ore', // names let vox/bot obs + `vox map` read ores
+  11: 'Snow' // biome surface cap (snowy biome); placeable
 };
-// break-particle colors: coal near-black, iron tan, gold warm-yellow
+// break-particle colors: coal near-black, iron tan, gold warm-yellow, snow blue-white
 const BLOCK_COLORS = {
   1: 0x69a84f, 2: 0x8a6042, 3: 0x7d7d82, 4: 0xd9c79c, 5: 0x6e5432, 6: 0x3a7630, 7: 0x3268c8,
-  8: 0x2b2b30, 9: 0xc9a878, 10: 0xf2c44a
+  8: 0x2b2b30, 9: 0xc9a878, 10: 0xf2c44a, 11: 0xeef4fb
 };
 // atlas tile index per block face: [top, bottom, side]. Ores are the SAME tile all six faces.
 const BLOCK_TILES = {
@@ -655,10 +676,12 @@ const BLOCK_TILES = {
   7: { top: 8, bottom: 8, side: 8 },
   8: { top: 13, bottom: 13, side: 13 },  // Coal Ore — appended atlas tiles (crack tiles 9-12 untouched)
   9: { top: 14, bottom: 14, side: 14 },  // Iron Ore
-  10: { top: 15, bottom: 15, side: 15 }  // Gold Ore
+  10: { top: 15, bottom: 15, side: 15 }, // Gold Ore
+  11: { top: 16, bottom: 16, side: 16 }  // Snow — free slot 16 of the 8x8 atlas
 };
-// hotbar icon tile per placeable block (ores are not placeable, so no icons needed)
-const ICON_TILES = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 7 };
+// hotbar icon tile per placeable block. The hotbar read is additionally hardened to
+// `ICON_TILES[id] ?? BLOCK_TILES[id].side` so any future placeable can never render NaN.
+const ICON_TILES = { 1: 1, 2: 2, 3: 3, 4: 4, 5: 5, 6: 7, 11: 16 };
 // Ore hardness (Coal 1.1 / Iron 1.5 / Gold 1.4 — tougher than STONE 0.9) lives in
 // BLOCK_HARDNESS near the hold-to-mine code so blockHardness() reads it directly.
 
@@ -800,10 +823,53 @@ function terrainHeightAt(gx, gz) {
   if (h > WORLD_H - 12) h = WORLD_H - 12;
   return h;
 }
+// --- biomes (temperature x moisture, pure fns of (seed, coords) — cycle-10) -----
+// ZERO new save bytes and terrainHeightAt is NEVER touched: heights, caves, mouths,
+// ore bands and spawn math stay byte-identical. Biomes only repaint the surface CAP
+// (post-pass in genChunk) and gate tree density inside treeInfoAt. Two independent
+// fbm2 fields at a large scale (wavelength ~480 blocks) read as regions, not noise.
+// THRESHOLDS (measured across 8 seeds, +-1200 blocks, see evolution log): plains
+// 59% / forest 20% / snowy 14% / desert 5% / rocky 2% — plains+forest 79%, so the
+// modal look of existing worlds stays familiar. DELIBERATE spec deviation: the
+// proposed rocky override `h > SEA+22` (=48) is unreachable (terrainHeightAt tops
+// out at ~47 in practice; h>=48 measured at 0.000% over 2.9M columns) — shipped
+// `h > SEA+11` (~1.7% of columns: genuine hilltops) so rocky actually exists.
+const BIOME_ROCKY_H = SEA + 11;     // elevation override, checked FIRST
+const BIOME_T_DESERT = 0.62, BIOME_M_DESERT = 0.40; // hot AND dry
+const BIOME_T_SNOW = 0.36;          // cold
+const BIOME_M_FOREST = 0.60;        // wet
+function tempAt(gx, gz) { return fbm2(worldSeed ^ 0x7e3b, gx * 0.0021, gz * 0.0021, 3, 2.0, 0.5); }
+function moistAt(gx, gz) { return fbm2(worldSeed ^ 0x1c9d, gx * 0.0021, gz * 0.0021, 3, 2.0, 0.5); }
+// classification split from biomeAt so callers that ALREADY know the column height
+// (the genChunk cap repaint, treeInfoAt) never pay terrainHeightAt twice.
+function biomeClassify(h, t, m) {
+  if (h > BIOME_ROCKY_H) return 'rocky';
+  if (t > BIOME_T_DESERT && m < BIOME_M_DESERT) return 'desert';
+  if (t < BIOME_T_SNOW) return 'snowy';
+  if (m > BIOME_M_FOREST) return 'forest';
+  return 'plains';
+}
+function biomeAt(gx, gz) {
+  return biomeClassify(terrainHeightAt(gx, gz), tempAt(gx, gz), moistAt(gx, gz));
+}
+// per-biome tree gate: forest is dense, plains keeps the original 0.0065, the other
+// three grow nothing. Gated INSIDE treeInfoAt — the single source spawnHeadClear,
+// the cave-mouth pass, and genChunk all already call — so findSpawn and head-clear
+// stay automatically consistent with zero extra code.
+const TREE_GATE_FOREST = 0.018;
+const TREE_GATE_PLAINS = 0.0065;
 function treeInfoAt(gx, gz) {
-  if (ihash(worldSeed ^ 0x51ab3f, gx, gz) > 0.0065) return null;
+  // cheap hash cull FIRST (the forest gate is the max any biome allows), so the
+  // 2-fbm2 biome cost is only paid for the <2% of columns that might be trees
+  const roll = ihash(worldSeed ^ 0x51ab3f, gx, gz);
+  if (roll > TREE_GATE_FOREST) return null;
   const h = terrainHeightAt(gx, gz);
   if (h <= SEA + 1 || h >= WORLD_H - 12) return null;
+  const biome = biomeClassify(h, tempAt(gx, gz), moistAt(gx, gz));
+  const gate = biome === 'forest' ? TREE_GATE_FOREST
+             : biome === 'plains' ? TREE_GATE_PLAINS
+             : 0; // desert / snowy / rocky: no trees
+  if (roll > gate) return null;
   const trunkH = 4 + Math.floor(ihash(worldSeed ^ 0x77aa11, gx, gz) * 3);
   return { h, trunkH };
 }
@@ -989,6 +1055,46 @@ function carveCaves(data, baseX, baseZ, heights) {
   }
 }
 
+// --- biome cap repaint (cycle-10): runs in genChunk AFTER carveCaves + seedOres and
+// BEFORE trees, so the carve pass still sees vanilla grass/dirt caps (preserving the
+// cycle-2 invariant that the stone-only cave band can never daylight) and ore seeding
+// is untouched. Per column, ONLY if the topmost cells still hold the ORIGINAL cap ids
+// (a cave-mouth shaft top reads AIR; a belled-lip cell reads AIR mid-cap — both stop
+// the repaint exactly where the carve stopped the original cap): desert -> grass +
+// dirt cap (~4 blocks) become SAND; snowy -> the single grass cap becomes SNOW;
+// rocky -> the top 1-2 cap blocks become STONE. temp/moist sampled ONCE per column.
+// Beach/ocean columns (h <= SEA+1: sand/dirt caps, never grass) are skipped outright,
+// so coastlines are byte-identical to before. The edits overlay applies after all of
+// this in genChunk — player edits always win.
+function paintBiomeCaps(data, baseX, baseZ, heights) {
+  for (let lz = 0; lz < 16; lz++) {
+    for (let lx = 0; lx < 16; lx++) {
+      const h = heights[lx + lz * 16];
+      if (h <= SEA + 1) continue; // beach/seabed columns wear no grass cap — untouched
+      const topI = voxIndex(lx, h, lz);
+      if (data[topI] !== B.GRASS) continue; // carved / mouth-shaft column — skip
+      const biome = biomeClassify(h, tempAt(baseX + lx, baseZ + lz), moistAt(baseX + lx, baseZ + lz));
+      if (biome === 'desert') {
+        // grass + the ~3-deep dirt cap -> SAND; stop at the first non-original id so a
+        // belled cave-mouth lip (AIR mid-cap) or deep-column stone is never overwritten
+        for (let y = h; y >= h - 3 && y >= 0; y--) {
+          const i = voxIndex(lx, y, lz);
+          if (y === h ? data[i] !== B.GRASS : data[i] !== B.DIRT) break;
+          data[i] = B.SAND;
+        }
+      } else if (biome === 'snowy') {
+        data[topI] = B.SNOW; // the single grass cap block
+      } else if (biome === 'rocky') {
+        data[topI] = B.STONE; // top 1-2 cap blocks read as bare rock
+        if (h - 1 >= 0) {
+          const i2 = voxIndex(lx, h - 1, lz);
+          if (data[i2] === B.DIRT) data[i2] = B.STONE;
+        }
+      } // plains / forest: the original grass cap stands
+    }
+  }
+}
+
 function genChunk(cx, cz) {
   const data = new Uint8Array(CHUNK_W * CHUNK_W * WORLD_H);
   const baseX = cx * 16, baseZ = cz * 16;
@@ -1021,6 +1127,8 @@ function genChunk(cx, cz) {
   // ores: AFTER carving so veins seed only in REMAINING stone (never carved air);
   // separate salt + field, so cave density is unchanged. Edits overlay still wins.
   seedOres(data, baseX, baseZ, heights);
+  // biome cap repaint (cycle-10): AFTER carve+ores, BEFORE trees — see paintBiomeCaps
+  paintBiomeCaps(data, baseX, baseZ, heights);
   // trees (deterministic from world coords, so canopies cross borders seamlessly)
   const stampIfAir = (wx, wy, wz, id) => {
     const lx = wx - baseX, lz = wz - baseZ;
@@ -1567,6 +1675,13 @@ function makeAtlas() {
   oreTile(13, 28, 28, 34, 70);     // coal: near-black nuggets
   oreTile(14, 196, 168, 132, 120); // iron: warm tan flecks
   oreTile(15, 230, 188, 70, 150);  // gold: warm-yellow, brightest highlight
+  // 16: snow (cycle-10 biome cap) — white with a faint blue-grey speckle, drawn AFTER
+  // the ore tiles so the shared rng stream leaves every existing tile byte-identical.
+  fillTile(16, () => {
+    const d = rng() * 12 - 6;
+    if (rng() < 0.07) return rgb(210 + d, 222 + d, 238 + d); // cool shadowed grains
+    return rgb(241 + d, 246 + d, 252 + d);
+  });
   return atlasCanvas;
 }
 
@@ -1608,6 +1723,81 @@ function updateCrackOverlay() {
   if (stage !== crackStageShown) setCrackStage(stage);
   crackMesh.position.set(breakState.x + 0.5, breakState.y + 0.5, breakState.z + 0.5);
   crackMesh.visible = true;
+}
+
+// --- first-person held-block viewmodel (cycle-10) -----------------------------
+// A SECOND tiny scene ('handScene') holding ONE BoxGeometry(0.5) mesh whose
+// MeshLambertMaterial maps the EXISTING atlasTexture (no new texture upload), plus
+// one DirectionalLight + one HemisphereLight. Rendered as an overlay pass right
+// after the main render with the depth buffer cleared, so terrain can never clip
+// through the hand and the main pass is untouched. SAFETY BY CONSTRUCTION: this
+// block animates ONLY its own mesh transform in its own scene — it NEVER writes
+// camera.position/rotation or player.*, so eyeRay/DDA targeting, the camFx
+// accumulator, and the shake/bob clamps are provably unaffected. Fully skipped
+// under ?headless=1 / ?console=1 (no scene, no objects, no pass — mirrors the
+// crackMesh/achInit gating). In 'become' mode the camera still follows player.pos
+// and the hand shows the PLAYER's selected block — harmless by design. Remote
+// players and bots never see your hand (separate scene, never in the main graph).
+let handScene = null, handCam = null, handMesh = null, handLight = null, handHemi = null;
+let handBaseUV = null;     // the box geometry's original 0/1 corner uvs (crackMesh pattern)
+let handBlockShown = -1;   // UVs rebuilt ONLY when the selected block id changes
+let showHand = true;       // 'First-person hand' setting (persisted in the settings blob)
+let swingT = 0;            // single module-level swing phase: 1 -> 0 over ~0.22s
+const HAND_BASE = { x: 0.42, y: -0.38, z: -0.72, rx: -0.1, ry: -0.35 }; // parked bottom-right
+
+function ensureHandScene() {
+  if (handScene || voxHeadless || voxBootParams.headless || voxBootParams.console) return;
+  if (!THREE || !atlasTexture) return;
+  handScene = new THREE.Scene();
+  handCam = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.01, 5);
+  const geo = new THREE.BoxGeometry(0.5, 0.5, 0.5);
+  handBaseUV = geo.attributes.uv.array.slice();
+  handMesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ map: atlasTexture }));
+  handMesh.position.set(HAND_BASE.x, HAND_BASE.y, HAND_BASE.z);
+  handMesh.rotation.set(HAND_BASE.rx, HAND_BASE.ry, 0);
+  handScene.add(handMesh);
+  handLight = new THREE.DirectionalLight(0xfff3d6, 1.1);
+  handLight.position.set(0.6, 1, 0.4);
+  handScene.add(handLight);
+  handHemi = new THREE.HemisphereLight(0xcfe8ff, 0x5a4a36, 0.8);
+  handScene.add(handHemi);
+  setHandBlock(PLACEABLE[selSlot]);
+}
+// per-face UVs from BLOCK_TILES via the existing tileUV() helper. THREE BoxGeometry
+// face order is +x,-x,+y,-y,+z,-z (4 verts each): faces 2/3 take the block's top/
+// bottom tiles, the other four its side tile. Mirrors the crackMesh UV-touch-on-
+// change pattern — needsUpdate fires ONLY when the hotbar slot actually changes.
+function setHandBlock(id) {
+  if (!handMesh || !BLOCK_TILES[id]) return;
+  const tiles = BLOCK_TILES[id];
+  const uvAttr = handMesh.geometry.attributes.uv;
+  for (let i = 0; i < uvAttr.count; i++) {
+    const face = (i / 4) | 0;
+    const tile = face === 2 ? tiles.top : face === 3 ? tiles.bottom : tiles.side;
+    const t = tileUV(tile, handBaseUV[i * 2], handBaseUV[i * 2 + 1]);
+    uvAttr.setXY(i, t[0], t[1]);
+  }
+  uvAttr.needsUpdate = true;
+  handBlockShown = id;
+}
+// per-frame pose: base park + chop arc from swingT (pitch/dip/push) + a subtle idle
+// sway riding the EXISTING gait phase (bobPhase — never a second phase) scaled by
+// horizontal speed. Also copies the day/night daylight factor into the hand lights
+// (same formula updateEnvironment uses) so the held block darkens at night.
+function updateHandPose() {
+  if (!handMesh) return;
+  const sw = Math.sin(Math.PI * swingT);
+  let y = HAND_BASE.y - 0.12 * sw;
+  if (cameraMotion) {
+    const speed = Math.hypot(player.vel.x, player.vel.z);
+    y += 0.012 * Math.sin(bobPhase * 2) * Math.min(1, speed / 7);
+  }
+  handMesh.position.set(HAND_BASE.x, y, HAND_BASE.z - 0.05 * sw);
+  handMesh.rotation.set(HAND_BASE.rx - 0.9 * sw, HAND_BASE.ry, 0);
+  const sunY = Math.sin(((worldTime / DAY_LEN) % 1) * Math.PI * 2);
+  const daylight = clamp01((sunY + 0.15) / 0.35);
+  handLight.intensity = 0.1 + daylight * 1.2;
+  handHemi.intensity = 0.2 + daylight * 0.62;
 }
 
 // --- particles (break/place puffs) ------------------------------------------
@@ -2006,8 +2196,9 @@ function blockIntersectsAnyEntity(bx, by, bz) {
 // (bot.dig) and the vox CLI (dig x y z) keep INSTANT single-call semantics.
 let breakState = null;            // null | { x, y, z, id, progress, stage }
 let lastTapT = -1e9;              // touch quick-tap timestamp: decay pauses ~0.4s after a tap
-// seconds to break (ores 8/9/10 tougher than STONE 0.9 so mining them feels rewarding)
-const BLOCK_HARDNESS = { 1: 0.35, 2: 0.35, 3: 0.9, 4: 0.3, 5: 0.6, 6: 0.18, 8: 1.1, 9: 1.5, 10: 1.4 };
+// seconds to break (ores 8/9/10 tougher than STONE 0.9 so mining them feels rewarding;
+// SNOW 11 is soft like sand)
+const BLOCK_HARDNESS = { 1: 0.35, 2: 0.35, 3: 0.9, 4: 0.3, 5: 0.6, 6: 0.18, 8: 1.1, 9: 1.5, 10: 1.4, 11: 0.3 };
 function blockHardness(id) { return BLOCK_HARDNESS[id] || 0.35; }
 
 function completePlayerBreak() {
@@ -2030,6 +2221,7 @@ function applyMineDamage(hit, amount) {
   const q = Math.min(3, Math.floor(breakState.progress * 4));
   if (q > breakState.stage) { // quarter-stage transitions only — NEVER per-frame
     breakState.stage = q;
+    swingT = 1; // HAND: swing restarts on each crack-stage advance (stage edges, never per frame — rapid mining can't spaz)
     voxEvent('dig_progress', {
       x: breakState.x, y: breakState.y, z: breakState.z,
       progress: Math.round(Math.min(1, breakState.progress) * 100) / 100
@@ -2091,6 +2283,7 @@ function doPlace() {
   if (blockIntersectsAnyEntity(px, py, pz)) return; // never place inside yourself or a bot
   const id = PLACEABLE[selSlot];
   if (!setBlock(px, py, pz, id, true, true)) return; // localEditFast = instant remesh of the player's own chunk
+  swingT = 1; // HAND: a successful place swings the viewmodel
   coachPlaceCount++; // ONBOARD: PLACE/TOWER steps count successful player places
   achOnPlace(px, py, pz); // FIELD GUIDE: builder/architect (via coachPlaceCount) + homesteader (chunk spread)
   spawnParticles(px, py, pz, BLOCK_COLORS[id] || 0xffffff, 8);
@@ -2284,6 +2477,10 @@ function updateCamFx(dt) {
   // into a seizure. Decay runs regardless of cameraMotion — trauma is just never READ
   // unless cameraMotion is on (the shake block above is gated on it).
   trauma = Math.max(0, trauma - dt * 1.6);
+  // HAND: ease the viewmodel swing phase back to 0 over ~0.22s (restarted to 1 at the
+  // crack-stage-advance / successful-place edges). Read only by updateHandPose — it
+  // never feeds camFx, so the camera path is byte-identical with the hand on or off.
+  if (swingT > 0) swingT = Math.max(0, swingT - dt / 0.22);
   // when motion is disabled, force a perfectly still camera (safety belt). bobPhase is
   // NOT reset here — it keeps advancing to drive footstep cadence (audio is independent).
   if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; }
@@ -2394,7 +2591,7 @@ function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkShowHand', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
    'rowFixedJoy', 'chkFixedJoy', 'lookSensInput', 'lookSensVal', 'chkInvertY', // TOUCH COMFORT (cycle-9)
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'questHud', 'questHudSkip', // ONBOARD coach
@@ -2450,7 +2647,7 @@ function buildHotbar() {
     icon.width = 44; icon.height = 44;
     const ictx = icon.getContext('2d');
     ictx.imageSmoothingEnabled = false;
-    const tile = ICON_TILES[id];
+    const tile = ICON_TILES[id] ?? BLOCK_TILES[id].side; // hardened: a placeable missing an icon falls back to its side tile, never NaN
     const sx = (tile % ATLAS_COLS) * ATLAS_TS, sy = Math.floor(tile / ATLAS_COLS) * ATLAS_TS;
     ictx.drawImage(atlasCanvas, sx, sy, ATLAS_TS, ATLAS_TS, 0, 0, 44, 44);
     slot.appendChild(icon);
@@ -2467,6 +2664,8 @@ function selectSlot(i) {
   selSlot = ((i % PLACEABLE.length) + PLACEABLE.length) % PLACEABLE.length;
   const slots = ui.hotbar.children;
   for (let s = 0; s < slots.length; s++) slots[s].classList.toggle('sel', s === selSlot);
+  // HAND: swap the viewmodel's per-face UVs only when the selection actually changed
+  if (handMesh && PLACEABLE[selSlot] !== handBlockShown) setHandBlock(PLACEABLE[selSlot]);
 }
 
 function setDebugHud(on) {
@@ -2889,6 +3088,13 @@ function initUiButtons() {
     hapticsOn = ui.chkHaptics.checked;
     saveSettings();
   });
+  // FIRST-PERSON HAND (cycle-10): unchecking hides the mesh AND skips the overlay
+  // pass entirely (the render-site gate reads showHand); persists like cameraMotion.
+  ui.chkShowHand.addEventListener('change', () => {
+    showHand = ui.chkShowHand.checked;
+    if (handMesh) handMesh.visible = showHand;
+    saveSettings();
+  });
   // TOUCH COMFORT (cycle-9): floating-vs-fixed joystick, look sensitivity, invert-Y.
   ui.chkFixedJoy.addEventListener('change', () => {
     fixedJoy = ui.chkFixedJoy.checked;
@@ -3211,7 +3417,8 @@ function saveSettings() {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
       cameraMotion: cameraMotion, haptics: hapticsOn,
-      fixedJoy: fixedJoy, lookSens: lookSens, invertY: invertY // touch comfort (cycle-9)
+      fixedJoy: fixedJoy, lookSens: lookSens, invertY: invertY, // touch comfort (cycle-9)
+      showHand: showHand // first-person hand viewmodel (cycle-10)
     }));
   } catch (e) { /* ignore */ }
 }
@@ -3234,6 +3441,7 @@ function loadSettings() {
       if (typeof s.fixedJoy === 'boolean') fixedJoy = s.fixedJoy;
       if (Number.isFinite(s.lookSens)) lookSens = Math.max(0.4, Math.min(2, s.lookSens));
       if (typeof s.invertY === 'boolean') invertY = s.invertY;
+      if (typeof s.showHand === 'boolean') showHand = s.showHand; // older blobs default ON (cycle-10)
     }
   } catch (e) { /* ignore */ }
 }
@@ -3392,13 +3600,23 @@ let nbLastSent = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, t: 0 };
 let nbAutoJoinDone = false;
 const nbScriptLoads = {};
 
+// &b= parse hardening (cycle-10): strict integer parse — Number, NOT parseInt, so a
+// float like '2.5' can never truncate into a different (possibly valid) index. Any
+// malformed value (negative, float, NaN, empty) resolves to 0 and never throws; range
+// validation against NB_BROKER_CONFIGS happens later in nbValidBrokerIdx at join time.
+function nbParseBrokerParam(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === '') return 0;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 ? n : 0;
+}
+
 // Auto-join (§9): ?join=<peerId> in the query, #k=<token> in the FRAGMENT
 // (the secret never hits any server).
 const nbJoinParams = (() => {
   try {
     const u = new URL(location.href);
     const peerId = u.searchParams.get('join');
-    const broker = parseInt(u.searchParams.get('b') || '0', 10) || 0;
+    const broker = nbParseBrokerParam(u.searchParams.get('b'));
     const m = (u.hash || '').match(/[#&]k=([A-Za-z0-9_-]+)/);
     if (peerId && m) return { peerId, token: m[1], broker };
   } catch (e) { /* malformed URL — ignore */ }
@@ -4095,6 +4313,22 @@ const NB_BROKER_CONFIGS = [
   null, // PeerJS cloud default (0.peerjs.com)
   { host: 'peerjs.92k.de', port: 443, secure: true, path: '/' },
 ];
+// strict link-index validation (cycle-10): only an integer within the live config list
+// passes; anything else (negative, float, out-of-range, NaN) resolves to broker 0.
+// The old `NB_BROKER_CONFIGS[idx] !== undefined` accepted e.g. '1.0'-style indices and
+// relied on array-holes semantics; this is the explicit, harness-extractable form.
+function nbValidBrokerIdx(idx) {
+  return Number.isInteger(idx) && idx >= 0 && idx < NB_BROKER_CONFIGS.length ? idx : 0;
+}
+// lowest UNTRIED broker index, or -1 when every entry has had its one attempt.
+// With today's 2-entry list this reproduces the old single-flip (0<->1) byte-for-byte;
+// with 3+ brokers every entry gets exactly one try — never a storm.
+function nbNextUntriedBroker(tried) {
+  for (let i = 0; i < NB_BROKER_CONFIGS.length; i++) if (!tried.has(i)) return i;
+  return -1;
+}
+// the broker index the live (or last) session actually used — surfaced in vox('status')
+let nbBrokerIdx = 0;
 function nbNewPeerAt(idx) {
   const cfg = NB_BROKER_CONFIGS[idx];
   return cfg ? new window.Peer(cfg) : new window.Peer();
@@ -4148,6 +4382,7 @@ async function nbFlyKite() {
   Neighborhood.enabled = true;
   Neighborhood.role = 'kite';
   Neighborhood.hostPeerId = peer.id;
+  nbBrokerIdx = brokerIdx; // vox('status') reports the broker this kite actually flies on
   Neighborhood.link = nbBaseUrl() + '?join=' + encodeURIComponent(peer.id) +
     (brokerIdx ? '&b=' + brokerIdx : '') + '#k=' + Neighborhood.token;
   nbShowKitedUi();
@@ -4312,7 +4547,7 @@ async function nbJoin(link) {
   try {
     const u = new URL(String(link), location.href);
     peerId = u.searchParams.get('join');
-    broker = parseInt(u.searchParams.get('b') || '0', 10) || 0;
+    broker = nbParseBrokerParam(u.searchParams.get('b')); // strict integer (cycle-10)
     const m = (u.hash || '').match(/[#&]k=([A-Za-z0-9_-]+)/);
     if (m) token = m[1];
   } catch (e) { /* not a URL */ }
@@ -4344,30 +4579,74 @@ const NB_JOIN_BROKER_ERRS = new Set([
 
 async function nbJoinWith(peerId, token, brokerIdx) {
   if (Neighborhood.enabled) { toast('Already in a neighborhood — leave it first'); return false; }
-  if (!(await nbEnsureLibs())) return false;
+  nbJoinCancelled = false; // fresh attempt (incl. RETRY): a stale pre-attempt cancel never kills it
+  if (!(await nbEnsureLibs())) {
+    nbJoinHudSet('offline'); // JOIN HUD: PeerJS CDN never loaded — offline note, no spinner
+    return false;
+  }
+  if (nbJoinCancelled) {
+    // 'Play solo instead' tapped while the CDN libs were still loading (nbJoinAbort was
+    // not armed yet). Bail BEFORE touching session state or creating any peer; the same
+    // clean-solo end state nbJoinAbort leaves (guarded like nbJoinAbort: never tear down
+    // a session the user started in the meantime).
+    nbJoinCancelled = false;
+    if (!Neighborhood.enabled) { nbResetSession(); }
+    return false;
+  }
   nbSetStatus('Scan-to-Join — connecting to the kite…');
+  nbJoinHudSet('connecting'); // JOIN HUD: attempt start (no-op unless the auto-join card is up)
   Neighborhood.token = token;
   try {
     Neighborhood.key = await nbDeriveKey(token);
   } catch (e) {
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
+    nbJoinHudSet('failed');
     return false;
   }
-  const linkIdx = NB_BROKER_CONFIGS[brokerIdx] !== undefined ? brokerIdx : 0;
-  let triedAlternate = false; // single-alternate guard: at most ONE fallback, never a storm
+  if (nbJoinCancelled) {
+    // 'Play solo instead' tapped during the PBKDF2 derive — same pre-attempt bail; this
+    // is the last await before attempt(), so past here nbJoinAbort covers cancellation.
+    nbJoinCancelled = false;
+    if (!Neighborhood.enabled) { nbResetSession(); } // clears the token/key set above
+    return false;
+  }
+  // BROKER HARDENING (cycle-10): strict index validation (any malformed/out-of-range
+  // &b= resolves to 0) + a triedIdx Set seeded with the initial index. Each fallback-
+  // eligible failure tries the LOWEST untried broker — at most one attempt per broker,
+  // never a storm. With today's 2-entry list the try sequence is byte-equivalent to the
+  // old single-flip; with 3+ brokers every entry gets exactly one shot.
+  const linkIdx = nbValidBrokerIdx(brokerIdx);
+  const triedIdx = new Set([linkIdx]);
 
-  // attempt(): create a Peer at one broker index with the full watchdog discipline. Re-runs
-  // exactly once on the OTHER broker for a broker-unreachable failure (reusing the already-
-  // derived Neighborhood.key/token — only the Peer is re-created at the alternate index).
+  // attempt(): create a Peer at one broker index with the full watchdog discipline.
+  // Re-runs on the next untried broker for a broker-unreachable failure (reusing the
+  // already-derived Neighborhood.key/token — only the Peer is re-created).
   const attempt = (idx) => {
     const peer = nbNewPeerAt(idx);
+    nbBrokerIdx = idx; // vox('status') reports the broker this attempt/session uses
     Neighborhood.peer = peer;
     Neighborhood.hostPeerId = peerId;
     let settled = false;     // copied verbatim from nbCreatePeer: every transition is idempotent
     let wd = null, wd2 = null;
     const clearWatchdogs = () => { if (wd) { clearTimeout(wd); wd = null; } if (wd2) { clearTimeout(wd2); wd2 = null; } };
 
-    // Fall back to the alternate broker ONCE; otherwise surface the terminal failure.
+    // JOIN HUD: 'Play solo instead' tapped MID-attempt must abort via the SAME cleanup
+    // the watchdog uses (clear both watchdogs + peer.destroy()) so a late-arriving
+    // snapshot can never apply over the restored solo world. Reassigned per attempt so
+    // it always points at the live peer; a post-snapshot call is a no-op (enabled).
+    nbJoinAbort = () => {
+      nbJoinAbort = null;
+      if (Neighborhood.enabled) return; // snapshot already applied — nothing to abort
+      settled = true;                   // any late watchdog/open/error becomes a no-op
+      clearWatchdogs();
+      if (Neighborhood.peer === peer) Neighborhood.peer = null;
+      try { peer.destroy(); } catch (e) {}
+      nbResetSession();
+      nbSetStatus('');
+    };
+
+    // Fall back to the next untried broker; when ALL brokers are tried, surface the
+    // terminal failure (the join HUD's failure state fires from the same site).
     const failOrFallback = (canFallback) => {
       if (settled) return;     // a connected/handshaken session must never be torn down here
       settled = true;
@@ -4376,20 +4655,25 @@ async function nbJoinWith(peerId, token, brokerIdx) {
       // (the conn handlers gate on Neighborhood.peer === peer) and can't trip nbOnHostLost.
       if (Neighborhood.peer === peer) Neighborhood.peer = null;
       try { peer.destroy(); } catch (e) {} // dispose the failed peer so it can't keep retrying
-      if (canFallback && !triedAlternate && NB_BROKER_CONFIGS.length > 1) {
-        triedAlternate = true;
-        const altIdx = idx === 0 ? 1 : 0; // the OTHER NB_BROKER_CONFIGS entry
-        nbSetStatus('Scan-to-Join — trying an alternate broker…');
-        attempt(altIdx);
-        return;
+      if (canFallback) {
+        const nextIdx = nbNextUntriedBroker(triedIdx);
+        if (nextIdx >= 0) {
+          triedIdx.add(nextIdx);
+          nbSetStatus('Scan-to-Join — trying an alternate broker…');
+          nbJoinHudSet('retry'); // JOIN HUD: 'Trying another broker…'
+          attempt(nextIdx);
+          return;
+        }
       }
+      nbJoinAbort = null;
       nbResetSession();
       nbSetStatus('Could not reach the kite — is it still flying?');
       toast('Could not reach the kite');
+      nbJoinHudSet('failed'); // JOIN HUD: terminal — RETRY / 'Play solo instead'
     };
 
     // PRIMARY watchdog: the broker peer never fired 'open' (nor a terminal error). Treat a
-    // never-firing broker as unreachable -> eligible for the single alternate-broker retry.
+    // never-firing broker as unreachable -> eligible for the next-untried-broker retry.
     wd = setTimeout(() => failOrFallback(true), NB_JOIN_WD_MS);
 
     peer.on('error', (err) => {
@@ -4398,13 +4682,15 @@ async function nbJoinWith(peerId, token, brokerIdx) {
         if (Neighborhood.enabled) nbSetStatus('Network hiccup: ' + t);
         return;
       }
-      // broker-unreachable -> retry the alternate once; host-gone on a reachable broker -> fail.
+      // broker-unreachable -> try the next untried broker; a clean 'peer-unavailable'
+      // (host-gone on a REACHABLE broker) NEVER falls back — cycle-6 semantics preserved.
       failOrFallback(NB_JOIN_BROKER_ERRS.has(t));
     });
 
     peer.on('open', () => {
       if (settled) return;                 // late 'open' after a watchdog/error reset — ignore
       if (wd) { clearTimeout(wd); wd = null; } // broker reachable; the primary watchdog is done
+      nbJoinHudSet('handshake'); // JOIN HUD: 'Handshaking…' (the second-stage watchdog arms here)
       // SECOND-STAGE watchdog: broker is up but the host (conn 'open') may never answer. If the
       // sealed handshake doesn't land in time, treat it as host-unreachable and reset (no
       // fallback — a reachable broker that can't find the host won't be fixed by switching brokers).
@@ -4426,7 +4712,13 @@ async function nbJoinWith(peerId, token, brokerIdx) {
         // a destroyed-peer 'close' during fallback must not tear down the NEW attempt:
         // only act if this conn still belongs to the live peer.
         if (Neighborhood.peer !== peer) return;
-        nbOnHostLost();
+        // pre-handshake close MUST settle the attempt via failOrFallback (mirrors conn 'error'):
+        // routing it through nbOnHostLost left settled=false with the 8s wd2 still armed, and a
+        // one-tap Retry inside that window got its fresh peer (or fully-joined session) destroyed
+        // when the stale wd2 fired failOrFallback -> nbResetSession (which destroys
+        // Neighborhood.peer UNCONDITIONALLY — the ===peer guard only protects the variable).
+        if (!settled) { failOrFallback(false); return; }  // conn died pre-handshake -> host-gone fail
+        nbOnHostLost();                                    // post-handshake -> normal host-lost path
       });
       conn.on('error', () => {
         if (Neighborhood.peer !== peer) return;           // stale conn from a superseded peer — ignore
@@ -4506,8 +4798,13 @@ function nbApplySnapshot(p, env) {
     achUnlock('neighbor'); // FIELD GUIDE: join success edge (no-op when headless/already unlocked)
     // ONBOARD: name the host — the welcome/snapshot's first roster entry IS the host
     const hostPl = Array.isArray(p.players) && p.players.length ? p.players[0] : null;
-    if (hostPl && typeof hostPl.name === 'string') {
-      const hostName = nbCleanName(hostPl.name);
+    const hostName = hostPl && typeof hostPl.name === 'string' ? nbCleanName(hostPl.name) : null;
+    nbJoinAbort = null; // JOIN HUD: the join landed — the mid-attempt abort must never fire now
+    if (nbJoinHud) {
+      // JOIN HUD success folds the joiner toast into the card (never double-shown),
+      // then auto-dismisses after ~1.5s so the card is gone before play.
+      nbJoinHudSet('success', hostName);
+    } else if (hostName) {
       setTimeout(() => toast('You’re in ' + hostName + '’s world'), 2000);
     }
     setTimeout(hideNb, 1600);
@@ -4526,6 +4823,7 @@ function nbOnHostLost() {
   } else {
     nbResetSession();
     nbSetStatus('The connection to the kite closed before the handshake finished.');
+    nbJoinHudSet('failed'); // JOIN HUD: pre-snapshot close — surface RETRY, never a hung spinner
   }
 }
 
@@ -4632,13 +4930,111 @@ function nbSendPos(now) {
   }
 }
 
+// --- JOIN HUD (cycle-10): QR-arrival live status card ---------------------------
+// Created ONLY by the ?join=…#k=… auto-join path (nbMaybeAutoJoin). Status text is
+// driven entirely by the EXISTING join lifecycle hooks in nbJoinWith — no new timers.
+// Manual panel joins and vox('join') never see it (nbJoinHudSet no-ops while the card
+// is absent), and ?headless=1 / ?console=1 suppress it outright. The node is REMOVED
+// (not hidden) on dismiss so it can never eat input afterwards.
+let nbJoinHud = null;     // the live card element; null = inactive (every hook no-ops)
+let nbJoinAbort = null;   // set by nbJoinWith's live attempt; 'Play solo instead' calls it
+// 'Play solo instead' tapped BEFORE attempt() armed nbJoinAbort — i.e. while nbJoinWith
+// is still awaiting nbEnsureLibs (CDN script loads) or nbDeriveKey (PBKDF2). nbJoinWith
+// checks this after each of those awaits and bails before attempt(), so a cancelled join
+// can never continue in the background and land a late snapshot over the solo world.
+// Cleared at every nbJoinWith entry (covers RETRY, which re-runs nbJoinWith).
+let nbJoinCancelled = false;
+
+function nbJoinHudSet(state, info) {
+  if (!nbJoinHud) return; // gate: only the auto-join card ever renders these states
+  const msg = nbJoinHud.querySelector('#nbJoinHudMsg');
+  const spin = nbJoinHud.querySelector('.nbJoinSpin');
+  const btns = nbJoinHud.querySelector('#nbJoinHudBtns');
+  if (!msg || !spin || !btns) return;
+  btns.textContent = ''; // rebuild the button row per state (buttons stay >=44px via CSS)
+  const soloBtn = (label) => {
+    const b = document.createElement('button');
+    b.className = 'ghost';
+    b.textContent = label || 'Play solo instead';
+    b.addEventListener('click', () => nbJoinHudDismiss(true)); // mid-attempt: aborts cleanly
+    return b;
+  };
+  if (state === 'connecting' || state === 'retry' || state === 'handshake') {
+    spin.style.display = '';
+    msg.textContent = state === 'connecting' ? 'Reaching the kite…'
+      : state === 'retry' ? 'Trying another broker…' : 'Handshaking…';
+    btns.appendChild(soloBtn());
+  } else if (state === 'success') {
+    spin.style.display = 'none';
+    msg.textContent = info ? 'You’re in ' + info + '’s world!' : 'You’re in the neighborhood!';
+    setTimeout(() => nbJoinHudDismiss(false), 1500); // auto-dismiss; abort=false (join landed)
+  } else if (state === 'offline') {
+    // PeerJS CDN lazy-load failed: the existing offline note instead of a spinner
+    spin.style.display = 'none';
+    msg.textContent = 'Neighborhood features need a connection — your solo game keeps working offline.';
+    btns.appendChild(soloBtn('Play solo'));
+  } else { // 'failed' — fired only after ALL brokers have been tried
+    spin.style.display = 'none';
+    msg.textContent = 'Could not reach the kite — is it still flying?';
+    const retry = document.createElement('button');
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => {
+      retry.disabled = true; // in-flight guard; the 'connecting' state re-renders the row anyway
+      nbJoinWith(nbJoinParams.peerId, nbJoinParams.token, nbJoinParams.broker); // fresh triedIdx Set
+    });
+    btns.appendChild(retry);
+    btns.appendChild(soloBtn());
+  }
+}
+function nbJoinHudShow() {
+  if (nbJoinHud || voxHeadless || voxBootParams.headless || voxBootParams.console) return;
+  const wrap = document.createElement('div');
+  wrap.id = 'nbJoinHud'; // container takes no pointer events (CSS); only the card does
+  const card = document.createElement('div');
+  card.className = 'card'; // reuses the existing modal card styling
+  const spin = document.createElement('div');
+  spin.className = 'nbJoinSpin'; // pure-CSS spinner (vwspin keyframes — no assets)
+  const msg = document.createElement('div');
+  msg.id = 'nbJoinHudMsg';
+  msg.className = 'row';
+  const btns = document.createElement('div');
+  btns.id = 'nbJoinHudBtns';
+  btns.className = 'row btns';
+  card.appendChild(spin);
+  card.appendChild(msg);
+  card.appendChild(btns);
+  wrap.appendChild(card);
+  document.body.appendChild(wrap);
+  nbJoinHud = wrap;
+  nbJoinHudSet('connecting');
+}
+function nbJoinHudDismiss(abort) {
+  if (!nbJoinHud) return;
+  nbJoinHud.remove(); // REMOVED from the DOM, never just hidden
+  nbJoinHud = null;
+  if (abort && nbJoinAbort) {
+    // 'Play solo instead' mid-attempt: the same cleanup the watchdogs use (clear both
+    // watchdogs + peer.destroy() + nbResetSession), so a late snapshot can never apply.
+    try { nbJoinAbort(); } catch (e) { /* dismissal never throws */ }
+  } else if (abort) {
+    // PRE-ATTEMPT window: nbJoinWith is still awaiting nbEnsureLibs/nbDeriveKey and has
+    // not armed nbJoinAbort yet. Flag the cancel so nbJoinWith bails after its awaits —
+    // otherwise the join would keep running headless and a late snapshot could replace
+    // the solo world the user explicitly chose.
+    nbJoinCancelled = true;
+  }
+  nbJoinAbort = null;
+}
+
 // --- auto-join from URL (after the world has loaded) -------------------------------------
 function nbMaybeAutoJoin() {
   if (nbAutoJoinDone || !nbJoinParams) return;
   nbAutoJoinDone = true;
   toast('Scan-to-Join — connecting to the neighborhood…');
-  // VOX hook: ?headless=1 / ?console=1 suppress modals (the snapshot auto-applies anyway)
-  if (!voxHeadless && !voxBootParams.console) showNb();
+  // VOX hook: ?headless=1 / ?console=1 suppress ALL join UI (the snapshot auto-applies
+  // anyway; vox('join') keeps its own voxWaitFor discipline). The JOIN HUD card replaces
+  // the old Neighborhood modal here — live status + one-tap retry instead of a panel.
+  if (!voxHeadless && !voxBootParams.console) nbJoinHudShow();
   nbJoinWith(nbJoinParams.peerId, nbJoinParams.token, nbJoinParams.broker);
 }
 
@@ -5913,6 +6309,7 @@ function vfObservation(bot) {
     aheadStrip,     // ADD (4): [+1,+2,+3] facing strip at eye level
     memory,         // ADD (5): bounded { facts(<=8), waypoints, stats } — persists for twins
     notable,        // ADD (6, cycle-9): nearest ores {block,x,y,z,dist}[] (<=6, always present)
+    biome: biomeAt(ix, iz), // ADD (cycle-10): one short string — strictly additive, CDP-safe
     groundBelow,    // backward-compat: alias of groundProfile.standingOn (kept this cycle)
     blocksAhead,    // backward-compat / DEPRECATED (see note above; kept this cycle)
     recentChat: vfRecentChat.slice(-5),
@@ -6562,6 +6959,7 @@ function voxCmdStatus() {
     },
     kited: Neighborhood.enabled && Neighborhood.role === 'kite',
     neighbors: Neighborhood.avatars.size,
+    broker: nbBrokerIdx, // BROKER HARDENING (cycle-10): the signaling broker index in use
     editGeoDrops: nbEditGeoDrops, // SPATIAL FENCE: operators can spot false positives here
     link: Neighborhood.link || null,
     tetherUrl: voxTetherUrl,
@@ -6610,9 +7008,13 @@ function voxCmdMap(radius, ySlice) {
   // shared map would render those 'c'/'i'/'o' where HEAD rendered '?', breaking the
   // cycle-2 non-slice byte-identity guarantee; gating on `sliced` keeps the non-slice
   // text and return JSON byte-identical (ids 8-10 fall through to '?' exactly as before).
+  // SNOW GLYPH (cycle-10): '*' lives in the BASE map — snow is a legitimate SURFACE cap
+  // in snowy biomes, so the non-slice map rendering it is an INTENDED output change
+  // (the generated world itself changed); the cycle-9 slice-gating lesson applies only
+  // to deep-only ids like the ores, which stay slice-gated.
   const CHARS = sliced
-    ? { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~', 8: 'c', 9: 'i', 10: 'o' }
-    : { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~' };
+    ? { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~', 11: '*', 8: 'c', 9: 'i', 10: 'o' }
+    : { 1: 'g', 2: 'd', 3: 'S', 4: 's', 5: 'w', 6: 'L', 7: '~', 11: '*' };
   const rows = [];
   for (let z = cz - r; z <= cz + r; z++) {
     const row = [];
@@ -6646,7 +7048,7 @@ function voxCmdMap(radius, ySlice) {
     'map @ (' + cx + ',' + cz + ') r=' + r + (sliced ? ' y=' + sliceY : '') +
     '   north = -z (top), east = +x (right)\n' +
     rows.map((rw) => rw.join('')).join('\n') + '\n' +
-    'legend: g grass  d dirt  s sand  S stone  w wood  L leaves  ~ water  . air/void\n' +
+    'legend: g grass  d dirt  s sand  S stone  w wood  L leaves  ~ water  * snow  . air/void\n' +
     '        P player  T console twin  B bot  N neighbor';
   if (sliced) {
     text += '\n        slice y=' + sliceY +
@@ -7082,7 +7484,7 @@ const VOX_COMMANDS = {
   stop:      { usage: 'stop', desc: 'halt movement, paths and behaviors', fn: voxCmdStop },
   move:      { usage: 'move forward|back|left|right|jump|sprint on|off', desc: 'control states (VoxelFlayer setControlState)', fn: voxCmdMove },
   dig:       { usage: 'dig x y z', desc: 'break a block (a twin walks closer if out of reach)', fn: voxCmdDig },
-  place:     { usage: 'place x y z <blockName|id>', desc: 'place a block (Grass/Dirt/Stone/Sand/Wood/Leaves)', fn: voxCmdPlace },
+  place:     { usage: 'place x y z <blockName|id>', desc: 'place a block (Grass/Dirt/Stone/Sand/Wood/Leaves/Snow)', fn: voxCmdPlace },
   block:     { usage: 'block x y z', desc: 'query a block', fn: voxCmdBlock },
   find:      { usage: 'find <block> [r=12]', desc: 'nearest blocks of a type around the subject (r<=16, up to 6) — e.g. find Gold Ore', fn: voxCmdFind },
   goto:      { usage: 'goto x y z', desc: 'pathfind via the existing bot A* (console twin)', fn: voxCmdGoto },
@@ -7359,6 +7761,7 @@ function main() {
   ui.chkSound.checked = soundOn;
   ui.chkAutoQuality.checked = autoQuality;
   ui.chkCameraMotion.checked = cameraMotion;
+  ui.chkShowHand.checked = showHand; // first-person hand (cycle-10)
   ui.chkHaptics.checked = hapticsOn;
   if (IS_TOUCH) ui.rowHaptics.classList.remove('hidden'); // Haptics setting is touch-only
   // TOUCH COMFORT (cycle-9): joystick row is touch-only (mirrors #rowHaptics);
@@ -7382,6 +7785,10 @@ function main() {
   window.addEventListener('resize', () => {
     camera.aspect = window.innerWidth / window.innerHeight;
     camera.updateProjectionMatrix();
+    if (handCam) { // HAND: keep the viewmodel camera's aspect in lockstep (cycle-10)
+      handCam.aspect = window.innerWidth / window.innerHeight;
+      handCam.updateProjectionMatrix();
+    }
     applyRenderScale(); // keeps a governor-stepped pixel ratio across resize/rotate/fullscreen
   });
   // HIDDEN-TAB DRIVER: browsers stop firing rAF in hidden tabs, so a coarse
@@ -7501,7 +7908,24 @@ function main() {
 
     // VOX: headless skips ONLY the render; a hidden tab keeps ticking twins/networking
     // without GPU spend (the dt clamp bounds any catch-up on return)
-    if (!voxHeadless && !document.hidden) renderer.render(scene, camera);
+    if (!voxHeadless && !document.hidden) {
+      renderer.render(scene, camera);
+      // FIRST-PERSON HAND (cycle-10): overlay pass inside the SAME guard, immediately
+      // after the main render. clearDepth() means terrain can never clip through the
+      // hand; autoClear is restored so the next frame's main pass is untouched. One
+      // extra draw call at the same governed renderScale. Skipped entirely when the
+      // setting is off or under ?headless=1 / ?console=1 (ensureHandScene refuses).
+      if (showHand) {
+        ensureHandScene();
+        if (handScene) {
+          updateHandPose();
+          renderer.autoClear = false;
+          renderer.clearDepth();
+          renderer.render(handScene, handCam);
+          renderer.autoClear = true;
+        }
+      }
+    }
 
     // loading screen drops once the ground under the player is meshed
     if (loadingVisible) {
