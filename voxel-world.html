@@ -1739,6 +1739,50 @@ function updateCrackOverlay() {
   crackMesh.visible = true;
 }
 
+// LIVING BLOCK HIGHLIGHT (cycle-12): drive the ONE dedicated highlightBox material/object —
+// breathe (idle), mining-heat (matching breakState), hover-pop (target change). `hit` is the
+// current DDA target (or null when no target). All writes are presentation-only on the box's
+// own material/scale; nothing here touches player.pos/eyeRay/camera. Skipped under headless
+// by the caller (this runs inside the non-headless targeting/render block).
+function updateHighlight(hit, dt) {
+  if (voxHeadless || !highlightBox || !THREE) return; // headless: zero material writes (spec)
+  if (!_hlAccent) { _hlAccent = new THREE.Color(0xbfd4ff); _hlHot = new THREE.Color(0xffd27f); }
+  hlT += dt;
+  if (!hit) {
+    // RESET cleanly when there is no target so the box never pops stale on re-acquire.
+    hlLastKey = null;
+    hlPopT = 0;
+    highlightBox.scale.set(1, 1, 1);
+    return;
+  }
+  const key = hit.x + ',' + hit.y + ',' + hit.z;
+  // HOVER POP: on a target CHANGE, arm a short pop (scale ~1.05 easing back to 1.0).
+  if (key !== hlLastKey) {
+    hlLastKey = key;
+    hlPopT = 0.12;
+  }
+  // MINING HEAT: hot when the live breakState matches THIS target cell.
+  const mining = breakState && breakState.x === hit.x && breakState.y === hit.y &&
+                 breakState.z === hit.z;
+  const heat = mining ? Math.max(0, Math.min(1, breakState.progress)) : 0;
+  // BREATHE: slow sine; the pulse speeds up as mining heat climbs (peripheral progress cue).
+  const pulse = Math.sin(hlT * (3 + heat * 6));
+  const mat = highlightBox.material;
+  mat.opacity = 0.6 + 0.25 * pulse;
+  // color: gently breathe base<->cool accent at idle, shift toward the hot accent by heat.
+  const breatheMix = 0.5 + 0.5 * pulse;                 // 0..1 cool-accent blend
+  mat.color.set(HL_BASE_COLOR).lerp(_hlAccent, breatheMix * 0.35); // subtle idle breathe
+  if (heat > 0) mat.color.lerp(_hlHot, heat);            // mining heat overlays the breathe
+  // HOVER POP scale, easing the 1.05 kick back to 1.0 over hlPopT.
+  if (hlPopT > 0) {
+    hlPopT = Math.max(0, hlPopT - dt);
+    const s = 1 + 0.05 * (hlPopT / 0.12);
+    highlightBox.scale.set(s, s, s);
+  } else {
+    highlightBox.scale.set(1, 1, 1);
+  }
+}
+
 // --- first-person held-block viewmodel (cycle-10) -----------------------------
 // A SECOND tiny scene ('handScene') holding ONE BoxGeometry(0.5) mesh whose
 // MeshLambertMaterial maps the EXISTING atlasTexture (no new texture upload), plus
@@ -2196,6 +2240,15 @@ let solidMat = null, waterMat = null, atlasTexture = null;
 let colDay = null, colNight = null, colDusk = null, skyTmp = null;
 let lastMeshMs = 0; // F3 instrumentation: last buildChunkMesh duration (ms)
 
+// CELESTIAL SKY (cycle-12): sun/moon billboard discs + a day-fading wheeling starfield.
+// World-lifetime objects parented to the persistent scene (like sunLight/highlightBox),
+// NOT per-chunk — never disposed on world reload, persist across applyWorldState like the
+// lights do. All driven each frame in updateEnvironment from the SAME ang/sunY/daylight/
+// glow already computed there (no new math). Created in main() AFTER scene exists, ONLY
+// when not headless/console (mirrors ensureHandScene's refusal), so headless/CDP stays
+// object-free and the F3 draw-call count is unaffected under ?headless=1/?console=1.
+let skySun = null, skyMoon = null, skyStars = null, skyStarGroup = null, skyTmpVec = null;
+
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
 function updateEnvironment(dt) {
@@ -2212,6 +2265,10 @@ function updateEnvironment(dt) {
   sunLight.position.set(Math.cos(ang) * 60, Math.max(sunY, 0.06) * 90 + 8, 35);
   sunLight.intensity = 0.1 + daylight * 1.2;
   hemiLight.intensity = 0.2 + daylight * 0.62;
+  // CELESTIAL SKY: place the resident sun/moon/starfield from these SAME values (no new
+  // math). No-op when the sky was never created (headless/console). updateEnvironment runs
+  // per frame, so the bodies re-center on the camera every frame (no parallax).
+  updateSky(ang, sunY, daylight, glow);
   return frac;
 }
 function updateFog() {
@@ -2230,6 +2287,94 @@ function updateFog() {
   }
 }
 
+// CELESTIAL SKY: draw a soft radial-gradient disc on a small canvas (NO external file).
+// Warm-white core for the sun, cool-white for the moon. Generated once at boot.
+function makeDiscTexture(core, edge) {
+  const cnv = document.createElement('canvas');
+  cnv.width = 64; cnv.height = 64;
+  const ctx = cnv.getContext('2d');
+  const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  g.addColorStop(0, core);
+  g.addColorStop(0.45, core);
+  g.addColorStop(1, edge);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(cnv);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+// Build the three sky bodies. GATED behind !headless/!console by the caller (main); each
+// body sets fog=false (so cycle-8's reduced fog/camera.far never tints/swallows them) and
+// depthWrite=false (so they never occlude terrain). Anchored to camera each frame so they
+// read as infinitely far (no parallax). R = camera.far*0.5 stays inside the frustum at rd2
+// (far~64 → R~32) and rd8 (far~144 → R~72).
+function createSky() {
+  if (skySun || !scene || !THREE) return;
+  skyTmpVec = new THREE.Vector3();
+  const sunTex = makeDiscTexture('rgba(255,250,235,1)', 'rgba(255,240,200,0)');
+  const moonTex = makeDiscTexture('rgba(232,240,255,1)', 'rgba(190,205,235,0)');
+  skySun = new THREE.Sprite(new THREE.SpriteMaterial(
+    { map: sunTex, fog: false, transparent: true, depthWrite: false, depthTest: false }));
+  skySun.scale.set(8, 8, 1);
+  skySun.renderOrder = -2;
+  scene.add(skySun);
+  skyMoon = new THREE.Sprite(new THREE.SpriteMaterial(
+    { map: moonTex, fog: false, transparent: true, depthWrite: false, depthTest: false }));
+  skyMoon.scale.set(6, 6, 1);
+  skyMoon.renderOrder = -2;
+  scene.add(skyMoon);
+  // STARFIELD: ~400 points on a unit sphere * R, generated once. Parented to a Group that
+  // wheels with `ang` and re-centers on the camera every frame.
+  const N = 400;
+  const positions = new Float32Array(N * 3);
+  let rng = 0x5bd1e995;
+  const rand = () => { rng = (Math.imul(rng, 1103515245) + 12345) & 0x7fffffff; return rng / 0x7fffffff; };
+  for (let i = 0; i < N; i++) {
+    // uniform sphere sampling
+    const u = rand() * 2 - 1;
+    const t = rand() * Math.PI * 2;
+    const r = Math.sqrt(Math.max(0, 1 - u * u));
+    positions[i * 3] = Math.cos(t) * r;
+    positions[i * 3 + 1] = u;
+    positions[i * 3 + 2] = Math.sin(t) * r;
+  }
+  const starGeo = new THREE.BufferGeometry();
+  starGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  const starMat = new THREE.PointsMaterial({
+    color: 0xffffff, size: 2, sizeAttenuation: false, fog: false,
+    transparent: true, opacity: 0, depthWrite: false, depthTest: false,
+    blending: THREE.AdditiveBlending
+  });
+  skyStars = new THREE.Points(starGeo, starMat);
+  skyStars.renderOrder = -3;
+  skyStarGroup = new THREE.Group();
+  skyStarGroup.add(skyStars);
+  scene.add(skyStarGroup);
+}
+// Per-frame placement, driven by the SAME ang/sunY/daylight/glow updateEnvironment computes.
+function updateSky(ang, sunY, daylight, glow) {
+  if (!skySun || !camera) return;
+  const far = camera.far || 144;
+  const R = far * 0.5;
+  // SUN: dir matches sunLight.position's direction (cos(ang), max(sunY,-0.2), 0.35).
+  skyTmpVec.set(Math.cos(ang), Math.max(sunY, -0.2), 0.35).normalize().multiplyScalar(R);
+  skySun.position.copy(camera.position).add(skyTmpVec);
+  skySun.material.opacity = daylight;
+  // tint toward dusk by glow (glow peaks at 0.5 near the horizon → scale to a 0..1 lerp).
+  // Lerp directly on the material's own color from the warm-white base each frame (never
+  // mutate the shared colDay/colDusk constants).
+  skySun.material.color.copy(colDay).lerp(colDusk, glow * 2 > 1 ? 1 : glow * 2);
+  // MOON: opposite direction, visible at night.
+  skyTmpVec.set(-Math.cos(ang), Math.max(-sunY, -0.2), -0.35).normalize().multiplyScalar(R);
+  skyMoon.position.copy(camera.position).add(skyTmpVec);
+  skyMoon.material.opacity = clamp01(1 - daylight * 1.4);
+  // STARFIELD: re-center on camera, wheel with ang, fade in after dusk.
+  skyStarGroup.position.copy(camera.position);
+  skyStarGroup.scale.setScalar(R);
+  skyStarGroup.rotation.z = ang;
+  skyStars.material.opacity = clamp01(1 - daylight * 1.4);
+}
+
 // ===== PLAYER =====
 // ---------------------------------------------------------------------------
 // AABB player (0.6 x 1.8 x 0.6), per-axis collision against GLOBAL voxel
@@ -2242,6 +2387,7 @@ const player = {
   yaw: 0, pitch: 0,
   onGround: false,
   fly: false,
+  sprinting: false, // FOV KICK (cycle-12): set each step in stepPhysics, read by updateCamFx
   half: 0.3, height: 1.8, eye: 1.62
 };
 
@@ -2337,6 +2483,9 @@ function stepPhysics(dt) {
   const joySprint = IS_TOUCH && Math.hypot(joyVec.x, joyVec.y) > 0.92;
   const sprinting = !player.fly &&
     (shiftHeld && desktopActive || joySprint || voxPlayerControls.sprint) && moveF > 0.1; // VOX hook
+  // FOV KICK (cycle-12): expose sprint state for updateCamFx (read-only downstream). Zero
+  // behavior change — the same value is still passed into entityPhysicsStep below.
+  player.sprinting = sprinting;
   const jumpHeld = (desktopActive && keys.has('Space')) || touchJumpHeld || voxPlayerControls.jump; // VOX hook
   const downHeld = (desktopActive && shiftHeld) || touchDownHeld;
 
@@ -2577,6 +2726,28 @@ function findSpawn() {
 // existing soundOn flag; fully skipped under headless and while the tab is hidden.
 let cameraMotion = true;             // 'Camera motion' setting (bob/dip/lift)
 const camFx = { dy: 0, dx: 0, roll: 0 };
+// SPEED-DRIVEN FOV KICK (cycle-12): pure-presentation FOV swing on the camera PROJECTION
+// only — never player.pos / eyeRay, so DDA targeting/physics stay byte-identical (the same
+// invariant the rest of camFx guarantees). Gated by the EXISTING cameraMotion flag (off →
+// fov forced to fovBase). Snaps to base on teleport. Clamped to <=10deg from base. handCam
+// (fov 60) is never touched.
+const FOV_BASE = 75;                  // matches camera's construction fov (line ~8114)
+let fovCur = FOV_BASE;                // current eased fov (degrees)
+
+// LIVING BLOCK HIGHLIGHT (cycle-12): the target highlightBox breathes when idle, heats with
+// breakState.progress on the matching target, and pops on target change. All writes are on
+// the ONE existing dedicated LineSegments material/object (no new geometry/objects). Pure
+// presentation — remote players never see your highlight; skipped under headless (the whole
+// targeting/render block is non-headless-gated). NOT gated by cameraMotion (it is the target
+// outline, not player-view motion) — kept subtle so it never reads as a cheap flash.
+let hlT = 0;                          // breathe/heat time accumulator (advanced by dt each frame)
+let hlPopT = 0;                       // hover-pop timer (~0.12s) on target change
+let hlLastKey = null;                 // last-targeted "x,y,z" so a CHANGE can trigger the pop
+const HL_BASE_COLOR = 0x111111;       // the original near-black wireframe color
+// Accent colors are lazily built as THREE.Color objects on first use (THREE is null at
+// module-eval time — it's filled by boot()'s dynamic import). _hlAccent = cool idle breathe,
+// _hlHot = amber/white mining-heat accent.
+let _hlAccent = null, _hlHot = null;
 // SCREEN-SHAKE (trauma): a RAM-only [0..1] scalar fed into the SAME camFx
 // accumulator so shake composes with bob/dip and is governed by the same gates.
 // trauma is READ only inside updateCamFx and only while cameraMotion is on, so it
@@ -2604,6 +2775,7 @@ function camFxNotifyTeleport() {
   landDip = 0; landDipVel = 0;
   wasOnGround = false; prevVelY = 0;
   trauma = 0; // SHAKE: a positional jump (safe tp / world-load) must never shake
+  fovCur = FOV_BASE; // FOV KICK: a tp must never read as a fall (next updateCamFx rebuilds)
   wasInWater = entInWater(player);
 }
 
@@ -2713,6 +2885,36 @@ function updateCamFx(dt) {
   // when motion is disabled, force a perfectly still camera (safety belt). bobPhase is
   // NOT reset here — it keeps advancing to drive footstep cadence (audio is independent).
   if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; }
+
+  // SPEED-DRIVEN FOV KICK: PROJECTION-only juice — writes ONLY camera.fov /
+  // updateProjectionMatrix(), NEVER player.pos / eyeRay, so DDA targeting + physics stay
+  // byte-identical (verified: eyeRay reads player.pos/eye/yaw/pitch, never the camera).
+  // Gated by the SAME cameraMotion flag as bob/dip/shake.
+  if (camera) {
+    let fovTarget = FOV_BASE;
+    if (cameraMotion) {
+      // (1) sprint on the ground: +6deg
+      if (player.sprinting && onGround && !player.fly) fovTarget += 6;
+      // (2) fly kick scaled by horizontal speed (fly tops at 11 b/s): up to +8deg
+      if (player.fly) fovTarget += 8 * Math.min(1, speed / 11);
+      // (3) fall kick: +10deg scaled by downward speed (caps at ~22 b/s)
+      if (player.vel.y < 0) fovTarget += 10 * Math.min(1, -player.vel.y / 22);
+      // (4) underwater: NARROW -5deg
+      if (inWater) fovTarget -= 5;
+      // clamp total swing to <=10deg from base
+      fovTarget = Math.max(FOV_BASE - 10, Math.min(FOV_BASE + 10, fovTarget));
+    }
+    // asymmetric ease: widen quickly (~10/s), settle slowly (~6/s)
+    const widening = fovTarget > fovCur;
+    const rate = widening ? 10 : 6;
+    fovCur += (fovTarget - fovCur) * Math.min(1, rate * dt);
+    if (!cameraMotion) fovCur = FOV_BASE; // force base when motion off (one rebuild below)
+    // only rebuild the projection when the change is visible (avoid a per-frame rebuild at idle)
+    if (Math.abs(camera.fov - fovCur) > 0.05) {
+      camera.fov = fovCur;
+      camera.updateProjectionMatrix();
+    }
+  }
 }
 
 // footstep with hard rate cap + material filter + ±12% pitch randomization
@@ -3826,6 +4028,15 @@ const Neighborhood = {
   libsReady: false
 };
 
+// Cap on human-player avatars a joiner/host will allocate from untrusted host->joiner
+// ingress (relayed 'hello' + snapshot 'players' loop). = VF_MAX_BOTS*4 (=32), the exact
+// ceiling vfRemoteBots uses (VF_REMOTE_BOTS_MAX), so the two receive caps match. Each
+// avatar builds a THREE.Group (3 BoxGeometries + 3 materials) PLUS a CanvasTexture name
+// sprite; without this a malicious/buggy host could exhaust GPU/RAM on join. The check
+// sits at the top of nbEnsureAvatar (after the existing-avatar fast-path) so a refused
+// allocation never half-builds — mirrors vfRemoteBotPos's "nothing added before this point".
+const NB_MAX_AVATARS = 32;       // = VF_MAX_BOTS * 4
+
 let nbApplyingRemote = false;  // suppresses rebroadcast while applying a remote edit
 let chatTyping = false;
 let nbPosTimer = 0;
@@ -4141,6 +4352,10 @@ function nbEnsureAvatar(rappid, name, color) {
   if (!rappid || rappid === Neighborhood.rappid || !scene) return null;
   let av = Neighborhood.avatars.get(rappid);
   if (av) return av;
+  // CAP (cycle-12): refuse NEW rappids past NB_MAX_AVATARS BEFORE any geometry/texture/
+  // scene.add so a refused allocation never half-builds. Existing avatars already resolved
+  // above; a freed slot (nbRemoveAvatar/bye) lets a legitimate churn back in.
+  if (Neighborhood.avatars.size >= NB_MAX_AVATARS) return null;
   const colorNum = parseInt(nbCleanColor(color).slice(1), 16);
   const group = new THREE.Group();
   const body = new THREE.Mesh(
@@ -5018,7 +5233,10 @@ function nbApplySnapshot(p, env) {
   // host's world (re-captured on every snapshot so a host world-replace stays sane).
   nbSpawnRef = { x: player.pos.x, z: player.pos.z };
   if (Array.isArray(p.players)) {
-    for (const pl of p.players) {
+    // CAP (cycle-12): the players list is fully host-controlled and consumed verbatim on
+    // first join — slice to NB_MAX_AVATARS so a malicious/buggy host can't make us allocate
+    // thousands of Groups+textures (nbEnsureAvatar also caps, this bounds the iteration too).
+    for (const pl of p.players.slice(0, NB_MAX_AVATARS)) {
       if (!pl || typeof pl !== 'object' || pl.rappid === Neighborhood.rappid) continue;
       const av = nbEnsureAvatar(pl.rappid, pl.name, pl.color);
       if (av && Number.isFinite(pl.x) && Number.isFinite(pl.y) && Number.isFinite(pl.z)) {
@@ -8130,6 +8348,11 @@ function main() {
   highlightBox.visible = false;
   scene.add(highlightBox);
 
+  // CELESTIAL SKY (cycle-12): create sun/moon discs + starfield, GATED behind not-headless/
+  // not-console (mirrors ensureHandScene) so ?headless=1/?console=1 stays object-free. These
+  // are world-lifetime objects on the persistent scene — never disposed on world reload.
+  if (!voxHeadless && !voxBootParams.headless && !voxBootParams.console) createSky();
+
   initParticles();
 
   // load saved world (or fresh seed)
@@ -8271,6 +8494,12 @@ function main() {
     } else {
       highlightBox.visible = false;
     }
+    // LIVING BLOCK HIGHLIGHT (cycle-12): breathe / mining-heat / hover-pop on the ONE
+    // dedicated material+object. Passing hit=null when there's no target resets the pop/scale
+    // cleanly. This runs inside the non-headless render block (the !voxHeadless guard at the
+    // updateCamFx site above does not wrap this, but the whole gameTick render path only
+    // reaches here with a live scene; under headless the renderer.render is skipped anyway).
+    updateHighlight(hit, dt);
     updateCrackOverlay(); // hold-to-mine: 4-stage crack visual on the mined block
 
     const dayFrac = updateEnvironment(dt);
