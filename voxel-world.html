@@ -52,6 +52,12 @@
   .hbSlot canvas{position:absolute;left:2px;top:2px;width:44px;height:44px;image-rendering:pixelated;
     border-radius:4px;pointer-events:none}
   .hbSlot .k{position:absolute;left:4px;top:2px;font-size:10px;color:#fff;text-shadow:0 1px 2px #000;z-index:1}
+  /* SELECTION JUICE (cycle-1): a transform-only scale-pop + accent glow on the newly-selected
+     slot. TRANSFORM/box-shadow only (never margin/width) so the 7-slot hotbar layout is
+     pixel-stable on a 360px phone; pointer-events untouched. The .justSel class is added on an
+     actual selection CHANGE and removed on animationend (with a setTimeout backstop). */
+  @keyframes hbPop{0%{transform:scale(1)}45%{transform:scale(1.15)}100%{transform:scale(1)}}
+  .hbSlot.justSel{animation:hbPop .14s ease-out;box-shadow:0 0 14px rgba(126,195,255,.85),0 0 9px rgba(255,255,255,.65)}
 
   #debugHud{position:fixed;left:10px;top:calc(10px + env(safe-area-inset-top));z-index:30;
     background:rgba(0,0,0,.58);padding:8px 11px;border-radius:7px;
@@ -107,6 +113,21 @@
     background:rgba(0,0,0,.78);color:#fff;padding:8px 16px;border-radius:18px;font-size:14px;z-index:60;
     opacity:0;transition:opacity .25s;pointer-events:none;white-space:nowrap}
   #toast.show{opacity:1}
+
+  /* SELECTION JUICE (cycle-1): center-bottom block-name flash on hotbar selection. A DEDICATED
+     node — NOT #toast (neighborhood/system messages own that node and would clobber each other).
+     Sits ABOVE #hotbar (hotbar bottom is 10px+inset, slots ≤52px), honoring safe-area like the
+     other bottom HUDs. Distinct accent border + tint so it never reads as a system toast.
+     pointer-events:none so it never steals input; transform-only so layout is stable. */
+  #blockNameFlash{position:fixed;left:50%;bottom:calc(70px + env(safe-area-inset-bottom));
+    transform:translateX(-50%);background:rgba(10,16,26,.82);color:#eaf3ff;
+    border:1px solid rgba(126,195,255,.55);padding:5px 16px;border-radius:14px;font-size:15px;
+    font-weight:600;letter-spacing:.4px;text-shadow:0 1px 3px #000;z-index:24;opacity:0;
+    transition:opacity .14s ease-out;pointer-events:none;white-space:nowrap}
+  #blockNameFlash.show{opacity:1}
+  @media (max-width:700px){
+    #blockNameFlash{bottom:calc(58px + env(safe-area-inset-bottom));font-size:14px}
+  }
 
   /* ===== ONBOARD COACH: first-90-seconds hint card (fresh players + QR arrivals) ===== */
   #questHud{position:fixed;left:50%;bottom:calc(136px + env(safe-area-inset-bottom));transform:translateX(-50%);
@@ -598,6 +619,11 @@ the string IS the transport; Claude is the canonical string-holder)
 <div id="achPanel" class="hidden" role="dialog" aria-label="Field Guide"></div>
 
 <div id="toast"></div>
+
+<!-- SELECTION JUICE (cycle-1): center-bottom block-name flash on hotbar selection. A dedicated
+     node, never #toast — system/neighborhood messages own #toast. Inert under headless/console
+     (selectSlot is never called there, and blockNameFlash() guards on !voxHeadless anyway). -->
+<div id="blockNameFlash" role="status" aria-live="polite"></div>
 
 <script>
 /* Boot guard: if the Three.js CDN never loads (offline first visit), show a friendly
@@ -1243,13 +1269,19 @@ function setBlock(gx, gy, gz, id, record, localEditFast) {
   // up-to-4 border neighbors for ALL edits) is deferred to dirtyMeshSet, drained
   // nearest-first under budget in processStreaming(). Face-visibility decisions and the
   // record/save/edit-op ordering above are unchanged — only WHEN the rebuild happens.
-  if (localEditFast) buildChunkMesh(c);          // human local edit: instant
-  else dirtyMeshSet.add(chunkKey(cx, cz));       // remote/bot/vox: deferred + coalesced
+  // VRAM RECLAIM (cycle-1): a meshDisposed chunk (fully fogged AND behind the camera) keeps its
+  // data + dirty flag updated, but the rebuild is deferred to return — reclaimFarChunkMeshes
+  // re-adds it to dirtyMeshSet when it re-enters the band, so the edit shows correctly then
+  // without a wasteful behind-camera rebuild this second. localEditFast chunks are always near +
+  // in front, so they are never meshDisposed; the synchronous build stays instant.
+  if (localEditFast) buildChunkMesh(c);              // human local edit: instant
+  else if (!c.meshDisposed) dirtyMeshSet.add(chunkKey(cx, cz)); // remote/bot/vox: deferred + coalesced
   // border edits also need the adjacent chunk's culled faces refreshed (always deferred).
-  // Mark the neighbor dirty so the drain's "already meshed" guard doesn't skip it.
+  // Mark the neighbor dirty so the drain's "already meshed" guard doesn't skip it. A
+  // meshDisposed neighbor keeps its dirty flag but defers the rebuild to its own return.
   const markNeighbor = (ncx, ncz) => {
     const n = chunks.get(chunkKey(ncx, ncz));
-    if (n) { n.dirty = true; dirtyMeshSet.add(chunkKey(ncx, ncz)); }
+    if (n) { n.dirty = true; if (!n.meshDisposed) dirtyMeshSet.add(chunkKey(ncx, ncz)); }
   };
   if (lx === 0) markNeighbor(cx - 1, cz);
   if (lx === 15) markNeighbor(cx + 1, cz);
@@ -1385,8 +1417,11 @@ function buildChunkMesh(chunk) {
 }
 
 function disposeChunkMeshes(c) {
+  // DOUBLE-DISPOSE GUARD (cycle-1): the per-mesh null checks make this idempotent, so the
+  // VRAM reaper (which also disposes geometry) never double-frees an already-disposed mesh.
   if (c.solidMesh) { scene.remove(c.solidMesh); c.solidMesh.geometry.dispose(); c.solidMesh = null; }
   if (c.waterMesh) { scene.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
+  c.meshDisposed = false; // a full dispose/unload clears the reaper flag (a re-loaded chunk re-meshes normally)
 }
 
 function disposeAllChunks() {
@@ -1413,7 +1448,11 @@ function scanChunks() {
       if (!chunks.has(chunkKey(cx, cz))) genQueue.push({ cx, cz, d2 });
       if (Math.max(Math.abs(dx), Math.abs(dz)) <= renderDist) {
         const c = chunks.get(chunkKey(cx, cz));
-        if (!c || !c.solidMesh || c.dirty) meshQueue.push({ cx, cz, d2 });
+        // VRAM RECLAIM (cycle-1): a meshDisposed chunk is intentionally NOT GPU-resident (fully
+        // fogged AND behind the camera). It is NOT a "needs meshing" chunk here — only
+        // reclaimFarChunkMeshes re-arms it (clears the flag + re-adds to dirtyMeshSet) when it
+        // re-enters the near/frustum band, so the existing drain rebuilds it under the cap.
+        if ((!c || !c.solidMesh || c.dirty) && !(c && c.meshDisposed)) meshQueue.push({ cx, cz, d2 });
       }
     }
   }
@@ -1427,6 +1466,70 @@ function unloadFarChunks() {
     if (Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) > renderDist + 2) {
       disposeChunkMeshes(c);
       chunks.delete(k);
+    }
+  }
+}
+
+// VRAM RECLAIM (cycle-1): the longest-standing perf wish (cited verbatim in cycle-8's field
+// note, re-carried through 9/10/11/12). Chunks inside renderDist stay GPU-resident even when
+// fully past fog.far (cycle-8's camera.far governor already culls them to 0 draw calls) or
+// directly behind the player — at rd6-8 on a phone that is megabytes of BufferGeometry never
+// drawn, and peak VRAM is the hard ceiling on long mobile sessions / tab eviction. This pass
+// disposes ONLY the GPU geometry (meshes) of chunks that are BOTH fully fogged AND strongly
+// behind the camera; chunk.data, edits, yMin/yMax are NEVER touched, so re-meshing on return is
+// a deterministic, byte-identical rebuild with NO terrain re-gen. Runs at most once per second
+// (ride the existing 1s fpsAcc tick — NEVER per-frame), gated off during the initial flood
+// (loadingVisible) and under headless / hidden tab (no camera to face, no meshes worth freeing).
+//
+// Predicates (exact inverses on the boundary — proven in the Node harness):
+//   DISPOSE  when nearestCornerDist >  fog.far  AND  forwardDot <  -0.5
+//   RE-MESH  when nearestCornerDist <= fog.far  OR   forwardDot >= -0.5
+// nearestCorner = closest point of the chunk AABB to the camera; forwardDot = dot of the
+// normalized (chunkCenter - cameraPos) with the camera's world-forward. The -0.5 threshold is a
+// generous ~120° rear cone, and "fully past fog.far" means already invisible, so a normal turn
+// never reveals an unmeshed hole; on return the chunk re-enters dirtyMeshSet and the existing
+// MESH_CAP_PER_FRAME=2 nearest-first drain refills it within ~1-2 frames.
+let _reclaimFwd = null; // lazily-allocated forward-vector scratch (THREE ready by first call); chunk-center math uses plain scalars (zero alloc)
+function chunkNearestCornerDist2(cx, cz, px, py, pz) {
+  // closest point of the chunk's world-space AABB to the camera, squared distance.
+  const x0 = cx * 16, x1 = x0 + 16, z0 = cz * 16, z1 = z0 + 16;
+  const nx = px < x0 ? x0 : (px > x1 ? x1 : px);
+  const ny = py < 0 ? 0 : (py > WORLD_H ? WORLD_H : py);
+  const nz = pz < z0 ? z0 : (pz > z1 ? z1 : pz);
+  const dx = px - nx, dy = py - ny, dz = pz - nz;
+  return dx * dx + dy * dy + dz * dz;
+}
+function reclaimFarChunkMeshes() {
+  // GATING: never during the initial chunk flood, never headless, never a hidden tab.
+  if (loadingVisible || voxHeadless || document.hidden) return;
+  if (!camera || !scene || !scene.fog) return;
+  if (!_reclaimFwd) _reclaimFwd = new THREE.Vector3();
+  const far = scene.fog.far;
+  const far2 = far * far;
+  camera.getWorldDirection(_reclaimFwd); // unit forward in world space
+  const fx = _reclaimFwd.x, fy = _reclaimFwd.y, fz = _reclaimFwd.z;
+  const px = camera.position.x, py = camera.position.y, pz = camera.position.z;
+  for (const c of chunks.values()) {
+    const near2 = chunkNearestCornerDist2(c.cx, c.cz, px, py, pz);
+    const fullyFogged = near2 > far2;
+    // forward-dot of the normalized (chunkCenter - cameraPos) with the camera forward
+    const ctx = c.cx * 16 + 8 - px, cty = WORLD_H * 0.5 - py, ctz = c.cz * 16 + 8 - pz;
+    const len = Math.sqrt(ctx * ctx + cty * cty + ctz * ctz) || 1;
+    const dot = (ctx * fx + cty * fy + ctz * fz) / len;
+    const behind = dot < -0.5;
+    if (c.meshDisposed) {
+      // RE-MESH ON RETURN: back in the near OR frustum band -> re-arm for the existing drain.
+      if (!fullyFogged || !behind) {
+        c.meshDisposed = false;
+        c.dirty = true;
+        dirtyMeshSet.add(chunkKey(c.cx, c.cz)); // processStreaming drains it nearest-first under the cap
+      }
+    } else if (fullyFogged && behind && c.solidMesh) {
+      // DISPOSE the GPU geometry only — data/edits/yMin/yMax stay resident (guarded on solidMesh
+      // being non-null so we never double-dispose). waterMesh may or may not exist.
+      scene.remove(c.solidMesh); c.solidMesh.geometry.dispose(); c.solidMesh = null;
+      if (c.waterMesh) { scene.remove(c.waterMesh); c.waterMesh.geometry.dispose(); c.waterMesh = null; }
+      c.meshDisposed = true;
     }
   }
 }
@@ -2015,6 +2118,26 @@ function playMoveSound(kind, intensity, blockUnder) {
       osc.connect(og); og.connect(audioCtx.destination);
       osc.start(t0); osc.stop(t0 + dur + 0.02);
     }
+  } catch (e) { /* never let audio break gameplay */ }
+}
+
+// --- hotbar selection tick (cycle-1): a tiny ~40ms high blip --------------------
+// Synthesized through the SAME WebAudio pattern as playSound/playMoveSound: gated by soundOn AND
+// the existing ensureAudio gesture gate (a pre-gesture selection is SILENT and never throws).
+// Fired ONLY on the change-guarded branch of selectSlot — wheel/digit/tap all funnel there.
+function playSelectTick() {
+  if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+  try {
+    const t0 = audioCtx.currentTime;
+    const dur = 0.04;
+    const osc = audioCtx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(1200, t0);
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(0.06, t0);
+    g.gain.exponentialRampToValueAtTime(0.0006, t0 + dur);
+    osc.connect(g); g.connect(audioCtx.destination);
+    osc.start(t0); osc.stop(t0 + dur + 0.01);
   } catch (e) { /* never let audio break gameplay */ }
 }
 
@@ -3025,6 +3148,7 @@ function grabDom() {
    'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkShowHand', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
    'rowFixedJoy', 'chkFixedJoy', 'lookSensInput', 'lookSensVal', 'chkInvertY', // TOUCH COMFORT (cycle-9)
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
+   'blockNameFlash', // SELECTION JUICE (cycle-1): center-bottom block-name flash
    'questHud', 'questHudSkip', // ONBOARD coach
    'achPill', 'achPanel', // FIELD GUIDE achievements (separate node — never #questHud)
    // NEIGHBORHOOD DOM
@@ -3086,17 +3210,60 @@ function buildHotbar() {
     slot.addEventListener('pointerdown', (e) => {
       e.preventDefault();
       e.stopPropagation();
-      selectSlot(i);
+      // SELECTION JUICE (cycle-1): pass the touch flag so a tap also buzzes (haptic() is itself
+      // IS_TOUCH && hapticsOn gated). pen/mouse taps select + pop + tick + name-flash, no buzz.
+      selectSlot(i, e.pointerType === 'touch');
     });
     ui.hotbar.appendChild(slot);
   });
 }
-function selectSlot(i) {
-  selSlot = ((i % PLACEABLE.length) + PLACEABLE.length) % PLACEABLE.length;
+// SELECTION JUICE (cycle-1): center-bottom block-name flash with its OWN ~1.2s timer (cleared
+// and reset on each change). A dedicated element (#blockNameFlash) — never #toast. Behind the
+// !voxHeadless gate like the other DOM HUDs; the element may be missing pre-DOM, so guarded.
+let hbNameTimer = null;
+function flashBlockName(name) {
+  if (voxHeadless || !ui.blockNameFlash) return;
+  ui.blockNameFlash.textContent = name;
+  ui.blockNameFlash.classList.add('show');
+  clearTimeout(hbNameTimer);
+  hbNameTimer = setTimeout(() => { if (ui.blockNameFlash) ui.blockNameFlash.classList.remove('show'); }, 1200);
+}
+function selectSlot(i, fromTouch) {
+  // CHANGE GUARD (load-bearing): capture the previous slot; if the resolved index is the SAME,
+  // early-return BEFORE any juice. The CSS .sel class toggle below is idempotent, but the
+  // pop/tick/name-flash/haptic must fire ONLY on an actual selection CHANGE — otherwise holding
+  // the wheel or repeated taps machine-guns the tick and re-triggers the pop.
+  const prev = selSlot;
+  const next = ((i % PLACEABLE.length) + PLACEABLE.length) % PLACEABLE.length;
+  if (next === prev) {
+    // keep the .sel class authoritative (idempotent), but fire no effects on a re-select.
+    const slots0 = ui.hotbar.children;
+    for (let s = 0; s < slots0.length; s++) slots0[s].classList.toggle('sel', s === selSlot);
+    return;
+  }
+  selSlot = next;
   const slots = ui.hotbar.children;
   for (let s = 0; s < slots.length; s++) slots[s].classList.toggle('sel', s === selSlot);
   // HAND: swap the viewmodel's per-face UVs only when the selection actually changed
   if (handMesh && PLACEABLE[selSlot] !== handBlockShown) setHandBlock(PLACEABLE[selSlot]);
+  // ---- the four change-guarded effects (wheel / digit keys / touch tap all funnel here) ----
+  // (1) SCALE-POP on the newly-selected slot: a transient .justSel class (transform-only).
+  const sel = slots[selSlot];
+  if (sel && !voxHeadless) {
+    sel.classList.remove('justSel');
+    // force reflow so re-selecting an adjacent slot restarts the animation cleanly
+    void sel.offsetWidth;
+    sel.classList.add('justSel');
+    const clearPop = () => { sel.classList.remove('justSel'); sel.removeEventListener('animationend', clearPop); };
+    sel.addEventListener('animationend', clearPop);
+    setTimeout(clearPop, 160); // backstop in case animationend never fires
+  }
+  // (2) TICK SOUND: soundOn + gesture-gated inside playSelectTick (pre-gesture = silent).
+  playSelectTick();
+  // (3) CENTER-SCREEN NAME FLASH: e.g. 'Stone' / 'Snow' for ~1.2s (own timer).
+  flashBlockName(BLOCK_NAMES[PLACEABLE[selSlot]]);
+  // (4) HAPTIC on touch selection (haptic() is IS_TOUCH && hapticsOn gated; iOS no-op; never throws).
+  if (fromTouch) haptic(8);
 }
 
 function setDebugHud(on) {
@@ -3838,10 +4005,83 @@ function collectSave() {
     twins: vfRosterData() // VOXELFLAYER: the twin roster travels with the world
   };
 }
+// SAVE INTEGRITY (cycle-1): a swallowed setItem (quota-full / private mode) used to lose an
+// hour of building with zero signal. saveNow now RETURNS a boolean (true on success) and, on
+// the FIRST failed write per session ONLY, toasts a single actionable warning + emits a
+// save_failed vox event — never spammed (private mode where every setItem throws warns once
+// then stays quiet). The solo SAVE_KEY blob and the export JSON are byte-identical to before;
+// only -nb- session keys gain a `lastTouched` epoch (used by nbReapStaleSessionKeys; an unknown
+// key validateSave ignores). lastTouched is set ONLY when writing a session key — the solo and
+// export paths never carry it.
+let _saveWarned = false;     // one warning per session (toast + save_failed event)
+let _lastSaveOk = true;      // status surface: did the most recent saveNow() succeed?
 function saveNow() {
   clearTimeout(saveTimer);
   saveTimer = null;
-  try { localStorage.setItem(activeSaveKey, JSON.stringify(collectSave())); } catch (e) { /* quota/private */ }
+  try {
+    const s = collectSave();
+    // legacy session keys with no lastTouched read as 0 (reaped first — acceptable). Only the
+    // live SESSION key is stamped; the solo SAVE_KEY save stays byte-identical to before.
+    if (activeSaveKey !== SAVE_KEY) s.lastTouched = Date.now();
+    localStorage.setItem(activeSaveKey, JSON.stringify(s));
+    _lastSaveOk = true;
+    return true;
+  } catch (e) {
+    _lastSaveOk = false;
+    if (!_saveWarned) {
+      _saveWarned = true;
+      try { toast('Could not save — storage is full or blocked. Export your world (gear menu) to keep it.'); } catch (e2) { /* pre-DOM */ }
+      try { voxEvent('save_failed', { key: activeSaveKey }); } catch (e2) { /* events never break the game */ }
+    }
+    return false;
+  }
+}
+// REAPER (cycle-1): every JOIN writes autosaves to SAVE_KEY+'-nb-'+hostPeerId, and PeerJS host
+// ids are random per session, so re-hosting/re-joining leaves permanent multi-MB session blobs
+// with ZERO removeItem anywhere — over weeks they trip quota and silently kill the SOLO autosave
+// (the artifact that matters most). Called ONCE in main() AFTER loadSettings (so activeSaveKey is
+// still SAVE_KEY at boot, before any join) inside try/catch (private mode = no-op). NEVER touches
+// the live (activeSaveKey) or solo (SAVE_KEY) key under any path. Eviction: drop any matched key
+// older than 7 days, then keep at most the 5 newest by lastTouched. Pure logic extracted in the
+// Node harness — given the active key + 8 stale -nb- keys at varying ages, the active and solo
+// keys survive, >7-day keys go, and at most 5 -nb- keys remain newest-first.
+const NB_SESSION_PREFIX = SAVE_KEY + '-nb-';
+const NB_SESSION_MAX_AGE_MS = 7 * 86400000; // 7 days
+const NB_SESSION_KEEP = 5;                  // keep at most the 5 newest session keys
+function nbReapStaleSessionKeys() {
+  try {
+    // collect keys into an array FIRST — never mutate localStorage while iterating it
+    const allKeys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k != null) allKeys.push(k);
+    }
+    const now = Date.now();
+    const matched = [];
+    for (const k of allKeys) {
+      // strict: must start with the -nb- prefix AND be neither the live nor the solo key
+      if (k.indexOf(NB_SESSION_PREFIX) !== 0) continue;
+      if (k === activeSaveKey || k === SAVE_KEY) continue;
+      let touched = 0;
+      try {
+        const o = JSON.parse(localStorage.getItem(k) || 'null');
+        if (o && typeof o === 'object' && Number.isFinite(o.lastTouched)) touched = o.lastTouched;
+      } catch (e) { touched = 0; } // unparseable / legacy = 0 (reaped first)
+      matched.push({ key: k, touched });
+    }
+    // age eviction: anything older than 7 days goes regardless of count
+    const survivors = [];
+    for (const m of matched) {
+      if (now - m.touched > NB_SESSION_MAX_AGE_MS) localStorage.removeItem(m.key);
+      else survivors.push(m);
+    }
+    // count cap: keep only the 5 newest by lastTouched (a user bouncing between two hosts
+    // keeps both — each session's autosave freshens its own key every write)
+    if (survivors.length > NB_SESSION_KEEP) {
+      survivors.sort((a, b) => b.touched - a.touched); // newest first
+      for (let i = NB_SESSION_KEEP; i < survivors.length; i++) localStorage.removeItem(survivors[i].key);
+    }
+  } catch (e) { /* private mode / storage exception: never block boot */ }
 }
 function scheduleSave() {
   clearTimeout(saveTimer);
@@ -7571,7 +7811,10 @@ function voxCmdStatus() {
       consoleTwin: b.name === voxConsoleBotName
     })),
     consoleTwin: voxConsoleBotName,
-    headless: voxHeadless
+    headless: voxHeadless,
+    // SAVE INTEGRITY (cycle-1): ok=false once a write has failed this session; lastSaveOk =
+    // the most recent saveNow() result; approxBytes computed lazily HERE (never per-save).
+    storage: { ok: !_saveWarned, lastSaveOk: _lastSaveOk, approxBytes: JSON.stringify(collectSave()).length }
   };
 }
 
@@ -8299,6 +8542,10 @@ try { voxInitTerminal(); } catch (e) { /* the terminal is optional sugar — nev
 function main() {
   grabDom();
   loadSettings();
+  // SAVE INTEGRITY (cycle-1): reap leaked -nb- session blobs from prior kite/join sessions.
+  // Runs AFTER loadSettings (activeSaveKey is still SAVE_KEY here, before any join) and is
+  // self-wrapped in try/catch so a storage exception can never block boot.
+  nbReapStaleSessionKeys();
 
   // renderer / scene
   try {
@@ -8519,6 +8766,7 @@ function main() {
       qualityGovernorTick(now); // adaptive resolution: rides the existing 1s fps tick
       achTick(); // FIELD GUIDE: pill visibility + spatial/time predicates (locked-only, O(1))
       ambTick(); // AMBIENT BED (cycle-11): 1Hz mood selector — never per-frame
+      reclaimFarChunkMeshes(); // VRAM RECLAIM (cycle-1): dispose meshes (not data) for chunks fully past fog.far AND behind the camera; re-arms them on return — never per-frame
     }
     hudTimer += dt;
     if (hudVisible && hudTimer > 0.25) { hudTimer = 0; updateHud(dayFrac); }
