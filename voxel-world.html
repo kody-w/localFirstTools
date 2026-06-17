@@ -188,6 +188,33 @@
     border:1px solid rgba(255,255,255,.25);padding:5px 14px;border-radius:18px;cursor:pointer}
   #kiteHud .kiteMark{width:18px}
   #kiteHudCount{font-size:13px;white-space:nowrap}
+
+  /* ===== PRESENCE COMPASS (cycle-1): off-screen neighbor bearings =====
+     A single fixed strip across the TOP edge (BELOW the achPill/kiteHud z-order so it never
+     covers their taps; its own chevrons take pointer events to open the roster). Each chevron
+     is positioned horizontally by the neighbor's bearing relative to player.yaw, rotated to
+     point toward them, tinted their avatar color, with a truncated name + rounded distance.
+     Rebuilt at ~4Hz (not per-frame). Honors safe-area insets; 6-cap + '+N' collapse keeps a
+     360px phone uncluttered. Built ONLY when Neighborhood.enabled, never headless/console. */
+  #nbCompass{position:fixed;left:0;right:0;top:calc(env(safe-area-inset-top));height:30px;z-index:23;
+    pointer-events:none;overflow:hidden}
+  #nbCompass .nbChev{position:absolute;top:2px;transform:translateX(-50%);display:flex;
+    flex-direction:column;align-items:center;pointer-events:auto;cursor:pointer;max-width:96px}
+  #nbCompass .nbChevArrow{font-size:13px;line-height:1;text-shadow:0 1px 2px #000;display:inline-block}
+  #nbCompass .nbChevLbl{font-size:10px;line-height:1.1;color:#e8eef7;text-shadow:0 1px 2px #000;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:90px;
+    background:rgba(0,0,0,.42);border-radius:6px;padding:0 4px;margin-top:1px}
+  #nbCompass .nbChev.more .nbChevArrow{color:#cfe2f7}
+  /* roster popup: a simple list opened by tapping a chevron — color swatch + name + distance */
+  #nbRoster{position:fixed;left:50%;top:calc(40px + env(safe-area-inset-top));transform:translateX(-50%);
+    background:rgba(7,11,18,.95);border:1px solid #2c3f57;border-radius:10px;padding:8px 12px;
+    z-index:37;width:min(260px,80vw);font-size:13px;line-height:1.7;pointer-events:auto;
+    box-shadow:0 8px 30px rgba(0,0,0,.5);max-height:50vh;overflow-y:auto}
+  #nbRoster .nbRosterTitle{font-weight:600;color:#9cc4ee;margin-bottom:4px}
+  #nbRoster .nbRosterRow{display:flex;align-items:center;gap:8px}
+  #nbRoster .nbRosterSw{width:12px;height:12px;border-radius:3px;flex:none;border:1px solid rgba(255,255,255,.35)}
+  #nbRoster .nbRosterName{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #nbRoster .nbRosterDist{opacity:.72;font-size:12px}
   .nbCenter{text-align:center}
   .sealBadge{display:inline-block;background:#1d3a2f;color:#9fe3bd;border:1px solid #2f6e51;
     border-radius:10px;padding:1px 9px;font-size:11.5px;letter-spacing:.4px;vertical-align:middle}
@@ -315,6 +342,12 @@
 <div id="kiteHud" class="hidden" role="status" aria-label="Kited — this world is flying as a neighborhood">
   <span id="kiteHudMark"></span><span id="kiteHudCount">neighbors: 0</span>
 </div>
+
+<!-- PRESENCE COMPASS (cycle-1): off-screen neighbor bearings. Empty static containers so
+     grabDom resolves them; ALL chevron/roster child DOM is built lazily by JS and ONLY when
+     a neighborhood is live AND not headless/console (zero built DOM otherwise). -->
+<div id="nbCompass" class="hidden" role="status" aria-label="Neighbor compass"></div>
+<div id="nbRoster" class="hidden" role="dialog" aria-label="Neighbors"></div>
 
 <!-- VOXELFLAYER: per-twin status strip (visible while any twin is hatched) -->
 <div id="twinStrip" class="hidden" role="status" aria-label="Hatched twins"></div>
@@ -476,6 +509,9 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkShowHand" checked> First-person hand <span class="small">(held block + swing animation)</span></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkShowCompass" checked> Show neighbor compass <span class="small">(off-screen friends' bearings during a neighborhood session)</span></label>
     </div>
     <div class="row hidden" id="rowHaptics">
       <label><input type="checkbox" id="chkHaptics" checked> Haptics <span class="small">(vibrate + crosshair flash on break / place / mode / fly / ping)</span></label>
@@ -2029,8 +2065,13 @@ function ensureAudio() {
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   } catch (e) { /* audio unsupported; stay silent */ }
 }
-function playSound(kind) {
+// gainScale (optional, default 1) multiplies both voice peaks so a DISTANT remote-edit tick
+// is fainter than a near one (cycle-1 multiplayer feel: nbApplyRemoteEdit passes 1/(1+dist*0.12)).
+// EVERY existing call site omits it -> *1 -> byte-identical to before (the local player's own
+// break/place, bot dig/place, and the vox commands all stay at full gain).
+function playSound(kind, gainScale) {
   if (!soundOn || !audioCtx || audioCtx.state !== 'running') return;
+  const gs = Number.isFinite(gainScale) ? Math.max(0, Math.min(1, gainScale)) : 1;
   try {
     const t0 = audioCtx.currentTime;
     const dur = kind === 'break' ? 0.14 : 0.08;
@@ -2044,7 +2085,7 @@ function playSound(kind) {
     filt.type = 'lowpass';
     filt.frequency.value = kind === 'break' ? 750 + Math.random() * 350 : 1500;
     const g = audioCtx.createGain();
-    g.gain.setValueAtTime(kind === 'break' ? 0.42 : 0.3, t0);
+    g.gain.setValueAtTime((kind === 'break' ? 0.42 : 0.3) * gs, t0);
     g.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
     src.connect(filt); filt.connect(g); g.connect(audioCtx.destination);
     src.start(t0);
@@ -2059,7 +2100,7 @@ function playSound(kind) {
       osc.frequency.exponentialRampToValueAtTime(120, t0 + 0.06);
     }
     const og = audioCtx.createGain();
-    og.gain.setValueAtTime(0.25, t0);
+    og.gain.setValueAtTime(0.25 * gs, t0);
     og.gain.exponentialRampToValueAtTime(0.001, t0 + dur);
     osc.connect(og); og.connect(audioCtx.destination);
     osc.start(t0); osc.stop(t0 + dur + 0.02);
@@ -2948,6 +2989,10 @@ let waterMotion = true;              // 'Living water' setting (shimmer + breath
 let waterAnimT = 0;                  // water animation phase (advanced by dt in gameTick)
 let waterTex = null;                 // cloned atlas texture owned by waterMat (null on clone failure)
 let waterUWAcc = 0;                  // ~4Hz accumulator for the underwater-overlay depth update
+// PRESENCE COMPASS (cycle-1): 'Show neighbor compass' setting (default ON), persisted in the
+// settings blob beside autoQuality/cameraMotion/haptics/waterMotion with the same typeof guard.
+let showCompass = true;
+let nbCompassAcc = 0;                // ~4Hz accumulator for the compass rebuild (NOT per-frame)
 const WATER_BASE_OPACITY = 0.7;      // matches waterMat's construction opacity
 
 let bobPhase = 0;
@@ -3214,7 +3259,7 @@ function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkWaterMotion', 'chkShowHand', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkWaterMotion', 'chkShowHand', 'chkShowCompass', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
    'rowFixedJoy', 'chkFixedJoy', 'lookSensInput', 'lookSensVal', 'chkInvertY', // TOUCH COMFORT (cycle-9)
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'blockNameFlash', // SELECTION JUICE (cycle-1): center-bottom block-name flash
@@ -3222,6 +3267,7 @@ function grabDom() {
    'achPill', 'achPanel', // FIELD GUIDE achievements (separate node — never #questHud)
    // NEIGHBORHOOD DOM
    'btnKite', 'kiteHud', 'kiteHudMark', 'kiteHudCount', 'btnNeighborhood',
+   'nbCompass', 'nbRoster', // PRESENCE COMPASS (cycle-1): off-screen neighbor bearings + roster
    'nbPanel', 'nbOffline', 'nbStatusNote', 'nbIdle', 'nbNameInput', 'nbColorInput',
    'btnFlyKite', 'btnJoinToggle', 'nbJoinRow', 'nbJoinInput', 'btnJoinGo',
    'nbKited', 'nbKiteMarkBox', 'nbQrCanvas', 'nbLinkText', 'btnCopyLink',
@@ -3774,6 +3820,13 @@ function initUiButtons() {
     if (handMesh) handMesh.visible = showHand;
     saveSettings();
   });
+  // PRESENCE COMPASS (cycle-1): toggling off clears the strip + roster DOM immediately
+  // (the per-frame rebuild also no-ops when off); persists like cameraMotion.
+  ui.chkShowCompass.addEventListener('change', () => {
+    showCompass = ui.chkShowCompass.checked;
+    if (!showCompass) nbCompassClear();
+    saveSettings();
+  });
   // TOUCH COMFORT (cycle-9): floating-vs-fixed joystick, look sensitivity, invert-Y.
   ui.chkFixedJoy.addEventListener('change', () => {
     fixedJoy = ui.chkFixedJoy.checked;
@@ -4170,7 +4223,8 @@ function saveSettings() {
       renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
       cameraMotion: cameraMotion, waterMotion: waterMotion, haptics: hapticsOn,
       fixedJoy: fixedJoy, lookSens: lookSens, invertY: invertY, // touch comfort (cycle-9)
-      showHand: showHand // first-person hand viewmodel (cycle-10)
+      showHand: showHand, // first-person hand viewmodel (cycle-10)
+      showCompass: showCompass // presence compass (cycle-1)
     }));
   } catch (e) { /* ignore */ }
 }
@@ -4196,6 +4250,7 @@ function loadSettings() {
       if (Number.isFinite(s.lookSens)) lookSens = Math.max(0.4, Math.min(2, s.lookSens));
       if (typeof s.invertY === 'boolean') invertY = s.invertY;
       if (typeof s.showHand === 'boolean') showHand = s.showHand; // older blobs default ON (cycle-10)
+      if (typeof s.showCompass === 'boolean') showCompass = s.showCompass; // PRESENCE COMPASS (cycle-1): older blobs default ON
     }
   } catch (e) { /* ignore */ }
 }
@@ -4909,10 +4964,21 @@ nbRegisterOp('chat', (p, env) => {
   addChatMsg(nbCleanName(p.name || (av && av.name)), String(p.text || '').slice(0, 240),
     av ? av.color : null, false);
 });
-nbRegisterOp('bye', (p) => {
-  const av = Neighborhood.avatars.get(p && p.rappid);
+nbRegisterOp('bye', (p, env, fromEntry) => {
+  // CYCLE-1 SECURITY FIX: authorize on the cycle-3-bound identity, never the arbitrary
+  // payload field p.rappid. The ONLY legitimate on-wire bye is the host's own self-
+  // departure broadcast (nbHostDropNeighbor, rappid: entry.rappid), which the HOST sends
+  // to JOINERS. A ready LEAF over the wire saying 'bye' can only legitimately mean "I am
+  // leaving" — so on the HOST receive path (fromEntry present = wire-received bye from a
+  // ready leaf) the target MUST come from env.from_rappid, never the spoofable p.rappid.
+  // On the JOINER receive path (fromEntry null — the host vouches for the departed peer
+  // via p.rappid) we keep p.rappid so legitimate host-originated departures still evict.
+  // A forged leaf->host bye{rappid:other} now resolves target = the sender's OWN id, so it
+  // can only self-depart (harmless); it can no longer evict a victim's avatar.
+  const target = (fromEntry && env && env.from_rappid) ? env.from_rappid : (p && p.rappid);
+  const av = Neighborhood.avatars.get(target);
   if (av) addChatMsg(null, av.name + ' left the neighborhood', null, true);
-  if (p && p.rappid) nbRemoveAvatar(p.rappid);
+  if (target) nbRemoveAvatar(target);
 });
 // PHASE 3: the ===== VOXELFLAYER ===== section below registers the real handlers
 // for 'bot-claim' / 'bot-act' / 'bot-release' and extends 'pos' + 'bye' with bot flags.
@@ -5089,12 +5155,52 @@ function nbOnLocalEdit(gx, gy, gz, id) {
   if (Neighborhood.role === 'kite') nbBroadcastSealed(env);
   else nbSendToHost(env, true);
 }
+// REMOTE-EDIT IMPACT FEEDBACK (cycle-1): the first multiplayer FEEL touch. A neighbor's
+// break/place arriving over the wire used to land SILENTLY (setBlock with zero particles/
+// sound); now a successful in-loaded-chunk remote edit emits the SAME break/place puff + tick
+// the local player's own edits do, gated so it stays subtle and can't be machine-gunned:
+//   (1) DISTANCE — skip entirely beyond NB_FX_MAX_DIST (~32 blocks) from player.pos; closer
+//       neighbors get a louder tick (audio gain 1/(1+dist*0.12)); a far one is a faint tick.
+//   (2) GLOBAL RATE CAP — coalesce to <=~8 feedback events/sec (NB_FX_MIN_MS spacing, keyed
+//       GLOBALLY across all senders) so a tower-spamming neighbor or a remote bot loop can't
+//       machine-gun puffs. Drops are silent (the edit still applies).
+//   (3) GATES — never under voxHeadless or a hidden tab (mirrors the existing audio gates).
+// Only this REMOTE wire path is touched: the local player's own break/place already feels via
+// its own particles/sound, and a sender's OWN bots feel via nbOnLocalEdit — so no double-emit.
+const NB_FX_MAX_DIST = 32;     // skip feedback beyond ~32 blocks from the local player
+const NB_FX_MIN_MS = 125;      // global spacing -> <=~8 feedback events/sec (370ms-style guard)
+let nbFxLastMs = 0;            // last feedback timestamp (global across all senders)
+function nbRemoteEditFx(x, y, z, id, oldId) {
+  if (voxHeadless || document.hidden) return; // mirror the audio/HUD headless+hidden gates
+  const dx = (x + 0.5) - player.pos.x, dy = (y + 0.5) - player.pos.y, dz = (z + 0.5) - player.pos.z;
+  const dist = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  if (dist > NB_FX_MAX_DIST) return; // too far to feel — skip entirely
+  const now = performance.now();
+  if (now - nbFxLastMs < NB_FX_MIN_MS) return; // global rate cap: coalesce a flood to <=~8/s
+  nbFxLastMs = now;
+  const gain = 1 / (1 + dist * 0.12); // distance falloff: a far neighbor is a faint tick
+  if (id === B.AIR) {
+    // a break: puff the BROKEN block's color (read BEFORE setBlock by the caller)
+    spawnParticles(x, y, z, BLOCK_COLORS[oldId] || 0xffffff, 10);
+    playSound('break', gain);
+  } else {
+    spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 6);
+    playSound('place', gain);
+  }
+}
 function nbApplyRemoteEdit(x, y, z, id) {
   nbApplyingRemote = true;
   try {
+    // EDGE (A): read oldId BEFORE setBlock — a break puff must use the BROKEN block's color.
+    const oldId = getBlock(x, y, z);
     const ok = setBlock(x, y, z, id, true);
-    if (!ok && y >= 0 && y < WORLD_H) {
-      // chunk not loaded here yet — record the edit so genChunk applies it later
+    if (ok) {
+      // EDGE (B): emit feedback ONLY for a successful in-loaded-chunk edit (ok===true), inside
+      // the nbApplyingRemote try AFTER setBlock returns true — a refused/unloaded edit (the
+      // recordEdit branch below) produces no phantom puff; edit-op ordering is unchanged.
+      nbRemoteEditFx(x, y, z, id, oldId);
+    } else if (y >= 0 && y < WORLD_H) {
+      // chunk not loaded here yet — record the edit so genChunk applies it later (no feedback)
       recordEdit(x, y, z, id);
       scheduleSave();
     }
@@ -5688,8 +5794,170 @@ function nbResetSession() {
   Neighborhood.enabled = false;
   Neighborhood.role = null;
   closeChatInput();
+  nbCompassClear(); // PRESENCE COMPASS (cycle-1): remove the strip + roster DOM on leave/reset
   nbSetStatus('');
   nbRefreshPanel();
+}
+
+// ===== PRESENCE COMPASS (cycle-1): off-screen neighbor bearings + roster =====
+// The neighborhood was SILENT and INVISIBLE: friends' positions only showed as 3D bodies in
+// front of you. This makes off-screen neighbors LOCATABLE — a top-edge strip of chevrons, each
+// pointing toward a neighbor, tinted their color, with name + distance. It consumes EXISTING
+// wire data (av.cur, the cycle-11 lerp-SMOOTHED position) with ZERO protocol change. Bearing
+// is computed from player.yaw to av.cur ONLY (never raw network targets, so packet cadence
+// can't jitter the chevrons). A neighbor already inside the camera frustum is SUPPRESSED (you
+// can see their 3D body). Capped to the 6 nearest within range; the rest collapse to a '+N'
+// chevron. Rebuilt at ~4Hz (nbCompassAcc), NOT per-frame. Built ONLY when Neighborhood.enabled,
+// gated behind the showCompass setting, and ZERO DOM under headless/console.
+const NB_COMPASS_RANGE = 256;   // show neighbors within ~256 blocks (configurable default)
+const NB_COMPASS_CAP = 6;       // visible chevrons; the rest collapse into '+N' (reuses the obs nearest-6 pattern)
+let nbCompassFrustum = null;    // lazily-allocated THREE.Frustum (THREE ready by first build)
+let nbCompassProj = null;       // lazily-allocated THREE.Matrix4 (proj * viewInverse)
+let nbCompassVec = null;        // lazily-allocated THREE.Vector3 scratch (av.cur world point)
+let nbRosterOpen = false;       // roster popup visibility (tap a chevron to open/close)
+
+function nbCompassInert() { return !!(voxHeadless || voxBootParams.headless || voxBootParams.console); }
+// remove ALL built strip/roster child DOM and hide both containers (leave / reset / setting-off)
+function nbCompassClear() {
+  if (ui.nbCompass) { ui.nbCompass.innerHTML = ''; ui.nbCompass.classList.add('hidden'); }
+  nbRosterOpen = false;
+  if (ui.nbRoster) { ui.nbRoster.innerHTML = ''; ui.nbRoster.classList.add('hidden'); }
+}
+// refresh the cached camera frustum ONCE per rebuild (updateMatrixWorld so it reflects THIS
+// frame's camera transform — nbCompassTick runs before renderer.render). Returns false if there
+// is no camera (headless never reaches here, but belt-and-suspenders).
+function nbCompassRefreshFrustum() {
+  if (!camera) return false;
+  if (!nbCompassFrustum) { nbCompassFrustum = new THREE.Frustum(); nbCompassProj = new THREE.Matrix4(); nbCompassVec = new THREE.Vector3(); }
+  camera.updateMatrixWorld();
+  nbCompassProj.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  nbCompassFrustum.setFromProjectionMatrix(nbCompassProj);
+  return true;
+}
+// is this world-point inside the cached camera frustum? (suppress its chevron — visible body)
+function nbCompassInFrustum(x, y, z) {
+  if (!nbCompassFrustum) return false;
+  nbCompassVec.set(x, y, z);
+  return nbCompassFrustum.containsPoint(nbCompassVec);
+}
+// collect in-range neighbors (av.cur ONLY), nearest-first: {name,color,dist,bearing,inView}
+function nbCompassGather() {
+  const out = [];
+  const haveFrustum = nbCompassRefreshFrustum();
+  const px = player.pos.x, pz = player.pos.z;
+  const fx = -Math.sin(player.yaw), fz = -Math.cos(player.yaw); // player forward in XZ
+  for (const av of Neighborhood.avatars.values()) {
+    if (!av || !av.cur) continue; // host / avatar-less senders: no-op gracefully
+    const dx = av.cur.x - px, dz = av.cur.z - pz;
+    const dist = Math.hypot(dx, dz);
+    if (dist > NB_COMPASS_RANGE) continue;
+    // signed bearing from forward to the target dir (+ = screen-right, 0 = ahead, ±PI = behind)
+    const dot = fx * dx + fz * dz;
+    const cross = fx * dz - fz * dx;
+    const bearing = Math.atan2(cross, dot);
+    // y at body center (~av.cur.y + 1) so a same-level neighbor reads as on-screen, not above/below
+    const inView = haveFrustum && nbCompassInFrustum(av.cur.x, av.cur.y + 1, av.cur.z);
+    out.push({ name: av.name, color: av.color, dist, bearing, inView });
+  }
+  out.sort((a, b) => a.dist - b.dist);
+  return out;
+}
+// build the roster popup (color swatch + name + distance), nearest-first, ALL in-range neighbors
+function nbCompassBuildRoster(list) {
+  const r = ui.nbRoster;
+  r.innerHTML = '';
+  const title = document.createElement('div');
+  title.className = 'nbRosterTitle';
+  title.textContent = 'Neighbors (' + list.length + ')';
+  r.appendChild(title);
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'small';
+    empty.textContent = 'No neighbors in range.';
+    r.appendChild(empty);
+  }
+  for (const n of list) {
+    const row = document.createElement('div');
+    row.className = 'nbRosterRow';
+    const sw = document.createElement('span');
+    sw.className = 'nbRosterSw';
+    sw.style.background = n.color || '#888';
+    const nm = document.createElement('span');
+    nm.className = 'nbRosterName';
+    nm.textContent = n.name || 'Neighbor';
+    const ds = document.createElement('span');
+    ds.className = 'nbRosterDist';
+    ds.textContent = Math.round(n.dist) + 'm';
+    row.appendChild(sw); row.appendChild(nm); row.appendChild(ds);
+    r.appendChild(row);
+  }
+}
+function nbCompassToggleRoster() {
+  nbRosterOpen = !nbRosterOpen;
+  if (nbRosterOpen) {
+    nbCompassBuildRoster(nbCompassGather());
+    ui.nbRoster.classList.remove('hidden');
+  } else {
+    ui.nbRoster.classList.add('hidden');
+  }
+}
+// one ~4Hz rebuild: clears the strip, lays out up-to-6 nearest off-screen chevrons by bearing,
+// collapses the rest into a single '+N' chevron. A chevron rotates to point toward its neighbor.
+function nbCompassRebuild() {
+  const strip = ui.nbCompass;
+  strip.innerHTML = '';
+  const all = nbCompassGather();
+  // suppress neighbors already visible in the frustum (you see their 3D body)
+  const offscreen = all.filter((n) => !n.inView);
+  if (!offscreen.length) { strip.classList.add('hidden'); if (nbRosterOpen) nbCompassBuildRoster(all); return; }
+  strip.classList.remove('hidden');
+  const shown = offscreen.slice(0, NB_COMPASS_CAP);
+  const extra = offscreen.length - shown.length;
+  for (const n of shown) {
+    const chev = document.createElement('div');
+    chev.className = 'nbChev';
+    // horizontal position: center = ahead (bearing 0), edges = behind (±PI). Clamp inside [3%,97%].
+    const pos = Math.max(3, Math.min(97, 50 + (n.bearing / Math.PI) * 50));
+    chev.style.left = pos + '%';
+    const arrow = document.createElement('div');
+    arrow.className = 'nbChevArrow';
+    arrow.textContent = '▲'; // ▲ rotated to point along the bearing
+    arrow.style.color = n.color || '#cfe2f7';
+    arrow.style.transform = 'rotate(' + n.bearing + 'rad)';
+    const lbl = document.createElement('div');
+    lbl.className = 'nbChevLbl';
+    const nm = (n.name || 'Neighbor');
+    lbl.textContent = (nm.length > 9 ? nm.slice(0, 9) + '…' : nm) + ' ' + Math.round(n.dist) + 'm';
+    chev.appendChild(arrow); chev.appendChild(lbl);
+    chev.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); nbCompassToggleRoster(); });
+    strip.appendChild(chev);
+  }
+  if (extra > 0) {
+    const more = document.createElement('div');
+    more.className = 'nbChev more';
+    more.style.left = '50%';
+    more.style.top = '14px';
+    const arrow = document.createElement('div');
+    arrow.className = 'nbChevArrow';
+    arrow.textContent = '+' + extra;
+    more.appendChild(arrow);
+    more.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); nbCompassToggleRoster(); });
+    strip.appendChild(more);
+  }
+  if (nbRosterOpen) nbCompassBuildRoster(all); // keep an open roster fresh at the same cadence
+}
+// ~4Hz driver — called from the render block beside nbTick/vfTick (NOT per-frame). Gated:
+// zero work under headless/console, when the setting is off, or with no live neighborhood.
+function nbCompassTick(dt) {
+  if (nbCompassInert()) return;          // ?headless=1 / ?console=1 / runtime headless: zero DOM
+  if (!showCompass || !Neighborhood.enabled) {
+    if (ui.nbCompass && !ui.nbCompass.classList.contains('hidden')) nbCompassClear();
+    return;
+  }
+  nbCompassAcc += dt;
+  if (nbCompassAcc < 0.25) return;       // ~4Hz rebuild cadence
+  nbCompassAcc = 0;
+  try { nbCompassRebuild(); } catch (e) { /* a bad rebuild never breaks the render loop */ }
 }
 
 // --- per-frame: avatar lerp + throttled pos broadcast (~10/s, plaintext per spec) --------
@@ -5982,6 +6250,88 @@ const VF_MEM_FACTS_CAP = 24;     // FIFO ring of short fact strings
 const VF_MEM_FACT_LEN = 120;     // per-fact char clamp
 const VF_MEM_WP_CAP = 16;        // named waypoints {name -> {x,y,z}}
 const VF_MEM_OBS_FACTS = 8;      // facts.slice(-8) in the observation (keeps it bounded)
+// ACTION-RESULT FEEDBACK (cycle-1): a RAM-only ring on every bot recording the REAL outcome
+// of each op at its true completion site (dig boolean, place reason, goto reached/gave_up/
+// no_path, find count, void rescue). vfObservation DRAINS it into a strictly-additive
+// `lastActions` field (splice-on-read: each outcome reported exactly once; a quiet turn -> []).
+// Records are ints + short string literals only (CDP returnByValue-safe). NEVER persisted —
+// it must NOT enter vfRosterData / vfSanitizeMemory (the cycle-6/11 persisted-roster-shape
+// invariant holds). Cap 12 so the network obs stays inside VF_OBS_BUDGET even in a busy scene.
+const VF_ACTLOG_CAP = 12;
+// PLACE REASON CHANNEL (cycle-1): bot.placeBlock returns a bare boolean (public API shape —
+// unchanged). It writes the 1-word failure reason to this module scratch on EVERY call
+// (success clears it to null), so vfExecuteOp can read the real cause immediately after the
+// call without altering the return shape. Read-once discipline: a record-site reads it right
+// after the synchronous placeBlock returns; no other code interleaves on the same thread.
+let vfLastPlaceReason = null;
+// push a compact outcome record onto a bot's RAM-only action ring (oldest-dropped over cap).
+// Guarded so a record never throws into a physics/think loop; bot may lack _actionLog only
+// in pre-seed edge paths, so allocate lazily.
+function vfPushAction(bot, rec) {
+  if (!bot || !rec) return;
+  try {
+    if (!Array.isArray(bot._actionLog)) bot._actionLog = [];
+    bot._actionLog.push(rec);
+    while (bot._actionLog.length > VF_ACTLOG_CAP) bot._actionLog.shift();
+  } catch (e) { /* never break a loop over a feedback record */ }
+}
+// GOTO RESULT CORRELATION (cycle-1): a command/operator-form goto pushes ONE pending record
+// (vfStartGoto) keyed on its target coords; the completion edge calls this to report the
+// outcome exactly once. If the pending record is still resident in the ring, flip it in
+// place (so the next obs reports the final result, never a stale 'pending'); if it was
+// already drained (an obs read landed mid-flight, reporting 'pending' once), push a fresh
+// completion record so the result is still reported exactly once. Cleared after, so a stray
+// later edge (e.g. a built-in-brain goto reaching a budget abort) is a no-op for the log.
+function vfStartGoto(bot, x, z) {
+  if (!bot) return;
+  // a re-issued goto supersedes any prior pending one: drop the stale arrive listener so it
+  // can never flip the new target's record (mirrors vfDigSmart's off-on-failure discipline).
+  if (bot._gotoArrive) { try { bot.off('goal_reached', bot._gotoArrive); } catch (e) {} bot._gotoArrive = null; }
+  const rec = { op: 'goto', x: Math.round(x), z: Math.round(z), result: 'pending' };
+  bot._gotoRec = rec;
+  vfPushAction(bot, rec);
+}
+function vfGotoResult(bot, result) {
+  if (!bot || !bot._gotoRec) return; // only command/operator-form gotos arm a record
+  const rec = bot._gotoRec;
+  bot._gotoRec = null;
+  if (bot._gotoArrive) { try { bot.off('goal_reached', bot._gotoArrive); } catch (e) {} bot._gotoArrive = null; }
+  try {
+    if (Array.isArray(bot._actionLog) && bot._actionLog.indexOf(rec) >= 0) {
+      rec.result = result; // still resident — flip in place (reported once, with the final result)
+    } else {
+      vfPushAction(bot, { op: 'goto', x: rec.x, z: rec.z, result }); // drained as 'pending' — report the completion too
+    }
+  } catch (e) { /* never break a loop over a feedback record */ }
+}
+// drop a pending command-goto's bookkeeping WITHOUT pushing an outcome — used when a different
+// command supersedes the goto (e.g. an out-of-reach dig issues its own internal walk). The
+// stale arrive listener is removed so it can never mis-flip the superseded goto to 'reached';
+// an undrained 'pending' record honestly stays pending (it was never completed).
+function vfCancelGoto(bot) {
+  if (!bot) return;
+  if (bot._gotoArrive) { try { bot.off('goal_reached', bot._gotoArrive); } catch (e) {} bot._gotoArrive = null; }
+  bot._gotoRec = null;
+}
+// COMMAND/OPERATOR-FORM goto with outcome reporting. Built-in brains (wanderer/miner/
+// follower) and vfDigSmart still call bot.goto directly — they do NOT arm a record, so the
+// log is never flooded by their constant repaths; only twin/operator {op:'goto'} reports.
+// The pending record is armed BEFORE bot.goto so an immediate 'already there' goal_reached
+// (the setTimeout in bot.goto) is caught by the once-listener; a null-path return is flipped
+// to 'no_path' right away. The reached/gave_up edges fire from vfUpdateBot (guarded on
+// _gotoRec) — see the goal_reached emit and the pathTime>25 budget abort.
+function vfCommandGoto(bot, gx, gy, gz) {
+  vfStartGoto(bot, gx, gz);
+  // Use on()+self-off (NOT once()): once() registers an internal wrapper, so bot.off(arrive)
+  // couldn't remove it — we need the EXACT registered fn in _gotoArrive so vfStartGoto/
+  // vfGotoResult can drop a stale listener when the goto is re-issued or completes another way.
+  const arrive = () => { bot.off('goal_reached', arrive); vfGotoResult(bot, 'reached'); };
+  bot._gotoArrive = arrive;
+  bot.on('goal_reached', arrive); // identity-guarded; self-removing on fire
+  const ok = bot.goto({ x: gx, y: gy, z: gz });
+  if (!ok) vfGotoResult(bot, 'no_path'); // null path -> give up; report it (also drops the listener)
+  return ok; // true = path found OR already there (async goal_reached); false = no path
+}
 function vfFreshMemory() {
   return { facts: [], waypoints: {}, stats: { dug: 0, placed: 0, chats: 0 } };
 }
@@ -6246,6 +6596,9 @@ function vfSpawnBot(opts) {
     // PERSISTENT MEMORY: facts (FIFO, capped), named waypoints, and action stats. Survives
     // saves for TWINS (rehydrated from the roster in vfHatchTwin); RAM-only for built-in bots.
     memory: vfFreshMemory(),
+    // ACTION-RESULT FEEDBACK (cycle-1): RAM-only outcome ring, drained into obs.lastActions.
+    // NEVER persisted (not in vfRosterData/vfSanitizeMemory) — see VF_ACTLOG_CAP header.
+    _actionLog: [],
     walkPhase: 0,
     _events: Object.create(null),
 
@@ -6327,12 +6680,15 @@ function vfSpawnBot(opts) {
     },
 
     dig(p) {
+      // ACTION-RESULT FEEDBACK (cycle-1): record the REAL dig outcome at its true completion
+      // site (this method's boolean return), drained once into obs.lastActions. Coords are
+      // integer-rounded; the failure records use the floored target where one exists.
       if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return false;
       const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
       const id = getBlock(x, y, z);
-      if (!isSolid(id)) return false;
+      if (!isSolid(id)) { vfPushAction(this, { op: 'dig', x, y, z, ok: false }); return false; }
       const d = Math.hypot(x + 0.5 - ent.pos.x, y + 0.5 - (ent.pos.y + ent.eye), z + 0.5 - ent.pos.z);
-      if (d > REACH) return false; // same 6-block reach as the player
+      if (d > REACH) { vfPushAction(this, { op: 'dig', x, y, z, ok: false }); return false; } // same 6-block reach as the player
       this.lookAt({ x: x + 0.5, y: y + 0.5, z: z + 0.5 });
       setBlock(x, y, z, B.AIR, true); // same edit path: neighborhood sync + saves
       spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 14); // same break feedback
@@ -6340,21 +6696,27 @@ function vfSpawnBot(opts) {
       this.emit('dig_complete', { x, y, z, id });
       voxEvent('dig_complete', { x, y, z, blockId: id, by: name }); // VOX hook: ring-buffer mirror
       if (this.memory) this.memory.stats.dug++; // MEMORY: count at the REAL action site (every path)
+      vfPushAction(this, { op: 'dig', x, y, z, ok: true }); // ACTION-RESULT FEEDBACK
       return true;
     },
 
     placeBlock(p, blockId) {
-      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) return false;
+      // PLACE REASON CHANNEL (cycle-1): the public return shape stays a bare boolean. On EVERY
+      // call the 1-word failure cause is written to the module scratch vfLastPlaceReason (null
+      // on success) so vfExecuteOp can read the real cause immediately after the synchronous
+      // return without altering the API. Read-once discipline (no thread interleave).
+      vfLastPlaceReason = null;
+      if (!p || !Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.z)) { vfLastPlaceReason = 'bad_coords'; return false; }
       const x = Math.floor(p.x), y = Math.floor(p.y), z = Math.floor(p.z);
-      if (y < 0 || y >= WORLD_H) return false;
+      if (y < 0 || y >= WORLD_H) { vfLastPlaceReason = 'out_of_world'; return false; }
       let id = Number.isInteger(blockId) ? blockId : this.selectedBlockId;
       if (!PLACEABLE.includes(id)) id = this.selectedBlockId;
       const existing = getBlock(x, y, z);
-      if (existing !== B.AIR && existing !== B.WATER) return false;
+      if (existing !== B.AIR && existing !== B.WATER) { vfLastPlaceReason = 'occupied'; return false; }
       const d = Math.hypot(x + 0.5 - ent.pos.x, y + 0.5 - (ent.pos.y + ent.eye), z + 0.5 - ent.pos.z);
-      if (d > REACH) return false;
-      if (blockIntersectsAnyEntity(x, y, z)) return false;
-      if (!setBlock(x, y, z, id, true)) return false;
+      if (d > REACH) { vfLastPlaceReason = 'out_of_reach'; return false; }
+      if (blockIntersectsAnyEntity(x, y, z)) { vfLastPlaceReason = 'intersects'; return false; }
+      if (!setBlock(x, y, z, id, true)) { vfLastPlaceReason = 'not_loaded'; return false; }
       this.lookAt({ x: x + 0.5, y: y + 0.5, z: z + 0.5 });
       spawnParticles(x, y, z, BLOCK_COLORS[id] || 0xffffff, 8);
       playSound('place');
@@ -6551,6 +6913,7 @@ function vfUpdateBot(bot, dt) {
       bot.path = null;
       bot.gotoTarget = null;
       bot.clearControlStates();
+      vfGotoResult(bot, 'gave_up'); // ACTION-RESULT FEEDBACK (cycle-1): no-op unless _gotoRec armed
     } else if (bot.path && bot.path.length) {
       const wp = bot.path[0];
       const cx = wp.x + 0.5, cz = wp.z + 0.5;
@@ -6603,6 +6966,7 @@ function vfTick(dt) {
       bot.ent.vel.x = 0; bot.ent.vel.y = 0; bot.ent.vel.z = 0;
       bot.stop();
       voxEvent('bot-status', { name: bot.name, status: 'void-rescued', note: 'fell out of the loaded world; teleported back to spawn' }); // VOX hook
+      vfPushAction(bot, { event: 'void_rescued' }); // ACTION-RESULT FEEDBACK (cycle-1): drained into obs.lastActions
     }
   }
   // NEIGHBORHOOD: broadcast bot positions on the existing "pos" stream, flagged as bots
@@ -6788,13 +7152,15 @@ function vfExecuteOp(bot, a) {
       // WAYPOINT NAV: {op:'goto', waypoint:'home'} resolves a named coord from bot.memory;
       // a missing name chats 'no such waypoint' rather than silently failing. Otherwise the
       // existing {x,y,z} A* goto is unchanged (the same chunk-fenced path; no new physics).
+      // ACTION-RESULT FEEDBACK (cycle-1): the COMMAND/operator-form goto records its outcome
+      // (pending -> reached/gave_up/no_path) via vfCommandGoto. The A* path itself is unchanged.
       if (typeof a.waypoint === 'string') {
         const wp = bot.memory && bot.memory.waypoints && bot.memory.waypoints[a.waypoint];
-        if (wp) { bot.behavior = null; bot.goto({ x: wp.x, y: wp.y, z: wp.z }); }
+        if (wp) { bot.behavior = null; vfCommandGoto(bot, wp.x, wp.y, wp.z); }
         else bot.chat('no such waypoint: ' + a.waypoint.slice(0, 32));
       } else if (Number.isFinite(a.x) && Number.isFinite(a.z)) {
         bot.behavior = null;
-        bot.goto({ x: a.x, y: a.y, z: a.z });
+        vfCommandGoto(bot, a.x, a.y, a.z); // y may be non-finite; bot.goto derives the ground y
       }
       break;
     case 'remember':
@@ -6845,12 +7211,19 @@ function vfExecuteOp(bot, a) {
         bot.chat('no ' + BLOCK_NAMES[fid] + ' within ' + maxD);
       }
       voxEvent('find', { name: bot.name, block: BLOCK_NAMES[fid], count: hits.length });
+      vfPushAction(bot, { op: 'find', block: BLOCK_NAMES[fid], count: hits.length }); // ACTION-RESULT FEEDBACK (cycle-1)
       break;
     }
     case 'dig': vfDigSmart(bot, a); break;
     case 'place':
+      // ACTION-RESULT FEEDBACK (cycle-1): record the REAL outcome. placeBlock returns a bare
+      // boolean (unchanged) and writes the 1-word cause to vfLastPlaceReason; read it right
+      // after the synchronous call (read-once discipline). Coords integer-rounded.
       if (Number.isFinite(a.x) && Number.isFinite(a.y) && Number.isFinite(a.z)) {
-        bot.placeBlock({ x: a.x, y: a.y, z: a.z }, a.blockId);
+        const px = Math.round(a.x), py = Math.round(a.y), pz = Math.round(a.z);
+        const placed = bot.placeBlock({ x: a.x, y: a.y, z: a.z }, a.blockId);
+        if (placed) vfPushAction(bot, { op: 'place', x: px, y: py, z: pz, ok: true });
+        else vfPushAction(bot, { op: 'place', x: px, y: py, z: pz, ok: false, reason: vfLastPlaceReason || 'failed' });
       }
       break;
     case 'chat':
@@ -6875,7 +7248,10 @@ function vfDigSmart(bot, a) {
   const t = { x: Math.floor(a.x), y: Math.floor(a.y), z: Math.floor(a.z) };
   if (bot.dig(t)) return;
   if (!isSolid(getBlock(t.x, t.y, t.z))) return;
-  // out of reach: walk over, then dig once on arrival
+  // out of reach: walk over, then dig once on arrival. This internal walk SUPERSEDES any
+  // pending command-goto, so drop that goto's stale arrive listener first (cycle-1) — otherwise
+  // its listener would mis-flip the superseded goto's record to 'reached' when this walk lands.
+  vfCancelGoto(bot);
   const onArrive = () => { bot.dig(t); };
   bot.once('goal_reached', onArrive);
   if (!bot.goto({ x: t.x + 0.5, y: t.y, z: t.z + 0.5 })) bot.off('goal_reached', onArrive);
@@ -7171,7 +7547,15 @@ function vfObservation(bot) {
     blocksAhead,    // backward-compat / DEPRECATED (see note above; kept this cycle)
     recentChat: vfRecentChat.slice(-5),
     worldSeed,      // re-emitted (vox('seed') exists separately); left in per spec — do NOT remove
-    timeOfDay: Math.round(((worldTime / DAY_LEN) % 1) * 100) / 100
+    timeOfDay: Math.round(((worldTime / DAY_LEN) % 1) * 100) / 100,
+    // ACTION-RESULT FEEDBACK (cycle-1): DRAIN-ON-READ the RAM-only outcome ring so each dig/
+    // place/goto/find/void-rescue result is reported EXACTLY ONCE; a quiet turn reports []. The
+    // splice empties the log so the next obs starts fresh (documented: a manual vox('obs')
+    // between think turns also drains it, mirroring the cycle-4 obs note). Records are ints +
+    // short string literals only — CDP returnByValue-safe. STRICTLY ADDITIVE: every existing
+    // key above is byte-identical. The network builder (vfNetworkObs) trims this AFTER
+    // recentChat/notable so VF_OBS_BUDGET still holds.
+    lastActions: Array.isArray(bot._actionLog) ? bot._actionLog.splice(0) : []
   };
 }
 
@@ -7224,6 +7608,11 @@ function vfNetworkObs(bot) {
   const over = () => JSON.stringify(obs).length > VF_OBS_BUDGET;
   if (over() && Array.isArray(obs.recentChat) && obs.recentChat.length > 3) { obs.recentChat = obs.recentChat.slice(-3); trimmed = true; }
   if (over() && Array.isArray(obs.notable) && obs.notable.length > 3) { obs.notable = obs.notable.slice(0, 3); trimmed = true; }
+  // ACTION-RESULT FEEDBACK (cycle-1): trim lastActions AFTER recentChat/notable, in the fixed
+  // order, keeping the MOST RECENT outcomes (slice(-6)) so VF_OBS_BUDGET still holds in a busy
+  // scene. Each record is tiny (ints + short string literals); cap 12 keeps it bounded even
+  // before this trim. The obs has already drained the ring, so this only shrinks the wire copy.
+  if (over() && Array.isArray(obs.lastActions) && obs.lastActions.length > 6) { obs.lastActions = obs.lastActions.slice(-6); trimmed = true; }
   if (over() && Array.isArray(obs.nearbyPlayers) && obs.nearbyPlayers.length > 3) { obs.nearbyPlayers = obs.nearbyPlayers.slice(0, 3); trimmed = true; }
   if (over() && Array.isArray(obs.nearbyBots) && obs.nearbyBots.length > 3) { obs.nearbyBots = obs.nearbyBots.slice(0, 3); trimmed = true; }
   if (over() && Array.isArray(obs.pings) && obs.pings.length > 2) { obs.pings = obs.pings.slice(0, 2); trimmed = true; }
@@ -7275,6 +7664,7 @@ async function vfTwinThink(twin) {
     'You are playing a Minecraft-like voxel game as character ' + twin.name + '. ' +
     'Observation: ' + JSON.stringify(obs) + '. ' +
     'Your observation.memory persists across sessions — reuse facts and waypoints instead of re-deriving them. ' +
+    'observation.lastActions reports whether your previous ops succeeded (ok/reason/result) — do not blindly repeat a failed action. ' +
     'Before digging blind, look at the underground: an operator can run the "cave" console command for a depth-collapsed cave/ore overview (# cave, c/i/o = coal/iron/gold), and you can {"op":"find","block":"Iron Ore"} to locate the nearest ore. ' +
     'Reply ONLY with a JSON array of actions, e.g. ' +
     '[{"op":"goto","x":1,"y":40,"z":2},{"op":"goto","waypoint":"home"},{"op":"dig","x":0,"y":39,"z":2},' +
@@ -7319,7 +7709,11 @@ async function vfTwinThink(twin) {
     // within ~12 blocks in the freshly built obs. Failure backoff (the catch above)
     // is untouched and takes precedence — this branch only runs on a successful turn.
     const executed = !!(actions && actions.length);
-    const salient = executed ||
+    // ACTION-RESULT FEEDBACK (cycle-1): a turn whose obs carried any op outcome (the prior
+    // turn's dig/place/goto/find/void-rescue, drained into obs.lastActions) is salient — so a
+    // twin that just learned a result thinks at full cadence next turn instead of backing off.
+    const gotResult = Array.isArray(obs.lastActions) && obs.lastActions.length > 0;
+    const salient = executed || gotResult ||
       vfChatSeq !== twin._lastChatSeq ||
       nbPingSeq !== twin._lastPingSeq ||
       vfObsHasNearby(obs, 12);
@@ -7521,12 +7915,19 @@ nbRegisterOp('pos', (p, env, fromEntry, sealed) => {
 // extend 'bye': a departing neighbor takes their twins and claims with them
 const vfBaseByeHandler = Neighborhood.opHandlers['bye'];
 nbRegisterOp('bye', (p, env, fromEntry, sealed) => {
-  if (p && p.rappid) {
+  // CYCLE-1 SECURITY FIX: same authorization as the base handler — a wire-received bye on
+  // the HOST (fromEntry present) declaims/derobots ONLY the sender's own id (env.from_rappid),
+  // never the spoofable p.rappid. A forged leaf->host bye{rappid:victim} can no longer delete
+  // a victim's remote-bot visuals or steal their bot claims (which would let a follow-up
+  // bot-claim complete full claim theft). On the JOINER (fromEntry null), the host vouches
+  // for the departed peer via p.rappid, so legitimate departures still clean up correctly.
+  const target = (fromEntry && env && env.from_rappid) ? env.from_rappid : (p && p.rappid);
+  if (target) {
     for (const k of [...vfRemoteBots.keys()]) {
-      if (k.indexOf(p.rappid + '/') === 0) vfRemoveRemoteBot(k);
+      if (k.indexOf(target + '/') === 0) vfRemoveRemoteBot(k);
     }
     for (const [bn, holder] of [...vfClaims]) {
-      if (holder === p.rappid) vfClaims.delete(bn);
+      if (holder === target) vfClaims.delete(bn);
     }
   }
   if (vfBaseByeHandler) vfBaseByeHandler(p, env, fromEntry, sealed);
@@ -8249,7 +8650,11 @@ function voxCmdGoto(x, y, z) {
   x = Number(x); y = Number(y); z = Number(z);
   if (!Number.isFinite(x) || !Number.isFinite(z)) return { ok: false, error: 'usage: goto x y z' };
   b.behavior = null;
-  const found = b.goto({ x, y, z: z });
+  // ACTION-RESULT FEEDBACK (cycle-1): route through vfCommandGoto so the outcome (pending ->
+  // reached/gave_up/no_path) also lands in the twin's obs.lastActions (a 'become' operator can
+  // see it via vox('obs')); the immediate return shape is unchanged (found = had a path OR
+  // already there, exactly as the old bot.goto boolean).
+  const found = vfCommandGoto(b, x, y, z);
   return found
     ? { ok: true, subject: b.name, target: { x, y: Number.isFinite(y) ? y : null, z }, note: 'pathing (A* — 1-up jumps, <=3-down falls; goal_reached fires on arrival)' }
     : { ok: false, error: 'no path found within budget — try a nearer target' };
@@ -8832,6 +9237,7 @@ function main() {
   ui.chkCameraMotion.checked = cameraMotion;
   ui.chkWaterMotion.checked = waterMotion; // living water (cycle-1)
   ui.chkShowHand.checked = showHand; // first-person hand (cycle-10)
+  ui.chkShowCompass.checked = showCompass; // presence compass (cycle-1)
   ui.chkHaptics.checked = hapticsOn;
   if (IS_TOUCH) ui.rowHaptics.classList.remove('hidden'); // Haptics setting is touch-only
   // TOUCH COMFORT (cycle-9): joystick row is touch-only (mirrors #rowHaptics);
@@ -8966,6 +9372,7 @@ function main() {
     const dayFrac = updateEnvironment(dt);
     updateParticles(dt);
     nbTick(dt); // NEIGHBORHOOD: avatar lerp + throttled pos broadcast
+    nbCompassTick(dt); // PRESENCE COMPASS (cycle-1): ~4Hz off-screen neighbor bearings (gated)
     nbPingTick(); // PING: expire waypoint markers (runs solo too — local markers)
     vfTick(dt); // VOXELFLAYER: path following, walk bob, twin pos stream, remote twins
     if (coachState) coachTick(); // ONBOARD: O(1) step poll
