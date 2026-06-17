@@ -436,7 +436,8 @@ the string IS the transport; Claude is the canonical string-holder)
   vox('help') lists every command; every command is also a direct method (vox.observe(),
   vox.act([...]), vox.kite(), ...) and returns JSON-serializable data (CDP returnByValue-safe).
   Highlights: become &lt;name&gt; (BE your own kited twin) &middot; obs / act (the same observation +
-  action schema as brainstem twins) &middot; map &middot; kite / join / unkite &middot; hatch &middot; events &middot;
+  action schema as brainstem twins) &middot; map &middot; cave (depth-collapsed cave/ore overview —
+  look before you dig) &middot; find &lt;block&gt; &middot; kite / join / unkite &middot; hatch &middot; events &middot;
   headless on|off &middot; save / export / import. The backquote (`) terminal feeds the same CLI.
   Headless bootstrap (this one command line is a full autonomous neighbor):
     chrome --headless=new --remote-debugging-port=9222 \
@@ -469,6 +470,9 @@ the string IS the transport; Claude is the canonical string-holder)
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkCameraMotion" checked> Camera motion <span class="small">(view-bob, landing dip, jump lift)</span></label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="chkWaterMotion" checked> Living water <span class="small">(surface shimmer, depth-tinted underwater)</span></label>
     </div>
     <div class="row">
       <label><input type="checkbox" id="chkShowHand" checked> First-person hand <span class="small">(held block + swing animation)</span></label>
@@ -523,7 +527,7 @@ the string IS the transport; Claude is the canonical string-holder)
         <input id="nbJoinInput" type="text" placeholder="Paste a kite link (&hellip;?join=&hellip;#k=&hellip;)" autocomplete="off">
         <button id="btnJoinGo">Join</button>
       </div>
-      <p class="small">Scan-to-Join: scan the host's QR code or open their kite link. The channel secret rides in the link fragment (<code>#k=</code>) so it never touches any server.</p>
+      <p class="small">Scan-to-Join: scan the host's QR code or open their kite link. The channel secret rides in the link fragment (<code>#k=</code>) so it stays off the wire, and it's stripped from your URL the instant you join.</p>
     </div>
 
     <div id="nbKited" class="hidden">
@@ -2583,6 +2587,55 @@ function isInWater() { return entInWater(player); }
 function cameraInWater() {
   return getBlock(Math.floor(player.pos.x), Math.floor(player.pos.y + player.eye), Math.floor(player.pos.z)) === B.WATER;
 }
+
+// LIVING WATER (cycle-1): three coordinated, pure-presentation touches. Called from the
+// gameTick render block ONLY when !voxHeadless && !document.hidden — so headless/hidden tabs
+// do zero water work. Also no-ops cleanly when waterMotion is off OR the atlas clone failed
+// (waterTex === null), restoring byte-identical static water. Touches ONLY material/texture
+// properties + the #underwater overlay style — never a chunk mesh transform (chunk meshes are
+// matrixAutoUpdate=false per cycle-8) and never any save/wire/observation/bot state.
+function updateWater(dt) {
+  if (!waterMotion || !waterTex || !waterMat) {
+    // setting off (or clone failed): keep water byte-identical to the original static slab.
+    if (waterMat && waterMat.opacity !== WATER_BASE_OPACITY) waterMat.opacity = WATER_BASE_OPACITY;
+    if (waterTex && (waterTex.offset.x !== 0 || waterTex.offset.y !== 0)) waterTex.offset.set(0, 0);
+    // restore the static overlay color (in case a previous depth-tint left a stale value)
+    if (ui && ui.underwater && ui.underwater.style.background) ui.underwater.style.background = '';
+    return;
+  }
+  waterAnimT += dt;
+  // (1) SURFACE SHIMMER — sub-tile UV scroll. The baked water UVs already sit at the
+  //     half-texel inset (ATLAS_PAD), so the gap from a baked edge to the cell boundary is
+  //     exactly ATLAS_PAD/ATLAS_COLS (= one texel). Keep BOTH offsets a bounded oscillation
+  //     UNDER that gap so the sample never crosses into a neighbor cell (the old x-ramp
+  //     `(waterAnimT*0.012)%(1/ATLAS_COLS)` swept a FULL tile width and bled into the crack/ore
+  //     tiles; the old y amplitude 0.006 also exceeded the gap). With NearestFilter the motion
+  //     is intentionally subtle — staying strictly inside the single 32px water cell.
+  const shimmerAmp = (ATLAS_PAD * 0.8) / ATLAS_COLS; // ~0.0016 < one-texel gap (0.00195)
+  waterTex.offset.x = Math.sin(waterAnimT * 0.5) * shimmerAmp;
+  waterTex.offset.y = Math.sin(waterAnimT * 0.6) * shimmerAmp;
+  // (2) OPACITY BREATHE — one material write/frame, ~0.62..0.74 around the base 0.7.
+  waterMat.opacity = WATER_BASE_OPACITY - 0.02 + Math.sin(waterAnimT * 0.8) * 0.06;
+  // (3) DEPTH-TINTED UNDERWATER OVERLAY — only while the camera eye is in water, updated at
+  //     ~4Hz (not per frame) for cheapness. Deeper = darker/bluer; plus a slow breathe.
+  waterUWAcc += dt;
+  if (waterUWAcc >= 0.25 && ui && ui.underwater) {
+    waterUWAcc = 0;
+    if (cameraInWater()) {
+      // water surface is the global sea plane at y=SEA; depth = how far the eye sits below it.
+      const eyeY = player.pos.y + player.eye;
+      const depth = Math.max(0, Math.min(12, (SEA + 1) - eyeY)); // 0..12 blocks below surface
+      const breathe = Math.sin(waterAnimT * 0.9) * 0.02;          // slow ~ a few-second breathe
+      const op = Math.max(0.30, Math.min(0.55, 0.30 + (depth / 12) * 0.25 + breathe));
+      // deeper also reads a touch bluer/darker — nudge the rgb with depth, keep it subtle.
+      const tt = depth / 12;
+      const rr = Math.round(22 - tt * 8);   // 22 -> 14
+      const gg = Math.round(58 - tt * 18);  // 58 -> 40
+      const bb = Math.round(148 - tt * 18); // 148 -> 130
+      ui.underwater.style.background = 'rgba(' + rr + ',' + gg + ',' + bb + ',' + op.toFixed(3) + ')';
+    }
+  }
+}
 function physicsReady() {
   return chunks.has(chunkKey(playerChunkX(), playerChunkZ()));
 }
@@ -2881,6 +2934,22 @@ let _hlAccent = null, _hlHot = null;
 let trauma = 0;                      // accumulated shake energy, clamped to 1
 let shakeT = 0;                      // deterministic shake phase (advanced by dt*22)
 function addTrauma(a) { trauma = Math.min(1, trauma + a); }
+
+// LIVING WATER (cycle-1): pure-presentation water feel — a sub-tile UV-scroll shimmer +
+// gentle opacity breathe on the water material, plus a depth-tinted underwater overlay.
+// CRITICAL: the shimmer animates a CLONE of the atlas texture (waterTex, built at material
+// time) — NEVER the shared atlasTexture (solidMat + crack overlay + hand viewmodel all read
+// the shared one, so scrolling it would smear every terrain face). waterMotion defaults to
+// the current cameraMotion value (so prefers-reduced-motion users opt out for free) and rides
+// the settings blob with the same typeof guard as cameraMotion/autoQuality/haptics. When off,
+// waterTex.offset stays (0,0), waterMat.opacity stays 0.7 and #underwater keeps its static
+// value — byte-identical to before. All per-frame writes are gated !voxHeadless && !document.hidden.
+let waterMotion = true;              // 'Living water' setting (shimmer + breathe + depth tint)
+let waterAnimT = 0;                  // water animation phase (advanced by dt in gameTick)
+let waterTex = null;                 // cloned atlas texture owned by waterMat (null on clone failure)
+let waterUWAcc = 0;                  // ~4Hz accumulator for the underwater-overlay depth update
+const WATER_BASE_OPACITY = 0.7;      // matches waterMat's construction opacity
+
 let bobPhase = 0;
 let wasOnGround = false;             // landing-dip edge detector
 let prevVelY = 0;                    // pre-land vertical speed (impact magnitude)
@@ -3145,7 +3214,7 @@ function grabDom() {
   ['gl', 'loading', 'loadingMsg', 'loadingSpinner', 'lockHint', 'crosshair', 'hotbar', 'debugHud',
    'topBar', 'btnDebugTop', 'btnHelpTop', 'btnSettings', 'touchUI', 'joyZone', 'joyKnob',
    'btnMode', 'btnPing', 'btnJump', 'btnDown', 'helpOverlay', 'btnCloseHelp', 'settingsPanel', 'seedLabel',
-   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkShowHand', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
+   'renderDistInput', 'renderDistVal', 'chkSound', 'chkAutoQuality', 'chkCameraMotion', 'chkWaterMotion', 'chkShowHand', 'rowHaptics', 'chkHaptics', 'btnExport', 'btnImportBtn', 'importFile',
    'rowFixedJoy', 'chkFixedJoy', 'lookSensInput', 'lookSensVal', 'chkInvertY', // TOUCH COMFORT (cycle-9)
    'btnNewWorld', 'btnHelpFromSettings', 'btnCloseSettings', 'underwater', 'toast',
    'blockNameFlash', // SELECTION JUICE (cycle-1): center-bottom block-name flash
@@ -3686,6 +3755,14 @@ function initUiButtons() {
     if (!cameraMotion) { camFx.dy = 0; camFx.dx = 0; camFx.roll = 0; landDip = 0; landDipVel = 0; }
     saveSettings();
   });
+  // LIVING WATER (cycle-1): toggling off restores static water on the NEXT updateWater frame
+  // (offset->0, opacity->base, overlay style cleared); persists like cameraMotion.
+  ui.chkWaterMotion.addEventListener('change', () => {
+    waterMotion = ui.chkWaterMotion.checked;
+    if (!waterMotion && waterTex) { waterTex.offset.set(0, 0); if (waterMat) waterMat.opacity = WATER_BASE_OPACITY; }
+    if (!waterMotion && ui.underwater) ui.underwater.style.background = '';
+    saveSettings();
+  });
   ui.chkHaptics.addEventListener('change', () => {
     hapticsOn = ui.chkHaptics.checked;
     saveSettings();
@@ -4091,7 +4168,7 @@ function saveSettings() {
   try {
     localStorage.setItem(SETTINGS_KEY, JSON.stringify({
       renderDistance: renderDist, sound: soundOn, autoQuality: autoQuality,
-      cameraMotion: cameraMotion, haptics: hapticsOn,
+      cameraMotion: cameraMotion, waterMotion: waterMotion, haptics: hapticsOn,
       fixedJoy: fixedJoy, lookSens: lookSens, invertY: invertY, // touch comfort (cycle-9)
       showHand: showHand // first-person hand viewmodel (cycle-10)
     }));
@@ -4103,13 +4180,15 @@ function loadSettings() {
   try {
     cameraMotion = !(typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
   } catch (e) { cameraMotion = true; }
+  waterMotion = cameraMotion; // LIVING WATER (cycle-1): defaults to cameraMotion (reduced-motion opts out for free)
   try {
     const s = JSON.parse(localStorage.getItem(SETTINGS_KEY) || 'null');
     if (s && typeof s === 'object') {
       if (Number.isFinite(s.renderDistance)) renderDist = Math.max(2, Math.min(8, s.renderDistance | 0));
       if (typeof s.sound === 'boolean') soundOn = s.sound;
       if (typeof s.autoQuality === 'boolean') autoQuality = s.autoQuality; // older blobs default by IS_TOUCH
-      if (typeof s.cameraMotion === 'boolean') cameraMotion = s.cameraMotion; // older blobs default ON / reduced-motion
+      if (typeof s.cameraMotion === 'boolean') { cameraMotion = s.cameraMotion; waterMotion = s.cameraMotion; } // older blobs default ON / reduced-motion; waterMotion inherits unless its own key overrides below
+      if (typeof s.waterMotion === 'boolean') waterMotion = s.waterMotion; // LIVING WATER (cycle-1): explicit key wins; older blobs (no key) inherit cameraMotion above
       if (typeof s.haptics === 'boolean') hapticsOn = s.haptics; // older blobs default ON for touch (IS_TOUCH)
       // TOUCH COMFORT (cycle-9): same typeof guards as autoQuality/cameraMotion/haptics so
       // old blobs fall back cleanly (floating stick, 1.0 sens, non-inverted).
@@ -4305,6 +4384,33 @@ const nbJoinParams = (() => {
     if (peerId && m) return { peerId, token: m[1], broker };
   } catch (e) { /* malformed URL — ignore */ }
   return null;
+})();
+
+// SECRET HYGIENE (cycle-1): the kite secret in '#k=<token>' is the BEARER credential for the
+// AES-GCM sealed channel — anyone holding it + the peerId can derive the key and decrypt/inject.
+// nbJoinParams above has already captured peerId/token/broker into its in-memory const (and the
+// auto-join + RETRY paths read THAT snapshot, never the URL), so we can now scrub the address
+// bar WITHOUT touching the variable. Runs ONCE here at module-eval, BEFORE main()/nbMaybeAutoJoin
+// renders or connects, so the secret never lingers in location.href / BFCache / history-sync /
+// a screenshot for the whole joined session (nbLeave's later replaceState becomes redundant on
+// this path but is harmless/idempotent). Gated on nbJoinParams != null: only a tab that arrived
+// via a join link is scrubbed — a HOST's own kite link (shown in the panel/QR) never has
+// ?join=/#k= in its own URL, so the host link is never affected. try/catch because replaceState
+// throws in exotic embeddings (mirrors nbLeave's guard).
+(function nbScrubJoinSecret() {
+  if (!nbJoinParams) return; // only join-link arrivals; host links untouched
+  try {
+    const u = new URL(location.href);
+    u.searchParams.delete('join'); // the peerId query param
+    u.searchParams.delete('b');    // the broker-index param
+    // strip the k= fragment but PRESERVE any other legitimate hash the page might use
+    let hash = (u.hash || '').replace(/^#/, '');
+    if (hash) {
+      hash = hash.split('&').filter((p) => !/^k=/.test(p)).join('&');
+    }
+    const clean = u.pathname + (u.search ? u.search : '') + (hash ? '#' + hash : '');
+    history.replaceState(null, '', clean);
+  } catch (e) { /* replaceState unavailable in this embedding — secret stays, no crash */ }
 })();
 
 // --- small codecs ------------------------------------------------------------
@@ -7169,6 +7275,7 @@ async function vfTwinThink(twin) {
     'You are playing a Minecraft-like voxel game as character ' + twin.name + '. ' +
     'Observation: ' + JSON.stringify(obs) + '. ' +
     'Your observation.memory persists across sessions — reuse facts and waypoints instead of re-deriving them. ' +
+    'Before digging blind, look at the underground: an operator can run the "cave" console command for a depth-collapsed cave/ore overview (# cave, c/i/o = coal/iron/gold), and you can {"op":"find","block":"Iron Ore"} to locate the nearest ore. ' +
     'Reply ONLY with a JSON array of actions, e.g. ' +
     '[{"op":"goto","x":1,"y":40,"z":2},{"op":"goto","waypoint":"home"},{"op":"dig","x":0,"y":39,"z":2},' +
     '{"op":"place","x":0,"y":40,"z":2,"blockId":3},{"op":"chat","text":"hi"},' +
@@ -7900,6 +8007,92 @@ function voxCmdMap(radius, ySlice) {
   return out;
 }
 
+// AUTO CAVE/ORE OVERVIEW (cycle-1): a SEPARATE command/handler from voxCmdMap — the
+// cycle-2/9/10 byte-identity guarantee for `vox map`'s non-slice text + return JSON is
+// load-bearing (fixed twice in cycle-9), so this never touches voxCmdMap, its CHARS table,
+// or its return shape. It depth-COLLAPSES the underground: for every (x,z) column it scans
+// y=2..SEA-2 and reduces the whole column to ONE composite glyph by priority —
+//   (1) any ore present  -> the cycle-9 slice ore glyph (c/i/o), deepest-priority so gold
+//       wins over iron over coal (reusing those glyphs means no new legend collision);
+//   (2) else a cave VOID (AIR below a solid cell, tracked via a descending sawSolid flag so
+//       an open surface column above a cave mouth doesn't falsely read as cave everywhere)
+//       -> '#' (deliberately NOT in the documented vox map legend);
+//   (3) else solid stone with no cave/ore -> '.';
+//   (4) else the column never reaches underground (deep ocean/void) -> ' '.
+// The subject mark ('P'/'T'/'B'/'N') follows voxCmdMap's convention. Read-only over resident
+// chunk.data — getBlock returns AIR for unloaded chunks, so this reflects ONLY loaded terrain
+// (documented in the help desc, exactly like vox map). Cost bound: (2r+1)^2 * (SEA-2) reads
+// (~101k at r=32) — fine for an on-demand operator command; each column scan breaks early
+// once BOTH a cave-void AND the deepest ore (gold) are found (the glyph can't upgrade further).
+function voxCmdCave(radius) {
+  if (!voxReady()) return voxNotReady('world still booting');
+  let r = parseInt(radius, 10);
+  if (!Number.isFinite(r)) r = 12;
+  r = Math.max(2, Math.min(32, r)); // SAME clamp as voxCmdMap (2..32)
+  const subj = voxBot();
+  const ent = subj ? subj.ent : player;
+  const cx = Math.floor(ent.pos.x), cz = Math.floor(ent.pos.z);
+  const yLo = 2, yHi = SEA - 2; // tight y-range per spec (keeps the read cost bounded)
+  let reads = 0;
+  const rows = [];
+  for (let z = cz - r; z <= cz + r; z++) {
+    const row = [];
+    for (let x = cx - r; x <= cx + r; x++) {
+      // descend the column collecting composite state
+      let bestOre = 0;     // 0 none, else deepest-priority ore id (gold > iron > coal)
+      let sawSolid = false; // a solid cell seen so far while descending
+      let cave = false;     // AIR follows a solid cell -> an enclosed/open cave void
+      let anySolid = false; // any solid (incl. ore) seen -> column reaches underground
+      for (let y = yHi; y >= yLo; y--) {
+        const id = getBlock(x, y, z);
+        reads++;
+        if (id === B.AIR) {
+          if (sawSolid) cave = true; // void UNDER a solid -> cave (not a surface gap)
+          continue;
+        }
+        // any non-air (incl. WATER) counts as a "solid above" for the cave test, so a
+        // water-floored cavern still reads as void; but only true stone/ore marks the
+        // column as reaching underground rock.
+        sawSolid = true;
+        if (id !== B.WATER) anySolid = true;
+        // deepest-priority ore: gold (10) beats iron (9) beats coal (8). Because we descend
+        // top->bottom, a deeper, higher-priority ore overwrites a shallower one.
+        if (id === B.GOLD_ORE) bestOre = B.GOLD_ORE;
+        else if (id === B.IRON_ORE && bestOre !== B.GOLD_ORE) bestOre = B.IRON_ORE;
+        else if (id === B.COAL_ORE && bestOre === 0) bestOre = B.COAL_ORE;
+        // early-out: cave-void + the deepest possible ore both found -> glyph can't improve
+        if (cave && bestOre === B.GOLD_ORE) break;
+      }
+      let ch;
+      if (bestOre === B.GOLD_ORE) ch = 'o';
+      else if (bestOre === B.IRON_ORE) ch = 'i';
+      else if (bestOre === B.COAL_ORE) ch = 'c';
+      else if (cave) ch = '#';
+      else if (anySolid) ch = '.';
+      else ch = ' ';
+      row.push(ch);
+    }
+    rows.push(row);
+  }
+  // entity marks follow voxCmdMap's convention; only marked within the scanned x/z footprint
+  const mark = (px, pz, mch) => {
+    const ix = Math.floor(px) - (cx - r), iz = Math.floor(pz) - (cz - r);
+    if (iz >= 0 && iz < rows.length && ix >= 0 && ix < rows[iz].length) rows[iz][ix] = mch;
+  };
+  for (const av of Neighborhood.avatars.values()) mark(av.cur.x, av.cur.z, 'N');
+  for (const rb of vfRemoteBots.values()) mark(rb.cur.x, rb.cur.z, 'B');
+  for (const b of vfBots) { if (b.name !== voxConsoleBotName) mark(b.ent.pos.x, b.ent.pos.z, 'B'); }
+  if (subj) mark(subj.ent.pos.x, subj.ent.pos.z, 'T');
+  mark(ent.pos.x, ent.pos.z, 'P'); // subject center, overwriting its glyph (last so it wins)
+  const cols = 2 * r + 1;
+  const text =
+    'cave @ (' + cx + ',' + cz + ') r=' + r + '  y=' + yLo + '..' + yHi +
+    '  north = -z (top), east = +x (right)\n' +
+    rows.map((rw) => rw.join('')).join('\n') + '\n' +
+    'legend: # cave  c coal  i iron  o gold  . rock  (space) void  P player  T twin  B bot  N neighbor';
+  return { ok: true, r, scanned: { cols: cols * cols, reads }, text };
+}
+
 function voxCmdTp(x, y, z, exact) {
   if (!voxReady()) return voxNotReady('world still booting');
   x = Number(x); y = Number(y); z = Number(z);
@@ -8325,6 +8518,7 @@ const VOX_COMMANDS = {
   status:    { usage: 'status', desc: 'seed/mode/fps/chunks/position/kite/twins/bots/headless', fn: voxCmdStatus },
   obs:       { usage: 'obs [name]', desc: 'observation JSON — same builder the brainstem twins use', fn: voxCmdObs },
   map:       { usage: 'map [radius=12] [y]', desc: 'ASCII top-down map around the subject; add a y for a horizontal slice (caves read as ".")', fn: voxCmdMap },
+  cave:      { usage: 'cave [r=12]', desc: 'depth-collapsed underground overview (# cave  c/i/o coal/iron/gold  . rock) for the resident chunks around the subject — a snapshot of loaded chunks; check it before digging (r<=32)', fn: voxCmdCave },
   tp:        { usage: 'tp x y z [exact]', desc: 'teleport the subject (console twin, else player); snaps out of solid blocks unless "exact"', fn: voxCmdTp },
   look:      { usage: 'look yaw pitch', desc: 'set view angles (radians)', fn: voxCmdLook },
   jump:      { usage: 'jump', desc: 'hop once', fn: voxCmdJump },
@@ -8581,11 +8775,30 @@ function main() {
   atlasTex.minFilter = THREE.NearestFilter;
   atlasTex.generateMipmaps = false;
   atlasTex.colorSpace = THREE.SRGBColorSpace;
-  atlasTexture = atlasTex; // shared by the hold-to-mine crack overlay
+  atlasTexture = atlasTex; // shared by the hold-to-mine crack overlay + hand viewmodel
   solidMat = new THREE.MeshLambertMaterial({ map: atlasTex });
   waterMat = new THREE.MeshLambertMaterial({
-    map: atlasTex, transparent: true, opacity: 0.7, depthWrite: false, side: THREE.DoubleSide
+    map: atlasTex, transparent: true, opacity: WATER_BASE_OPACITY, depthWrite: false, side: THREE.DoubleSide
   });
+  // LIVING WATER (cycle-1): clone the atlas ONCE for water so the shimmer can scroll its
+  // .offset without smearing every terrain face (solidMat/crack/hand keep the shared atlasTex).
+  // Copy the SAME sampler settings; on ANY failure fall back to the shared atlas and leave
+  // waterTex null so updateWater skips all three animations (static water exactly as today).
+  try {
+    const wt = atlasTex.clone();
+    wt.magFilter = THREE.NearestFilter;
+    wt.minFilter = THREE.NearestFilter;
+    wt.generateMipmaps = false;
+    wt.colorSpace = THREE.SRGBColorSpace;
+    // ClampToEdge (NOT Repeat): the shimmer offset is bounded under the half-texel inset so it
+    // never reaches a cell boundary; clamping ensures any residual sub-texel excursion samples
+    // the water cell edge rather than wrapping to arbitrary atlas tiles (crack/ore overlays).
+    wt.wrapS = THREE.ClampToEdgeWrapping;
+    wt.wrapT = THREE.ClampToEdgeWrapping;
+    wt.needsUpdate = true;
+    waterMat.map = wt;
+    waterTex = wt;
+  } catch (e) { waterTex = null; /* clone failed — water stays on the shared atlas, no animation */ }
 
   // block-target wireframe highlight
   highlightBox = new THREE.LineSegments(
@@ -8617,6 +8830,7 @@ function main() {
   ui.chkSound.checked = soundOn;
   ui.chkAutoQuality.checked = autoQuality;
   ui.chkCameraMotion.checked = cameraMotion;
+  ui.chkWaterMotion.checked = waterMotion; // living water (cycle-1)
   ui.chkShowHand.checked = showHand; // first-person hand (cycle-10)
   ui.chkHaptics.checked = hapticsOn;
   if (IS_TOUCH) ui.rowHaptics.classList.remove('hidden'); // Haptics setting is touch-only
@@ -8756,6 +8970,10 @@ function main() {
     vfTick(dt); // VOXELFLAYER: path following, walk bob, twin pos stream, remote twins
     if (coachState) coachTick(); // ONBOARD: O(1) step poll
     ui.underwater.classList.toggle('hidden', !cameraInWater());
+    // LIVING WATER (cycle-1): shimmer + opacity breathe + depth-tinted overlay. Gated so
+    // headless/hidden tabs do zero water work (and create no objects — the clone is built at
+    // material time, itself behind the non-headless scene init). No-ops when waterMotion is off.
+    if (!voxHeadless && !document.hidden) updateWater(dt);
 
     // fps + debug hud
     fpsFrames++;
