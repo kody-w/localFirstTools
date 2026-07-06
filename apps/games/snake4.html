@@ -652,7 +652,7 @@ function downloadTrophy(){ const url=captureTrophy(); if(!url) return; const a=d
 function shareLink(){
   const frag = Game.mode==='daily' ? 'daily' : ('seed='+(Game.seed!=null?Game.seed:(((Game.score*2654435761)>>>0)%1000000)));
   const url = location.origin+location.pathname+'#'+frag+'&s='+(Game.score|0);
-  try{ navigator.clipboard.writeText(url); toast('🔗 Challenge link copied'); }catch(_){ toast('🔗 '+url); }
+  try{ const r=navigator.clipboard && navigator.clipboard.writeText(url); if(r && r.catch) r.catch(()=>{}); toast('🔗 Challenge link copied'); }catch(_){ toast('🔗 '+url); }
   return url;
 }
 function parseHash(){
@@ -797,8 +797,11 @@ function chainSmash(x,z,dx,dz){
 
 
 // ── audio (tiny WebAudio blips, gesture-gated) ───────────────────────────
-let actx=null;
-function initAudio(){ try{ actx = actx || new (window.AudioContext||window.webkitAudioContext)(); }catch(_){}}
+let actx=null, master=null, musicGain=null, nextNoteTime=0, sched16=0;
+function initAudio(){ try{ if(!actx){ actx = new (window.AudioContext||window.webkitAudioContext)();
+  master = actx.createGain(); master.gain.value = 1; master.connect(actx.destination);
+  musicGain = actx.createGain(); musicGain.gain.value = 0.0001; musicGain.connect(master);
+} if(actx.state==='suspended'){ actx.resume&&actx.resume().catch(()=>{}); } }catch(_){}}
 function blip(freq, dur, type, vol){
   if(!actx || Game.muted) return; try{
     const o=actx.createOscillator(), g=actx.createGain();
@@ -814,6 +817,42 @@ const sEat=(combo)=>{ const c=Math.min(combo||1,6); const b=470+(c-1)*72;
 const sTurn=()=>blip(240,0.04,'square',0.06);
 const sDie=()=>{ blip(300,0.18,'sawtooth',0.18); setTimeout(()=>blip(180,0.28,'sawtooth',0.16),110); };
 
+// ── adaptive generative soundtrack (pure WebAudio, tempo↔speed, layers↔tension, scale↔day-night) ──
+const SCALES={ major:[0,2,4,5,7,9,11], minor:[0,2,3,5,7,8,10] };
+const mtof=(m)=>440*Math.pow(2,(m-69)/12);
+function startMusic(){ Game.music.playing=true; if(actx){ nextNoteTime=actx.currentTime+0.08; } sched16=0; }
+function noteOn(freq,t,dur,type,gain){ try{ const o=actx.createOscillator(), g=actx.createGain();
+  o.type=type; o.frequency.setValueAtTime(freq,t);
+  g.gain.setValueAtTime(0.0001,t); g.gain.linearRampToValueAtTime(gain,t+0.01); g.gain.exponentialRampToValueAtTime(0.0001,t+dur);
+  o.connect(g); g.connect(musicGain); o.start(t); o.stop(t+dur+0.02); }catch(_){}}
+function stepMusic(){
+  const M=Game.music; if(!M.playing) return;
+  const speedNorm=Math.max(0,Math.min(1,(180/Game.stepMs-1)/(180/Game.minStep-1)));
+  M.bpm = 84 + speedNorm*72;                                   // tempo tracks speed (84→156)
+  const tgt=Math.min(1, 0.15 + Game.combo*0.12 + Game.smash*0.3
+    + Math.min((Game.snake&&Game.snake.length||0)/40,1)*0.15
+    + Math.min((Game.pillars?Game.pillars.size:0)/42,1)*0.15);
+  M.tension += (tgt-M.tension)*0.06;                            // eased intensity
+  const night = 1 - Math.min(1,(Game.dayF||1)*1.4);
+  M.scaleName = night>0.5?'minor':'major'; M.root = night>0.5?45:48;   // dusk drops to A2 minor
+  const maxLayers = Game.reducedMotion?1:4;
+  M.layers = Math.min(maxLayers, M.tension>0.65?4:M.tension>0.5?3:M.tension>0.25?2:1);
+  if(!actx) return;                                            // no audio device: adaptive state still updated
+  const active = Game.running && !Game.paused && !Game.over && !Game.counting;
+  const vol = (Game.muted||!active) ? 0.0001 : (0.05 + M.tension*0.11);
+  if(musicGain) musicGain.gain.setTargetAtTime(vol, actx.currentTime, 0.08);
+  if(Game.muted||!active){ nextNoteTime=Math.max(nextNoteTime, actx.currentTime); return; }
+  const scale=SCALES[M.scaleName], spb=60/M.bpm/4;
+  while(nextNoteTime < actx.currentTime + 0.12){
+    const s=sched16%16;
+    if(s%4===0) noteOn(mtof(M.root-12+scale[0]), nextNoteTime, spb*3.6, 'triangle', 0.5);          // bass
+    if(M.layers>=2) noteOn(mtof(M.root+12+scale[(s*2)%scale.length]), nextNoteTime, spb*0.9, 'square', 0.13); // arp
+    if(M.layers>=3 && s%2===1) noteOn(5800+Math.random()*500, nextNoteTime, 0.02, 'square', 0.03);  // hat
+    if(M.layers>=4 && s===0) noteOn(mtof(M.root+scale[4]), nextNoteTime, spb*14, 'sawtooth', 0.05);  // pad
+    M.step=s; nextNoteTime+=spb; sched16++;
+  }
+}
+
 // ── game state ───────────────────────────────────────────────────────────
 const Game = {
   snake: [], prevSnake: [], dir:{x:1,z:0}, nextDir:{x:1,z:0}, dirQueue:[],
@@ -824,7 +863,8 @@ const Game = {
   counting:false, countUntil:0,
   timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random,
   rec:[], ghost:null, ghostIdx:0, deathCam:null, reducedMotion:false, muted:false,
-  pillars:new Map(), biomeGroup:null, biomeSectors:null, swallow:null
+  pillars:new Map(), biomeGroup:null, biomeSectors:null, swallow:null,
+  music:{ playing:false, bpm:84, tension:0, step:0, root:48, scaleName:'major', layers:1 }
 };
 function dailySeed(){ return Number(new Date().toISOString().slice(0,10).replace(/-/g,'')) || 1; }
 
@@ -1152,6 +1192,7 @@ function loop(now){
   frameCamera(dt);
   updateDayNight(dt);
   stepGhost(dt);
+  stepMusic();
   if(composer && !Game.reducedMotion) composer.render(); else if(renderer) renderer.render(scene, camera);
 }
 
@@ -1203,6 +1244,7 @@ function togglePause(){ if(!Game.running && !Game.over){ return; } if(Game.over)
 
 function startGame(){
   initAudio();
+  startMusic();
   Game.best = parseInt(localStorage.getItem('snake4-highscore')||'0',10)||0;
   Game.bestCombo = parseInt(localStorage.getItem('snake4-bestcombo')||'0',10)||0;
   document.getElementById('welcome').classList.add('hidden');
@@ -1257,7 +1299,7 @@ function boot(){
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
     window.snake4 = Game;
-    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE, biomeAt, buySkin, equipSkin, openShop, captureTrophy, shareLink, parseHash };
+    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE, biomeAt, buySkin, equipSkin, openShop, captureTrophy, shareLink, parseHash, stepMusic, startMusic };
   }catch(err){ showBootError(err); }
 }
 function wireToggles(){
