@@ -447,6 +447,7 @@ function buildWorld(){
   }
   floor.instanceMatrix.needsUpdate = true; if(floor.instanceColor) floor.instanceColor.needsUpdate = true;
   scene.add(floor);
+  floorMesh = floor;   // keep a ref so buildBiomeRing can reskin the arena floor per seed
 
   // brick border wall, 2 high, ring just outside the play area
   const stoneMat = new THREE.MeshLambertMaterial({ map:T.stone });
@@ -486,6 +487,9 @@ function buildWorld(){
 // ── seeded biome ring: forest / desert / snow sectors filling the fog annulus ──
 let biomeBaseMat=null;
 const BIOME_COLORS=[0x4a7c3a, 0xd9c18a, 0xe8eef5];   // 0 forest · 1 desert · 2 snow
+let floorMesh=null;
+const sectorOf=(wx,wz)=>{ let a=Math.atan2(wz,wx); if(a<0)a+=Math.PI*2; return Math.min(7,Math.floor(a/(Math.PI*2)*8)); };
+function biomeAt(x,z){ return Game.biomeSectors ? Game.biomeSectors[sectorOf(cellToWorld(x), cellToWorld(z))] : 0; }
 function disposeBiome(){
   if(Game.biomeGroup){ scene.remove(Game.biomeGroup);
     Game.biomeGroup.traverse(o=>{ if(o.isInstancedMesh && o.dispose) o.dispose(); });
@@ -511,6 +515,12 @@ function buildBiomeRing(seed){
   const eff=(seed>>>0)||0x5eed; const rng=mulberry32(eff);
   const sectors=[]; for(let s=0;s<8;s++) sectors.push(Math.floor(rng()*3));   // 8 seeded sector biomes (first draws → deterministic)
   Game.biomeSectors=sectors;
+  if(floorMesh){   // reskin the ARENA floor to the same sectors (subtle wash keeps the grass readable)
+    const fc=new THREE.Color(), white=new THREE.Color(0xffffff);
+    for(let x=0;x<N;x++) for(let z=0;z<N;z++){ const b=sectors[sectorOf(cellToWorld(x),cellToWorld(z))];
+      const chk=(x+z)%2===0?1.0:0.86; fc.set(BIOME_COLORS[b]).lerp(white,0.5).multiplyScalar(chk); floorMesh.setColorAt(x*N+z, fc); }
+    if(floorMesh.instanceColor) floorMesh.instanceColor.needsUpdate=true;
+  }
   const g=new THREE.Group(); Game.biomeGroup=g;
   const RING=7, outer=HALF+RING;
   const cells=[];
@@ -519,11 +529,11 @@ function buildBiomeRing(seed){
     const wx=cellToWorld(x), wz=cellToWorld(z); if(Math.hypot(wx,wz)>outer) continue;
     cells.push([x,z,wx,wz]);
   }
-  const sectorOf=(wx,wz)=>{ let a=Math.atan2(wz,wx); if(a<0)a+=Math.PI*2; return Math.min(7,Math.floor(a/(Math.PI*2)*8)); };
+  const sectorOf2=sectorOf;
   const inst=new THREE.InstancedMesh(CUBE, biomeBaseMat, cells.length); inst.receiveShadow=true;
   const m=new THREE.Matrix4(), col=new THREE.Color(); let i=0;
   for(const [x,z,wx,wz] of cells){
-    const b=sectors[sectorOf(wx,wz)];
+    const b=sectors[sectorOf2(wx,wz)];
     m.setPosition(wx,-0.5,wz); inst.setMatrixAt(i,m);
     const chk=((x+z)&1)?0.9:1.0; col.set(BIOME_COLORS[b]).multiplyScalar(chk); inst.setColorAt(i,col); i++;
   }
@@ -624,6 +634,16 @@ function dustRing(x,z){
 }
 function stepPillars(dt){
   for(const [k,p] of Game.pillars){
+    if(p.toppling){   // domino: tip over along the ram axis, sink, then remove
+      p.toppling.t += dt;
+      if(p.toppling.t > p.toppling.delay){
+        const dx=p.toppling.dx||0, dz=p.toppling.dz||0;
+        p.mesh.rotation.z += (-dx)*dt*5; p.mesh.rotation.x += (dz)*dt*5;
+        p.mesh.position.x += dx*dt*1.4; p.mesh.position.z += dz*dt*1.4; p.mesh.position.y -= dt*3.2;
+        if(p.mesh.position.y < -p.h-0.6){ scene.remove(p.mesh); Game.pillars.delete(k); }
+      }
+      continue;
+    }
     // arm once no snake segment sits on the cell
     if(!p.armed && !Game.snake.some(s=>s.x===p.x && s.z===p.z)) p.armed=true;
     if(p.decaying){
@@ -647,6 +667,27 @@ function smashPillar(x,z){
   if(!Game.reducedMotion){ shake=Math.max(shake,0.5); Game.hitStop=Math.max(Game.hitStop,42); }
   blip(120,0.16,'sawtooth',0.18); setTimeout(()=>blip(90,0.20,'sawtooth',0.15),60);
   toast('💥 SMASH!');
+  updateHUD();
+}
+function chainSmash(x,z,dx,dz){
+  // collect a contiguous line of armed pillars from the impact cell along the ram direction → domino them
+  const chain=[]; let cx=x, cz=z;
+  while(chain.length<12){ const p=Game.pillars.get(cx+','+cz); if(p && p.armed && !p.toppling){ chain.push(p); cx+=dx; cz+=dz; } else break; }
+  if(chain.length===0){ const p=Game.pillars.get(x+','+z); if(p) chain.push(p); }   // safety: smash at least the impact cell
+  Game.smash=0;
+  let i=0;
+  for(const p of chain){
+    p.armed=false;   // disarm immediately so the collapsing row is safe to drive through
+    if(!Game.reducedMotion){ p.toppling={ t:0, delay:i*0.05, dx, dz }; burst(p.x,p.z,0x9a9a9e); }
+    else { scene.remove(p.mesh); Game.pillars.delete(p.x+','+p.z); }
+    i++;
+  }
+  const n=chain.length;
+  Game.score += 25*n;
+  if(!Game.reducedMotion){ shake=Math.max(shake, 0.4+Math.min(0.5,n*0.08)); Game.hitStop=Math.max(Game.hitStop,42); }
+  blip(120,0.16,'sawtooth',0.18); setTimeout(()=>blip(90,0.20,'sawtooth',0.15),60);
+  if(n>=2) for(let k=1;k<Math.min(n,6);k++) setTimeout(()=>blip(150+k*45,0.09,'sawtooth',0.12), 55+k*55);
+  toast(n>=2 ? ('💥 ×'+n+' DOMINO!  +'+(25*n)) : '💥 SMASH!');
   updateHUD();
 }
 
@@ -679,7 +720,7 @@ const Game = {
   counting:false, countUntil:0,
   timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random,
   rec:[], ghost:null, ghostIdx:0, deathCam:null, reducedMotion:false, muted:false,
-  pillars:new Map(), biomeGroup:null, biomeSectors:null
+  pillars:new Map(), biomeGroup:null, biomeSectors:null, swallow:null
 };
 function dailySeed(){ return Number(new Date().toISOString().slice(0,10).replace(/-/g,'')) || 1; }
 
@@ -750,15 +791,18 @@ function bindTouch(){
 
 // ── stepping ─────────────────────────────────────────────────────────────
 function step(){
-  if(Game.dirQueue.length){ Game.dir = Game.dirQueue.shift(); }
   const head = Game.snake[0];
+  const onIce = biomeAt(head.x, head.z)===2;   // snow biome underfoot = ice
+  if(onIce && !Game._onIce) toast('🧊 ICE — no turning!');
+  Game._onIce = onIce;
+  if(Game.dirQueue.length && !onIce){ Game.dir = Game.dirQueue.shift(); }   // ice holds your queued turn — you slide straight
   const nh = { x:head.x+Game.dir.x, z:head.z+Game.dir.z };
 
   // wall
   if(nh.x<0 || nh.x>=N || nh.z<0 || nh.z>=N){ return die('Hit the wall'); }
   // maze pillar you sculpted (armed = you've vacated it)
   if(pillarArmedAt(nh.x, nh.z)){
-    if(Game.smash>=1){ smashPillar(nh.x, nh.z); }   // ram through your own wall with a charged smash
+    if(Game.smash>=1){ chainSmash(nh.x, nh.z, Game.dir.x, Game.dir.z); }   // charged ram → domino the row
     else { return die('Trapped in your maze'); }
   }
   // self (allow moving into current tail cell only if not growing — tail will vacate)
@@ -774,15 +818,17 @@ function step(){
     Game.combo = (nowT - Game.lastEatAt < Game.comboWindow) ? Game.combo+1 : 1;
     Game.lastEatAt = nowT;
     Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
+    const onSand = biomeAt(nh.x, nh.z)===1;   // desert biome drags: no smash charge + no speed-up this bite
     const _smashPrev = Game.smash;
-    Game.smash = Math.min(1, Game.smash + 0.10 + Game.combo*0.10);   // combos charge the smash meter
+    if(!onSand) Game.smash = Math.min(1, Game.smash + 0.10 + Game.combo*0.10);   // combos charge the smash meter
     const gain = 10 * Game.combo;
     Game.score += gain; Game.len = Game.snake.length;
-    Game.stepMs = Math.max(Game.minStep, Game.stepMs - 5);
+    if(!onSand) Game.stepMs = Math.max(Game.minStep, Game.stepMs - 5);
     spawnPillar(nh.x, nh.z, Math.min(Game.combo, 5));   // sculpt the maze at the eaten cell
     if(!Game._coached){ Game._coached=true; if(!localStorage.getItem('snake4-coached')){ try{localStorage.setItem('snake4-coached','1');}catch(_){}; showCoach(); } }
     placeFood(); burst(nh.x,nh.z, 0xe23a2c); sEat(Game.combo);
     Game.hitStop = Game.reducedMotion?0:55; Game.headPulse = Game.reducedMotion?0:1; if(!Game.reducedMotion) shake = Math.max(shake, 0.16);   // bite juice
+    if(!Game.reducedMotion) Game.swallow={ t:1, combo:Game.combo };   // peristalsis gulp travels head→tail
     toast(Game.combo>=2 ? ('+'+gain+'   ×'+Game.combo+' COMBO') : ('+'+gain));
     if(Game.smash>=1 && _smashPrev<1){ toast('💥 SMASH READY — ram your own walls!'); blip(660,0.10,'square',0.16); }
     publishScore(Game.score);
@@ -871,7 +917,14 @@ function syncMeshes(t){
       const nd = Game.dirQueue.length ? Game.dirQueue[0] : Game.dir;         // preview upcoming turn
       mesh.rotation.y = Math.atan2(nd.x, nd.z);
     } else {
-      mesh.scale.setScalar(Math.max(0.62, 0.92 - i*0.012));
+      let s = Math.max(0.62, 0.92 - i*0.012);
+      if(Game.swallow){   // gulp bulge sweeping down the body
+        const w=(1-Game.swallow.t)*Game.snake.length;
+        const bulge=Math.max(0, 1-Math.abs(i-w))*(0.22+Game.swallow.combo*0.05);
+        mesh.scale.set(s*(1+bulge), s*(1-bulge*0.6), s*(1+bulge));
+      } else {
+        mesh.scale.setScalar(s);
+      }
     }
   }
 }
@@ -983,6 +1036,7 @@ function loop(now){
   Game._prevNow = now;
   Game._frames = (Game._frames||0) + 1;
   Game.headPulse = Math.max(0, (Game.headPulse||0) - dt*4);
+  if(Game.swallow){ Game.swallow.t -= dt*2; if(Game.swallow.t<=0) Game.swallow=null; }   // decay the gulp wave
 
   stepParticles(dt);
   stepPillars(dt);
@@ -1081,7 +1135,7 @@ function boot(){
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
     window.snake4 = Game;
-    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE };
+    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE, biomeAt };
   }catch(err){ showBootError(err); }
 }
 function wireToggles(){
