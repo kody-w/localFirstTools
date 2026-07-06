@@ -138,6 +138,16 @@
   #flash.on{ animation:flashFade .26s ease-out; }
   @keyframes flashFade{ 0%{ opacity:0.5; } 100%{ opacity:0; } }
 
+  #board{ position:fixed; top:120px; right:16px; z-index:20; min-width:154px; text-align:right; font-size:12px;
+    background:rgba(8,14,22,0.5); border:1px solid rgba(255,255,255,0.08); border-radius:10px; padding:7px 10px;
+    backdrop-filter:blur(6px); display:none; }
+  #board.show{ display:block; }
+  #board .bt{ font-size:9px; letter-spacing:1.5px; color:#00bcd4; margin-bottom:5px; }
+  #board .br{ display:flex; justify-content:space-between; gap:12px; padding:1px 0; color:#c8ccd4; }
+  #board .br.me .bn, #board .br.me .bs{ color:var(--gold); font-weight:bold; }
+  #board .bs{ font-variant-numeric:tabular-nums; }
+  .btn.ghost{ background:rgba(255,255,255,0.08); color:#cfe0ff; border-bottom-color:rgba(0,0,0,0.3); margin-top:10px; }
+
   /* Mobile dpad */
   #pad{ position:fixed; bottom:20px; right:20px; z-index:30; display:none; grid-template-columns:repeat(3,54px);
     grid-template-rows:repeat(3,54px); gap:6px; }
@@ -174,6 +184,8 @@
   <div><span class="k">Time</span> <span class="v" id="timeVal">0s</span></div>
 </div>
 
+<div class="panel" id="board"></div>
+
 <div class="panel" id="hint">
   <b>Move</b> <kbd>W A S D</kbd> / <kbd>↑ ← ↓ →</kbd> / swipe &nbsp;·&nbsp; <b>Pause</b> <kbd>Space</kbd> &nbsp;·&nbsp; <b>Restart</b> <kbd>R</kbd> &nbsp;·&nbsp; <b>Camera</b> <kbd>C</kbd>
 </div>
@@ -197,6 +209,7 @@
     <p>🧱 Crash into a <span class="em">wall</span> or <span class="em">yourself</span> and it's over.</p>
     <p>⚡ Every apple makes you a little <span class="em">faster</span>.</p>
     <button class="btn" id="startBtn">▶ Play</button>
+    <button class="btn ghost" id="dailyBtn">🗓 Daily Challenge</button>
   </div>
 </div>
 
@@ -272,14 +285,51 @@ function buildTextures(){
 // ── scene ────────────────────────────────────────────────────────────────
 const container = document.getElementById('game');
 let renderer, scene, camera;
+let sun, hemi, skyCanvas, skyCtx, skyTex, starField, moonMesh;
+const CLIENT_ID = 's4-' + Math.random().toString(36).slice(2,8);
+const lerpHex=(a,b,t)=>{ const ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255,br=(b>>16)&255,bg=(b>>8)&255,bb=b&255;
+  return (((ar+(br-ar)*t)|0)<<16)|(((ag+(bg-ag)*t)|0)<<8)|((ab+(bb-ab)*t)|0); };
+const hexStr=(h)=>'#'+('000000'+((h>>>0).toString(16))).slice(-6);
 const SKY_TOP = 0x5aa0ee, SKY_BOT = 0xbfe6ff, FOG = 0xa9dbff;
 
 function skyTexture(){
-  const cnv=document.createElement('canvas'); cnv.width=8; cnv.height=256;
-  const ctx=cnv.getContext('2d'); const g=ctx.createLinearGradient(0,0,0,256);
-  g.addColorStop(0,'#4f97ea'); g.addColorStop(0.55,'#79b7ff'); g.addColorStop(1,'#c7e9ff');
-  ctx.fillStyle=g; ctx.fillRect(0,0,8,256);
-  const t=new THREE.CanvasTexture(cnv); t.colorSpace=THREE.SRGBColorSpace; return t;
+  skyCanvas=document.createElement('canvas'); skyCanvas.width=8; skyCanvas.height=256;
+  skyCtx=skyCanvas.getContext('2d');
+  skyTex=new THREE.CanvasTexture(skyCanvas); skyTex.colorSpace=THREE.SRGBColorSpace;
+  drawSky('#4f97ea','#79b7ff','#c7e9ff');
+  return skyTex;
+}
+function drawSky(top,mid,bot){
+  const g=skyCtx.createLinearGradient(0,0,0,256);
+  g.addColorStop(0,top); g.addColorStop(0.55,mid); g.addColorStop(1,bot);
+  skyCtx.fillStyle=g; skyCtx.fillRect(0,0,8,256); if(skyTex) skyTex.needsUpdate=true;
+}
+
+function buildSkyBodies(){
+  const R=N*3.2, cnt=260, pos=new Float32Array(cnt*3);
+  for(let i=0;i<cnt;i++){ const th=Math.random()*Math.PI*2, ph=Math.acos(2*Math.random()-1);
+    pos[i*3]=R*Math.sin(ph)*Math.cos(th); pos[i*3+1]=Math.abs(R*Math.cos(ph))*0.85+6; pos[i*3+2]=R*Math.sin(ph)*Math.sin(th); }
+  const g=new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(pos,3));
+  starField=new THREE.Points(g, new THREE.PointsMaterial({color:0xffffff,size:0.7,transparent:true,opacity:0,depthWrite:false,fog:false}));
+  scene.add(starField);
+  moonMesh=new THREE.Mesh(new THREE.SphereGeometry(2.2,14,14), new THREE.MeshBasicMaterial({color:0xdfe6ff,transparent:true,opacity:0,fog:false}));
+  scene.add(moonMesh);
+}
+function updateDayNight(dt){
+  Game.timeOfDay = (Game.timeOfDay + dt/(Game.dayLen||110)) % 1;
+  const ang = Game.timeOfDay*Math.PI*2, sh = Math.sin(ang);
+  const dayF = Math.max(0, Math.min(1, sh*1.15 + 0.35));
+  Game.dayF = dayF;
+  if(sun){ sun.intensity = 0.06 + dayF*1.15; sun.color.setHex(lerpHex(0x3b4a72, 0xfff3d8, dayF));
+    sun.position.set(Math.cos(ang)*N*1.1, Math.max(0.15, sh)*N*1.5, Math.sin(ang)*N*0.6 + N*0.3); }
+  if(hemi){ hemi.intensity = 0.18 + dayF*0.72; hemi.color.setHex(lerpHex(0x2a3350, 0xdff0ff, dayF)); }
+  if(scene && scene.fog){ scene.fog.color.setHex(lerpHex(0x0b1526, 0xa9dbff, dayF)); }
+  if(Math.abs(dayF-(Game._lastSkyF==null?-9:Game._lastSkyF))>0.004){ Game._lastSkyF=dayF;
+    drawSky(hexStr(lerpHex(0x0a1330,0x4f97ea,dayF)), hexStr(lerpHex(0x122048,0x79b7ff,dayF)), hexStr(lerpHex(0x243056,0xc7e9ff,dayF))); }
+  const night = 1-Math.min(1, dayF*1.5);
+  if(starField) starField.material.opacity = night;
+  if(moonMesh){ moonMesh.material.opacity = night*0.9;
+    moonMesh.position.set(-Math.cos(ang)*N*1.4, Math.max(-2, -sh)*N*1.3+3, -Math.sin(ang)*N*0.6+N*0.3); }
 }
 
 function initScene(){
@@ -295,14 +345,15 @@ function initScene(){
 
   camera = new THREE.PerspectiveCamera(52, window.innerWidth/window.innerHeight, 0.1, 400);
 
-  const hemi = new THREE.HemisphereLight(0xdff0ff, 0x5a7040, 0.85); scene.add(hemi);
-  const sun = new THREE.DirectionalLight(0xfff3d8, 1.15);
+  hemi = new THREE.HemisphereLight(0xdff0ff, 0x5a7040, 0.85); scene.add(hemi);
+  sun = new THREE.DirectionalLight(0xfff3d8, 1.15);
   sun.position.set(N*0.7, N*1.5, N*0.5); sun.castShadow = true;
   sun.shadow.mapSize.set(1024,1024);
   const s = N*0.9; const cam = sun.shadow.camera;
   cam.left=-s; cam.right=s; cam.top=s; cam.bottom=-s; cam.near=1; cam.far=N*4; cam.updateProjectionMatrix();
   sun.shadow.bias = -0.0008;
   scene.add(sun);
+  buildSkyBodies();
 
   window.addEventListener('resize', onResize);
 }
@@ -445,8 +496,10 @@ const Game = {
   food:{x:9,z:9}, score:0, best:0, len:3,
   running:false, paused:false, over:false, started:false,
   stepMs:180, minStep:82, sinceStep:0, startTime:0, camMode:0,
-  combo:0, bestCombo:0, lastEatAt:0, comboWindow:2600, hitStop:0, headPulse:0
+  combo:0, bestCombo:0, lastEatAt:0, comboWindow:2600, hitStop:0, headPulse:0,
+  timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random
 };
+function dailySeed(){ return Number(new Date().toISOString().slice(0,10).replace(/-/g,'')) || 1; }
 
 function resetState(){
   Game.snake = [{x:6,z:9},{x:5,z:9},{x:4,z:9}];
@@ -454,6 +507,8 @@ function resetState(){
   Game.dir={x:1,z:0}; Game.nextDir={x:1,z:0}; Game.dirQueue=[];
   Game.score=0; Game.len=3; Game.stepMs=180; Game.sinceStep=0; Game.over=false;
   Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0;
+  if(Game.mode==='daily'){ Game.seed=dailySeed(); Game.rng=mulberry32(Game.seed); }
+  else { Game.seed=null; Game.rng=Math.random; }
   Game.startTime = performance.now();
   placeFood();
   ensureSegments(Game.snake.length);
@@ -464,7 +519,7 @@ function resetState(){
 function placeFood(){
   const occ = new Set(Game.snake.map(s=>s.x+','+s.z));
   let x,z, guard=0;
-  do{ x=Math.floor(Math.random()*N); z=Math.floor(Math.random()*N); guard++; }
+  do{ x=Math.floor((Game.rng||Math.random)()*N); z=Math.floor((Game.rng||Math.random)()*N); guard++; }
   while(occ.has(x+','+z) && guard<500);
   Game.food={x,z};
 }
@@ -558,7 +613,43 @@ function die(reason){
 }
 
 function publishScore(score, final){
-  try{ if(window.bus) window.bus.publish('score', { game:'snake4', score:Number(score)||0, final:!!final, timestamp:Date.now() }); }catch(_){}
+  try{ if(window.bus) window.bus.publish('score', { game:'snake4', score:Number(score)||0, final:!!final, timestamp:Date.now(), client:CLIENT_ID, mode:Game.mode||'classic', seed:Game.seed||null }); }catch(_){}
+}
+
+// ── cross-app leaderboard (subscribes to the telepathy 'score' bus) ───────
+const Board = Object.create(null);
+let lastBeat = 0;
+const escB = (s)=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function ingestScore(p, src){
+  if(!p || typeof p.score!=='number') return false;
+  const key = (p.game||'?')+'@'+(p.client||src||'?');
+  const self = p.client===CLIENT_ID;
+  if(!Board[key] || p.score>Board[key].score){ Board[key] = {label:self?'you':(p.game||'peer'), score:p.score, self}; return true; }
+  return false;
+}
+function onScoreMsg(p, m){
+  try{
+    ingestScore(p, m && m.src); renderBoard();
+    if(p && p.client!==CLIENT_ID && typeof p.score==='number' && p.score>Math.max(Game.score,Game.best) && Date.now()-lastBeat>1500){
+      lastBeat=Date.now(); toast('⚡ '+(p.game||'rival')+' passed you · '+p.score); beatPulse();
+    }
+  }catch(_){}
+}
+function renderBoard(){
+  const el=document.getElementById('board'); if(!el) return;
+  const rows=Object.values(Board).sort((a,b)=>b.score-a.score).slice(0,6);
+  if(!rows.length){ el.classList.remove('show'); return; }
+  el.classList.add('show');
+  el.innerHTML='<div class="bt">◈ TELEPATHY BOARD</div>'+rows.map((r,i)=>
+    '<div class="br'+(r.self?' me':'')+'"><span class="bn">'+(i+1)+'. '+escB(r.label)+'</span><span class="bs">'+r.score+'</span></div>').join('');
+}
+function beatPulse(){ const el=document.getElementById('flash'); if(!el || Game.reducedMotion) return;
+  el.style.background='#ffd54a'; el.classList.remove('on'); void el.offsetWidth; el.classList.add('on'); setTimeout(()=>{ el.style.background=''; }, 300); }
+function initLeaderboard(){
+  try{ if(!window.bus) return;
+    for(const m of (window.bus.history('score',80)||[])){ if(m&&m.payload) ingestScore(m.payload, m.src); }
+    window.bus.subscribe('score', onScoreMsg); renderBoard();
+  }catch(_){}
 }
 
 // ── rendering / interpolation ────────────────────────────────────────────
@@ -609,7 +700,7 @@ function stepFood(time){
   foodStem.position.set(fx, 1.02+bob, fz);
   foodLeaf.position.set(fx+0.14, 1.02+bob, fz); foodLeaf.rotation.y = time*1.6;
   foodLight.position.set(fx, 1.4+bob, fz);
-  foodLight.intensity = 1.2 + Math.sin(time*4)*0.4;
+  foodLight.intensity = 1.2 + Math.sin(time*4)*0.4 + (1-(Game.dayF||1))*1.4;
 }
 
 // ── loop ─────────────────────────────────────────────────────────────────
@@ -637,6 +728,7 @@ function loop(now){
   stepFood(time);
   for(const c of clouds){ c.position.x += c.userData.spd*dt; if(c.position.x>N*2) c.position.x=-N*2; }
   frameCamera(dt);
+  updateDayNight(dt);
   if(renderer) renderer.render(scene, camera);
 }
 
@@ -665,6 +757,7 @@ function startGame(){
   document.getElementById('gameover').classList.add('hidden');
   resetState();
   Game.running=true; Game.paused=false; Game.started=true;
+  if(Game.mode==='daily') toast('🗓 Daily #'+Game.seed);
   Game._prevNow = performance.now();
 }
 function restart(){ document.getElementById('gameover').classList.add('hidden'); startGame(); }
@@ -684,8 +777,10 @@ function boot(){
     document.getElementById('boot').classList.add('hidden');
     document.addEventListener('keydown', handleKey);
     bindTouch();
-    document.getElementById('startBtn').addEventListener('click', startGame);
+    document.getElementById('startBtn').addEventListener('click', ()=>{ Game.mode='classic'; startGame(); });
+    const db=document.getElementById('dailyBtn'); if(db) db.addEventListener('click', ()=>{ Game.mode='daily'; startGame(); });
     document.getElementById('againBtn').addEventListener('click', restart);
+    initLeaderboard();
     Game.best = parseInt(localStorage.getItem('snake4-highscore')||'0',10)||0; updateHUD();
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
