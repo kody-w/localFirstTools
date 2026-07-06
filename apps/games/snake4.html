@@ -340,6 +340,8 @@ function updateDayNight(dt){
   if(moonMesh){ moonMesh.material.opacity = night*0.9;
     moonMesh.position.set(-Math.cos(ang)*N*1.4, Math.max(-2, -sh)*N*1.3+3, -Math.sin(ang)*N*0.6+N*0.3); }
   if(bloomPass) bloomPass.strength = 0.5 + night*0.85;   // skyline/apple glow harder at night
+  if(Game.pillars) for(const [,p] of Game.pillars){   // maze becomes a neon skyline after dark
+    const m=p.mesh.material; if(m && m.emissive){ m.emissive.setHex(p.h>=4?0x5a3fff:0x1f6fff); m.emissiveIntensity = night*(0.18+p.h*0.09); } }
 }
 
 function initScene(){
@@ -510,6 +512,57 @@ function stepParticles(dt){
     if(p.userData.life<=0){ scene.remove(p); particles.splice(i,1); } }
 }
 
+// ── Maze: the snake sculpts lethal voxel pillars where it eats ────────────
+// Each eaten apple erupts into a pillar (height = combo at that bite). A pillar
+// arms (becomes lethal) only once the whole snake has vacated its cell, so it
+// rises BEHIND you. A decay valve sinks the oldest once the maze gets dense,
+// so late runs never gridlock.
+let pillarMat=null; const PILLAR_CAP=42; let pillarOrder=0;
+function spawnPillar(x,z,h){
+  if(Game.pillars.has(x+','+z)) return;
+  if(!pillarMat) pillarMat=new THREE.MeshLambertMaterial({ map:T.stone, emissive:0x000000 });
+  const m=new THREE.Mesh(CUBE, pillarMat.clone());
+  m.castShadow=true; m.receiveShadow=true;
+  m.position.set(cellToWorld(x), h/2, cellToWorld(z));
+  m.scale.set(0.98, h, 0.98);
+  scene.add(m);
+  Game.pillars.set(x+','+z, { mesh:m, h, x, z, armed:false, order:pillarOrder++, targetY:h/2 });
+  if(!Game.reducedMotion){ m.position.y=-h; dustRing(x,z); shake=Math.max(shake,0.13); blip(84,0.13,'sine',0.13); }
+  else { m.position.y=h/2; }
+  // decay valve: sink+remove the oldest when the maze is dense
+  if(Game.pillars.size>PILLAR_CAP){
+    let oldestKey=null, oldest=Infinity;
+    for(const [k,p] of Game.pillars){ if(p.order<oldest){ oldest=p.order; oldestKey=k; } }
+    if(oldestKey){ const p=Game.pillars.get(oldestKey); p.decaying=true; }
+  }
+}
+function dustRing(x,z){
+  const cnt=Game.reducedMotion?0:12;
+  for(let k=0;k<cnt;k++){ const m=new THREE.Mesh(pGeo, new THREE.MeshLambertMaterial({color:0xbfa06a}));
+    m.position.set(cellToWorld(x),0.15,cellToWorld(z));
+    const a=Math.random()*Math.PI*2, sp=1.6+Math.random()*1.8;
+    m.userData.v=new THREE.Vector3(Math.cos(a)*sp, 0.4+Math.random()*0.8, Math.sin(a)*sp);
+    m.userData.life=0.4+Math.random()*0.2; scene.add(m); particles.push(m); }
+}
+function stepPillars(dt){
+  for(const [k,p] of Game.pillars){
+    // arm once no snake segment sits on the cell
+    if(!p.armed && !Game.snake.some(s=>s.x===p.x && s.z===p.z)) p.armed=true;
+    if(p.decaying){
+      p.mesh.position.y -= dt*6; p.mesh.scale.y=Math.max(0.02, p.mesh.scale.y-dt*8);
+      if(p.mesh.position.y < -p.h){ scene.remove(p.mesh); Game.pillars.delete(k); }
+    } else if(!Game.reducedMotion && p.mesh.position.y < p.targetY-0.01){
+      p.mesh.position.y += (p.targetY - p.mesh.position.y) * Math.min(1, dt*9); // ease-up
+    }
+  }
+}
+function clearPillars(){
+  if(Game.pillars) for(const [,p] of Game.pillars) scene.remove(p.mesh);
+  Game.pillars = new Map(); pillarOrder=0;
+}
+function pillarArmedAt(x,z){ const p=Game.pillars.get(x+','+z); return p && p.armed; }
+
+
 // ── audio (tiny WebAudio blips, gesture-gated) ───────────────────────────
 let actx=null;
 function initAudio(){ try{ actx = actx || new (window.AudioContext||window.webkitAudioContext)(); }catch(_){}}
@@ -536,7 +589,8 @@ const Game = {
   stepMs:180, minStep:82, sinceStep:0, startTime:0, camMode:0,
   combo:0, bestCombo:0, lastEatAt:0, comboWindow:2600, hitStop:0, headPulse:0,
   timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random,
-  rec:[], ghost:null, ghostIdx:0, deathCam:null, reducedMotion:false, muted:false
+  rec:[], ghost:null, ghostIdx:0, deathCam:null, reducedMotion:false, muted:false,
+  pillars:new Map()
 };
 function dailySeed(){ return Number(new Date().toISOString().slice(0,10).replace(/-/g,'')) || 1; }
 
@@ -546,7 +600,7 @@ function resetState(){
   Game.dir={x:1,z:0}; Game.nextDir={x:1,z:0}; Game.dirQueue=[];
   Game.score=0; Game.len=3; Game.stepMs=180; Game.sinceStep=0; Game.over=false;
   Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0; Game.deathCam=null;
-  Game.rec=[]; loadGhost();
+  Game.rec=[]; loadGhost(); clearPillars();
   if(Game.mode==='daily'){ Game.seed=dailySeed(); Game.rng=mulberry32(Game.seed); }
   else { Game.seed=null; Game.rng=Math.random; }
   Game.startTime = performance.now();
@@ -558,6 +612,7 @@ function resetState(){
 
 function placeFood(){
   const occ = new Set(Game.snake.map(s=>s.x+','+s.z));
+  if(Game.pillars) for(const [k] of Game.pillars) occ.add(k);
   let x,z, guard=0;
   do{ x=Math.floor((Game.rng||Math.random)()*N); z=Math.floor((Game.rng||Math.random)()*N); guard++; }
   while(occ.has(x+','+z) && guard<500);
@@ -611,6 +666,8 @@ function step(){
 
   // wall
   if(nh.x<0 || nh.x>=N || nh.z<0 || nh.z>=N){ return die('Hit the wall'); }
+  // maze pillar you sculpted (armed = you've vacated it)
+  if(pillarArmedAt(nh.x, nh.z)){ return die('Trapped in your maze'); }
   // self (allow moving into current tail cell only if not growing — tail will vacate)
   const willGrow = (nh.x===Game.food.x && nh.z===Game.food.z);
   const body = willGrow ? Game.snake : Game.snake.slice(0, Game.snake.length-1);
@@ -627,6 +684,7 @@ function step(){
     const gain = 10 * Game.combo;
     Game.score += gain; Game.len = Game.snake.length;
     Game.stepMs = Math.max(Game.minStep, Game.stepMs - 5);
+    spawnPillar(nh.x, nh.z, Math.min(Game.combo, 5));   // sculpt the maze at the eaten cell
     placeFood(); burst(nh.x,nh.z, 0xe23a2c); sEat(Game.combo);
     Game.hitStop = Game.reducedMotion?0:55; Game.headPulse = Game.reducedMotion?0:1; if(!Game.reducedMotion) shake = Math.max(shake, 0.16);   // bite juice
     toast(Game.combo>=2 ? ('+'+gain+'   ×'+Game.combo+' COMBO') : ('+'+gain));
@@ -651,9 +709,10 @@ function die(reason){
   publishScore(Game.score, true);
   document.getElementById('goScore').textContent = Game.score;
   document.getElementById('goBest').textContent = 'Best ' + Game.best + (Game.bestCombo>1?('  ·  ×'+Game.bestCombo+' best combo'):'');
-  document.getElementById('goLen').textContent = 'Length ' + Game.snake.length;
+  document.getElementById('goLen').textContent = 'Length ' + Game.snake.length + (Game.pillars&&Game.pillars.size?('  ·  '+Game.pillars.size+' towers sculpted'):'');
   document.getElementById('goTag').textContent = (reason||'Game Over') + (newBest && Game.score>0 ? ' — New Best!' : '');
-  setTimeout(()=>document.getElementById('gameover').classList.remove('hidden'), 640);
+  const revealMs = (!Game.reducedMotion && Game.pillars && Game.pillars.size>0) ? 2400 : 640;
+  setTimeout(()=>document.getElementById('gameover').classList.remove('hidden'), revealMs);
 }
 
 function publishScore(score, final){
@@ -755,11 +814,19 @@ function frameCamera(dt){
   if(Game.deathCam){
     Game.deathCam.t = Math.min(1, Game.deathCam.t + dt/0.6);
     const e = Game.deathCam.t;
-    desired = new THREE.Vector3(head.x, 3+ (1-e)*6, head.z + 5 - e*2.5);
-    look = new THREE.Vector3(head.x, 0.6, head.z);
-    const targetFov = 52 - e*20;
-    camera.fov += (targetFov-camera.fov)*Math.min(1, dt*8); camera.updateProjectionMatrix();
-    camera.position.lerp(desired, 1-Math.pow(0.002, dt)); camera.lookAt(look); return;
+    if(e<1){   // phase 1: crash-zoom onto the head
+      desired = new THREE.Vector3(head.x, 3+ (1-e)*6, head.z + 5 - e*2.5);
+      look = new THREE.Vector3(head.x, 0.6, head.z);
+      const targetFov = 52 - e*20;
+      camera.fov += (targetFov-camera.fov)*Math.min(1, dt*8); camera.updateProjectionMatrix();
+      camera.position.lerp(desired, 1-Math.pow(0.002, dt)); camera.lookAt(look); return;
+    } else if(Game.pillars && Game.pillars.size>0){   // phase 2: orbit the monument you built
+      Game.deathCam.orbit = (Game.deathCam.orbit||0) + dt*0.5;
+      const a=Game.deathCam.orbit;
+      desired = new THREE.Vector3(Math.cos(a)*N*1.5, N*1.7, Math.sin(a)*N*1.5);
+      const tf=52; camera.fov += (tf-camera.fov)*Math.min(1,dt*4); camera.updateProjectionMatrix();
+      camera.position.lerp(desired, 1-Math.pow(0.01, dt)); camera.lookAt(0,1.5,0); return;
+    }
   }
   if(Game.camMode===0){
     desired = new THREE.Vector3(0, N*1.35, N*1.15);
@@ -814,6 +881,7 @@ function loop(now){
   Game.headPulse = Math.max(0, (Game.headPulse||0) - dt*4);
 
   stepParticles(dt);
+  stepPillars(dt);
   stepFood(time);
   for(const c of clouds){ c.position.x += c.userData.spd*dt; if(c.position.x>N*2) c.position.x=-N*2; }
   frameCamera(dt);
