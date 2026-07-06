@@ -145,6 +145,9 @@
   #smashBar.ready #smashFill{ background:linear-gradient(90deg,#ffd54a,#ff9800); }
   @keyframes smashPulse{ to{ box-shadow:0 0 22px rgba(255,213,74,0.95); } }
   #terrainTag{ display:inline-block; margin-top:5px; padding:2px 10px; border-radius:12px; font-size:0.66rem; font-weight:bold; letter-spacing:.4px; }
+  #comboTimer{ display:none; width:132px; height:4px; margin-top:5px; border-radius:3px; background:rgba(0,0,0,0.35); overflow:hidden; }
+  #comboTimer.show{ display:block; }
+  #comboTimer i{ display:block; height:100%; width:100%; background:linear-gradient(90deg,#ff9800,#ffd54a); transition:width .1s linear; }
   #terrainTag.grass{ background:rgba(74,124,58,0.85); color:#eaffe0; }
   #terrainTag.sand{ background:rgba(205,175,115,0.92); color:#3a2c10; }
   #terrainTag.ice{ background:rgba(180,222,240,0.92); color:#0c2230; }
@@ -158,6 +161,8 @@
   .skinCard .eq{ color:var(--gold); font-size:0.68rem; }
   .skinCard .lock{ opacity:0.5; font-size:0.72rem; }
   .skinCard .skinBtn{ margin:0; padding:3px 8px; font-size:0.7rem; }
+  .legend{ margin-top:14px; font-size:0.66rem; color:#9fb0c8; line-height:1.8; max-width:360px; }
+  .legend kbd{ background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.25); border-radius:4px; padding:0 5px; font-family:inherit; }
   #countdown{ position:fixed; top:44%; left:50%; transform:translate(-50%,-50%); z-index:34; pointer-events:none;
     font-size:150px; font-weight:900; color:#fff; opacity:0; text-shadow:0 6px 30px rgba(0,0,0,0.6), 0 0 40px rgba(255,213,74,0.55);
     -webkit-text-stroke:3px rgba(126,200,80,0.9); letter-spacing:2px; }
@@ -217,6 +222,7 @@
   <div id="sub">🟩 <b>You are the snake</b> · eat 🍎 to grow</div>
   <div id="terrainTag" class="grass" data-t="0">🌲 Grass</div>
   <div id="comboPill"></div>
+  <div id="comboTimer"><i></i></div>
   <div id="smashBar" aria-hidden="true"><i id="smashFill"></i><b>SMASH</b></div>
 </div>
 
@@ -285,6 +291,21 @@
     <p style="text-align:center">Bank: <span class="bankLbl">🪙 0</span> &nbsp;·&nbsp; earn 🪙 by eating apples</p>
     <div id="shopGrid"></div>
     <button class="btn" id="shopClose">← Back</button>
+  </div>
+</div>
+
+<div class="overlay hidden" id="pauseMenu">
+  <div class="card">
+    <div class="tag">Paused</div>
+    <h1 style="font-size:2rem">⏸</h1>
+    <button class="btn" id="resumeBtn">▶ Resume <kbd>Space</kbd></button>
+    <button class="btn ghost" id="restartBtn2">↻ Restart</button>
+    <button class="btn ghost" id="pauseShopBtn">🎨 Skins</button>
+    <div class="opts">
+      <label><input type="checkbox" id="rmToggle2"> Reduced motion</label>
+      <label><input type="checkbox" id="muteToggle2"> Mute</label>
+    </div>
+    <div class="legend">Move <kbd>WASD</kbd> / <kbd>↑ ← ↓ →</kbd> &nbsp;·&nbsp; Camera <kbd>C</kbd> &nbsp;·&nbsp; 🧊 ice slides · 🏜 sand no boost &nbsp;·&nbsp; chain 🍎 → 💥 SMASH</div>
   </div>
 </div>
 
@@ -873,7 +894,7 @@ function resetState(){
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.dir={x:1,z:0}; Game.nextDir={x:1,z:0}; Game.dirQueue=[];
   Game.score=0; Game.len=3; Game.stepMs=180; Game.sinceStep=0; Game.over=false;
-  Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0; Game.deathCam=null; Game.smash=0; Game.applesRun=0;
+  Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0; Game.deathCam=null; Game.smash=0; Game.applesRun=0; Game.phaseSteps=0; Game._foodCd=0;
   Game.rec=[]; loadGhost(); clearPillars();
   if(Game.mode==='daily'){ Game.seed=dailySeed(); Game.rng=mulberry32(Game.seed); }
   else if(Game.mode==='seed'){ Game.seed=Game.forcedSeed||1; Game.rng=mulberry32(Game.seed); }
@@ -892,7 +913,29 @@ function placeFood(){
   let x,z, guard=0;
   do{ x=Math.floor((Game.rng||Math.random)()*N); z=Math.floor((Game.rng||Math.random)()*N); guard++; }
   while(occ.has(x+','+z) && guard<500);
-  Game.food={x,z};
+  // occasionally spawn a power food (deterministic in daily via Game.rng), gated by score + a cooldown
+  let kind='apple';
+  if(Game.score>=30 && (Game._foodCd|0)<=0){ const r=(Game.rng||Math.random)();
+    if(r<0.07) kind='tnt'; else if(r<0.12) kind='diamond'; else if(r<0.17) kind='phase'; }
+  Game._foodCd = (kind==='apple') ? (Game._foodCd|0)-1 : 4;
+  Game.food={x,z,kind};
+  if(kind!=='apple' && Game.running){ const NM={tnt:'🧨 TNT',diamond:'💎 Diamond',phase:'🌀 Phase'}; toast(NM[kind]+' appeared!'); }
+}
+function applyPowerFood(kind, cell){
+  if(kind==='tnt'){
+    let cleared=0;
+    for(let dx=-1;dx<=1;dx++) for(let dz=-1;dz<=1;dz++){ const key=(cell.x+dx)+','+(cell.z+dz), p=Game.pillars.get(key);
+      if(p){ scene.remove(p.mesh); Game.pillars.delete(key); if(!Game.reducedMotion) burst(cell.x+dx, cell.z+dz, 0x9a9a9e); cleared++; } }
+    Game.score += 20; if(!Game.reducedMotion){ shake=Math.max(shake,0.6); Game.hitStop=Math.max(Game.hitStop,50); }
+    blip(90,0.22,'sawtooth',0.2); toast('🧨 TNT! cleared '+cleared);
+  } else if(kind==='diamond'){
+    Game.score += 50; Game.smash=1; if(!Game.reducedMotion) Game.headPulse=1;
+    blip(880,0.14,'square',0.16); setTimeout(()=>blip(1320,0.16,'square',0.14),80); toast('💎 DIAMOND +50 · SMASH ready!');
+  } else if(kind==='phase'){
+    Game.phaseSteps=6; if(!Game.reducedMotion) shake=Math.max(shake,0.3);
+    blip(520,0.10,'triangle',0.14); toast('🌀 PHASE — walk through walls!');
+  }
+  updateHUD();
 }
 
 // ── input ────────────────────────────────────────────────────────────────
@@ -907,9 +950,10 @@ const DIRS = { up:[0,-1], down:[0,1], left:[-1,0], right:[1,0] };
 function handleKey(e){
   const k=e.key.toLowerCase();
   if(k===' '){ e.preventDefault(); togglePause(); return; }
+  if(k==='escape'){ e.preventDefault(); togglePause(); return; }
   if(k==='r'){ restart(); return; }
   if(k==='c'){ Game.camMode=(Game.camMode+1)%2; toast(Game.camMode? 'Follow cam':'Arena cam'); return; }
-  if(k==='m'){ Game.muted=!Game.muted; try{localStorage.setItem('snake4-muted', Game.muted?'1':'0');}catch(_){} toast(Game.muted?'🔇 Muted':'🔊 Sound on'); updateHUD(); return; }
+  if(k==='m'){ setMuted(!Game.muted); toast(Game.muted?'🔇 Muted':'🔊 Sound on'); return; }
   let d=null;
   if(k==='w'||k==='arrowup') d=DIRS.up;
   else if(k==='s'||k==='arrowdown') d=DIRS.down;
@@ -945,15 +989,18 @@ function step(){
 
   // wall
   if(nh.x<0 || nh.x>=N || nh.z<0 || nh.z>=N){ return die('Hit the wall'); }
+  const phasing = (Game.phaseSteps||0)>0;   // ender-phase: walk through your own maze/body
   // maze pillar you sculpted (armed = you've vacated it)
   if(pillarArmedAt(nh.x, nh.z)){
     if(Game.smash>=1){ chainSmash(nh.x, nh.z, Game.dir.x, Game.dir.z); }   // charged ram → domino the row
-    else { return die('Trapped in your maze'); }
+    else if(!phasing){ return die('Trapped in your maze'); }
   }
   // self (allow moving into current tail cell only if not growing — tail will vacate)
   const willGrow = (nh.x===Game.food.x && nh.z===Game.food.z);
+  const eatenKind = willGrow ? (Game.food.kind||'apple') : null;
   const body = willGrow ? Game.snake : Game.snake.slice(0, Game.snake.length-1);
-  if(body.some(s=>s.x===nh.x && s.z===nh.z)){ return die('Bit yourself'); }
+  if(!phasing && body.some(s=>s.x===nh.x && s.z===nh.z)){ return die('Bit yourself'); }
+  if(Game.phaseSteps>0) Game.phaseSteps--;
 
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.snake.unshift(nh);
@@ -976,6 +1023,7 @@ function step(){
     if(!Game.reducedMotion) Game.swallow={ t:1, combo:Game.combo };   // peristalsis gulp travels head→tail
     toast(Game.combo>=2 ? ('+'+gain+'   ×'+Game.combo+' COMBO') : ('+'+gain));
     if(Game.smash>=1 && _smashPrev<1){ toast('💥 SMASH READY — ram your own walls!'); blip(660,0.10,'square',0.16); }
+    if(eatenKind && eatenKind!=='apple') applyPowerFood(eatenKind, nh);   // TNT / diamond / phase effects
     publishScore(Game.score);
     ensureSegments(Game.snake.length);
   } else {
@@ -1152,6 +1200,9 @@ function stepFood(time){
   foodLeaf.position.set(fx+0.14, 1.02+bob, fz); foodLeaf.rotation.y = time*1.6;
   foodLight.position.set(fx, 1.4+bob, fz);
   foodLight.intensity = 1.2 + Math.sin(time*4)*0.4 + (1-(Game.dayF||1))*1.4;
+  const kind=Game.food.kind||'apple', KC={apple:[0xffcf6a,0x7a1010],tnt:[0xff3020,0x901008],diamond:[0x66e0ff,0x104060],phase:[0xb388ff,0x3a1060]};
+  const kc=KC[kind]||KC.apple; foodLight.color.setHex(kc[0]); if(appleMats&&appleMats.emissive) appleMats.emissive.setHex(kc[1]);
+  const sc = kind==='apple' ? 0.72 : 0.72+Math.sin(time*6)*0.08+0.1; foodMesh.scale.setScalar(sc);
 }
 
 // ── loop ─────────────────────────────────────────────────────────────────
@@ -1177,6 +1228,7 @@ function loop(now){
     if(Game.combo>0 && (performance.now()-Game.lastEatAt)>Game.comboWindow){ Game.combo=0; updateHUD(); }
     syncMeshes(Math.min(1, Game.sinceStep/Game.stepMs));
     updateTerrainTag();
+    updateComboTimer();
     document.getElementById('timeVal').textContent = Math.floor((now-Game.startTime)/1000)+'s';
     }
   }
@@ -1204,15 +1256,22 @@ function updateTerrainTag(){
   if(el.dataset.t===String(b)) return;
   el.dataset.t=String(b); el.className=TERR[b][0]; el.textContent=TERR[b][1];
 }
+function updateComboTimer(){
+  const el=document.getElementById('comboTimer'); if(!el) return;
+  if(Game.combo>=1 && Game.lastEatAt){ const rem=Math.max(0, 1-(performance.now()-Game.lastEatAt)/Game.comboWindow);
+    el.classList.add('show'); el.firstElementChild.style.width=(rem*100)+'%'; }
+  else el.classList.remove('show');
+}
 function updateHUD(){
   document.getElementById('scoreVal').textContent = Game.score;  document.getElementById('lenVal').textContent = Game.snake.length;
   document.getElementById('bestVal').textContent = Game.best;
   document.getElementById('spdVal').textContent = (180/Game.stepMs).toFixed(1)+'×';
   const cp=document.getElementById('comboPill');
   if(cp){ if(Game.combo>=2){ cp.textContent='×'+Game.combo+' COMBO'; cp.classList.add('show'); } else { cp.classList.remove('show'); } }
-  const sb=document.getElementById('smashBar'), sf=document.getElementById('smashFill');
-  if(sb&&sf){ if(Game.smash>0){ sb.classList.add('show'); sf.style.width=Math.min(100,Game.smash*100)+'%'; sb.classList.toggle('ready', Game.smash>=1); }
-    else { sb.classList.remove('show','ready'); sf.style.width='0%'; } }
+  const sb=document.getElementById('smashBar'), sf=document.getElementById('smashFill'), sbl=sb?sb.querySelector('b'):null;
+  if(sb&&sf){ if(Game.smash>0){ sb.classList.add('show'); sf.style.width=Math.min(100,Game.smash*100)+'%'; const rdy=Game.smash>=1; sb.classList.toggle('ready', rdy);
+      if(sbl) sbl.textContent = rdy ? '💥 RAM READY' : ('SMASH '+Math.round(Game.smash*100)+'%'); }
+    else { sb.classList.remove('show','ready'); sf.style.width='0%'; if(sbl) sbl.textContent='SMASH'; } }
 }
 function triggerFlash(){ const el=document.getElementById('flash'); if(!el) return; el.classList.remove('on'); void el.offsetWidth; el.classList.add('on'); }
 let toastTimer=null;
@@ -1239,8 +1298,12 @@ function showCoach(){
   clearTimeout(Game._coachT); Game._coachT=setTimeout(()=>el.classList.remove('show'), 6500);
 }
 
-function togglePause(){ if(!Game.running && !Game.over){ return; } if(Game.over) return;
-  Game.paused=!Game.paused; toast(Game.paused?'⏸ Paused':'▶ Resume'); }
+function togglePause(){ if(!Game.running || Game.over) return;
+  Game.paused=!Game.paused;
+  const pm=document.getElementById('pauseMenu'); if(pm){ pm.classList.toggle('hidden', !Game.paused); if(Game.paused) syncPauseToggles(); }
+  toast(Game.paused?'⏸ Paused':'▶ Resume'); }
+function syncPauseToggles(){ const rm=document.getElementById('rmToggle2'), mu=document.getElementById('muteToggle2');
+  if(rm) rm.checked=!!Game.reducedMotion; if(mu) mu.checked=!!Game.muted; }
 
 function startGame(){
   initAudio();
@@ -1249,6 +1312,7 @@ function startGame(){
   Game.bestCombo = parseInt(localStorage.getItem('snake4-bestcombo')||'0',10)||0;
   document.getElementById('welcome').classList.add('hidden');
   document.getElementById('gameover').classList.add('hidden');
+  { const pm=document.getElementById('pauseMenu'); if(pm) pm.classList.add('hidden'); }
   resetState();
   Game._coached=false;
   Game.counting=true; Game.countUntil=performance.now()+2000;   // 3-2-1 armed start
@@ -1289,6 +1353,9 @@ function boot(){
     const sc=document.getElementById('shopClose'); if(sc) sc.addEventListener('click', closeShop);
     const tb=document.getElementById('trophyBtn'); if(tb) tb.addEventListener('click', downloadTrophy);
     const lb=document.getElementById('linkBtn'); if(lb) lb.addEventListener('click', shareLink);
+    const rb=document.getElementById('resumeBtn'); if(rb) rb.addEventListener('click', ()=>{ if(Game.paused) togglePause(); });
+    const rb2=document.getElementById('restartBtn2'); if(rb2) rb2.addEventListener('click', ()=>{ Game.paused=false; restart(); });
+    const psb=document.getElementById('pauseShopBtn'); if(psb) psb.addEventListener('click', openShop);
     updateBankLbls();
     if(Game.forcedSeed!=null){ const s=document.getElementById('startBtn'); if(s) s.textContent='▶ Play Challenge #'+Game.forcedSeed; }
     const coachEl=document.getElementById('coach'); if(coachEl) coachEl.addEventListener('click', ()=>coachEl.classList.remove('show'));
@@ -1299,15 +1366,17 @@ function boot(){
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
     window.snake4 = Game;
-    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE, biomeAt, buySkin, equipSkin, openShop, captureTrophy, shareLink, parseHash, stepMusic, startMusic };
+    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE, biomeAt, buySkin, equipSkin, openShop, captureTrophy, shareLink, parseHash, stepMusic, startMusic, setFood:(x,z,kind)=>{ Game.food={x,z,kind:kind||'apple'}; }, updateHUD, updateComboTimer };
   }catch(err){ showBootError(err); }
 }
+function setReducedMotion(v){ Game.reducedMotion=!!v; try{localStorage.setItem('snake4-rm', v?'1':'0');}catch(_){}
+  if(v && composer){ composer=null; } else if(!v && !composer){ initPostFX(); }
+  document.querySelectorAll('#rmToggle,#rmToggle2').forEach(c=>{ if(c) c.checked=!!v; }); }
+function setMuted(v){ Game.muted=!!v; try{localStorage.setItem('snake4-muted', v?'1':'0');}catch(_){}
+  document.querySelectorAll('#muteToggle,#muteToggle2').forEach(c=>{ if(c) c.checked=!!v; }); updateHUD(); }
 function wireToggles(){
-  const rm=document.getElementById('rmToggle'); if(rm){ rm.checked=!!Game.reducedMotion;
-    rm.addEventListener('change', ()=>{ Game.reducedMotion=rm.checked; try{localStorage.setItem('snake4-rm', rm.checked?'1':'0');}catch(_){}
-      if(rm.checked && composer){ composer=null; } else if(!rm.checked && !composer){ initPostFX(); } }); }
-  const mu=document.getElementById('muteToggle'); if(mu){ mu.checked=!!Game.muted;
-    mu.addEventListener('change', ()=>{ Game.muted=mu.checked; try{localStorage.setItem('snake4-muted', mu.checked?'1':'0');}catch(_){} updateHUD(); }); }
+  ['rmToggle','rmToggle2'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.checked=!!Game.reducedMotion; el.addEventListener('change',()=>setReducedMotion(el.checked)); } });
+  ['muteToggle','muteToggle2'].forEach(id=>{ const el=document.getElementById(id); if(el){ el.checked=!!Game.muted; el.addEventListener('change',()=>setMuted(el.checked)); } });
 }
 function showBootError(err){
   const b=document.getElementById('boot'); b.classList.remove('hidden'); b.classList.add('err');
