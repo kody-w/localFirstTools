@@ -13,7 +13,8 @@
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
   }
 }
 </script>
@@ -146,6 +147,10 @@
   #board .br{ display:flex; justify-content:space-between; gap:12px; padding:1px 0; color:#c8ccd4; }
   #board .br.me .bn, #board .br.me .bs{ color:var(--gold); font-weight:bold; }
   #board .bs{ font-variant-numeric:tabular-nums; }
+  .opts{ display:flex; gap:14px; justify-content:center; margin-top:14px; font-size:0.72rem; color:#9fb0c8; flex-wrap:wrap; }
+  .opts label{ display:inline-flex; align-items:center; gap:5px; cursor:pointer; }
+  .opts input{ accent-color:var(--gold); cursor:pointer; }
+  .opts kbd{ background:rgba(0,0,0,0.4); border:1px solid rgba(255,255,255,0.25); border-radius:4px; padding:0 5px; font-family:inherit; }
   .btn.ghost{ background:rgba(255,255,255,0.08); color:#cfe0ff; border-bottom-color:rgba(0,0,0,0.3); margin-top:10px; }
 
   /* Mobile dpad */
@@ -210,6 +215,10 @@
     <p>⚡ Every apple makes you a little <span class="em">faster</span>.</p>
     <button class="btn" id="startBtn">▶ Play</button>
     <button class="btn ghost" id="dailyBtn">🗓 Daily Challenge</button>
+    <div class="opts">
+      <label><input type="checkbox" id="rmToggle"> Reduced motion</label>
+      <label><input type="checkbox" id="muteToggle"> Mute <kbd>M</kbd></label>
+    </div>
   </div>
 </div>
 
@@ -285,7 +294,7 @@ function buildTextures(){
 // ── scene ────────────────────────────────────────────────────────────────
 const container = document.getElementById('game');
 let renderer, scene, camera;
-let sun, hemi, skyCanvas, skyCtx, skyTex, starField, moonMesh;
+let sun, hemi, skyCanvas, skyCtx, skyTex, starField, moonMesh, composer, bloomPass, ghostMesh;
 const CLIENT_ID = 's4-' + Math.random().toString(36).slice(2,8);
 const lerpHex=(a,b,t)=>{ const ar=(a>>16)&255,ag=(a>>8)&255,ab=a&255,br=(b>>16)&255,bg=(b>>8)&255,bb=b&255;
   return (((ar+(br-ar)*t)|0)<<16)|(((ag+(bg-ag)*t)|0)<<8)|((ab+(bb-ab)*t)|0); };
@@ -330,6 +339,7 @@ function updateDayNight(dt){
   if(starField) starField.material.opacity = night;
   if(moonMesh){ moonMesh.material.opacity = night*0.9;
     moonMesh.position.set(-Math.cos(ang)*N*1.4, Math.max(-2, -sh)*N*1.3+3, -Math.sin(ang)*N*0.6+N*0.3); }
+  if(bloomPass) bloomPass.strength = 0.5 + night*0.85;   // skyline/apple glow harder at night
 }
 
 function initScene(){
@@ -357,10 +367,37 @@ function initScene(){
 
   window.addEventListener('resize', onResize);
 }
+
+// Post-processing (bloom + vignette). Loaded async from the three addons path;
+// if the import fails (offline/CDN), we silently keep plain rendering — the
+// game must never break because of an optional visual layer.
+async function initPostFX(){
+  if(Game.reducedMotion) return;   // respect reduced-motion: no bloom
+  try{
+    const [{EffectComposer},{RenderPass},{UnrealBloomPass},{ShaderPass},{OutputPass}] = await Promise.all([
+      import('three/addons/postprocessing/EffectComposer.js'),
+      import('three/addons/postprocessing/RenderPass.js'),
+      import('three/addons/postprocessing/UnrealBloomPass.js'),
+      import('three/addons/postprocessing/ShaderPass.js'),
+      import('three/addons/postprocessing/OutputPass.js'),
+    ]);
+    const c=new EffectComposer(renderer);
+    c.addPass(new RenderPass(scene, camera));
+    bloomPass=new UnrealBloomPass(new THREE.Vector2(window.innerWidth,window.innerHeight), 0.6, 0.4, 0.85);
+    c.addPass(bloomPass);
+    const vign={ uniforms:{ tDiffuse:{value:null}, offset:{value:1.15}, darkness:{value:0.62} },
+      vertexShader:'varying vec2 vUv; void main(){ vUv=uv; gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+      fragmentShader:'uniform sampler2D tDiffuse; uniform float offset; uniform float darkness; varying vec2 vUv; void main(){ vec4 tex=texture2D(tDiffuse,vUv); vec2 uv=(vUv-0.5)*offset; float v=clamp(1.0-dot(uv,uv)*darkness,0.0,1.0); gl_FragColor=vec4(tex.rgb*v,tex.a); }' };
+    c.addPass(new ShaderPass(vign));
+    c.addPass(new OutputPass());
+    composer=c;
+  }catch(e){ composer=null; /* plain render fallback */ }
+}
 function onResize(){
   if(!renderer) return;
   camera.aspect = window.innerWidth/window.innerHeight; camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
+  if(composer) composer.setSize(window.innerWidth, window.innerHeight);
 }
 
 // ── static world: grass floor + brick border + trees + clouds ────────────
@@ -456,7 +493,8 @@ function buildFood(){
 let particles = [];
 const pGeo = new THREE.BoxGeometry(0.16,0.16,0.16);
 function burst(x,z,color){
-  for(let k=0;k<16;k++){
+  const cnt = Game.reducedMotion?3:16;
+  for(let k=0;k<cnt;k++){
     const m=new THREE.Mesh(pGeo, new THREE.MeshLambertMaterial({ color }));
     m.position.set(cellToWorld(x), 0.6, cellToWorld(z));
     const a=Math.random()*Math.PI*2, sp=1.2+Math.random()*2.4;
@@ -476,7 +514,7 @@ function stepParticles(dt){
 let actx=null;
 function initAudio(){ try{ actx = actx || new (window.AudioContext||window.webkitAudioContext)(); }catch(_){}}
 function blip(freq, dur, type, vol){
-  if(!actx) return; try{
+  if(!actx || Game.muted) return; try{
     const o=actx.createOscillator(), g=actx.createGain();
     o.type=type||'square'; o.frequency.value=freq;
     g.gain.setValueAtTime(vol||0.14, actx.currentTime);
@@ -497,7 +535,8 @@ const Game = {
   running:false, paused:false, over:false, started:false,
   stepMs:180, minStep:82, sinceStep:0, startTime:0, camMode:0,
   combo:0, bestCombo:0, lastEatAt:0, comboWindow:2600, hitStop:0, headPulse:0,
-  timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random
+  timeOfDay:0.28, dayF:1, dayLen:110, mode:'classic', seed:null, rng:Math.random,
+  rec:[], ghost:null, ghostIdx:0, deathCam:null, reducedMotion:false, muted:false
 };
 function dailySeed(){ return Number(new Date().toISOString().slice(0,10).replace(/-/g,'')) || 1; }
 
@@ -506,7 +545,8 @@ function resetState(){
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.dir={x:1,z:0}; Game.nextDir={x:1,z:0}; Game.dirQueue=[];
   Game.score=0; Game.len=3; Game.stepMs=180; Game.sinceStep=0; Game.over=false;
-  Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0;
+  Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0; Game.deathCam=null;
+  Game.rec=[]; loadGhost();
   if(Game.mode==='daily'){ Game.seed=dailySeed(); Game.rng=mulberry32(Game.seed); }
   else { Game.seed=null; Game.rng=Math.random; }
   Game.startTime = performance.now();
@@ -538,6 +578,7 @@ function handleKey(e){
   if(k===' '){ e.preventDefault(); togglePause(); return; }
   if(k==='r'){ restart(); return; }
   if(k==='c'){ Game.camMode=(Game.camMode+1)%2; toast(Game.camMode? 'Follow cam':'Arena cam'); return; }
+  if(k==='m'){ Game.muted=!Game.muted; try{localStorage.setItem('snake4-muted', Game.muted?'1':'0');}catch(_){} toast(Game.muted?'🔇 Muted':'🔊 Sound on'); updateHUD(); return; }
   let d=null;
   if(k==='w'||k==='arrowup') d=DIRS.up;
   else if(k==='s'||k==='arrowdown') d=DIRS.down;
@@ -577,6 +618,7 @@ function step(){
 
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.snake.unshift(nh);
+  Game.rec.push({x:nh.x, z:nh.z});
   if(willGrow){
     const nowT = performance.now();
     Game.combo = (nowT - Game.lastEatAt < Game.comboWindow) ? Game.combo+1 : 1;
@@ -586,7 +628,7 @@ function step(){
     Game.score += gain; Game.len = Game.snake.length;
     Game.stepMs = Math.max(Game.minStep, Game.stepMs - 5);
     placeFood(); burst(nh.x,nh.z, 0xe23a2c); sEat(Game.combo);
-    Game.hitStop = 55; Game.headPulse = 1; shake = Math.max(shake, 0.16);   // bite juice
+    Game.hitStop = Game.reducedMotion?0:55; Game.headPulse = Game.reducedMotion?0:1; if(!Game.reducedMotion) shake = Math.max(shake, 0.16);   // bite juice
     toast(Game.combo>=2 ? ('+'+gain+'   ×'+Game.combo+' COMBO') : ('+'+gain));
     publishScore(Game.score);
     ensureSegments(Game.snake.length);
@@ -598,12 +640,14 @@ function step(){
 
 function die(reason){
   if(Game.over) return;
-  Game.over = true; Game.running = false; Game.combo=0; sDie(); shake=0.9;
-  triggerFlash();
+  Game.over = true; Game.running = false; Game.combo=0; sDie(); shake=Game.reducedMotion?0:0.9;
+  if(!Game.reducedMotion) triggerFlash();
   for(const s of Game.snake.slice(0,26)) burst(s.x, s.z, 0x4aa64e);   // shatter into voxel debris
   const newBest = Game.score > Game.best;
   Game.best = Math.max(Game.best, Game.score);
-  try{ localStorage.setItem('snake4-highscore', String(Game.best)); localStorage.setItem('snake4-bestcombo', String(Game.bestCombo)); }catch(_){}
+  try{ localStorage.setItem('snake4-highscore', String(Game.best)); localStorage.setItem('snake4-bestcombo', String(Game.bestCombo));
+    if(newBest && Game.rec.length) localStorage.setItem('snake4-ghost', JSON.stringify(Game.rec.slice(0,4000))); }catch(_){}
+  if(!Game.reducedMotion){ Game.deathCam={t:0}; }   // cinematic crash-zoom
   publishScore(Game.score, true);
   document.getElementById('goScore').textContent = Game.score;
   document.getElementById('goBest').textContent = 'Best ' + Game.best + (Game.bestCombo>1?('  ·  ×'+Game.bestCombo+' best combo'):'');
@@ -676,9 +720,47 @@ function syncMeshes(t){
   }
 }
 
+// ── Ghost Racer: replay your best run as a translucent phantom ───────────
+let ghostSegs=[];
+function loadGhost(){
+  Game.ghostIdx=0; Game.ghost=null;
+  try{ const raw=localStorage.getItem('snake4-ghost'); if(raw){ const p=JSON.parse(raw); if(Array.isArray(p)&&p.length) Game.ghost=p; } }catch(_){}
+  for(const g of ghostSegs) g.visible=false;
+}
+function ensureGhostSegs(n){
+  while(ghostSegs.length<n){ const m=new THREE.Mesh(CUBE, new THREE.MeshLambertMaterial({color:0x9fd0ff, transparent:true, opacity:0.32, depthWrite:false}));
+    m.renderOrder=2; scene.add(m); ghostSegs.push(m); }
+}
+function stepGhost(dt){
+  const gh=Game.ghost;
+  if(!gh || !Game.running || Game.paused){ for(const g of ghostSegs) g.visible=false; return; }
+  // advance one ghost node per game step, in lockstep with the player's clock
+  const prog = Math.min(1, Game.sinceStep/Game.stepMs);
+  const idx = Math.min(gh.length-1, Game.ghostIdx);
+  if(Game.sinceStep < (Game._ghPrev||0)) Game.ghostIdx = Math.min(gh.length-1, Game.ghostIdx+1); // wrapped => stepped
+  Game._ghPrev = Game.sinceStep;
+  const GLEN=5; ensureGhostSegs(GLEN);
+  for(let i=0;i<GLEN;i++){
+    const a=gh[Math.max(0, idx-i)], b=gh[Math.max(0, idx-i-1)]||a;
+    const wx=cellToWorld(b.x+(a.x-b.x)*(prog*(prog<1?1:1))), wz=cellToWorld(b.z+(a.z-b.z)*prog);
+    const seg=ghostSegs[i]; seg.visible = idx-i>=0 && idx<gh.length-1;
+    seg.position.set(wx, 0.5, wz); seg.scale.setScalar(Math.max(0.6,0.9-i*0.02));
+  }
+}
+
 function frameCamera(dt){
   const head = segMeshes[0] ? segMeshes[0].position : new THREE.Vector3();
   let desired, look;
+  // Cinematic crash-zoom on death.
+  if(Game.deathCam){
+    Game.deathCam.t = Math.min(1, Game.deathCam.t + dt/0.6);
+    const e = Game.deathCam.t;
+    desired = new THREE.Vector3(head.x, 3+ (1-e)*6, head.z + 5 - e*2.5);
+    look = new THREE.Vector3(head.x, 0.6, head.z);
+    const targetFov = 52 - e*20;
+    camera.fov += (targetFov-camera.fov)*Math.min(1, dt*8); camera.updateProjectionMatrix();
+    camera.position.lerp(desired, 1-Math.pow(0.002, dt)); camera.lookAt(look); return;
+  }
   if(Game.camMode===0){
     desired = new THREE.Vector3(0, N*1.35, N*1.15);
     look = new THREE.Vector3(head.x*0.25, 0, head.z*0.25);
@@ -686,6 +768,12 @@ function frameCamera(dt){
     const back = new THREE.Vector3(-Game.dir.x, 0, -Game.dir.z).multiplyScalar(6);
     desired = new THREE.Vector3(head.x+back.x, 7, head.z+back.z+0.001);
     look = new THREE.Vector3(head.x+Game.dir.x*2, 0.5, head.z+Game.dir.z*2);
+  }
+  // Speed-rush dynamic FOV: widen with speed, punch in on each bite.
+  if(!Game.reducedMotion){
+    const speedNorm = Math.max(0, Math.min(1, (180/Game.stepMs - 1) / (180/Game.minStep - 1)));
+    const targetFov = 52 + speedNorm*11 - (Game.headPulse||0)*6;
+    camera.fov += (targetFov-camera.fov)*Math.min(1, dt*5); camera.updateProjectionMatrix();
   }
   camera.position.lerp(desired, 1-Math.pow(0.001, dt));
   if(shake>0){ camera.position.x += (Math.random()-0.5)*shake; camera.position.y += (Math.random()-0.5)*shake; shake=Math.max(0,shake-dt*1.6); }
@@ -722,6 +810,7 @@ function loop(now){
     document.getElementById('timeVal').textContent = Math.floor((now-Game.startTime)/1000)+'s';
   }
   Game._prevNow = now;
+  Game._frames = (Game._frames||0) + 1;
   Game.headPulse = Math.max(0, (Game.headPulse||0) - dt*4);
 
   stepParticles(dt);
@@ -729,7 +818,8 @@ function loop(now){
   for(const c of clouds){ c.position.x += c.userData.spd*dt; if(c.position.x>N*2) c.position.x=-N*2; }
   frameCamera(dt);
   updateDayNight(dt);
-  if(renderer) renderer.render(scene, camera);
+  stepGhost(dt);
+  if(composer && !Game.reducedMotion) composer.render(); else if(renderer) renderer.render(scene, camera);
 }
 
 // ── UI ───────────────────────────────────────────────────────────────────
@@ -765,6 +855,11 @@ function restart(){ document.getElementById('gameover').classList.add('hidden');
 // ── boot ─────────────────────────────────────────────────────────────────
 function boot(){
   try{
+    // load persisted accessibility prefs before building the scene
+    try{ Game.reducedMotion = localStorage.getItem('snake4-rm')!=null
+        ? localStorage.getItem('snake4-rm')==='1'
+        : (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      Game.muted = localStorage.getItem('snake4-muted')==='1'; }catch(_){}
     buildTextures();
     initScene();
     buildMaterials();
@@ -773,20 +868,29 @@ function boot(){
     ensureSegments(3);
     // idle preview snake
     Game.snake=[{x:6,z:9},{x:5,z:9},{x:4,z:9}]; Game.prevSnake=Game.snake.map(s=>({...s}));
-    syncMeshes(1); placeFood();
+    syncMeshes(1); placeFood(); loadGhost();
     document.getElementById('boot').classList.add('hidden');
     document.addEventListener('keydown', handleKey);
     bindTouch();
     document.getElementById('startBtn').addEventListener('click', ()=>{ Game.mode='classic'; startGame(); });
     const db=document.getElementById('dailyBtn'); if(db) db.addEventListener('click', ()=>{ Game.mode='daily'; startGame(); });
     document.getElementById('againBtn').addEventListener('click', restart);
+    wireToggles();
     initLeaderboard();
+    initPostFX();
     Game.best = parseInt(localStorage.getItem('snake4-highscore')||'0',10)||0; updateHUD();
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
     window.snake4 = Game;
     Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE };
   }catch(err){ showBootError(err); }
+}
+function wireToggles(){
+  const rm=document.getElementById('rmToggle'); if(rm){ rm.checked=!!Game.reducedMotion;
+    rm.addEventListener('change', ()=>{ Game.reducedMotion=rm.checked; try{localStorage.setItem('snake4-rm', rm.checked?'1':'0');}catch(_){}
+      if(rm.checked && composer){ composer=null; } else if(!rm.checked && !composer){ initPostFX(); } }); }
+  const mu=document.getElementById('muteToggle'); if(mu){ mu.checked=!!Game.muted;
+    mu.addEventListener('change', ()=>{ Game.muted=mu.checked; try{localStorage.setItem('snake4-muted', mu.checked?'1':'0');}catch(_){} updateHUD(); }); }
 }
 function showBootError(err){
   const b=document.getElementById('boot'); b.classList.remove('hidden'); b.classList.add('err');
