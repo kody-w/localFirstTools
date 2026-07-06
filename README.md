@@ -11,6 +11,18 @@ https://kody-w.github.io/localFirstTools/index.html
 
 ![Local First Tools Gallery](https://via.placeholder.com/1200x400/0a0a0a/06ffa5?text=Local+First+Tools+Gallery)
 
+## 🌐 AI Landgrab — this repo is agent-consumable infrastructure
+
+Every tool here is published as **public, zero-server, machine-readable data** that AI agents and
+developers can discover, invoke, and cite. **▶ [AI Landgrab HQ](https://kody-w.github.io/localFirstTools/landgrab/hq.html)**
+
+- 🗂 **Catalog** (all 2885+ tools, JSON): [`landgrab/index.json`](landgrab/index.json) · [`llms.txt`](llms.txt)
+- 🤖 **MCP toolbelt** (callable by any AI): [`landgrab/mcp/`](landgrab/mcp/) · drop-in skill: [`landgrab/SKILL.md`](landgrab/SKILL.md)
+- 🔌 **Open interop protocol**: [`PROTOCOL.md`](PROTOCOL.md) — one browser event bus, every tool
+- 📊 **Datasets**: [`corpus.jsonl`](landgrab/corpus/corpus.jsonl) · 🧩 **one-line embeds**: [`embed.js`](landgrab/embed.js) · 🛰 **zero-server API**: [`landgrab/api/`](landgrab/api/)
+
+Agents: start at [`AGENTS.md`](AGENTS.md). See [`landgrab/README.md`](landgrab/README.md) for all 10 pillars.
+
 ## ✨ Features
 
 - **🔒 Local-First Data**: Every app stores your data in your browser, not on a server
