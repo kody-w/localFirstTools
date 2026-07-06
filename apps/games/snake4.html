@@ -129,6 +129,15 @@
     font-size:14px; color:var(--gold); font-weight:bold; opacity:0; transition:opacity .2s, transform .2s; pointer-events:none; }
   #toast.show{ opacity:1; transform:translateX(-50%) translateY(0); }
 
+  #comboPill{ display:inline-block; margin-top:6px; padding:2px 11px; border-radius:14px; font-size:0.72rem; font-weight:bold;
+    color:#1a1207; background:linear-gradient(90deg,#ffd54a,#ff9800); opacity:0; transform:translateY(-4px) scale(0.9);
+    transition:opacity .15s, transform .15s; text-shadow:none; }
+  #comboPill.show{ opacity:1; transform:translateY(0) scale(1); animation:comboPulse .3s ease; }
+  @keyframes comboPulse{ 0%{ transform:scale(1.28); } 100%{ transform:scale(1); } }
+  #flash{ position:fixed; inset:0; z-index:35; pointer-events:none; background:#ff3b30; opacity:0; }
+  #flash.on{ animation:flashFade .26s ease-out; }
+  @keyframes flashFade{ 0%{ opacity:0.5; } 100%{ opacity:0; } }
+
   /* Mobile dpad */
   #pad{ position:fixed; bottom:20px; right:20px; z-index:30; display:none; grid-template-columns:repeat(3,54px);
     grid-template-rows:repeat(3,54px); gap:6px; }
@@ -150,10 +159,12 @@
 </head>
 <body>
 <div id="game"></div>
+<div id="flash"></div>
 
 <div class="panel" id="hud">
   <div id="score">Score: <span class="num" id="scoreVal">0</span></div>
   <div id="sub">🟩 <b>You are the snake</b> · eat 🍎 to grow</div>
+  <div id="comboPill"></div>
 </div>
 
 <div class="panel" id="stats">
@@ -422,7 +433,9 @@ function blip(freq, dur, type, vol){
     o.connect(g); g.connect(actx.destination); o.start(); o.stop(actx.currentTime+(dur||0.12));
   }catch(_){}
 }
-const sEat=()=>{ blip(520,0.09,'square',0.16); setTimeout(()=>blip(780,0.10,'square',0.14),60); };
+const sEat=(combo)=>{ const c=Math.min(combo||1,6); const b=470+(c-1)*72;
+  blip(b,0.08,'square',0.16); setTimeout(()=>blip(b*1.5,0.09,'square',0.14),52);
+  if(c>=3) setTimeout(()=>blip(b*2,0.09,'square',0.12),104); };
 const sTurn=()=>blip(240,0.04,'square',0.06);
 const sDie=()=>{ blip(300,0.18,'sawtooth',0.18); setTimeout(()=>blip(180,0.28,'sawtooth',0.16),110); };
 
@@ -431,7 +444,8 @@ const Game = {
   snake: [], prevSnake: [], dir:{x:1,z:0}, nextDir:{x:1,z:0}, dirQueue:[],
   food:{x:9,z:9}, score:0, best:0, len:3,
   running:false, paused:false, over:false, started:false,
-  stepMs:180, minStep:82, sinceStep:0, startTime:0, camMode:0
+  stepMs:180, minStep:82, sinceStep:0, startTime:0, camMode:0,
+  combo:0, bestCombo:0, lastEatAt:0, comboWindow:2600, hitStop:0, headPulse:0
 };
 
 function resetState(){
@@ -439,6 +453,7 @@ function resetState(){
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.dir={x:1,z:0}; Game.nextDir={x:1,z:0}; Game.dirQueue=[];
   Game.score=0; Game.len=3; Game.stepMs=180; Game.sinceStep=0; Game.over=false;
+  Game.combo=0; Game.lastEatAt=0; Game.hitStop=0; Game.headPulse=0;
   Game.startTime = performance.now();
   placeFood();
   ensureSegments(Game.snake.length);
@@ -459,7 +474,7 @@ function queueDir(dx,dz){
   const last = Game.dirQueue.length ? Game.dirQueue[Game.dirQueue.length-1] : Game.dir;
   if(dx===-last.x && dz===-last.z) return;      // no 180° reversal
   if(dx===last.x && dz===last.z) return;         // no duplicate
-  if(Game.dirQueue.length<2) Game.dirQueue.push({x:dx,z:dz});
+  if(Game.dirQueue.length<3) Game.dirQueue.push({x:dx,z:dz});
   sTurn();
 }
 const DIRS = { up:[0,-1], down:[0,1], left:[-1,0], right:[1,0] };
@@ -499,37 +514,47 @@ function step(){
   const nh = { x:head.x+Game.dir.x, z:head.z+Game.dir.z };
 
   // wall
-  if(nh.x<0 || nh.x>=N || nh.z<0 || nh.z>=N){ return die(); }
+  if(nh.x<0 || nh.x>=N || nh.z<0 || nh.z>=N){ return die('Hit the wall'); }
   // self (allow moving into current tail cell only if not growing — tail will vacate)
   const willGrow = (nh.x===Game.food.x && nh.z===Game.food.z);
   const body = willGrow ? Game.snake : Game.snake.slice(0, Game.snake.length-1);
-  if(body.some(s=>s.x===nh.x && s.z===nh.z)){ return die(); }
+  if(body.some(s=>s.x===nh.x && s.z===nh.z)){ return die('Bit yourself'); }
 
   Game.prevSnake = Game.snake.map(s=>({...s}));
   Game.snake.unshift(nh);
   if(willGrow){
-    Game.score += 10; Game.len = Game.snake.length;
+    const nowT = performance.now();
+    Game.combo = (nowT - Game.lastEatAt < Game.comboWindow) ? Game.combo+1 : 1;
+    Game.lastEatAt = nowT;
+    Game.bestCombo = Math.max(Game.bestCombo, Game.combo);
+    const gain = 10 * Game.combo;
+    Game.score += gain; Game.len = Game.snake.length;
     Game.stepMs = Math.max(Game.minStep, Game.stepMs - 5);
-    placeFood(); burst(nh.x,nh.z, 0xe23a2c); sEat();
-    toast('+10'); publishScore(Game.score);
+    placeFood(); burst(nh.x,nh.z, 0xe23a2c); sEat(Game.combo);
+    Game.hitStop = 55; Game.headPulse = 1; shake = Math.max(shake, 0.16);   // bite juice
+    toast(Game.combo>=2 ? ('+'+gain+'   ×'+Game.combo+' COMBO') : ('+'+gain));
+    publishScore(Game.score);
     ensureSegments(Game.snake.length);
   } else {
     Game.snake.pop();
-    // keep prevSnake same length behaviour handled in syncMeshes
   }
   updateHUD();
 }
 
-function die(){
-  Game.over = true; Game.running = false; sDie(); shake=0.5;
+function die(reason){
+  if(Game.over) return;
+  Game.over = true; Game.running = false; Game.combo=0; sDie(); shake=0.9;
+  triggerFlash();
+  for(const s of Game.snake.slice(0,26)) burst(s.x, s.z, 0x4aa64e);   // shatter into voxel debris
+  const newBest = Game.score > Game.best;
   Game.best = Math.max(Game.best, Game.score);
-  try{ localStorage.setItem('snake4-highscore', String(Game.best)); }catch(_){}
+  try{ localStorage.setItem('snake4-highscore', String(Game.best)); localStorage.setItem('snake4-bestcombo', String(Game.bestCombo)); }catch(_){}
   publishScore(Game.score, true);
   document.getElementById('goScore').textContent = Game.score;
-  document.getElementById('goBest').textContent = 'Best ' + Game.best;
+  document.getElementById('goBest').textContent = 'Best ' + Game.best + (Game.bestCombo>1?('  ·  ×'+Game.bestCombo+' best combo'):'');
   document.getElementById('goLen').textContent = 'Length ' + Game.snake.length;
-  document.getElementById('goTag').textContent = Game.score>0 && Game.score>=Game.best ? 'New Best!' : 'Game Over';
-  setTimeout(()=>document.getElementById('gameover').classList.remove('hidden'), 420);
+  document.getElementById('goTag').textContent = (reason||'Game Over') + (newBest && Game.score>0 ? ' — New Best!' : '');
+  setTimeout(()=>document.getElementById('gameover').classList.remove('hidden'), 640);
 }
 
 function publishScore(score, final){
@@ -549,9 +574,14 @@ function syncMeshes(t){
     const wz = cellToWorld(prev.z + (cur.z-prev.z)*ease);
     const mesh = segMeshes[i];
     mesh.position.set(wx, 0.5, wz);
-    const s = i===0 ? 0.98 : Math.max(0.62, 0.92 - i*0.012);
-    mesh.scale.setScalar(s);
-    if(i===0){ mesh.rotation.y = Math.atan2(Game.dir.x, Game.dir.z); }
+    if(i===0){
+      const p = Game.headPulse||0;
+      mesh.scale.set(0.98*(1+p*0.32), 0.98*(1-p*0.24), 0.98*(1+p*0.32));   // bite squash
+      const nd = Game.dirQueue.length ? Game.dirQueue[0] : Game.dir;         // preview upcoming turn
+      mesh.rotation.y = Math.atan2(nd.x, nd.z);
+    } else {
+      mesh.scale.setScalar(Math.max(0.62, 0.92 - i*0.012));
+    }
   }
 }
 
@@ -590,12 +620,18 @@ function loop(now){
   const time = now/1000;
 
   if(Game.running && !Game.paused){
-    Game.sinceStep += (now - (Game._prevNow||now));
-    if(Game.sinceStep >= Game.stepMs){ Game.sinceStep -= Game.stepMs; if(Game.sinceStep>Game.stepMs) Game.sinceStep=0; step(); }
+    const el = now - (Game._prevNow||now);
+    if(Game.hitStop>0){ Game.hitStop = Math.max(0, Game.hitStop - el); }
+    else {
+      Game.sinceStep += el;
+      if(Game.sinceStep >= Game.stepMs){ Game.sinceStep -= Game.stepMs; if(Game.sinceStep>Game.stepMs) Game.sinceStep=0; step(); }
+    }
+    if(Game.combo>0 && (performance.now()-Game.lastEatAt)>Game.comboWindow){ Game.combo=0; updateHUD(); }
     syncMeshes(Math.min(1, Game.sinceStep/Game.stepMs));
     document.getElementById('timeVal').textContent = Math.floor((now-Game.startTime)/1000)+'s';
   }
   Game._prevNow = now;
+  Game.headPulse = Math.max(0, (Game.headPulse||0) - dt*4);
 
   stepParticles(dt);
   stepFood(time);
@@ -610,7 +646,10 @@ function updateHUD(){
   document.getElementById('lenVal').textContent = Game.snake.length;
   document.getElementById('bestVal').textContent = Game.best;
   document.getElementById('spdVal').textContent = (180/Game.stepMs).toFixed(1)+'×';
+  const cp=document.getElementById('comboPill');
+  if(cp){ if(Game.combo>=2){ cp.textContent='×'+Game.combo+' COMBO'; cp.classList.add('show'); } else { cp.classList.remove('show'); } }
 }
+function triggerFlash(){ const el=document.getElementById('flash'); if(!el) return; el.classList.remove('on'); void el.offsetWidth; el.classList.add('on'); }
 let toastTimer=null;
 function toast(msg){ const el=document.getElementById('toast'); el.textContent=msg; el.classList.add('show');
   clearTimeout(toastTimer); toastTimer=setTimeout(()=>el.classList.remove('show'), 900); }
@@ -621,6 +660,7 @@ function togglePause(){ if(!Game.running && !Game.over){ return; } if(Game.over)
 function startGame(){
   initAudio();
   Game.best = parseInt(localStorage.getItem('snake4-highscore')||'0',10)||0;
+  Game.bestCombo = parseInt(localStorage.getItem('snake4-bestcombo')||'0',10)||0;
   document.getElementById('welcome').classList.add('hidden');
   document.getElementById('gameover').classList.add('hidden');
   resetState();
@@ -650,6 +690,7 @@ function boot(){
     last = performance.now(); requestAnimationFrame(loop);
     // expose for cross-app / debugging, mirroring snake3's window.wormGame
     window.snake4 = Game;
+    Game.__debug = { renderer, scene, camera, segMeshes:()=>segMeshes, particles:()=>particles, THREE };
   }catch(err){ showBootError(err); }
 }
 function showBootError(err){
