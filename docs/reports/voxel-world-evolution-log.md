@@ -296,3 +296,60 @@ Field notes for future cycles:
 - **The compass bearing math (`bearing = atan2(cross, dot)` of player-forward vs `av.cur` delta, mapped to a 0–100% strip) is the reusable PRESENCE PRIMITIVE** future waypoint/spectate cycles can lean on. A "show a beacon toward the last danger ping" or a "spectate-cam snap to neighbor" feature should reuse `nbCompassGather`'s frustum-suppressed, av.cur-only, nearest-first list rather than re-deriving bearings from raw network targets. The 4Hz `nbCompassAcc` cadence and the `nbCompassInert()`/`showCompass`/`Neighborhood.enabled` gate triple are the template for any future neighborhood HUD.
 - **`vfLastPlaceReason` is a module scratch read-once after the synchronous `placeBlock`** — if a future op ever calls `placeBlock` asynchronously or interleaves two place calls on one tick, capture the reason immediately at each call site (do not batch). The dig path needs no scratch (its boolean return is the whole signal).
 - Standing wishes still open (carried from cycle 14): remote-visible block-break PROGRESS (a throttled `dig_progress` op — note this cycle shipped remote break/place COMPLETION feedback, not in-progress cracks); ore drops / a real inventory; a Blob-worker clock for full-rate hidden-tab ticking; birds/wind variety to deepen the cycle-11 ambient bed. NEW for next cycles: the compass could grow a vertical "above/below you" cue (av.cur.y delta) and a tap-to-spectate, and remote-edit feedback could add a faint directional audio pan from the bearing primitive.
+
+## Cycle 16 — 2026-07-10T22:44:12-04:00
+
+BASE: `ed2e6db07f497176482c52ea887e521989464219`
+
+Exactly eight read-only strategy agents inspected the current 9,472-line game, cycles 1-15, and recent voxel history:
+
+| Role | Bounded candidates |
+|---|---|
+| Solo engine + persistence | Invalid-save quarantine; loaded-position rescue; solo edit ceiling; canonical edit keys |
+| Neighborhood security + protocol | Hello identity validation; pre-auth console closure; epoch-ordered ingress; disconnect claim cleanup |
+| Performance + resource lifecycle | Hidden presentation split; top-k dirty drain; mesher allocation reduction; twin loop lifecycle |
+| Input + accessibility | Modal focus lifecycle; held-touch cancellation; keyboard play gate; reduced-motion UI coverage |
+| Gameplay + world systems | Ore satchel; derived leaf decay; bounded sand settling; conflict-aware undo/redo |
+| Visual + audio feel | Distinct hand action arcs; material impact audio; visible twin action poses |
+| VoxelFlayer + vox API | Cancellable in-flight turns; honest action receipts; goal cancellation; turn diagnostics |
+| Adversarial QA + integration | Concurrent join destruction; neighbor-only world replacement; smart-dig false failure; false-positive `vox save` |
+
+### Consensus
+
+Equivalent proposals were clustered by affected invariant. Three clusters had support from two independent strategy roles; every one-role proposal ranked below them. The tie-break was verified severity, reproducibility, bounded implementation, and regression risk.
+
+| Rank | Consensus cluster | Supporting roles | Decision |
+|---:|---|---|---|
+| 1 | Session startup, authorization, and ordered ingress | Security + QA | Ship |
+| 2 | Cancellable single-flight network-twin turns | Performance + VoxelFlayer | Ship |
+| 3 | Recoverable and truthful persistence | Engine + QA | Ship |
+
+### Implemented
+
+1. **Epoch-safe neighborhood startup and ingress.** Host and join now share one startup generation, derive secrets into locals, and assign global token/key/peer state only while still owning that generation. Duplicate host starts converge on one link; a later host or join attempt invalidates every stale await/callback. Host and client DataChannel ingress is serialized across asynchronous AES-GCM decrypts and bound to a session epoch. The sealed hello is now the only pre-auth transition: malformed, host-owned, duplicate, or unbounded RAPPIDs are rejected; sealed console frames cannot dispatch before hello and every post-hello envelope kind is sender-bound. A newcomer is `bound` before snapshot delivery but becomes broadcast-`ready` only after a successful authoritative snapshot. Reliable frames arriving during that window queue behind the snapshot. Host world replacement synchronously clears every bound peer's pre-replacement queue and marks all handshakes for a fresh snapshot before awaiting any ready peer; the handshake loops until the snapshot is stable, then flushes only post-snapshot traffic.
+2. **Cancellable single-flight twin turns.** Network twins now track their stagger timeout, interval, fetch timeout, AbortController, and run generation. Pause, resume, restart, roster replacement, and removal all cancel stale timers and in-flight `/chat` requests. A 20-second request timeout emits a distinct `twin-turn` timeout result while retaining the existing unreachable badge/backoff. The Twin Console adds Pause/Resume controls, and `window.voxelflayer.pauseTwin(name)` / `resumeTwin(name)` expose the same lifecycle to automation. Repeated resumes collapse to one active loop; a removed or paused twin cannot apply a late response.
+3. **Recoverable, truthful persistence.** Boot reads the raw autosave before parsing. Invalid bytes are copied exactly to a timestamped recovery key before the fresh fallback can replace `SAVE_KEY`. If quota/private mode prevents that copy, the invalid primary remains untouched and the playable world moves to the fixed `voxel-world-save-v1-recovery-session` solo key. That fallback key is loaded on later boots and follows the player through join/leave via `soloSaveKey`, so neighborhood teardown cannot overwrite the only preserved invalid copy. `vox save` now returns `ok:false` with the storage error when `saveNow()` fails; `vox status().storage` reports active/solo keys and the latest error.
+
+### Validation
+
+- Import map parsed; classic and module inline scripts both passed `node --check`.
+- 105 static HTML IDs were unique; every literal DOM lookup and `grabDom` reference resolved.
+- Fresh Chrome/CDP boot: `__voxelBooted=true`, no boot error, loading hidden, 121 chunks, `vox.status/map/cave` green, 37 help commands, serializable observation schema v2.
+- Duplicate `vox.kite()` starts returned the same peer/link.
+- Host-vs-join and join-vs-join races converged on the latest host and remained connected beyond the stale 13-second watchdog.
+- Two concurrent newcomers and the existing neighbor converged to a three-neighbor roster on host and both leaves, proving queued hello replay.
+- A host world replacement during a live handshake ended with the identical seed `-36304007` and 121 chunks on host and joiner.
+- A delayed-seal harness discarded a pre-replacement encrypted `edit` while still delivering a non-world `chat`; serialized client ingress retained valid snapshot-following mutations.
+- A sealed console frame before hello and a sealed hello with an empty RAPPID were both connection-closed; the legitimate neighbor remained connected.
+- Pausing a thinking twin aborted its live request and left status `paused`; repeated resume produced one fetch; an unresolved request timed out and emitted `error:"timeout"`.
+- Corrupt autosave navigation preserved the exact invalid bytes in a recovery key and booted a valid fresh save. Under quota pressure, the 3,000,011-byte invalid primary remained untouched, the recovery-session world saved successfully, and a reload resumed that fallback.
+- Forced `QuotaExceededError`: `vox save` returned `ok:false`; restoring storage returned `ok:true`.
+- Iterative independent code-review gates drove the startup, snapshot-barrier, fallback-key, and encryption-epoch race fixes; the final gate reported no high-confidence findings.
+
+File size after implementation: 9,749 lines. Only `voxel-world.html` and this log belong to the cycle commit.
+
+### Runners-up
+
+- Smart-dig terminal-result correlation and `once/off` cancellation.
+- Modal focus/Escape lifecycle and held-touch cancellation.
+- Ore satchel inventory, remote-visible mining progress, hidden-tab presentation split, material-aware impact audio, and action receipts.

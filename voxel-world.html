@@ -4094,11 +4094,14 @@ function achInit() {
 // ---------------------------------------------------------------------------
 
 const SAVE_KEY = 'voxel-world-save-v1';
+const SAVE_RECOVERY_PREFIX = SAVE_KEY + '-recovery-';
+const SAVE_RECOVERY_SESSION_KEY = SAVE_KEY + '-recovery-session';
 const SETTINGS_KEY = 'voxel-world-settings-v1';
 const HELP_KEY = 'voxel-world-help-seen-v1';
 // NEIGHBORHOOD: while joined to a kite, autosaves go to SAVE_KEY + '-nb-' + hostPeerId
-// so the solo world stays untouched. Restored to SAVE_KEY on leave.
-let activeSaveKey = SAVE_KEY;
+// so the solo world stays untouched. Restored to soloSaveKey on leave.
+let soloSaveKey = SAVE_KEY;
+let activeSaveKey = soloSaveKey;
 
 let edits = {};                       // "gx,gy,gz" -> blockId
 const editsByChunk = new Map();       // "cx,cz" -> Map(cellIndex -> blockId)
@@ -4145,6 +4148,7 @@ function collectSave() {
 // export paths never carry it.
 let _saveWarned = false;     // one warning per session (toast + save_failed event)
 let _lastSaveOk = true;      // status surface: did the most recent saveNow() succeed?
+let _lastSaveError = null;
 function saveNow() {
   clearTimeout(saveTimer);
   saveTimer = null;
@@ -4152,18 +4156,35 @@ function saveNow() {
     const s = collectSave();
     // legacy session keys with no lastTouched read as 0 (reaped first — acceptable). Only the
     // live SESSION key is stamped; the solo SAVE_KEY save stays byte-identical to before.
-    if (activeSaveKey !== SAVE_KEY) s.lastTouched = Date.now();
+    if (activeSaveKey.indexOf(NB_SESSION_PREFIX) === 0) s.lastTouched = Date.now();
     localStorage.setItem(activeSaveKey, JSON.stringify(s));
     _lastSaveOk = true;
+    _lastSaveError = null;
     return true;
   } catch (e) {
     _lastSaveOk = false;
+    _lastSaveError = e && (e.name || e.message) ? String(e.name || e.message).slice(0, 80) : 'storage-write-failed';
     if (!_saveWarned) {
       _saveWarned = true;
       try { toast('Could not save — storage is full or blocked. Export your world (gear menu) to keep it.'); } catch (e2) { /* pre-DOM */ }
       try { voxEvent('save_failed', { key: activeSaveKey }); } catch (e2) { /* events never break the game */ }
     }
     return false;
+  }
+}
+function quarantineInvalidSave(raw) {
+  if (typeof raw !== 'string') return null;
+  const key = SAVE_RECOVERY_PREFIX + Date.now();
+  try {
+    // Store the exact original bytes, not a parsed/re-serialized approximation.
+    localStorage.setItem(key, raw);
+    return key;
+  } catch (e) {
+    // Quota/private-mode may also block the quarantine write. In that case preserve the
+    // original SAVE_KEY in place and route the playable fallback world to a different key.
+    soloSaveKey = SAVE_RECOVERY_SESSION_KEY;
+    activeSaveKey = soloSaveKey;
+    return 'original-preserved-in-place';
   }
 }
 // REAPER (cycle-1): every JOIN writes autosaves to SAVE_KEY+'-nb-'+hostPeerId, and PeerJS host
@@ -4191,7 +4212,7 @@ function nbReapStaleSessionKeys() {
     for (const k of allKeys) {
       // strict: must start with the -nb- prefix AND be neither the live nor the solo key
       if (k.indexOf(NB_SESSION_PREFIX) !== 0) continue;
-      if (k === activeSaveKey || k === SAVE_KEY) continue;
+      if (k === activeSaveKey || k === soloSaveKey || k === SAVE_KEY) continue;
       let touched = 0;
       try {
         const o = JSON.parse(localStorage.getItem(k) || 'null');
@@ -4282,7 +4303,8 @@ function validateSave(o) {
   return true;
 }
 
-function applyWorldState(seed, newEdits, ppos) {
+function applyWorldState(seed, newEdits, ppos, options) {
+  nbWorldEpoch++;
   disposeAllChunks();
   worldSeed = seed | 0;
   edits = newEdits || {};
@@ -4304,7 +4326,7 @@ function applyWorldState(seed, newEdits, ppos) {
   camFxNotifyTeleport(); // CAMERA: a world load/import is a large jump, not a landing
   updateFog(); // RENDERER PERF: re-derive camera.far for the import/load (re-meshes under the cap)
   scanChunks();
-  saveNow();
+  if (!options || !options.skipSave) saveNow();
   // NEIGHBORHOOD hook: a kited host whose world was replaced re-snapshots all neighbors
   nbAfterWorldReplaced();
 }
@@ -4417,6 +4439,24 @@ let nbPosTimer = 0;
 let nbLastSent = { x: 0, y: 0, z: 0, yaw: 0, pitch: 0, t: 0 };
 let nbAutoJoinDone = false;
 const nbScriptLoads = {};
+let nbSessionEpoch = 1;       // invalidates async decrypt/connection callbacks after reset
+let nbJoinGeneration = 0;     // exactly one host/join startup may own global session state
+let nbWorldEpoch = 0;         // invalidates encrypted world mutations across replacements
+
+function nbRemoteRappidIsValid(rappid) {
+  return typeof rappid === 'string' &&
+    rappid.length >= 6 && rappid.length <= 64 &&
+    /^[A-Za-z0-9_-]+$/.test(rappid) &&
+    rappid !== Neighborhood.rappid;
+}
+function nbEntryIsLive(entry, epoch) {
+  return !!entry && !entry.closed && epoch === nbSessionEpoch &&
+    Neighborhood.conns.get(entry.conn.peer) === entry;
+}
+function nbWorldSensitiveEnvelope(env) {
+  const p = env && env.payload;
+  return !!p && p.app === NB_APP_ID && (p.op === 'edit' || p.op === 'bot-act');
+}
 
 // &b= parse hardening (cycle-10): strict integer parse — Number, NOT parseInt, so a
 // float like '2.5' can never truncate into a different (possibly valid) index. Any
@@ -5130,22 +5170,40 @@ function nbBroadcastWire(wire, exceptPeerId) {
     if (pid === exceptPeerId) continue;
     if (e.ready && e.conn && e.conn.open) {
       try { e.conn.send(wire); } catch (err) { /* drop */ }
+    } else if (e.bound && e.conn && e.conn.open) {
+      // A bound peer is still receiving its authoritative snapshot. Queue every later
+      // reliable-channel frame so edits, chat, pings, and concurrent peer hellos replay
+      // strictly after that snapshot instead of mutating a solo/pre-snapshot world.
+      if (e.pendingWires.length < 256) e.pendingWires.push(wire);
+      else e.queueOverflow = true; // reconnect is safer than silently dropping state
     }
   }
 }
 async function nbBroadcastSealed(env, exceptPeerId) {
+  const worldEpoch = nbWorldEpoch;
   let wire = null;
   try { wire = await nbSeal(env); } catch (e) { return; }
+  if (nbWorldSensitiveEnvelope(env) && worldEpoch !== nbWorldEpoch) return;
   nbBroadcastWire(wire, exceptPeerId || null);
 }
 async function nbSendToHost(env, sealed) {
   const c = Neighborhood.hostConn;
   if (!c || !c.open) return;
-  try { c.send(sealed ? await nbSeal(env) : env); } catch (e) { /* drop */ }
+  const worldEpoch = nbWorldEpoch;
+  try {
+    const wire = sealed ? await nbSeal(env) : env;
+    if (nbWorldSensitiveEnvelope(env) && worldEpoch !== nbWorldEpoch) return;
+    c.send(wire);
+  } catch (e) { /* drop */ }
 }
 async function nbSendSealed(conn, env) {
-  if (!conn || !conn.open) return;
-  try { conn.send(await nbSeal(env)); } catch (e) { /* drop */ }
+  if (!conn || !conn.open) return false;
+  try {
+    conn.send(await nbSeal(env));
+    return true;
+  } catch (e) {
+    return false;
+  }
 }
 
 // --- world edit plumbing --------------------------------------------------------------
@@ -5268,27 +5326,46 @@ function nbCreatePeer() {
 
 async function nbFlyKite() {
   if (Neighborhood.enabled) { showNb(); return; }
+  if (nbJoinAbort) {
+    const abortPrior = nbJoinAbort;
+    nbJoinAbort = null;
+    try { abortPrior(); } catch (e) {}
+  }
+  const startGen = ++nbJoinGeneration;
+  const startIsCurrent = () => startGen === nbJoinGeneration && !Neighborhood.enabled;
   nbSetStatus('Raising the kite…');
   if (!(await nbEnsureLibs())) return;
-  Neighborhood.token = mintToken();
+  if (!startIsCurrent()) return;
+  const token = mintToken();
+  let key = null;
   try {
-    Neighborhood.key = await nbDeriveKey(Neighborhood.token);
+    key = await nbDeriveKey(token);
   } catch (e) {
+    if (!startIsCurrent()) return;
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
     return;
   }
+  if (!startIsCurrent()) return;
   let peer, brokerIdx;
   try {
     ({ peer, brokerIdx } = await nbCreatePeer());
   } catch (e) {
+    if (!startIsCurrent()) return;
     nbResetSession();
     nbSetStatus('Could not raise the kite (no signaling broker reachable). Check your connection and try again.');
     return;
   }
+  if (!startIsCurrent()) {
+    try { peer.destroy(); } catch (e) {}
+    return;
+  }
+  Neighborhood.token = token;
+  Neighborhood.key = key;
   Neighborhood.peer = peer;
   Neighborhood.enabled = true;
   Neighborhood.role = 'kite';
   Neighborhood.hostPeerId = peer.id;
+  const hostEpoch = nbSessionEpoch;
   nbBrokerIdx = brokerIdx; // vox('status') reports the broker this kite actually flies on
   Neighborhood.link = nbBaseUrl() + '?join=' + encodeURIComponent(peer.id) +
     (brokerIdx ? '&b=' + brokerIdx : '') + '#k=' + Neighborhood.token;
@@ -5297,23 +5374,43 @@ async function nbFlyKite() {
   achUnlock('neighbor'); // FIELD GUIDE: flying the kite counts (no-op when headless/already unlocked)
   addChatMsg(null, 'Kite is flying — neighbors can Scan-to-Join', null, true);
   toast('Kited! Share the QR or link');
-  peer.on('connection', (conn) => nbHostOnConnection(conn));
+  peer.on('connection', (conn) => {
+    if (Neighborhood.peer === peer && hostEpoch === nbSessionEpoch) nbHostOnConnection(conn);
+    else { try { conn.close(); } catch (e) {} }
+  });
   peer.on('error', (err) => {
+    if (Neighborhood.peer !== peer || hostEpoch !== nbSessionEpoch) return;
     const t = err && err.type ? err.type : String(err);
     nbSetStatus('Kite turbulence: ' + t);
   });
-  peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
+  peer.on('disconnected', () => {
+    if (Neighborhood.peer !== peer || hostEpoch !== nbSessionEpoch) return;
+    try { peer.reconnect(); } catch (e) {}
+  });
 }
 
 function nbHostOnConnection(conn) {
-  const entry = { conn, ready: false, rappid: null, name: null, color: null };
+  const entry = {
+    conn, ready: false, bound: false, rappid: null, name: null, color: null,
+    epoch: nbSessionEpoch, closed: false, ingress: Promise.resolve(),
+    pendingWires: [], queueOverflow: false, needsSnapshot: false
+  };
   Neighborhood.conns.set(conn.peer, entry);
-  conn.on('data', (wire) => { nbHostOnData(entry, wire); });
+  conn.on('data', (wire) => {
+    // Reliable DataChannels preserve arrival order, but async AES-GCM decrypts do not.
+    // Serialize each connection's ingress and bind it to the session epoch so a reset
+    // or replacement can never dispatch a late frame into the next world/session.
+    const worldEpoch = nbWorldEpoch;
+    entry.ingress = entry.ingress
+      .then(() => nbHostOnData(entry, wire, entry.epoch, worldEpoch))
+      .catch(() => {});
+  });
   conn.on('close', () => nbHostDropNeighbor(entry));
   conn.on('error', () => nbHostDropNeighbor(entry));
 }
 
-async function nbHostOnData(entry, wire) {
+async function nbHostOnData(entry, wire, epoch, worldEpoch) {
+  if (!nbEntryIsLive(entry, epoch)) return;
   if (typeof wire === 'string') { try { wire = JSON.parse(wire); } catch (e) { return; } }
   if (!wire || typeof wire !== 'object') return;
   let env = wire, sealed = false;
@@ -5322,6 +5419,7 @@ async function nbHostOnData(entry, wire) {
       env = await nbUnseal(wire);
       sealed = true;
     } catch (e) {
+      if (!nbEntryIsLive(entry, epoch)) return;
       // wrong-key peer: clean rejection, then drop
       try {
         entry.conn.send(envelope('ack', {
@@ -5333,7 +5431,23 @@ async function nbHostOnData(entry, wire) {
       return;
     }
   }
+  if (!nbEntryIsLive(entry, epoch)) return;
   if (!env || env.schema !== 'rapp-twin-chat/1.0' || typeof env.kind !== 'string') return;
+  if (env.kind === 'ack') return;
+  if (!entry.ready) {
+    // The sealed hello is the sole authorization transition. Console and every
+    // gameplay op stay unreachable until identity has been validated and bound.
+    if (env.kind !== 'say' || !sealed || !env.payload ||
+        env.payload.app !== NB_APP_ID || env.payload.op !== 'hello') {
+      try { entry.conn.close(); } catch (e) {}
+      return;
+    }
+    await nbHostWelcome(entry, env, wire, epoch);
+    return;
+  }
+  // Every post-hello envelope kind, including console, is identity-bound.
+  if (env.from_rappid !== entry.rappid) return;
+  if (nbWorldSensitiveEnvelope(env) && worldEpoch !== nbWorldEpoch) return;
   if (env.kind === 'console') {
     if (!sealed) { // conformance §16: unsealed console MUST be rejected
       try {
@@ -5348,24 +5462,10 @@ async function nbHostOnData(entry, wire) {
     nbSendSealed(entry.conn, envelope('ack', { ok: true, ackOf: env.nonce }, env.from_rappid));
     return;
   }
-  if (env.kind === 'ack') return;
   if (env.kind !== 'say') return;
-  if (!entry.ready) {
-    // entry rite: the FIRST envelope must be a sealed hello (the token authorizes)
-    if (!sealed || !env.payload || env.payload.app !== NB_APP_ID || env.payload.op !== 'hello') return;
-    nbHostWelcome(entry, env, wire);
-    return;
-  }
   const p = env.payload || {};
   if (p.app !== NB_APP_ID) return;
   if (!sealed && p.op !== 'pos') return; // plaintext is allowed only for pos (perf)
-  // TRUST: bind the envelope's claimed sender to the identity captured at hello
-  // (nbHostWelcome). A ready neighbor that forges from_rappid=someone-else would
-  // otherwise spoof 'bye' (evict another avatar), 'bot-claim'/'bot-release' (steal
-  // a controller's claim — those handlers key entirely off env.from_rappid), or
-  // chat/ping impersonation — and the host would dispatch it locally AND relay the
-  // wire verbatim. Reject BEFORE both local dispatch and the hub relay.
-  if (env.from_rappid !== entry.rappid) return;
   nbDispatch(env, entry, sealed);
   // hub relay (§10): forward the ORIGINAL wire to every other neighbor.
   // ANTI-GRIEF: a rate-limited / ceiling-refused 'edit' was dropped by nbDispatch (the edit
@@ -5379,44 +5479,69 @@ async function nbHostOnData(entry, wire) {
   }
 }
 
-async function nbHostWelcome(entry, env, helloWire) {
-  // TRUST: reject a hello whose from_rappid collides with an already-ready entry —
+async function nbHostWelcome(entry, env, helloWire, epoch) {
+  if (!nbEntryIsLive(entry, epoch) || !nbRemoteRappidIsValid(env.from_rappid)) {
+    try { entry.conn.close(); } catch (e) {}
+    return;
+  }
+  // TRUST: reject a hello whose from_rappid collides with an already-bound entry —
   // an attacker must not be able to assume another connected neighbor's identity at
   // the handshake (which would let the from_rappid binding above accept their forged
   // ops). A legit client uses a STABLE per-tab rappid (sessionStorage), so reconnect
   // reuses its own id and the old entry is already gone by then; this never rejects
   // legitimate traffic.
   for (const [, e] of Neighborhood.conns) {
-    if (e !== entry && e.ready && e.rappid === env.from_rappid) {
+    if (e !== entry && (e.bound || e.ready) && e.rappid === env.from_rappid) {
       try { entry.conn.close(); } catch (e2) {}
       return;
     }
   }
-  entry.ready = true;
+  if (!nbEntryIsLive(entry, epoch)) return;
+  entry.bound = true;
   entry.rappid = env.from_rappid;
   entry.name = nbCleanName(env.payload.name);
   entry.color = nbCleanColor(env.payload.skinColor);
+  let snapshotSent = false;
+  for (let pass = 0; pass < 3; pass++) {
+    entry.needsSnapshot = false;
+    // Build the snapshot at send time. If the host replaces the world while encryption
+    // is in flight, nbAfterWorldReplaced marks needsSnapshot and this loop sends a fresh
+    // authoritative state before the peer becomes broadcast-ready.
+    const players = [{
+      rappid: Neighborhood.rappid, name: Neighborhood.name, color: Neighborhood.color,
+      x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch
+    }];
+    for (const [, e] of Neighborhood.conns) {
+      if (!e.ready || e === entry) continue;
+      const av = Neighborhood.avatars.get(e.rappid);
+      players.push({
+        rappid: e.rappid, name: e.name, color: e.color,
+        x: av ? av.cur.x : player.pos.x, y: av ? av.cur.y : player.pos.y,
+        z: av ? av.cur.z : player.pos.z, yaw: av ? av.cur.yaw : 0, pitch: 0
+      });
+    }
+    snapshotSent = await nbSendSealed(entry.conn, envelope('say', {
+      app: NB_APP_ID, op: 'snapshot',
+      seed: worldSeed, edits, players,
+      spawn: { x: player.pos.x, y: player.pos.y, z: player.pos.z }
+    }, env.from_rappid));
+    if (!nbEntryIsLive(entry, epoch)) return;
+    if (!snapshotSent || !entry.needsSnapshot) break;
+  }
+  if (!snapshotSent || entry.needsSnapshot || entry.queueOverflow) {
+    try { entry.conn.close(); } catch (e) {}
+    return;
+  }
+  // Only after the snapshot is on the reliable channel may broadcasts reach this peer.
+  entry.ready = true;
+  for (const pending of entry.pendingWires.splice(0)) {
+    try { entry.conn.send(pending); } catch (e) {
+      try { entry.conn.close(); } catch (e2) {}
+      return;
+    }
+  }
   nbEnsureAvatar(entry.rappid, entry.name, entry.color);
   saveNow();
-  // world snapshot + current player roster (host -> joiner)
-  const players = [{
-    rappid: Neighborhood.rappid, name: Neighborhood.name, color: Neighborhood.color,
-    x: player.pos.x, y: player.pos.y, z: player.pos.z, yaw: player.yaw, pitch: player.pitch
-  }];
-  for (const [, e] of Neighborhood.conns) {
-    if (!e.ready || e === entry) continue;
-    const av = Neighborhood.avatars.get(e.rappid);
-    players.push({
-      rappid: e.rappid, name: e.name, color: e.color,
-      x: av ? av.cur.x : player.pos.x, y: av ? av.cur.y : player.pos.y,
-      z: av ? av.cur.z : player.pos.z, yaw: av ? av.cur.yaw : 0, pitch: 0
-    });
-  }
-  await nbSendSealed(entry.conn, envelope('say', {
-    app: NB_APP_ID, op: 'snapshot',
-    seed: worldSeed, edits, players,
-    spawn: { x: player.pos.x, y: player.pos.y, z: player.pos.z }
-  }, env.from_rappid));
   // announce the newcomer to everyone else (forward their sealed hello)
   nbBroadcastWire(helloWire, entry.conn.peer);
   nbUpdateCounts();
@@ -5426,6 +5551,7 @@ async function nbHostWelcome(entry, env, helloWire) {
 
 function nbHostDropNeighbor(entry) {
   if (!entry || !entry.conn || !Neighborhood.conns.has(entry.conn.peer)) return;
+  entry.closed = true;
   Neighborhood.conns.delete(entry.conn.peer);
   if (entry.ready) {
     nbRemoveAvatar(entry.rappid);
@@ -5438,8 +5564,22 @@ function nbHostDropNeighbor(entry) {
 // Host whose world got replaced (import / new world) re-snapshots every neighbor.
 async function nbAfterWorldReplaced() {
   if (!Neighborhood.enabled || Neighborhood.role !== 'kite') return;
+  const readyEntries = [];
+  // First pass is deliberately synchronous: invalidate EVERY bound handshake before
+  // awaiting any ready peer's encryption/send. Pre-replacement queued frames are dropped;
+  // the fresh snapshot already contains the authoritative edits and current ready roster.
   for (const [, e] of Neighborhood.conns) {
-    if (!e.ready) continue;
+    if (!e.ready) {
+      if (e.bound) {
+        e.pendingWires.length = 0;
+        e.queueOverflow = false;
+        e.needsSnapshot = true;
+      }
+      continue;
+    }
+    readyEntries.push(e);
+  }
+  for (const e of readyEntries) {
     await nbSendSealed(e.conn, envelope('say', {
       app: NB_APP_ID, op: 'snapshot',
       seed: worldSeed, edits, players: [],
@@ -5486,11 +5626,23 @@ const NB_JOIN_BROKER_ERRS = new Set([
 
 async function nbJoinWith(peerId, token, brokerIdx) {
   if (Neighborhood.enabled) { toast('Already in a neighborhood — leave it first'); return false; }
+  // A manual, auto, RETRY, or vox join may race another attempt before either reaches
+  // Neighborhood.enabled. Retire the prior owner first, then mint a generation that every
+  // await/callback must still own before touching global session state.
+  if (nbJoinAbort) {
+    const abortPrior = nbJoinAbort;
+    nbJoinAbort = null;
+    try { abortPrior(); } catch (e) {}
+  }
+  const joinGen = ++nbJoinGeneration;
+  const joinIsCurrent = () => joinGen === nbJoinGeneration && !Neighborhood.enabled;
   nbJoinCancelled = false; // fresh attempt (incl. RETRY): a stale pre-attempt cancel never kills it
   if (!(await nbEnsureLibs())) {
+    if (joinGen !== nbJoinGeneration) return false;
     nbJoinHudSet('offline'); // JOIN HUD: PeerJS CDN never loaded — offline note, no spinner
     return false;
   }
+  if (joinGen !== nbJoinGeneration) return false;
   if (nbJoinCancelled) {
     // 'Play solo instead' tapped while the CDN libs were still loading (nbJoinAbort was
     // not armed yet). Bail BEFORE touching session state or creating any peer; the same
@@ -5502,21 +5654,25 @@ async function nbJoinWith(peerId, token, brokerIdx) {
   }
   nbSetStatus('Scan-to-Join — connecting to the kite…');
   nbJoinHudSet('connecting'); // JOIN HUD: attempt start (no-op unless the auto-join card is up)
-  Neighborhood.token = token;
+  let derivedKey = null;
   try {
-    Neighborhood.key = await nbDeriveKey(token);
+    derivedKey = await nbDeriveKey(token);
   } catch (e) {
+    if (joinGen !== nbJoinGeneration) return false;
     nbSetStatus('This browser cannot derive the Sealed channel key (WebCrypto unavailable).');
     nbJoinHudSet('failed');
     return false;
   }
+  if (joinGen !== nbJoinGeneration) return false;
   if (nbJoinCancelled) {
     // 'Play solo instead' tapped during the PBKDF2 derive — same pre-attempt bail; this
     // is the last await before attempt(), so past here nbJoinAbort covers cancellation.
     nbJoinCancelled = false;
-    if (!Neighborhood.enabled) { nbResetSession(); } // clears the token/key set above
+    if (!Neighborhood.enabled) { nbResetSession(); }
     return false;
   }
+  Neighborhood.token = token;
+  Neighborhood.key = derivedKey;
   // BROKER HARDENING (cycle-10): strict index validation (any malformed/out-of-range
   // &b= resolves to 0) + a triedIdx Set seeded with the initial index. Each fallback-
   // eligible failure tries the LOWEST untried broker — at most one attempt per broker,
@@ -5529,7 +5685,10 @@ async function nbJoinWith(peerId, token, brokerIdx) {
   // Re-runs on the next untried broker for a broker-unreachable failure (reusing the
   // already-derived Neighborhood.key/token — only the Peer is re-created).
   const attempt = (idx) => {
+    if (!joinIsCurrent()) return;
     const peer = nbNewPeerAt(idx);
+    const attemptEpoch = nbSessionEpoch;
+    let ingress = Promise.resolve();
     nbBrokerIdx = idx; // vox('status') reports the broker this attempt/session uses
     Neighborhood.peer = peer;
     Neighborhood.hostPeerId = peerId;
@@ -5543,6 +5702,7 @@ async function nbJoinWith(peerId, token, brokerIdx) {
     // it always points at the live peer; a post-snapshot call is a no-op (enabled).
     nbJoinAbort = () => {
       nbJoinAbort = null;
+      if (joinGen !== nbJoinGeneration) return;
       if (Neighborhood.enabled) return; // snapshot already applied — nothing to abort
       settled = true;                   // any late watchdog/open/error becomes a no-op
       clearWatchdogs();
@@ -5555,7 +5715,7 @@ async function nbJoinWith(peerId, token, brokerIdx) {
     // Fall back to the next untried broker; when ALL brokers are tried, surface the
     // terminal failure (the join HUD's failure state fires from the same site).
     const failOrFallback = (canFallback) => {
-      if (settled) return;     // a connected/handshaken session must never be torn down here
+      if (settled || !joinIsCurrent()) return; // stale attempts can never tear down a winner
       settled = true;
       clearWatchdogs();
       // null out FIRST so any synchronous close/error from destroy() sees this peer as stale
@@ -5584,6 +5744,7 @@ async function nbJoinWith(peerId, token, brokerIdx) {
     wd = setTimeout(() => failOrFallback(true), NB_JOIN_WD_MS);
 
     peer.on('error', (err) => {
+      if (joinGen !== nbJoinGeneration) return;
       const t = err && err.type ? err.type : String(err);
       if (settled) { // already connected (or already failed): only annotate live hiccups
         if (Neighborhood.enabled) nbSetStatus('Network hiccup: ' + t);
@@ -5595,7 +5756,7 @@ async function nbJoinWith(peerId, token, brokerIdx) {
     });
 
     peer.on('open', () => {
-      if (settled) return;                 // late 'open' after a watchdog/error reset — ignore
+      if (settled || !joinIsCurrent()) return; // late 'open' after reset/supersession — ignore
       if (wd) { clearTimeout(wd); wd = null; } // broker reachable; the primary watchdog is done
       nbJoinHudSet('handshake'); // JOIN HUD: 'Handshaking…' (the second-stage watchdog arms here)
       // SECOND-STAGE watchdog: broker is up but the host (conn 'open') may never answer. If the
@@ -5605,20 +5766,27 @@ async function nbJoinWith(peerId, token, brokerIdx) {
       const conn = peer.connect(peerId, { reliable: true });
       Neighborhood.hostConn = conn;
       conn.on('open', async () => {
-        if (settled) return;               // a stray late open after reset must not re-arm the session
+        if (settled || !joinIsCurrent()) return; // stale open must not re-arm the session
         if (Neighborhood.peer !== peer) return; // we've moved on to the alternate peer — ignore
         settled = true;                    // CONNECTED: clear every watchdog so a later 'close'
         clearWatchdogs();                  //   is handled by nbOnHostLost, never a stale watchdog
         await nbSendToHost(envelope('say', {
           app: NB_APP_ID, op: 'hello', name: Neighborhood.name, skinColor: Neighborhood.color
         }), true);
+        if (joinGen !== nbJoinGeneration || attemptEpoch !== nbSessionEpoch) return;
         nbSetStatus('Sealed hello sent — waiting for the world snapshot…');
       });
-      conn.on('data', (wire) => nbClientOnData(wire));
+      conn.on('data', (wire) => {
+        // Preserve DataChannel arrival order across async decrypt and drop any frame whose
+        // attempt/session was replaced before it finished opening.
+        ingress = ingress
+          .then(() => nbClientOnData(wire, attemptEpoch, joinGen, peer))
+          .catch(() => {});
+      });
       conn.on('close', () => {
         // a destroyed-peer 'close' during fallback must not tear down the NEW attempt:
         // only act if this conn still belongs to the live peer.
-        if (Neighborhood.peer !== peer) return;
+        if (Neighborhood.peer !== peer || joinGen !== nbJoinGeneration) return;
         // pre-handshake close MUST settle the attempt via failOrFallback (mirrors conn 'error'):
         // routing it through nbOnHostLost left settled=false with the 8s wd2 still armed, and a
         // one-tap Retry inside that window got its fresh peer (or fully-joined session) destroyed
@@ -5628,7 +5796,7 @@ async function nbJoinWith(peerId, token, brokerIdx) {
         nbOnHostLost();                                    // post-handshake -> normal host-lost path
       });
       conn.on('error', () => {
-        if (Neighborhood.peer !== peer) return;           // stale conn from a superseded peer — ignore
+        if (Neighborhood.peer !== peer || joinGen !== nbJoinGeneration) return;
         if (!settled) { failOrFallback(false); return; }  // conn died pre-handshake -> host-gone fail
         nbOnHostLost();                                    // post-handshake -> normal host-lost path
       });
@@ -5639,13 +5807,17 @@ async function nbJoinWith(peerId, token, brokerIdx) {
   return true;
 }
 
-async function nbClientOnData(wire) {
+async function nbClientOnData(wire, epoch, joinGen, peer) {
+  if (epoch !== nbSessionEpoch || joinGen !== nbJoinGeneration ||
+      Neighborhood.peer !== peer) return;
   if (typeof wire === 'string') { try { wire = JSON.parse(wire); } catch (e) { return; } }
   if (!wire || typeof wire !== 'object') return;
   let env = wire, sealed = false;
   if (wire.schema === 'rapp-sealed/1.0') {
     try { env = await nbUnseal(wire); sealed = true; } catch (e) { return; }
   }
+  if (epoch !== nbSessionEpoch || joinGen !== nbJoinGeneration ||
+      Neighborhood.peer !== peer) return;
   if (!env || env.schema !== 'rapp-twin-chat/1.0' || typeof env.kind !== 'string') return;
   if (env.kind === 'ack') {
     if (env.payload && env.payload.ok === false) {
@@ -5673,7 +5845,7 @@ function nbApplySnapshot(p, env) {
   Neighborhood.enabled = true;
   Neighborhood.role = 'neighbor';
   // protect the solo save: final solo write, then switch to the session key
-  if (activeSaveKey === SAVE_KEY) {
+  if (activeSaveKey === soloSaveKey) {
     saveNow();
     activeSaveKey = SAVE_KEY + '-nb-' + (Neighborhood.hostPeerId || 'kite');
   }
@@ -5747,9 +5919,9 @@ function nbLeave(skipToast) {
     try { history.replaceState(null, '', location.pathname); } catch (e) {}
   }
   if (wasNeighbor) {
-    activeSaveKey = SAVE_KEY;
+    activeSaveKey = soloSaveKey;
     let save = null;
-    try { save = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { save = null; }
+    try { save = JSON.parse(localStorage.getItem(soloSaveKey) || 'null'); } catch (e) { save = null; }
     if (validateSave(save)) {
       applyWorldState(save.seed, save.edits, save.playerPosition);
       // ROSTER RECONCILE (twin-leak fix): the JOIN switched activeSaveKey to the -nb- session
@@ -5774,6 +5946,12 @@ function nbLeave(skipToast) {
 }
 
 function nbResetSession() {
+  // Invalidate every queued decrypt, connection callback, and pending join attempt before
+  // destroying transport state. Late async work observes a mismatched epoch/generation and
+  // becomes a no-op instead of mutating the next solo or neighborhood world.
+  nbSessionEpoch++;
+  nbJoinGeneration++;
+  nbJoinAbort = null;
   for (const rid of [...Neighborhood.avatars.keys()]) nbRemoveAvatar(rid);
   for (const rec of Neighborhood.pings.values()) nbDisposePing(rec); // PING markers die with the session
   Neighborhood.pings.clear();
@@ -6433,6 +6611,34 @@ function vfConfirmTwinOrigin(url) {
   if (ok) vfAllowTwinOrigin(origin);
   return ok;
 }
+const VF_TWIN_FETCH_TIMEOUT_MS = 20000;
+function vfStopTwinLoop(twin) {
+  if (!twin) return;
+  twin._runGen = (twin._runGen || 0) + 1;
+  if (twin.startTimer) clearTimeout(twin.startTimer);
+  if (twin.timer) clearInterval(twin.timer);
+  if (twin.fetchTimer) clearTimeout(twin.fetchTimer);
+  twin.startTimer = null;
+  twin.timer = null;
+  twin.fetchTimer = null;
+  if (twin.abortController) {
+    try { twin.abortController.abort(); } catch (e) {}
+  }
+  twin.abortController = null;
+  twin.inFlight = false;
+}
+function vfPauseTwin(twin) {
+  if (!twin) return { ok: false, error: 'no such twin' };
+  if (twin.mode === 'local' || !twin.url) {
+    return { ok: false, error: twin.name + ' is a local-brain twin (always running, no URL)' };
+  }
+  vfStopTwinLoop(twin);
+  vfSetTwinStatus(twin, 'paused');
+  return { ok: true, name: twin.name, status: twin.status };
+}
+function vfTwinRunIsCurrent(twin, runGen) {
+  return vfTwins.includes(twin) && twin._runGen === runGen;
+}
 // shared by the per-row Resume button (interactive) and vox('resume') (never prompts)
 function vfResumeTwin(twin, interactive) {
   if (!twin) return { ok: false, error: 'no such twin' };
@@ -6447,7 +6653,7 @@ function vfResumeTwin(twin, interactive) {
   twin.failCount = 0;
   twin.nextAllowed = 0;
   vfSetTwinStatus(twin, 'live');
-  vfStartTwinLoop(twin); // existing stagger/backoff untouched
+  vfStartTwinLoop(twin);
   return { ok: true, name: twin.name, status: twin.status };
 }
 
@@ -6781,7 +6987,7 @@ function vfRemoveBot(name) {
   const ti = vfTwins.findIndex((t) => t.bot === bot);
   if (ti >= 0) {
     const t = vfTwins[ti];
-    if (t.timer) clearInterval(t.timer);
+    vfStopTwinLoop(t);
     vfTwins.splice(ti, 1);
   }
   vfClaims.delete(name);
@@ -7287,6 +7493,10 @@ function vfHatchTwin(cfg) {
     brain,
     bot,
     timer: null,
+    startTimer: null,
+    fetchTimer: null,
+    abortController: null,
+    _runGen: 0,
     status: mode === 'local' ? 'local' : 'paused',
     history: [],
     failCount: 0,
@@ -7331,12 +7541,14 @@ function vfHatchTwin(cfg) {
 }
 
 function vfStartTwinLoop(twin) {
-  if (twin.timer) clearInterval(twin.timer);
+  vfStopTwinLoop(twin);
+  const runGen = twin._runGen;
   const stagger = 900 + (vfTwins.indexOf(twin) % VF_MAX_BOTS) * 700; // staggered loops
-  setTimeout(() => {
-    if (!vfTwins.includes(twin)) return;
-    vfTwinThink(twin);
-    twin.timer = setInterval(() => { vfTwinThink(twin); }, twin.intervalS * 1000);
+  twin.startTimer = setTimeout(() => {
+    if (!vfTwinRunIsCurrent(twin, runGen)) return;
+    twin.startTimer = null;
+    vfTwinThink(twin, runGen);
+    twin.timer = setInterval(() => { vfTwinThink(twin, runGen); }, twin.intervalS * 1000);
   }, stagger);
 }
 
@@ -7631,8 +7843,9 @@ function vfObsHasNearby(obs, r) {
   } catch (e) { return false; }
 }
 
-async function vfTwinThink(twin) {
-  if (!twin.bot || twin.inFlight || !twin.url) return;
+async function vfTwinThink(twin, runGen) {
+  if (runGen === undefined) runGen = twin._runGen;
+  if (!vfTwinRunIsCurrent(twin, runGen) || !twin.bot || twin.inFlight || !twin.url) return;
   if (performance.now() < twin.nextAllowed) return; // backoff after failures
   // a neighbor's claim outranks the brainstem (one controller per bot)
   if (vfClaims.has(twin.name) && vfClaims.get(twin.name) !== Neighborhood.rappid) return;
@@ -7656,6 +7869,13 @@ async function vfTwinThink(twin) {
     return;
   }
   twin.inFlight = true;
+  const controller = new AbortController();
+  twin.abortController = controller;
+  twin.fetchTimer = setTimeout(() => {
+    if (vfTwinRunIsCurrent(twin, runGen) && twin.abortController === controller) {
+      try { controller.abort(); } catch (e) {}
+    }
+  }, VF_TWIN_FETCH_TIMEOUT_MS);
   vfSetTwinStatus(twin, 'thinking');
   const obs = vfNetworkObs(twin.bot); // network-trimmed copy (vox obs/become stay full)
   twin._lastObsBytes = JSON.stringify(obs).length; // OBSERVABILITY: surfaced in vox('status')
@@ -7677,25 +7897,37 @@ async function vfTwinThink(twin) {
     const res = await fetch(twin.url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ user_input: userInput, conversation_history: twin.history.slice(-10) })
+      body: JSON.stringify({ user_input: userInput, conversation_history: twin.history.slice(-10) }),
+      signal: controller.signal
     });
+    if (!vfTwinRunIsCurrent(twin, runGen)) return;
     if (!res.ok) throw new Error('HTTP ' + res.status);
     const text = await res.text();
+    if (!vfTwinRunIsCurrent(twin, runGen)) return;
     let data = null;
     try { data = JSON.parse(text); } catch (e) { data = null; }
     raw = (data && typeof data === 'object')
       ? (data.assistant_response || data.response || text)
       : text;
   } catch (e) {
+    if (!vfTwinRunIsCurrent(twin, runGen)) return;
     // CORS / offline / refused: badge it, idle on last orders, retry with backoff
     twin.failCount++;
     twin.nextAllowed = performance.now() +
       Math.min(60000, twin.intervalS * 1000 * Math.pow(2, Math.min(4, twin.failCount)));
+    const timedOut = e && e.name === 'AbortError';
     vfSetTwinStatus(twin, 'unreachable');
-    voxEvent('twin-turn', { name: twin.name, ok: false, error: 'unreachable' }); // VOX hook
+    voxEvent('twin-turn', { name: twin.name, ok: false, error: timedOut ? 'timeout' : 'unreachable' });
+    if (twin.fetchTimer) clearTimeout(twin.fetchTimer);
+    twin.fetchTimer = null;
+    if (twin.abortController === controller) twin.abortController = null;
     twin.inFlight = false;
     return;
   }
+  if (twin.fetchTimer) clearTimeout(twin.fetchTimer);
+  twin.fetchTimer = null;
+  if (twin.abortController === controller) twin.abortController = null;
+  if (!vfTwinRunIsCurrent(twin, runGen)) return;
   try {
     twin.failCount = 0;
     twin.nextAllowed = 0;
@@ -7739,7 +7971,7 @@ async function vfTwinThink(twin) {
     vfSetTwinStatus(twin, 'live');
     voxEvent('twin-turn', { name: twin.name, ok: true, actions: actions ? actions.length : 0 }); // VOX hook
   } catch (e) { /* twin errors NEVER break the game loop */ }
-  twin.inFlight = false;
+  if (vfTwinRunIsCurrent(twin, runGen)) twin.inFlight = false;
 }
 
 function vfSetTwinStatus(twin, status) {
@@ -8052,13 +8284,18 @@ function vfRefreshTwinUi() {
     row.appendChild(dot);
     row.appendChild(nm);
     row.appendChild(info);
-    if (t && t.status === 'paused') {
-      // consent gate: paused network twin — Resume runs the allow-or-confirm flow
-      const res = document.createElement('button');
-      res.textContent = 'Resume';
-      res.title = 'Approve this twin’s /chat origin on this device and start its loop';
-      res.addEventListener('click', () => { vfResumeTwin(t, true); });
-      row.appendChild(res);
+    if (t && t.mode !== 'local') {
+      const ctl = document.createElement('button');
+      if (t.status === 'paused') {
+        ctl.textContent = 'Resume';
+        ctl.title = 'Approve this twin’s /chat origin on this device and start its loop';
+        ctl.addEventListener('click', () => { vfResumeTwin(t, true); });
+      } else {
+        ctl.textContent = 'Pause';
+        ctl.title = 'Stop this twin’s timer and cancel any in-flight /chat request';
+        ctl.addEventListener('click', () => { vfPauseTwin(t); });
+      }
+      row.appendChild(ctl);
     }
     row.appendChild(rm);
     ui.twinList.appendChild(row);
@@ -8107,6 +8344,14 @@ function initVoxelflayer() {
     spawn: (opts) => vfSpawnBot(opts || {}),
     remove: (name) => vfRemoveBot(nbCleanName(name)),
     hatchTwin: (cfg) => vfHatchTwin(cfg || {}),
+    pauseTwin: (name) => {
+      const t = vfTwins.find((x) => x.name === nbCleanName(name));
+      return vfPauseTwin(t);
+    },
+    resumeTwin: (name) => {
+      const t = vfTwins.find((x) => x.name === nbCleanName(name));
+      return vfResumeTwin(t, false);
+    },
     get twins() {
       return vfTwins.map((t) => ({
         name: t.name, mode: t.mode, status: t.status, interval: t.intervalS, brain: t.brain
@@ -8322,7 +8567,14 @@ function voxCmdStatus() {
     headless: voxHeadless,
     // SAVE INTEGRITY (cycle-1): ok=false once a write has failed this session; lastSaveOk =
     // the most recent saveNow() result; approxBytes computed lazily HERE (never per-save).
-    storage: { ok: !_saveWarned, lastSaveOk: _lastSaveOk, approxBytes: JSON.stringify(collectSave()).length }
+    storage: {
+      ok: !_saveWarned,
+      lastSaveOk: _lastSaveOk,
+      lastError: _lastSaveError,
+      key: activeSaveKey,
+      soloKey: soloSaveKey,
+      approxBytes: JSON.stringify(collectSave()).length
+    }
   };
 }
 
@@ -8881,8 +9133,10 @@ function voxCmdHeadless(state) {
 
 function voxCmdSave() {
   if (!voxReady()) return voxNotReady('world still booting');
-  saveNow();
-  return { ok: true, savedTo: activeSaveKey };
+  const ok = saveNow();
+  return ok
+    ? { ok: true, savedTo: activeSaveKey }
+    : { ok: false, error: _lastSaveError || 'storage write failed', savedTo: activeSaveKey };
 }
 
 function voxCmdExport() {
@@ -9221,12 +9475,35 @@ function main() {
   initParticles();
 
   // load saved world (or fresh seed)
-  let save = null;
-  try { save = JSON.parse(localStorage.getItem(SAVE_KEY) || 'null'); } catch (e) { save = null; }
+  let save = null, rawSave = null;
+  try {
+    rawSave = localStorage.getItem(SAVE_KEY);
+    save = JSON.parse(rawSave || 'null');
+  } catch (e) { save = null; }
   if (validateSave(save)) {
     applyWorldState(save.seed, save.edits, save.playerPosition);
   } else {
-    applyWorldState(randomSeed(), {}, null);
+    let fallbackSave = null;
+    try {
+      fallbackSave = JSON.parse(localStorage.getItem(SAVE_RECOVERY_SESSION_KEY) || 'null');
+    } catch (e) { fallbackSave = null; }
+    if (validateSave(fallbackSave)) {
+      soloSaveKey = SAVE_RECOVERY_SESSION_KEY;
+      activeSaveKey = soloSaveKey;
+      applyWorldState(fallbackSave.seed, fallbackSave.edits, fallbackSave.playerPosition);
+      toast('Recovered the playable fallback world; the invalid primary autosave remains untouched.');
+      try { voxEvent('save_recovery', { key: soloSaveKey, resumed: true }); } catch (e) {}
+    } else {
+      const recoveryKey = quarantineInvalidSave(rawSave);
+      applyWorldState(randomSeed(), {}, null);
+      if (rawSave !== null) {
+        const where = recoveryKey === 'original-preserved-in-place'
+          ? 'The original remains untouched because storage could not create a backup.'
+          : 'The original bytes were quarantined at ' + recoveryKey + '.';
+        toast('Invalid autosave was not discarded. ' + where);
+        try { voxEvent('save_recovery', { key: recoveryKey }); } catch (e) {}
+      }
+    }
   }
 
   // UI wiring
