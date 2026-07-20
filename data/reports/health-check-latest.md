@@ -1,11 +1,11 @@
 # Health Check Report
 
-_Generated: 2026-07-19T08:05:44.154Z_
+_Generated: 2026-07-20T08:46:50.922Z_
 
 - **Total**: 737
 - **Pass**: 620 (84.1%)
 - **Fail**: 117
-- **Avg load time**: 2951ms
+- **Avg load time**: 2945ms
 
 ## Failing apps
 
@@ -16,7 +16,7 @@ _Generated: 2026-07-19T08:05:44.154Z_
 | [`v2/apps/uncategorized/genesis-ark-odyssey.html`](https://kody-w.github.io/localFirstTools/v2/apps/uncategorized/genesis-ark-odyssey.html) | `pageerror` THREE.CapsuleGeometry is not a constructor |
 | [`exhibitions/sound-studio/holographic-display-creator.html`](https://kody-w.github.io/localFirstTools/exhibitions/sound-studio/holographic-display-creator.html) | `pageerror` Cannot read properties of undefined (reading 'addEventListener') |
 | [`lenia-eden.html`](https://kody-w.github.io/localFirstTools/lenia-eden.html) | `load_timeout` 12000ms |
-| [`v2/apps/simulations/linux-wasm-vm.html`](https://kody-w.github.io/localFirstTools/v2/apps/simulations/linux-wasm-vm.html) | `http_404` v2/v86/build/libv86.js<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`v2/apps/simulations/linux-wasm-vm.html`](https://kody-w.github.io/localFirstTools/v2/apps/simulations/linux-wasm-vm.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` v2/v86/build/libv86.js |
 | [`chrome-extension-build/index.html`](https://kody-w.github.io/localFirstTools/chrome-extension-build/index.html) | `http_404` chrome-extension-build/icon-192.png<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`apps/productivity/mesh-board.html`](https://kody-w.github.io/localFirstTools/apps/productivity/mesh-board.html) | `pageerror` Cannot access 'awarenessState' before initialization |
 | [`v2/apps/simulations/nano-banana-chat-app.html`](https://kody-w.github.io/localFirstTools/v2/apps/simulations/nano-banana-chat-app.html) | `load_timeout` 12000ms |
@@ -61,15 +61,14 @@ Program Info Log: |
 | [`v2/apps/experimental_ai/ai-companion-hub-enhanced.html`](https://kody-w.github.io/localFirstTools/v2/apps/experimental_ai/ai-companion-hub-enhanced.html) | `pageerror` Cannot read properties of null (reading 'addEventListener') |
 | [`wristAI.html`](https://kody-w.github.io/localFirstTools/wristAI.html) | `console.error` Failed to load resource: the server responded with a status of 403 () |
 | [`v2/apps/experimental_ai/algorithm-visualizer-pro.html`](https://kody-w.github.io/localFirstTools/v2/apps/experimental_ai/algorithm-visualizer-pro.html) | `pageerror` Maximum call stack size exceeded |
-| [`v86-master/examples/alpine.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/alpine.html) | `http_404` v86-master/images/alpine-fs.json<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`v86-master/examples/alpine.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/alpine.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`console.error` Loading the image ../images/alpine-fs.json failed (status %d) 404 |
 | [`apps/development/api-endpoint-tester.html`](https://kody-w.github.io/localFirstTools/apps/development/api-endpoint-tester.html) | `pageerror` Invalid left-hand side in assignment |
-| [`chrome-extension-build/apps/ai-tools/aplai-direct-app.html`](https://kody-w.github.io/localFirstTools/chrome-extension-build/apps/ai-tools/aplai-direct-app.html) | `console.error` Wake lock error: NotAllowedError: The requesting page is not visible |
 | [`v86-master/examples/async_load.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/async_load.html) | `http_404` v86-master/images/dsl-4.11.rc2.iso<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`v86-master/examples/lang.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/lang.html) | `http_404` v86-master/images/arch_state-v2.bin.zst<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`exhibitions/ai-research/browser-vm-app.html`](https://kody-w.github.io/localFirstTools/exhibitions/ai-research/browser-vm-app.html) | `pageerror` Unexpected token ']' |
 | [`v86-master/examples/destroy.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/destroy.html) | `http_404` v86-master/images/linux.iso<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`v2/apps/experimental_ai/digital-twin-keeper.html`](https://kody-w.github.io/localFirstTools/v2/apps/experimental_ai/digital-twin-keeper.html) | `pageerror` Cannot read properties of undefined (reading 'add') |
-| [`apps/uncategorized/dynamics365-lockstep-twin.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/dynamics365-lockstep-twin.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`apps/uncategorized/dynamics365-lockstep-twin.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/dynamics365-lockstep-twin.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` apps/uncategorized/frame-machines/frame-machine.css |
 | [`exhibitions/ai-research/hacker-news-simulator.html`](https://kody-w.github.io/localFirstTools/exhibitions/ai-research/hacker-news-simulator.html) | `pageerror` Missing } in template expression<br>`http_404` favicon.svg |
 | [`apps/development/health-dashboard.html`](https://kody-w.github.io/localFirstTools/apps/development/health-dashboard.html) | `http_404` apps/development/data/reports/health-check-latest.json<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`exhibitions/ai-research/jarvis-protocol-os.html`](https://kody-w.github.io/localFirstTools/exhibitions/ai-research/jarvis-protocol-os.html) | `console.error` Speech recognition error: not-allowed<br>`console.error` Speech recognition error: not-allowed |
@@ -86,9 +85,9 @@ Program Info Log: |
 | [`exhibitions/ai-research/recursive-self-portrait.html`](https://kody-w.github.io/localFirstTools/exhibitions/ai-research/recursive-self-portrait.html) | `pageerror` Unexpected token ';'<br>`pageerror` Unexpected token ',' |
 | [`v86-master/retro-os-arcade.html`](https://kody-w.github.io/localFirstTools/v86-master/retro-os-arcade.html) | `pageerror` Uncaught TypeError: Cannot set properties of null (setting 'onclick') |
 | [`v86-master/examples/save_restore.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/save_restore.html) | `http_404` v86-master/images/linux.iso<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
-| [`apps/uncategorized/dynamics365-frame-machine.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/dynamics365-frame-machine.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` apps/uncategorized/frame-machines/frame-machine.css |
-| [`apps/uncategorized/vibe_gallery.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/vibe_gallery.html) | `http_404` apps/uncategorized/screenshots/ferrofluid-wordsmith.png<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
-| [`v86-master/tests/manual/gc.html`](https://kody-w.github.io/localFirstTools/v86-master/tests/manual/gc.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` v86-master/build/libv86.js |
+| [`apps/uncategorized/dynamics365-frame-machine.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/dynamics365-frame-machine.html) | `http_404` apps/uncategorized/frame-machines/frame-machine.css<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`apps/uncategorized/vibe_gallery.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/vibe_gallery.html) | `http_404` apps/uncategorized/screenshots/timezone-overlap-finder%202.png<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`v86-master/tests/manual/gc.html`](https://kody-w.github.io/localFirstTools/v86-master/tests/manual/gc.html) | `http_404` v86-master/build/libv86.js<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`apps/uncategorized/membrane.html`](https://kody-w.github.io/localFirstTools/apps/uncategorized/membrane.html) | `console.error` [Membrane] LLM initialization failed: Error: Unable to find a compatible GPU. Th |
 | [`v86-master/examples/two_instances.html`](https://kody-w.github.io/localFirstTools/v86-master/examples/two_instances.html) | `http_404` v86-master/images/linux4.iso<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`v2/apps/experimental_ai/vibe-terminal.html`](https://kody-w.github.io/localFirstTools/v2/apps/experimental_ai/vibe-terminal.html) | `http_404` v2/apps/experimental_ai/data/config/utility_apps_config.json<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
@@ -97,7 +96,8 @@ Program Info Log: |
 | [`chrome-extension-build/apps/quantum-worlds/ancient-ruins-dying-star.html`](https://kody-w.github.io/localFirstTools/chrome-extension-build/apps/quantum-worlds/ancient-ruins-dying-star.html) | `pageerror` Unexpected strict mode reserved word |
 | [`v2/apps/uncategorized/chip8-emulator.html`](https://kody-w.github.io/localFirstTools/v2/apps/uncategorized/chip8-emulator.html) | `pageerror` Cannot read properties of undefined (reading 'target') |
 | [`v2/apps/games/dota3.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/dota3.html) | `pageerror` THREE.CapsuleGeometry is not a constructor |
-| [`v2/apps/games/github-game-service-test.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/github-game-service-test.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` v2/github-game-service.js |
+| [`v2/apps/games/github-game-service-test.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/github-game-service-test.html) | `http_404` v2/github-game-service.js<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
+| [`chrome-extension-build/apps/quantum-worlds/impossible-architecture-museum.html`](https://kody-w.github.io/localFirstTools/chrome-extension-build/apps/quantum-worlds/impossible-architecture-museum.html) | `console.error` Failed to load save data: TypeError: Cannot read properties of undefined (readin |
 | [`exhibitions/the-arcade/index.html`](https://kody-w.github.io/localFirstTools/exhibitions/the-arcade/index.html) | `http_404` api/<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`apps/games/nexus.html`](https://kody-w.github.io/localFirstTools/apps/games/nexus.html) | `console.error` Failed to acquire camera feed: NotFoundError: Requested device not found<br>`load_timeout` 12000ms |
 | [`v2/apps/games/popup.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/popup.html) | `http_404` v2/popup.js<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
@@ -107,7 +107,7 @@ Program Info Log: |
 | [`exhibitions/the-arcade/temporal-sandbox.html`](https://kody-w.github.io/localFirstTools/exhibitions/the-arcade/temporal-sandbox.html) | `pageerror` timestamp is not defined |
 | [`v2/apps/uncategorized/recursive-ziggurat.html`](https://kody-w.github.io/localFirstTools/v2/apps/uncategorized/recursive-ziggurat.html) | `pageerror` IndexSizeError: Failed to execute 'arc' on 'CanvasRenderingContext2D': The radiu |
 | [`v86-master/index.html`](https://kody-w.github.io/localFirstTools/v86-master/index.html) | `http_404` v86-master/build/v86_all.js?98e7110c2<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
-| [`v2/apps/games/wowmon-card-game-design-demo-improved.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/wowmon-card-game-design-demo-improved.html) | `console.error` Failed to load resource: the server responded with a status of 404 (File not fou<br>`http_404` v2/apps/games/assets/textures/apex/wall_hex.png |
+| [`v2/apps/games/wowmon-card-game-design-demo-improved.html`](https://kody-w.github.io/localFirstTools/v2/apps/games/wowmon-card-game-design-demo-improved.html) | `http_404` v2/apps/games/assets/textures/apex/wall_hex.png<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`v2/apps/experimental_ai/wowmon-campaign-mode.html`](https://kody-w.github.io/localFirstTools/v2/apps/experimental_ai/wowmon-campaign-mode.html) | `http_404` v2/apps/experimental_ai/assets/textures/apex/wall_hex.png<br>`console.error` Failed to load resource: the server responded with a status of 404 (File not fou |
 | [`v2/apps/uncategorized/amber-resonance.html`](https://kody-w.github.io/localFirstTools/v2/apps/uncategorized/amber-resonance.html) | `pageerror` Cannot access 'crystals' before initialization |
 | [`v2/apps/audio_music/canyon-composer.html`](https://kody-w.github.io/localFirstTools/v2/apps/audio_music/canyon-composer.html) | `pageerror` Cannot access 'cols' before initialization |
@@ -125,13 +125,13 @@ Program Info Log: |
 
 | App | ms |
 |---|---|
-| `v2/apps/experimental_ai/nexus.html` | 12079 |
-| `apps/games/nexus.html` | 12069 |
-| `v2/apps/experimental_ai/complete-implementation.html` | 12059 |
-| `chrome-extension-build/apps/education/pipboy-interface.html` | 12055 |
-| `v86-master/examples/async_load.html` | 12048 |
-| `v2/apps/experimental_ai/pipboy-interface.html` | 12043 |
-| `v2/apps/simulations/nano-banana-chat-app.html` | 12042 |
-| `chrome-extension-build/apps/education/nexus.html` | 12041 |
-| `lenia-eden.html` | 12040 |
-| `exhibitions/productivity-suite/record-review-app.html` | 12037 |
+| `gameoflife.html` | 13229 |
+| `v2/apps/experimental_ai/nexus.html` | 12071 |
+| `lenia-eden.html` | 12068 |
+| `v86-master/examples/async_load.html` | 12064 |
+| `v2/apps/simulations/nano-banana-chat-app.html` | 12059 |
+| `apps/games/nexus.html` | 12050 |
+| `chrome-extension-build/apps/education/nexus.html` | 12043 |
+| `v2/apps/experimental_ai/pipboy-interface.html` | 12035 |
+| `chrome-extension-build/apps/education/pipboy-interface.html` | 12034 |
+| `exhibitions/productivity-suite/record-review-app.html` | 12033 |
