@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Charisma Reps — 9-Minute Daily Articulation Trainer</title>
-<meta name="description" content="Train charisma and articulation in 9 minutes a day: a 3-minute diction warm-up, a rotating 13-lesson charisma drill, and a 3-minute impromptu speaking rep with optional self-recording, streaks, and local-first data.">
+<meta name="description" content="Train charisma and articulation in 9 minutes a day: a 3-minute diction warm-up, a rotating 13-lesson charisma drill, and a 3-minute impromptu speaking rep — with a voice coach, live transcript, filler-word counter, WPM tracking, optional self-recording, streaks, and local-first data.">
 <style>
 :root{
   --bg:#0b0e14; --panel:#131826; --panel2:#1a2133; --ink:#e8ecf6; --muted:#8b94ab;
@@ -80,6 +80,12 @@ h2{font-size:1.05rem;margin-bottom:10px}
 audio{width:100%;margin-top:10px}
 .footer-note{color:var(--muted);font-size:.78rem;text-align:center;margin-top:16px;line-height:1.5}
 .rec-dot{width:10px;height:10px;border-radius:50%;background:var(--rose);display:inline-block;animation:blink 1s infinite}
+.vstats{display:flex;gap:10px;justify-content:center;flex-wrap:wrap;margin-top:12px}
+.vstats span{background:var(--panel2);border:1px solid var(--ring);border-radius:999px;padding:6px 14px;font-size:.82rem;color:var(--muted)}
+.vstats b{color:var(--ink);font-variant-numeric:tabular-nums}
+.transcript{margin-top:10px;background:var(--panel2);border:1px solid var(--ring);border-radius:10px;padding:10px 14px;font-size:.9rem;line-height:1.5;color:var(--ink);min-height:44px;max-height:88px;overflow:hidden;display:flex;align-items:flex-end}
+.transcript .interim{color:var(--muted);font-style:italic}
+.transcript:empty::before{content:"listening…";color:var(--muted);font-style:italic}
 @keyframes blink{50%{opacity:.2}}
 details{margin-top:12px}
 summary{cursor:pointer;color:var(--muted);font-size:.9rem}
@@ -121,6 +127,14 @@ input[type=file]{display:none}
         <button class="btn" id="startBtn">▶ Start today's 9 minutes</button>
         <label class="row" style="gap:6px;font-size:.85rem;color:var(--muted);cursor:pointer">
           <input type="checkbox" id="recToggle"> record my final rep
+        </label>
+      </div>
+      <div class="row" style="margin-top:10px;gap:16px">
+        <label class="row" style="gap:6px;font-size:.85rem;color:var(--muted);cursor:pointer">
+          <input type="checkbox" id="voiceCoachToggle" checked> 🔊 voice coach reads to me
+        </label>
+        <label class="row" style="gap:6px;font-size:.85rem;color:var(--muted);cursor:pointer" id="srToggleLabel">
+          <input type="checkbox" id="srToggle" checked> 🎙 live transcript &amp; filler counter
         </label>
       </div>
       <details>
@@ -166,6 +180,14 @@ input[type=file]{display:none}
           <button class="btn ghost small" id="quitBtn">✕ Quit</button>
         </div>
         <div class="sub" id="recStatus" style="margin-top:10px"></div>
+        <div id="voiceZone" class="hidden" style="width:100%">
+          <div class="vstats">
+            <span>🗣 <b id="vWords">0</b> words</span>
+            <span>⏱ <b id="vWpm">–</b> wpm</span>
+            <span>⚠ <b id="vFillers">0</b> fillers</span>
+          </div>
+          <div class="transcript" id="transcript"></div>
+        </div>
       </div>
     </div>
   </section>
@@ -176,6 +198,7 @@ input[type=file]{display:none}
       <div class="big">🏆</div>
       <h1>Day complete.</h1>
       <p class="sub" id="doneSummary"></p>
+      <p class="sub" id="voiceSummary" style="margin-top:10px"></p>
       <div id="playbackZone"></div>
       <div style="margin-top:18px" class="row" >
         <button class="btn" id="backHomeBtn">Back to home</button>
@@ -372,6 +395,83 @@ function beep(freq=880, dur=.18, when=0, gain=.25){
 const chimePhase = ()=>{ beep(660,.15); beep(880,.2,.16); };
 const chimeDone  = ()=>{ beep(523,.15); beep(659,.15,.16); beep(784,.3,.32); };
 
+/* ---------------- voice: TTS coach ---------------- */
+const hasTTS = "speechSynthesis" in window;
+function coachOn(){ return hasTTS && $("voiceCoachToggle").checked; }
+function speak(text){
+  if(!coachOn()) return;
+  try{
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.02;
+    const vs = speechSynthesis.getVoices();
+    const v = vs.find(x=>/en[-_](US|GB)/i.test(x.lang) && /Samantha|Google (US|UK)|Daniel|Karen|Aria|Zira/i.test(x.name))
+           || vs.find(x=>/^en/i.test(x.lang));
+    if(v) u.voice = v;
+    u.onstart = ()=>pauseSR("tts");
+    u.onend   = ()=>resumeSR("tts");
+    u.onerror = ()=>resumeSR("tts");
+    speechSynthesis.speak(u);
+    setTimeout(()=>{ if(!speechSynthesis.speaking) resumeSR("tts"); }, 15000); // watchdog
+  }catch(e){}
+}
+function hushCoach(){ if(hasTTS) try{ speechSynthesis.cancel(); resumeSR("tts"); }catch(e){} }
+if(hasTTS) speechSynthesis.getVoices(); // warm the voice list
+
+/* ---------------- voice: speech recognition ---------------- */
+const SRClass = window.SpeechRecognition || window.webkitSpeechRecognition;
+let sr=null, srWanted=false, srHolds=new Set();
+let vstats=null;
+const FILLER_RE = /\b(um+|uh+|erm+|hmm+|like|you know|sort of|kind of|basically|actually|literally|i mean)\b/gi;
+
+function resetVstats(){ vstats={words:0, fillers:0, repWords:0, finals:""}; updateVstatsUI(); $("transcript").innerHTML=""; }
+function srSupported(){ return !!SRClass; }
+function startSR(){
+  if(!srSupported() || !$("srToggle").checked) return;
+  srWanted=true; srHolds.clear();
+  spinUpSR();
+  $("voiceZone").classList.remove("hidden");
+}
+function spinUpSR(){
+  if(!srWanted || srHolds.size) return;
+  try{
+    sr = new SRClass();
+    sr.lang="en-US"; sr.continuous=true; sr.interimResults=true;
+    sr.onresult = e=>{
+      let interim="";
+      for(let i=e.resultIndex;i<e.results.length;i++){
+        const txt = e.results[i][0].transcript;
+        if(e.results[i].isFinal){
+          vstats.finals += txt+" ";
+          const w = txt.trim().split(/\s+/).filter(Boolean).length;
+          vstats.words += w;
+          if(S && S.phase===2 && S.remaining<=150) vstats.repWords += w;
+          vstats.fillers += (txt.match(FILLER_RE)||[]).length;
+        } else interim += txt;
+      }
+      renderTranscript(interim);
+      updateVstatsUI();
+    };
+    sr.onend = ()=>{ if(srWanted && !srHolds.size) setTimeout(spinUpSR, 250); };
+    sr.onerror = ev=>{ if(ev.error==="not-allowed"){ srWanted=false; $("recStatus").textContent="⚠ mic blocked — transcript off"; } };
+    sr.start();
+  }catch(e){}
+}
+function pauseSR(reason){ srHolds.add(reason); if(sr){ try{ sr.abort(); }catch(e){} sr=null; } }
+function resumeSR(reason){ srHolds.delete(reason); if(srWanted) spinUpSR(); }
+function stopSR(){ srWanted=false; srHolds.clear(); if(sr){ try{ sr.abort(); }catch(e){} sr=null; } }
+function renderTranscript(interim){
+  const tail = (vstats.finals.slice(-160)).replace(/^\S*\s/,"");
+  $("transcript").innerHTML = tail + (interim?` <span class="interim">${interim}</span>`:"");
+}
+function repElapsedSec(){ return (S && S.phase===2) ? Math.max(1, 150 - Math.min(S.remaining,150)) : 0; }
+function updateVstatsUI(){
+  $("vWords").textContent = vstats.words;
+  $("vFillers").textContent = vstats.fillers;
+  const el = repElapsedSec();
+  $("vWpm").textContent = (el>10 && vstats.repWords>0) ? Math.round(vstats.repWords/(el/60)) : "–";
+}
+
 /* ---------------- session engine ---------------- */
 const PHASE_SECONDS = 180;
 const CIRC = 2*Math.PI*95;
@@ -390,7 +490,15 @@ function startSession(){
        twister: Math.floor(Math.random()*TWISTERS.length),
        prompt: Math.floor(Math.random()*PROMPTS.length)};
   recURL=null;
-  show("session"); chimePhase(); renderPhase(); startTick();
+  show("session"); chimePhase();
+  resetVstats(); $("voiceZone").classList.add("hidden"); startSR();
+  renderPhase(); announcePhase(); startTick();
+}
+function announcePhase(){
+  const L=LESSONS[S.lesson];
+  if(S.phase===0) speak("Round one: articulation warm-up. Repeat after me — slow, then fast. "+TWISTERS[S.twister]);
+  if(S.phase===1) speak(`Round two. Lesson ${S.lesson+1}: ${L.t}. Read the principles out loud.`);
+  if(S.phase===2) speak(`Round three. Your prompt: ${PROMPTS[S.prompt]}. Thirty seconds to outline, then speak.`);
 }
 function startTick(){
   clearInterval(tick);
@@ -398,18 +506,19 @@ function startTick(){
     if(S.paused) return;
     S.remaining--;
     if(S.remaining<=0){ nextPhase(); return; }
-    if(S.phase===0 && S.remaining%30===0){ S.twister=(S.twister+1)%TWISTERS.length; beep(740,.1); renderContent(); }
-    if(S.phase===1 && S.remaining===90){ beep(740,.1); renderContent(); }
-    if(S.phase===2 && S.remaining===150){ beep(740,.1); renderContent(); }
+    if(S.phase===0 && S.remaining%30===0){ S.twister=(S.twister+1)%TWISTERS.length; beep(740,.1); renderContent(); speak(TWISTERS[S.twister]); }
+    if(S.phase===1 && S.remaining===90){ beep(740,.1); renderContent(); speak("Drill time. "+LESSONS[S.lesson].drill); }
+    if(S.phase===2 && S.remaining===150){ beep(740,.1); renderContent(); speak("Go."); }
     if(S.remaining<=3) beep(440,.08);
     renderClock();
+    if(vstats && S.phase===2) updateVstatsUI();
   },1000);
 }
 function nextPhase(){
   if(S.phase===2){ finishSession(); return; }
   S.phase++; S.remaining=PHASE_SECONDS; chimePhase();
   if(S.phase===2 && $("recToggle").checked) startRecording();
-  renderPhase();
+  renderPhase(); announcePhase();
 }
 function renderPhase(){
   for(let i=0;i<3;i++){
@@ -473,7 +582,12 @@ function renderPlayback(){
 
 /* ---------------- finish ---------------- */
 function finishSession(){
-  clearInterval(tick); stopRecording(); chimeDone();
+  clearInterval(tick); stopRecording(); stopSR(); chimeDone();
+  const rep = vstats && vstats.repWords>10 ? Math.round(vstats.repWords/2.5) : 0;
+  $("voiceSummary").textContent = (vstats && vstats.words>0)
+    ? `🎙 Voice report: ${vstats.words} words spoken · ${vstats.fillers} filler${vstats.fillers===1?"":"s"} heard` + (rep?` · rep pace ~${rep} wpm (aim for 140–170)`:"")
+    : "";
+  speak("Day complete. Same time tomorrow.");
   const t=todayStr();
   if(!state.sessions.find(s=>s.date===t)){
     state.sessions.push({date:t, lesson:S.lesson, ts:Date.now()});
@@ -490,9 +604,12 @@ function show(id){ ["home","session","doneScreen"].forEach(x=>$(x).classList.tog
 $("startBtn").onclick = startSession;
 $("againBtn").onclick = startSession;
 $("backHomeBtn").onclick = ()=>{ show("home"); renderHome(); };
-$("pauseBtn").onclick = ()=>{ S.paused=!S.paused; $("pauseBtn").textContent = S.paused?"▶ Resume":"⏸ Pause"; };
+$("pauseBtn").onclick = ()=>{
+  S.paused=!S.paused; $("pauseBtn").textContent = S.paused?"▶ Resume":"⏸ Pause";
+  if(S.paused){ hushCoach(); pauseSR("pause"); } else resumeSR("pause");
+};
 $("skipBtn").onclick = ()=>{ nextPhase(); };
-$("quitBtn").onclick = ()=>{ clearInterval(tick); stopRecording(); show("home"); renderHome(); };
+$("quitBtn").onclick = ()=>{ clearInterval(tick); stopRecording(); stopSR(); hushCoach(); show("home"); renderHome(); };
 $("shuffleBtn").onclick = ()=>{
   if(!S) return;
   if(S.phase===0){ S.twister=(S.twister+1)%TWISTERS.length; }
@@ -523,6 +640,11 @@ $("resetBtn").onclick = ()=>{
   if(confirm("Erase streak and history?")){ state.sessions=[]; state.lessonCursor=0; save(); renderHome(); }
 };
 
+if(!srSupported()){
+  $("srToggle").checked=false; $("srToggle").disabled=true;
+  $("srToggleLabel").style.opacity=.5;
+  $("srToggleLabel").title="Live transcription needs Chrome/Edge (Web Speech API)";
+}
 renderHome();
 </script>
 </body>
