@@ -71,11 +71,12 @@ label{color:var(--dim);font-size:10px;text-transform:uppercase;letter-spacing:.0
 #view-arrange.on{display:flex;flex-direction:column}
 #arrTop{display:flex;gap:8px;align-items:center;padding:6px 10px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
 #arrange{display:grid;grid-template-columns:200px 1fr;flex:1;min-height:0}
-#trackHeads{background:var(--panel);border-right:1px solid var(--line);overflow-y:auto}
+#trackHeads{background:var(--panel);border-right:1px solid var(--line);overflow-x:hidden;overflow-y:auto}
 .thead{height:74px;border-bottom:1px solid var(--line);padding:6px 8px;display:flex;flex-direction:column;gap:4px;position:relative;cursor:pointer}
 .thead.sel{background:#20283a}
 .thead .row{display:flex;align-items:center;gap:5px}
-.thead .nm{flex:1;font-weight:600;color:var(--hi);background:transparent;border:none;padding:2px}
+.thead .nm{flex:1;min-width:0;font-weight:600;color:var(--hi);background:transparent;border:none;padding:2px;text-overflow:ellipsis}
+.thead .pill{flex-shrink:0;white-space:nowrap;text-transform:uppercase;letter-spacing:.04em;max-width:74px;overflow:hidden;text-overflow:ellipsis}
 .thead .colr{width:5px;position:absolute;left:0;top:0;bottom:0}
 .tinybtn{width:22px;height:20px;font-size:10px;padding:0;display:inline-flex;align-items:center;justify-content:center}
 .meter{height:6px;background:#0a0d12;border-radius:3px;overflow:hidden;position:relative}
@@ -574,6 +575,7 @@ class SynthProcessor extends AudioWorkletProcessor {
       else if(d.type==='note'){ this.queue.push(d); this.queue.sort((a,b)=>a.time-b.time); }
       else if(d.type==='alloff'){ for(const v of this.voices){ v.noteOff(); } }
       else if(d.type==='panic'){ for(const v of this.voices){ v.active=false; v.ampEnv.reset(); } this.queue.length=0; }
+      else if(d.type==='ping'){ this.port.postMessage({type:'pong', id:d.id}); }
     };
   }
   alloc(){
@@ -724,6 +726,7 @@ class DrumProcessor extends AudioWorkletProcessor {
       if(d.type==='trig'){ this.queue.push(d); this.queue.sort((a,b)=>a.time-b.time); }
       else if(d.type==='pan'){ this.pan=d.pan; }
       else if(d.type==='panic'){ this.hits.length=0; this.queue.length=0; }
+      else if(d.type==='ping'){ this.port.postMessage({type:'pong', id:d.id}); }
     };
   }
   process(inputs, outputs){
@@ -2265,10 +2268,32 @@ async function renderOffline(onlyTrackId){
     }
     if(track.automation){ for(const pid in track.automation){ const pts=track.automation[pid]; if(!pts||!pts.length)continue;
       const ap=getBundleParam(tn,pid); if(!ap)continue;
-      pts.forEach((pt,pi)=>{ if(pt.beat>=beats)return; try{ if(pi===0)ap.setValueAtTime(pt.value,T(pt.beat)); else ap.linearRampToValueAtTime(pt.value,T(pt.beat)); }catch(e){} }); } }
+      pts.forEach((pt,pi)=>{ if(pt.beat>beats)return; try{ if(pi===0)ap.setValueAtTime(pt.value,T(pt.beat)); else ap.linearRampToValueAtTime(pt.value,T(pt.beat)); }catch(e){} }); } }
   }
-  const buf=await octx.startRendering();
+  const buf=await flushWorklets(bundle).then(()=>octx.startRendering());
   return buf;
+}
+/* OfflineAudioContext delivers AudioWorklet port messages to the render thread
+   asynchronously; if we call startRendering() immediately, timed note/trig
+   messages posted last can be dropped (silent bounce). Ping each instrument
+   node and await its pong so we KNOW the render thread drained the queue. */
+function flushWorklets(bundle){
+  const nodes=[];
+  for(const id in bundle.tracks){ const tn=bundle.tracks[id]; if(tn && tn.inst) nodes.push(tn.inst); }
+  if(!nodes.length) return Promise.resolve();
+  return new Promise((resolve)=>{
+    let pending=nodes.length, done=false;
+    const finish=()=>{ if(!done){ done=true; nodes.forEach(n=>{ n.port.onmessage=n.__prevMsg||null; }); resolve(); } };
+    const to=setTimeout(finish, 300);
+    nodes.forEach((node,i)=>{
+      node.__prevMsg=node.port.onmessage;
+      node.port.onmessage=(e)=>{
+        if(e.data && e.data.type==='pong'){ if(--pending<=0){ clearTimeout(to); finish(); } }
+        else if(node.__prevMsg){ node.__prevMsg(e); }
+      };
+      node.port.postMessage({type:'ping', id:i});
+    });
+  });
 }
 function getBundleParam(tn,pid){
   if(pid==='cutoff'&&tn.inst)return tn.inst.parameters.get('cutoff');

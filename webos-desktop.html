@@ -1584,10 +1584,11 @@ registerApp({
       clear:()=>{ out.innerHTML=''; return {out:''}; },
       echo:(a)=>({out:a.join(' ')}),
       cd:(a)=>{ const t=resolve(a[0]||'/Users/User'); if(!FS.exists(t)) return {err:'cd: no such directory: '+(a[0]||'')}; if(!FS.isDir(t)) return {err:'cd: not a directory: '+a[0]}; cwd=t; refreshPS(); return {out:''}; },
-      ls:(a)=>{ const flags=a.filter(x=>x.startsWith('-')).join(''); const paths=a.filter(x=>!x.startsWith('-')); const target=resolve(paths[0]);
+      ls:(a, stdin, piped)=>{ const flags=a.filter(x=>x.startsWith('-')).join(''); const paths=a.filter(x=>!x.startsWith('-')); const target=resolve(paths[0]);
         if(!FS.exists(target)) return {err:'ls: no such file or directory: '+(paths[0]||'')};
         if(FS.isDir(target)){ const list=FS.list(target); if(flags.includes('l')){ return {out:list.map(e=>`${e.type==='dir'?'d':'-'}  ${String(e.type==='dir'?'--':fmtBytes(e.size)).padStart(8)}  ${e.name}${e.type==='dir'?'/':''}`).join('\n')}; }
-          return {out:list.map(e=>e.name+(e.type==='dir'?'/':'')).join(flags.includes('1')?'\n':'  ')}; }
+          const oneLine = piped || flags.includes('1');
+          return {out:list.map(e=>e.name+(e.type==='dir'?'/':'')).join(oneLine?'\n':'  ')}; }
         return {out:paths[0]}; },
       cat:(a, stdin)=>{ if(!a.length) return {out:stdin||''}; let o=[],e=[]; a.forEach(p=>{ const t=resolve(p); try{ if(FS.isDir(t)){e.push('cat: '+p+': is a directory');} else o.push(FS.read(t)); }catch(err){ e.push('cat: '+p+': no such file'); } }); return {out:o.join('\n'), err:e.join('\n')}; },
       mkdir:(a)=>{ if(!a.length) return {err:'mkdir: missing operand'}; let e=[]; a.filter(x=>!x.startsWith('-')).forEach(p=>{ try{FS.mkdir(resolve(p));}catch(err){e.push('mkdir: '+err.message);} }); return {out:'', err:e.join('\n')}; },
@@ -1595,12 +1596,12 @@ registerApp({
       rm:(a)=>{ const rec=a.some(x=>x.startsWith('-')&&x.includes('r')); const paths=a.filter(x=>!x.startsWith('-')); let e=[]; paths.forEach(p=>{ try{FS.rm(resolve(p), rec);}catch(err){e.push('rm: '+err.message);} }); return {out:'', err:e.join('\n')}; },
       mv:(a)=>{ const p=a.filter(x=>!x.startsWith('-')); if(p.length<2) return {err:'mv: usage: mv src dst'}; try{FS.mv(resolve(p[0]),resolve(p[1])); return {out:''};}catch(err){return {err:'mv: '+err.message};} },
       cp:(a)=>{ const p=a.filter(x=>!x.startsWith('-')); if(p.length<2) return {err:'cp: usage: cp src dst'}; try{FS.cp(resolve(p[0]),resolve(p[1])); return {out:''};}catch(err){return {err:'cp: '+err.message};} },
-      grep:(a, stdin)=>{ const flags=a.filter(x=>x.startsWith('-')); const rest=a.filter(x=>!x.startsWith('-')); const pat=rest[0]||''; let text=stdin||''; if(rest[1]){ try{text=FS.read(resolve(rest[1]));}catch(e){return {err:'grep: '+rest[1]+': no such file'};} } const ci=flags.some(f=>f.includes('i')); let re; try{re=new RegExp(pat, ci?'i':'');}catch(e){re=null;} const lines=text.split('\n').filter(l=> re? re.test(l): l.includes(pat)); return {out:lines.join('\n')}; },
+      grep:(a, stdin)=>{ const flags=a.filter(x=>x.startsWith('-')); const rest=a.filter(x=>!x.startsWith('-')); const pat=rest[0]||''; let text=stdin||''; if(rest[1]){ try{text=FS.read(resolve(rest[1]));}catch(e){return {err:'grep: '+rest[1]+': no such file'};} } const ci=flags.some(f=>f.includes('i')); let re; try{re=new RegExp(pat, ci?'i':'');}catch(e){re=null;} const lines=text.split('\n').filter(l=> re? re.test(l): l.includes(pat)); if(flags.some(f=>f.includes('c'))) return {out:String(lines.length)}; return {out:lines.join('\n')}; },
       wc:(a, stdin)=>{ const flags=a.filter(x=>x.startsWith('-')).join(''); const rest=a.filter(x=>!x.startsWith('-')); let text=stdin||''; if(rest[0]){ try{text=FS.read(resolve(rest[0]));}catch(e){return {err:'wc: '+rest[0]+': no such file'};} } const lines=text===''?0:text.split('\n').length; const words=text.trim()===''?0:text.trim().split(/\s+/).length; const chars=text.length; if(flags.includes('l')) return {out:String(lines)}; if(flags.includes('w')) return {out:String(words)}; if(flags.includes('c')) return {out:String(chars)}; return {out:`${lines} ${words} ${chars}`}; },
-      head:(a, stdin)=>{ let n=10; const idx=a.indexOf('-n'); if(idx>=0){ n=parseInt(a[idx+1])||10; } const rest=a.filter((x,i)=>!x.startsWith('-')&&!(idx>=0&&i===idx+1)); let text=stdin||''; if(rest[0]){ try{text=FS.read(resolve(rest[0]));}catch(e){return {err:'head: '+rest[0]+': no such file'};} } return {out:text.split('\n').slice(0,n).join('\n')}; },
-      tail:(a, stdin)=>{ let n=10; const idx=a.indexOf('-n'); if(idx>=0){ n=parseInt(a[idx+1])||10; } const rest=a.filter((x,i)=>!x.startsWith('-')&&!(idx>=0&&i===idx+1)); let text=stdin||''; if(rest[0]){ try{text=FS.read(resolve(rest[0]));}catch(e){return {err:'tail: '+rest[0]+': no such file'};} } return {out:text.split('\n').slice(-n).join('\n')}; },
+      head:(a, stdin)=>{ let n=10; const idx=a.indexOf('-n'); if(idx>=0){ n=parseInt(a[idx+1])||10; } else { const sh=a.find(x=>/^-\d+$/.test(x)); if(sh) n=parseInt(sh.slice(1)); } const rest=a.filter((x,i)=>!x.startsWith('-')&&!(idx>=0&&i===idx+1)); let text=stdin||''; if(rest[0]){ try{text=FS.read(resolve(rest[0]));}catch(e){return {err:'head: '+rest[0]+': no such file'};} } return {out:text.split('\n').slice(0,n).join('\n')}; },
+      tail:(a, stdin)=>{ let n=10; const idx=a.indexOf('-n'); if(idx>=0){ n=parseInt(a[idx+1])||10; } else { const sh=a.find(x=>/^-\d+$/.test(x)); if(sh) n=parseInt(sh.slice(1)); } const rest=a.filter((x,i)=>!x.startsWith('-')&&!(idx>=0&&i===idx+1)); let text=stdin||''; if(rest[0]){ try{text=FS.read(resolve(rest[0]));}catch(e){return {err:'tail: '+rest[0]+': no such file'};} } return {out:text.split('\n').slice(-n).join('\n')}; },
       tree:(a)=>{ const t=resolve(a[0]); if(!FS.isDir(t)) return {err:'tree: not a directory'}; return {out:(a[0]||cwd)+'\n'+FS.tree(t)}; },
-      ps:()=>{ const rows=Proc.all().map(p=>`${String(p.pid).padStart(5)}  ${(p.memBase).toFixed(1).padStart(6)}MB  ${p.name}`); return {out:'  PID     MEM  NAME\n'+rows.join('\n')}; },
+      ps:(a, stdin, piped)=>{ const rows=Proc.all().map(p=>`${String(p.pid).padStart(5)}  ${(p.memBase).toFixed(1).padStart(6)}MB  ${p.name}`); return {out: piped ? rows.join('\n') : '  PID     MEM  NAME\n'+rows.join('\n')}; },
       kill:(a)=>{ const pid=parseInt(a[0]); if(!pid) return {err:'kill: usage: kill <pid>'}; if(!Proc.get(pid)) return {err:'kill: ('+pid+') - no such process'}; Proc.kill(pid); return {out:''}; },
       open:(a)=>{ if(!a[0]) return {err:'open: usage: open <path|app>'}; const t=resolve(a[0]); if(FS.exists(t)){ openPath(t); return {out:'Opening '+a[0]+'…'}; } if(Apps.get(a[0])){ launchApp(a[0]); return {out:'Launching '+a[0]+'…'}; } return {err:'open: cannot find '+a[0]}; }
     };
@@ -1616,7 +1617,8 @@ registerApp({
         if(!name) continue;
         const fn=CMD[name];
         if(!fn){ print(name+': command not found','err'); return; }
-        let res; try{ res=fn(rest, stdin)||{}; }catch(err){ print(name+': '+err.message,'err'); return; }
+        const toTTY = (s===segs.length-1) && !redir;
+        let res; try{ res=fn(rest, stdin, !toTTY)||{}; }catch(err){ print(name+': '+err.message,'err'); return; }
         if(res.err) print(res.err,'err');
         const output = res.out!=null?res.out:'';
         if(redir){ try{ const t=resolve(redir.file); const existing=(redir.mode==='>>'&&FS.exists(t))?FS.read(t)+'\n':''; FS.write(t, existing+output); }catch(err){ print('redirect: '+err.message,'err'); } stdin=''; }

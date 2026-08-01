@@ -999,10 +999,17 @@ function makeNode(type, p) {
     sizing: { h: 'fixed', v: 'fixed' }, constraints: { h: 'left', v: 'top' },
     componentId: null, overrides: {}, variant: null,
   }, p || {});
-  if (!n.name) n.name = defName(type);
+  if (!n.name) n.name = (type === 'text') ? autoName(n) : defName(type);
   return n;
 }
 function defName(t) { return ({ frame: 'Frame', rect: 'Rectangle', ellipse: 'Ellipse', polygon: 'Polygon', star: 'Star', line: 'Line', path: 'Vector', text: 'Text', group: 'Group', boolean: 'Union', instance: 'Component', component: 'Component' })[t] || 'Layer'; }
+/* A text layer's name defaults to its content (Figma behaviour), trimmed and truncated. */
+function autoName(n) {
+  if (n && n.type === 'text') { const s = ((n.text && n.text.chars) || '').replace(/\s+/g, ' ').trim(); return s ? (s.length > 28 ? s.slice(0, 28) + '…' : s) : 'Text'; }
+  return (n && n.name) || defName(n ? n.type : '');
+}
+/* What the layers panel shows: explicit rename wins; otherwise text layers show content. */
+function displayName(n) { if (n.type === 'text' && !n._named) return autoName(n); return n.name || defName(n.type); }
 
 const app = {
   doc: newDoc('Analytics Dashboard'), selection: new Set(), hover: null, tool: 'select',
@@ -1019,7 +1026,7 @@ let _before = null;
 function mutate(fn) { const b = _before !== null ? _before : snap(); _before = null; fn(); app.history.push(b); if (app.history.length > 200) app.history.shift(); app.future.length = 0; app.version++; scheduleRender(); refreshPanels(); broadcast(); }
 function undo() { if (!app.history.length) return; app.future.push(snap()); restore(app.history.pop()); app.version++; clean(); scheduleRender(); refreshPanels(); broadcast(); }
 function redo() { if (!app.future.length) return; app.history.push(snap()); restore(app.future.pop()); app.version++; clean(); scheduleRender(); refreshPanels(); broadcast(); }
-function clean() { for (const id of Array.from(app.selection)) if (!app.doc.nodes[id]) app.selection.delete(id); }
+function clean() { for (const id of Array.from(app.selection)) if (!app.doc.nodes[id]) app.selection.delete(id); if (app.hover && !app.doc.nodes[app.hover]) app.hover = null; if (app.editing && !app.doc.nodes[app.editing]) { app.editing = null; if (app.nodeSel) app.nodeSel.clear(); } }
 
 /* ================= TREE ================= */
 function node(id) { return app.doc.nodes[id]; }
@@ -1343,6 +1350,7 @@ function drawOverlay() {
   drawRemote();
 }
 function outlineNode(n, color, lw) {
+  if (!n) return;
   const m = worldMatrix(n.id); const p = nodePath(n) || G.rectPath(0, 0, n.w, n.h, 0);
   octx.save(); octx.strokeStyle = color; octx.lineWidth = lw;
   octx.beginPath();
@@ -1466,7 +1474,7 @@ function selectableFor(n, deep) {
 }
 
 /* ================= expose partial for further sections ================= */
-const CORE = { app, G, V, $, $$, uid, clamp, d2r, r2d, round, node, kids, sibs, addNode, delNode, reparent, isCont, ancestors, topLevel, makeNode, defName, defFill, defStroke, defText, worldMatrix, localMatrix, matMul, applyM, invertM, s2w, w2s, nodePath, localBBox, nodeWorldBBox, selectionBBox, mutate, undo, redo, snap, restore, scheduleRender, hitTest, pointInNode, selectableFor, flattenPaintOrder, textMetrics, newDoc, roundedRectVar, strokeOutline, wrapText, ellipsePathNode };
+const CORE = { app, G, V, $, $$, uid, clamp, d2r, r2d, round, node, kids, sibs, addNode, delNode, reparent, isCont, ancestors, topLevel, makeNode, defName, autoName, displayName, defFill, defStroke, defText, worldMatrix, localMatrix, matMul, applyM, invertM, s2w, w2s, nodePath, localBBox, nodeWorldBBox, selectionBBox, mutate, undo, redo, snap, restore, scheduleRender, hitTest, pointInNode, selectableFor, flattenPaintOrder, textMetrics, newDoc, roundedRectVar, strokeOutline, wrapText, ellipsePathNode };
 window.__CORE = CORE;
 
 /* placeholders resolved in later concatenated sections */
@@ -1768,7 +1776,7 @@ function startTextEdit(id) {
   const m = worldMatrix(id); const p = applyM(m, [0, 0]); const s = w2s(p[0], p[1]);
   Object.assign(ta.style, { position: 'absolute', left: s[0] + 'px', top: s[1] + 'px', font: `${n.text.weight} ${n.text.size * app.view.scale}px ${n.text.font}`, color: n.text.color, lineHeight: n.text.lineHeight, minWidth: '40px', transformOrigin: '0 0' });
   $('#canvasWrap').appendChild(ta); ta.focus(); ta.select();
-  const commitText = () => { mutate(() => { n.text.chars = ta.value; const tm = textMetrics(n); if (n.text.auto === 'width') { n.w = Math.max(4, tm.w); n.h = Math.max(4, tm.h); } else if (n.text.auto === 'height') { n.h = Math.max(4, tm.h); } }); ta.remove(); app.textEditing = null; };
+  const commitText = () => { mutate(() => { n.text.chars = ta.value; if (!n._named) n.name = C.autoName(n); const tm = textMetrics(n); if (n.text.auto === 'width') { n.w = Math.max(4, tm.w); n.h = Math.max(4, tm.h); } else if (n.text.auto === 'height') { n.h = Math.max(4, tm.h); } }); ta.remove(); app.textEditing = null; };
   ta.addEventListener('blur', commitText);
   ta.addEventListener('input', () => { n.text.chars = ta.value; C.scheduleRender(); });
   ta.addEventListener('keydown', (ev) => { ev.stopPropagation(); if (ev.key === 'Escape') { ta.blur(); } });
@@ -2093,7 +2101,7 @@ window.__OPS = { reflowAll, reflowFrame, syncInstances, ops: C.ops };
 const C = window.__CORE, G = C.G, app = C.app;
 const { node, isCont, makeNode, addNode, mutate, worldMatrix, applyM, nodePath, localBBox, nodeWorldBBox, uid } = C;
 
-function download(name, blob) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
+function download(name, blob) { if (!blob) { console.warn('download: empty blob for ' + name); return; } const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
 function downloadText(name, text, mime) { download(name, new Blob([text], { type: mime || 'text/plain' })); }
 
 /* ---------- JSON ---------- */
@@ -2389,13 +2397,13 @@ function renderLayers() {
   };
   rec(app.doc.root, 0);
 }
-function matchSearch(n) { const q = layerSearch.toLowerCase(); if ((n.name || '').toLowerCase().includes(q)) return true; if (isCont(n)) return n.children.some(c => node(c) && matchSearch(node(c))); return false; }
+function matchSearch(n) { const q = layerSearch.toLowerCase(); if (C.displayName(n).toLowerCase().includes(q)) return true; if (isCont(n)) return n.children.some(c => node(c) && matchSearch(node(c))); return false; }
 function layerRow(n, depth) {
   const r = el('div', 'layer-row' + (app.selection.has(n.id) ? ' selected' : '') + (n.type === 'component' ? ' is-component' : '') + (n.type === 'instance' ? ' is-instance' : ''));
   r.style.paddingLeft = (8 + depth * 14) + 'px'; r.dataset.id = n.id; r.draggable = true;
   if (isCont(n) && n.children.length) { const tw = el('span', 'twisty', collapsed.has(n.id) ? '▸' : '▾'); tw.onclick = (e) => { e.stopPropagation(); if (collapsed.has(n.id)) collapsed.delete(n.id); else collapsed.add(n.id); renderLayers(); }; r.appendChild(tw); } else { r.appendChild(el('span', 'twisty')); }
   r.appendChild(el('span', 'layer-icon', typeIcon(n)));
-  const name = el('span', 'layer-name', n.name); name.ondblclick = (e) => { e.stopPropagation(); startRename(n, name); }; r.appendChild(name);
+  const name = el('span', 'layer-name', C.displayName(n)); name.ondblclick = (e) => { e.stopPropagation(); startRename(n, name); }; r.appendChild(name);
   const acts = el('span', 'layer-actions');
   acts.appendChild(iconBtn(n.locked ? '🔒' : '🔓', 'Lock', (e) => { e.stopPropagation(); mutate(() => n.locked = !n.locked); }));
   acts.appendChild(iconBtn(n.visible ? '👁' : '🙈', 'Hide', (e) => { e.stopPropagation(); mutate(() => { n.visible = !n.visible; touchOverride(n, 'visible'); }); }));
@@ -2409,7 +2417,7 @@ function layerRow(n, depth) {
   return r;
 }
 function typeIcon(n) { return ({ frame: '▤', group: '▦', rect: '▭', ellipse: '◯', polygon: '⬠', star: '★', line: '╱', path: '✎', text: 'T', boolean: '⬗', instance: '◈', component: '◆' })[n.type] || '▪'; }
-function startRename(n, span) { const inp = el('input', 'rename-input'); inp.value = n.name; span.replaceWith(inp); inp.focus(); inp.select(); const done = () => { mutate(() => n.name = inp.value || C.defName(n.type)); }; inp.onblur = done; inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { inp.value = n.name; inp.blur(); } }; }
+function startRename(n, span) { const inp = el('input', 'rename-input'); inp.value = C.displayName(n); span.replaceWith(inp); inp.focus(); inp.select(); const done = () => { mutate(() => { const v = inp.value.trim(); if (v) { n.name = v; n._named = true; } else { n._named = false; n.name = C.autoName(n); } }); }; inp.onblur = done; inp.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Enter') inp.blur(); if (e.key === 'Escape') { inp.value = C.displayName(n); inp.blur(); } }; }
 function onLayerDrop(srcId, target, e) {
   const src = node(srcId); if (!src || C.ancestors(target.id).includes(srcId)) return;
   mutate(() => {
@@ -2727,9 +2735,9 @@ function buildDemo() {
   add(N('text', { name: 'table title', x: 24, y: 18, w: 200, h: 20, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: 'Recent transactions', size: 16, weight: 600, color: '#ffffff' }) }), table.id);
   const rows = [['Acme Inc', 'Subscription', '$1,299', '#10b981'], ['Globex', 'One-time', '$540', '#3b82f6'], ['Initech', 'Subscription', '$2,100', '#8b5cf6'], ['Umbrella', 'Refund', '-$320', '#ef4444']];
   rows.forEach((r, i) => {
-    add(N('text', { name: 'r', x: 28, y: 56 + i * 36, w: 160, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[0], size: 14, weight: 500, color: '#e5e7eb' }) }), table.id);
-    add(N('text', { name: 'r', x: 320, y: 56 + i * 36, w: 160, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[1], size: 14, color: '#8b93a7' }) }), table.id);
-    add(N('text', { name: 'r', x: 700, y: 56 + i * 36, w: 100, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[2], size: 14, weight: 600, color: r[3], align: 'right' }) }), table.id);
+    add(N('text', { x: 28, y: 56 + i * 36, w: 160, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[0], size: 14, weight: 500, color: '#e5e7eb' }) }), table.id);
+    add(N('text', { x: 320, y: 56 + i * 36, w: 160, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[1], size: 14, color: '#8b93a7' }) }), table.id);
+    add(N('text', { x: 700, y: 56 + i * 36, w: 100, h: 18, fills: [], strokes: [], text: Object.assign(C.defText(), { chars: r[2], size: 14, weight: 600, color: r[3], align: 'right' }) }), table.id);
   });
 
   // A star + component example off to the side
