@@ -349,7 +349,7 @@ const renderer=new THREE.WebGLRenderer({antialias:true, powerPreference:'high-pe
 renderer.setSize(innerWidth,innerHeight);
 renderer.outputColorSpace=THREE.SRGBColorSpace;
 renderer.toneMapping=THREE.ACESFilmicToneMapping;
-const BASE_EXPOSURE=0.58;                 // scene is lit brightly (HDR sky IBL) — pull exposure down
+const BASE_EXPOSURE=0.68;                 // scene is lit brightly (HDR sky IBL) — pull exposure down
 renderer.toneMappingExposure=BASE_EXPOSURE;
 renderer.shadowMap.enabled=true;
 renderer.shadowMap.type=THREE.PCFSoftShadowMap;
@@ -424,8 +424,8 @@ function updateSun(){
   const c=warm.clone().lerp(day, clamp(e*1.4,0,1));
   sunLight.color.copy(c);
   sunLight.intensity=lerp(0.04, 2.3, clamp(e+0.15,0,1));
-  hemi.intensity=lerp(0.06,0.35,clamp(e+0.2,0,1));
-  ambient.intensity=lerp(0.02,0.08,clamp(e,0,1));
+  hemi.intensity=lerp(0.08,0.5,clamp(e+0.2,0,1));
+  ambient.intensity=lerp(0.03,0.16,clamp(e,0,1));
   skyU.turbidity.value=lerp(6,2.6,e);
   skyU.rayleigh.value=lerp(0.5,1.8,clamp(e+0.1,0,1));
   // fog tint with sky (horizon blue by day, not white)
@@ -507,67 +507,119 @@ composer.addPass(outputPass);
 
 /* ---------- 4. TRACK ---------- */
 const ROAD_HALF=6.2;           // half width of drivable tarmac (m)
+const BARRIER_LAT=ROAD_HALF+3.2;   // lateral distance of the barrier line from the centreline
+const WALL_LIMIT=BARRIER_LAT-1.0;  // car centre is confined within this (leaves ~half-car buffer)
+let occluders=[];              // static meshes the chase camera must never clip through (barriers)
+let propOccluders=[];          // rebuildable occluders (trees) — replaced when scenery rebuilds
 const track={ pts:[], N:0, length:0 }; // sampled centerline
 let trackGroup=new THREE.Group(); scene.add(trackGroup);
 
 // Control points: x,z in meters, y elevation. A flowing circuit with elevation.
+// The bottom-right closure was reshaped into a smooth, wide right-hand sweep. The
+// original loop spiked up to [0,0,0] at index 0 and immediately reversed to [70,-40],
+// a ~146deg control-polygon hairpin. Combined with uniform-parameter sampling that
+// bunched points there, it produced a ~1.5 m-radius cusp at the seam (kink at indices
+// ~1594..0): a radial "skid" fan, a self-intersecting road/grass notch, and a Reset
+// spawn sitting inside a 40deg corner. Index 0 now lands on a gentle sweep.
 const CTRL=[
-  [0,0,0],[70,0,-40],[140,4,-30],[180,8,30],[150,10,110],[80,6,150],
+  [110,0,-75],[150,2,-45],[184,5,5],[178,8,55],[150,10,110],[80,6,150],
   [-10,2,150],[-70,0,110],[-60,-2,40],[-110,2,-10],[-160,6,-70],[-120,10,-140],
-  [-40,6,-160],[40,2,-130],[30,0,-60]
+  [-40,6,-160],[30,4,-140],[75,2,-110]
 ];
 function buildAsphaltTex(){
-  // Procedural asphalt: mid-grey base + fine speckle noise, faint longitudinal seams,
-  // and a subtly darker, polished racing line down the centre. Tiles along the road length.
+  // Procedural asphalt: a light-ish NEUTRAL grey base (reads as tarmac in daylight, clearly
+  // separable from green grass) + fine aggregate speckle, faint seams, and a subtly darker
+  // polished racing line down the centre. Tiles along the road length.
   const w=128, h=512;
   const c=document.createElement('canvas'); c.width=w; c.height=h;
   const g=c.getContext('2d');
-  g.fillStyle='#4c4f56'; g.fillRect(0,0,w,h);
-  // speckle
+  g.fillStyle='#9a9ca1'; g.fillRect(0,0,w,h);          // neutral light-grey tarmac base
+  // speckle (light + dark aggregate flecks)
   const img=g.getImageData(0,0,w,h); const d=img.data;
+  function clamp8(x){ return x<0?0:x>255?255:x; }
   for(let i=0;i<d.length;i+=4){
-    const n=(Math.random()-0.5)*38;
-    d[i]=clamp8(d[i]+n); d[i+1]=clamp8(d[i+1]+n); d[i+2]=clamp8(d[i+2]+n*0.9);
+    const n=(Math.random()-0.5)*30;                    // neutral grain: equal on all channels
+    d[i]=clamp8(d[i]+n); d[i+1]=clamp8(d[i+1]+n); d[i+2]=clamp8(d[i+2]+n);
   }
   g.putImageData(img,0,0);
-  function clamp8(x){ return x<0?0:x>255?255:x; }
   // darker racing line (centre band, polished => slightly darker + smoother)
   const lg=g.createLinearGradient(w*0.34,0,w*0.66,0);
-  lg.addColorStop(0,'rgba(40,42,47,0)'); lg.addColorStop(0.5,'rgba(40,42,47,0.5)'); lg.addColorStop(1,'rgba(40,42,47,0)');
+  lg.addColorStop(0,'rgba(96,98,103,0)'); lg.addColorStop(0.5,'rgba(96,98,103,0.5)'); lg.addColorStop(1,'rgba(96,98,103,0)');
   g.fillStyle=lg; g.fillRect(w*0.34,0,w*0.32,h);
-  // transverse seams
-  g.strokeStyle='rgba(28,30,34,0.55)'; g.lineWidth=2;
-  for(let y=40;y<h;y+=120){ g.beginPath(); g.moveTo(0,y); g.lineTo(w,y); g.stroke(); }
+  // transverse seams — kept subtle & low-contrast so they read as faint expansion joints,
+  // never as hard bands (the real fix for the "fan" was the centreline geometry, not this)
+  g.strokeStyle='rgba(120,122,126,0.16)'; g.lineWidth=1;
+  for(let y=60;y<h;y+=170){ g.beginPath(); g.moveTo(0,y); g.lineTo(w,y); g.stroke(); }
   // longitudinal edge join lines
-  g.strokeStyle='rgba(30,32,36,0.4)'; g.lineWidth=1;
+  g.strokeStyle='rgba(74,76,80,0.4)'; g.lineWidth=1;
   g.beginPath(); g.moveTo(w*0.16,0); g.lineTo(w*0.16,h); g.moveTo(w*0.84,0); g.lineTo(w*0.84,h); g.stroke();
   const tex=new THREE.CanvasTexture(c);
   tex.wrapS=THREE.ClampToEdgeWrapping; tex.wrapT=THREE.RepeatWrapping;
   tex.repeat.set(1, 1); tex.anisotropy=8; tex.colorSpace=THREE.SRGBColorSpace;
   return tex;
 }
+function buildGrassTex(){
+  // Subtle mottled grass: green base with darker/lighter clumps and fine noise so the
+  // terrain doesn't read as a flat green sheet and stays clearly distinct from tarmac.
+  const s=256;
+  const c=document.createElement('canvas'); c.width=s; c.height=s;
+  const g=c.getContext('2d');
+  g.fillStyle='#496b3c'; g.fillRect(0,0,s,s);
+  for(let k=0;k<900;k++){
+    const x=Math.random()*s, y=Math.random()*s, r=2+Math.random()*7;
+    const shade=Math.random();
+    g.fillStyle = shade<0.5 ? 'rgba(40,74,40,0.18)' : 'rgba(96,120,70,0.14)';
+    g.beginPath(); g.arc(x,y,r,0,Math.PI*2); g.fill();
+  }
+  const img=g.getImageData(0,0,s,s), d=img.data;
+  for(let i=0;i<d.length;i+=4){ const n=(Math.random()-0.5)*22; d[i]+=n*0.7; d[i+1]+=n; d[i+2]+=n*0.6; }
+  g.putImageData(img,0,0);
+  const tex=new THREE.CanvasTexture(c);
+  tex.wrapS=tex.wrapT=THREE.RepeatWrapping; tex.anisotropy=8; tex.colorSpace=THREE.SRGBColorSpace;
+  return tex;
+}
 function buildTrack(){
   const cpts=CTRL.map(p=>new THREE.Vector3(p[0],p[1],p[2]));
   const curve=new THREE.CatmullRomCurve3(cpts, true, 'catmullrom', 0.5);
+  curve.arcLengthDivisions=6000;   // fine LUT so the u->t (arc-length) mapping is smooth
+  curve.updateArcLengths();
   const N=1600;
   const pts=[];
-  let cum=0, prev=null;
+  // Sample uniformly in ARC LENGTH (getPointAt), not curve parameter (getPoint). Uniform
+  // parameter sampling bunched samples where the curve moved slowly, collapsing segment
+  // length to ~0.19 m at the seam while the heading swept ~7 deg/point (a cusp). Arc-length
+  // sampling makes every segment ~equal (track.length/N), killing that discontinuity.
+  const positions=[];
+  for(let i=0;i<N;i++){ positions.push(curve.getPointAt(i/N)); }
+  // Tangents from centred finite differences on the periodic resampled positions, so the
+  // heading is C1-continuous across the seam (index N-1 -> 0) by construction.
+  let cum=0;
   for(let i=0;i<N;i++){
-    const t=i/N;
-    const pos=curve.getPoint(t);
-    const tan=curve.getTangent(t).normalize();
-    // left normal in XZ plane
+    const pos=positions[i];
+    const nxt=positions[(i+1)%N], prv=positions[(i-1+N)%N];
+    const tan=new THREE.Vector3(nxt.x-prv.x,0,nxt.z-prv.z).normalize();
     const left=new THREE.Vector3(-tan.z,0,tan.x).normalize();
-    if(prev) cum+=pos.distanceTo(prev);
-    prev=pos.clone();
-    pts.push({pos, tan, left, cum, width:ROAD_HALF, bank:0});
+    if(i>0) cum+=pos.distanceTo(positions[i-1]);
+    pts.push({pos, tan, left, cum, width:ROAD_HALF, safeHalf:ROAD_HALF, curv:0, bank:0});
   }
-  track.length=cum + pts[0].pos.distanceTo(pts[N-1].pos);
+  track.length=cum + positions[0].distanceTo(positions[N-1]);
   // banking from curvature
   for(let i=0;i<N;i++){
     const a=pts[(i-4+N)%N].tan, b=pts[(i+4)%N].tan;
     const cross=a.x*b.z-a.z*b.x;
     pts[i].bank=clamp(cross*3.5,-0.16,0.16); // radians roll of cross-section
+  }
+  // Per-point curvature (heading change per metre) + a safe half-width so a ribbon edge
+  // offset can never exceed the local radius of curvature (which would fold the inner edge
+  // back on itself and create self-intersecting triangles / a notch). safeHalf==ROAD_HALF
+  // everywhere on this smooth circuit; the clamp is a guarantee for any future tight bend.
+  const dsUniform=track.length/N;
+  for(let i=0;i<N;i++){
+    const a=pts[i].tan, b=pts[(i+1)%N].tan;
+    const dth=Math.atan2(a.x*b.z-a.z*b.x, a.x*b.x+a.z*b.z); // signed turn a->b (rad)
+    pts[i].curv=dth/dsUniform;
+    const Rloc=1/Math.max(Math.abs(pts[i].curv),1e-4);
+    pts[i].safeHalf=Math.min(ROAD_HALF, 0.9*Rloc);
   }
   track.pts=pts; track.N=N;
 
@@ -584,7 +636,7 @@ function buildTrack(){
     const bl=l.clone().multiplyScalar(Math.cos(bank)).add(up.clone().multiplyScalar(Math.sin(bank)));
     const worldUp=l.clone().cross(p.tan).normalize();
     const left=bl.clone();
-    const half=p.width;
+    const half=p.safeHalf;
     const L=p.pos.clone().addScaledVector(left, half);
     const R=p.pos.clone().addScaledVector(left,-half);
     // elevate edges by banking
@@ -597,14 +649,17 @@ function buildTrack(){
   }
   for(let i=0;i<N;i++){
     const a=i*2, b=((i+1)%N)*2;
-    iArr.push(a,a+1,b, a+1,b+1,b);
+    // winding chosen so face/vertex normals point UP (toward the sky); a reversed
+    // winding here left the road facing DOWN, so the overhead sun never lit it and
+    // the tarmac rendered near-black (indistinguishable from grass).
+    iArr.push(a,b,a+1, a+1,b,b+1);
   }
   roadGeo.setAttribute('position', new THREE.Float32BufferAttribute(vArr,3));
   roadGeo.setAttribute('normal', new THREE.Float32BufferAttribute(nArr,3));
   roadGeo.setAttribute('uv', new THREE.Float32BufferAttribute(uvArr,2));
   roadGeo.setIndex(iArr);
   roadGeo.computeVertexNormals();
-  const roadMat=new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.9, metalness:0.0, map:buildAsphaltTex()});
+  const roadMat=new THREE.MeshStandardMaterial({color:0xffffff, roughness:0.9, metalness:0.0, map:buildAsphaltTex(), envMapIntensity:0.3});
   roadMat.userData.baseRough=0.9;
   const road=new THREE.Mesh(roadGeo, roadMat);
   road.receiveShadow=true; road.name='road';
@@ -613,24 +668,70 @@ function buildTrack(){
 
   // Curbs (red/white) as thin ribbons just outside tarmac
   buildCurb(pts, N, 1); buildCurb(pts,N,-1);
+  // Grass verge: a smooth grass ribbon that follows the road edge exactly, hiding the
+  // coarse terrain-grid seam so the asphalt-to-grass boundary reads as a clean ribbon
+  // (the low-res conforming ground grid alone left a jagged/faceted, notched edge).
+  track.grassTex=buildGrassTex();
+  buildVerge(pts,N,1); buildVerge(pts,N,-1);
   // Barriers
+  occluders=[];
   buildBarriers(pts,N,1); buildBarriers(pts,N,-1);
   // Start/finish line
   buildStartLine(pts[0]);
 
-  // Grass ground
-  const groundGeo=new THREE.PlaneGeometry(2400,2400,1,1);
-  const groundMat=new THREE.MeshStandardMaterial({color:0x33502f, roughness:1, metalness:0, envMapIntensity:0.35});
-  const ground=new THREE.Mesh(groundGeo, groundMat);
-  ground.rotation.x=-Math.PI/2; ground.position.y=-0.05; ground.receiveShadow=true;
+  // Grass ground — a terrain grid that CONFORMS to the track elevation so the grass
+  // always sits just below the road surface (a flat plane would bury the undulating
+  // road in dips and make the tarmac read as grass). Flattens out in the far field.
+  buildGround();
+}
+
+// Downsampled centerline nearest-elevation lookup, then a conforming ground grid.
+function buildGround(){
+  const pts=track.pts, N=track.N;
+  // centroid
+  let cx=0, cz=0; for(let i=0;i<N;i++){ cx+=pts[i].pos.x; cz+=pts[i].pos.z; } cx/=N; cz/=N;
+  // downsample centerline into flat arrays for a fast nearest search
+  const stride=3, M=Math.ceil(N/stride);
+  const sx=new Float32Array(M), sz=new Float32Array(M), sy=new Float32Array(M);
+  let m=0; for(let i=0;i<N;i+=stride){ sx[m]=pts[i].pos.x; sz[m]=pts[i].pos.z; sy[m]=pts[i].pos.y; m++; }
+  const MARGIN=0.2;              // grass sits this far below the road surface
+  const CONFORM=70, FADE=300;    // full conform within CONFORM m, flat beyond FADE m
+  function nearest(x,z){
+    let bd=1e18, by=0;
+    for(let i=0;i<m;i++){ const dx=x-sx[i], dz=z-sz[i]; const d=dx*dx+dz*dz; if(d<bd){ bd=d; by=sy[i]; } }
+    return { y:by, dist:Math.sqrt(bd) };
+  }
+  const SIZE=1800, SEG=240, half=SIZE/2, step=SIZE/SEG;
+  const pos=[], uv=[], idx=[];
+  for(let j=0;j<=SEG;j++){
+    for(let i=0;i<=SEG;i++){
+      const x=cx-half+i*step, z=cz-half+j*step;
+      const ne=nearest(x,z);
+      const t=THREE.MathUtils.smoothstep(ne.dist, CONFORM, FADE); // 0 near track, 1 far
+      const y=(ne.y-MARGIN)*(1-t) + (-0.6)*t;                     // conform near, gently flat far
+      pos.push(x,y,z);
+      uv.push(i/SEG*60, j/SEG*60);
+    }
+  }
+  for(let j=0;j<SEG;j++) for(let i=0;i<SEG;i++){
+    const a=j*(SEG+1)+i, b=a+1, c=a+(SEG+1), d=c+1;
+    idx.push(a,c,b, b,c,d);
+  }
+  const g=new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos,3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv,2));
+  g.setIndex(idx); g.computeVertexNormals();
+  const groundMat=new THREE.MeshStandardMaterial({color:0xffffff, roughness:1, metalness:0, envMapIntensity:0.35, map:track.grassTex||buildGrassTex()});
+  const ground=new THREE.Mesh(g, groundMat);
+  ground.receiveShadow=true; ground.name='ground';
   trackGroup.add(ground);
 }
 
 function buildCurb(pts,N,side){
   const geo=new THREE.BufferGeometry(); const v=[],uv=[],idx=[];
-  const inner=ROAD_HALF-0.05, outer=ROAD_HALF+0.75;
   for(let i=0;i<N;i++){
     const p=pts[i];
+    const inner=p.safeHalf-0.05, outer=p.safeHalf+0.75;
     const A=p.pos.clone().addScaledVector(p.left, side*inner);
     const B=p.pos.clone().addScaledVector(p.left, side*outer);
     A.y+=0.02; B.y+=0.06;
@@ -647,6 +748,28 @@ function buildCurb(pts,N,side){
   const tex=new THREE.CanvasTexture(cv); tex.wrapS=tex.wrapT=THREE.RepeatWrapping; tex.repeat.set(1,1);
   const mat=new THREE.MeshStandardMaterial({map:tex, roughness:0.7, metalness:0});
   const m=new THREE.Mesh(geo,mat); m.receiveShadow=true; trackGroup.add(m);
+}
+
+// Grass verge ribbon: follows the tarmac edge segment-for-segment (N samples) so the
+// road-to-grass transition is a smooth ribbon rather than the coarse terrain grid's
+// faceted, notched boundary. Sits just below the curb and blends down into the terrain.
+function buildVerge(pts,N,side){
+  const geo=new THREE.BufferGeometry(); const v=[],uv=[],idx=[];
+  for(let i=0;i<N;i++){
+    const p=pts[i];
+    const inner=p.safeHalf+0.62, outer=p.safeHalf+7.5;
+    const A=p.pos.clone().addScaledVector(p.left, side*inner); A.y-=0.05;
+    const B=p.pos.clone().addScaledVector(p.left, side*outer); B.y-=0.22;
+    v.push(A.x,A.y,A.z, B.x,B.y,B.z);
+    uv.push(0, p.cum*0.22, (outer-inner)*0.22, p.cum*0.22);
+  }
+  for(let i=0;i<N;i++){ const a=i*2,b=((i+1)%N)*2; if(side>0) idx.push(a,a+1,b,a+1,b+1,b); else idx.push(a,b,a+1,a+1,b,b+1); }
+  geo.setAttribute('position',new THREE.Float32BufferAttribute(v,3));
+  geo.setAttribute('uv',new THREE.Float32BufferAttribute(uv,2));
+  geo.setIndex(idx); geo.computeVertexNormals();
+  const mat=new THREE.MeshStandardMaterial({map:track.grassTex, roughness:1, metalness:0, envMapIntensity:0.35,
+    polygonOffset:true, polygonOffsetFactor:1, polygonOffsetUnits:1});
+  const m=new THREE.Mesh(geo,mat); m.receiveShadow=true; m.name='verge'; trackGroup.add(m);
 }
 
 function buildBarriers(pts,N,side){
@@ -677,6 +800,7 @@ function buildBarriers(pts,N,side){
   }
   posts.instanceMatrix.needsUpdate=true; rails.instanceMatrix.needsUpdate=true;
   trackGroup.add(posts); trackGroup.add(rails);
+  occluders.push(posts, rails);
 }
 
 function buildStartLine(p0){
@@ -704,6 +828,19 @@ function sampleTrack(x,z){
     const p=pts[i]; const dx=x-p.pos.x, dz=z-p.pos.z;
     const d=dx*dx+dz*dz;
     if(d<bestD){ bestD=d; best=i; }
+  }
+  // Robustness: if the windowed search landed on its edge or the closest
+  // point is implausibly far, the true nearest is likely outside the window
+  // (e.g. after a teleport / big lateral jump). Fall back to a full scan so
+  // collision + measurements never latch onto a wrong far centerline point.
+  let delta=((best-lastIdx)%N+N)%N; if(delta>N/2) delta-=N;
+  if(best<0 || bestD>2500 || Math.abs(delta)>=W){
+    best=-1; bestD=1e18;
+    for(let i=0;i<N;i++){
+      const p=pts[i]; const dx=x-p.pos.x, dz=z-p.pos.z;
+      const d=dx*dx+dz*dz;
+      if(d<bestD){ bestD=d; best=i; }
+    }
   }
   if(best<0) best=0;
   lastIdx=best;
@@ -751,6 +888,10 @@ function buildProps(){
   trunks.count=placed; folis.count=placed;
   trunks.instanceMatrix.needsUpdate=true; folis.instanceMatrix.needsUpdate=true;
   envGroup.add(trunks); envGroup.add(folis);
+  // drop stale tree occluders (scenery is rebuilt on quality change) then register new ones
+  for(const m of propOccluders){ const k=occluders.indexOf(m); if(k>=0) occluders.splice(k,1); }
+  propOccluders=[trunks, folis];
+  occluders.push(trunks, folis);
 
   if(q.grand){
     // Grandstands: instanced stepped boxes near a few track sections
@@ -1005,6 +1146,11 @@ function appendSkid(wheelIdx, x,y,z, rx,rz, intensity){
   const prev=skid.last[wheelIdx];
   const cur={x,y:y+0.02,z, rx,rz};
   if(prev){
+    // guard against degenerate spokes: if the tyre has barely moved since the last sample
+    // (e.g. a near-stationary wheelspin), don't lay a quad — otherwise many tiny rotating
+    // quads pile onto one point and read as a broken radial fan of skid streaks.
+    const dxm=cur.x-prev.x, dzm=cur.z-prev.z;
+    if(dxm*dxm+dzm*dzm < 0.0025){ return; }   // <5 cm of travel: skip, keep the anchor
     const p=skid.pos.array, al=skid.alpha.array;
     const quad=[
       [prev.x+prev.rx*half, prev.y, prev.z+prev.rz*half],
@@ -1024,6 +1170,12 @@ function appendSkid(wheelIdx, x,y,z, rx,rz, intensity){
   skid.last[wheelIdx]=cur;
 }
 function breakSkid(wheelIdx){ skid.last[wheelIdx]=null; }
+function clearSkid(){
+  if(!skid.pos) return;
+  skid.pos.array.fill(0); skid.alpha.array.fill(0);
+  skid.pos.needsUpdate=true; skid.alpha.needsUpdate=true;
+  skid.head=0; skid.last=[null,null,null,null];
+}
 
 /* ---------- 8. VEHICLE PHYSICS ---------- */
 const PH={
@@ -1062,7 +1214,11 @@ function resetCar(toStart){
   car.alphaT=[0,0,0,0];
   car.axFelt=0; car.ayFelt=0; car.speed=0; car.offTime=0;
   car.throttle=0; car.brake=0; car.handbrake=0; car.steer=0; car.steerTarget=0;
+  car.onTrack=true; car.surfaceMu=1;
   lastIdx=0;
+  impactShake=0; impactCooldown=0;
+  if(typeof clearSkid==='function') clearSkid();   // wipe rubber so no stale fan seeds at spawn
+  for(let i=0;i<4;i++) breakSkid(i);
   resetLap();
 }
 // Snap the car back onto the racing line at its current progress, preserving heading,
@@ -1234,9 +1390,24 @@ function physicsStep(dt){
     const tot=Math.hypot(Fx0,Fy0);
     if(tot>Fmax && tot>1e-3){ const s=Fmax/tot; Fx0*=s; Fy0*=s; }
     // fade tire force toward zero at a true standstill (below ~0.5 m/s) so a parked car
-    // neither creeps nor jitters; pulling away is smooth as v rises past the threshold.
+    // neither creeps nor jitters; this keeps standstill lateral behaviour rock-solid.
     const lowFade=clamp(vRel/0.5,0,1);
     Fx0*=lowFade; Fy0*=lowFade;
+    // ---- low-speed launch traction (stable) ----
+    // The Pacejka longitudinal branch is numerically stiff near a standstill (kappa uses a
+    // small denominator, so tiny omega changes swing the force wildly and the wheel ODE
+    // oscillates instead of accelerating the car). When pulling away under power we blend in
+    // a direct, grip-limited drive force: the drivetrain force at the contact patch clamped
+    // to mu*Fz. This is unconditionally stable and lets the car actually launch from a stop
+    // while still spinning the wheels (burnout) if floored past available grip. Braking is
+    // left to the Pacejka/wheel-lock path so low-speed stopping is unaffected.
+    const launching=(wheelDriveTorque[i]>10 && car.brake<0.05 && car.handbrake<0.05);
+    if(launching){
+      const gripCap=mu*Fz[i];
+      const FxLaunch=clamp(wheelDriveTorque[i]/PH.wheelR, -gripCap, gripCap);
+      const wLow=clamp((3.0 - vRel)/2.0, 0, 1);      // 1 below 1 m/s -> 0 above 3 m/s
+      Fx0=Fx0*(1-wLow) + FxLaunch*wLow;
+    }
     car.slip[i]=Math.min(1, (Math.abs(kappa)*0.25 + Math.abs(alpha)*1.4)*lowFade);
 
     // wheel rotational dynamics
@@ -1305,6 +1476,45 @@ function physicsStep(dt){
   const wvx=car.vLong*s + car.vLat*c;
   const wvz=car.vLong*c - car.vLat*s;
   car.x+=wvx*dt; car.z+=wvz*dt;
+
+  // ---- barrier / world-boundary collision (continuous, tunnel-proof) ----
+  // The barriers ring the corridor at a fixed lateral offset from the centreline, so we
+  // confine the car's lateral distance every physics substep. Because this runs at the
+  // 240 Hz fixed step and clamps position directly, it cannot be tunnelled through even at
+  // 150+ mph, and it doubles as the hard world boundary (the car can never leave the map).
+  {
+    const cs=sampleTrack(car.x,car.z);
+    const lat=cs.lateral, alat=Math.abs(lat);
+    if(alat>WALL_LIMIT){
+      const p=cs.p, side=(lat>=0?1:-1);
+      const pen=alat-WALL_LIMIT;
+      const nx=side*p.left.x, nz=side*p.left.z;   // outward normal toward the wall we hit
+      // push the car back out of penetration so it rests exactly on the barrier line
+      car.x-=nx*pen; car.z-=nz*pen;
+      // reflect the wall-normal component of velocity; scrub tangential; yaw impulse
+      const sy=Math.sin(car.yaw), cy=Math.cos(car.yaw);
+      let vwx=car.vLong*sy+car.vLat*cy, vwz=car.vLong*cy-car.vLat*sy;
+      const vn=vwx*nx+vwz*nz;                      // >0 means driving into the wall
+      if(vn>0){
+        const e=0.30;                              // restitution
+        vwx-=(1+e)*vn*nx; vwz-=(1+e)*vn*nz;        // kill/bounce normal component
+        const scrub=0.82;                          // tangential friction along the barrier
+        vwx*=scrub; vwz*=scrub;
+        car.vLong=vwx*sy+vwz*cy;
+        car.vLat =vwx*cy-vwz*sy;
+        // yaw: bleed rotation and deflect heading toward the wall tangent so we slide along it
+        const impact=Math.min(vn,40);
+        car.yawRate*=0.55;
+        const wallAng=Math.atan2(p.tan.x,p.tan.z);
+        let dAng=((car.yaw-wallAng+Math.PI*3)%TAU)-Math.PI;
+        car.yawRate-=clamp(dAng,-1,1)*impact*0.02;
+        triggerImpact(car.x, p.pos.y, car.z, impact);
+      } else {
+        // resting against the wall with no inward speed: just cancel any residual outward drift
+        car.vLat=0;
+      }
+    }
+  }
 
   car.Fz=Fz;
   car.speed=Math.hypot(car.vLong,car.vLat);
@@ -1426,8 +1636,24 @@ function initAudio(){
   windSrc.connect(windFilter); windFilter.connect(windGain); windGain.connect(master); windSrc.start();
 
   audio={ ctx, master, engineGain, engineFilter, oscs, subOsc, noiseGain, noiseFilter,
-    squealGain, squealFilter, windGain, windFilter, shiftCut:0,
-    gearShift(){ this.shiftCut=0.09; } };
+    squealGain, squealFilter, windGain, windFilter, shiftCut:0, _impactNoise:null,
+    gearShift(){ this.shiftCut=0.09; },
+    impact(s){
+      const ctx=this.ctx, now=ctx.currentTime;
+      // low body thud
+      const o=ctx.createOscillator(); o.type='square';
+      o.frequency.setValueAtTime(95+120*s, now); o.frequency.exponentialRampToValueAtTime(42, now+0.18);
+      const g=ctx.createGain(); g.gain.setValueAtTime(0.0001, now);
+      g.gain.exponentialRampToValueAtTime(0.45*(0.4+s), now+0.008); g.gain.exponentialRampToValueAtTime(0.0001, now+0.26);
+      o.connect(g); g.connect(this.master); o.start(now); o.stop(now+0.3);
+      // metallic crash noise
+      if(!this._impactNoise){ const b=ctx.createBuffer(1,(ctx.sampleRate*0.3)|0,ctx.sampleRate);
+        const d=b.getChannelData(0); for(let i=0;i<d.length;i++) d[i]=(Math.random()*2-1)*Math.pow(1-i/d.length,2); this._impactNoise=b; }
+      const nb=ctx.createBufferSource(); nb.buffer=this._impactNoise;
+      const nf=ctx.createBiquadFilter(); nf.type='bandpass'; nf.frequency.value=1500+s*900; nf.Q.value=0.8;
+      const ng=ctx.createGain(); ng.gain.setValueAtTime(0.3*(0.4+s), now); ng.gain.exponentialRampToValueAtTime(0.0001, now+0.22);
+      nb.connect(nf); nf.connect(ng); ng.connect(this.master); nb.start(now); nb.stop(now+0.26);
+    } };
 
   audio.update=function(dt){
     if(this.ctx.state==='suspended') this.ctx.resume();
@@ -1653,10 +1879,21 @@ function updateHUD(){
 const CAM_MODES=['chase','cockpit','hood'];
 let camMode=0;
 const camState={ pos:new THREE.Vector3(0,5,12), look:new THREE.Vector3(), fov:62 };
+// ---- impact feedback (barrier/scenery collisions) ----
+let impactShake=0, impactCooldown=0;
+const _camRay=new THREE.Raycaster(); _camRay.near=0;
+const _pivot=new THREE.Vector3(), _desired=new THREE.Vector3(), _dir=new THREE.Vector3();
+function triggerImpact(x,y,z,strength){
+  const s=clamp(strength/18,0,1);
+  impactShake=Math.max(impactShake, 0.18+s*0.6);
+  if(audio && audio.impact && impactCooldown<=0){ audio.impact(s); impactCooldown=0.12; }
+  emitSmoke(x, y+0.4, z, Math.round(2+s*4), false, true);   // debris puff at contact
+}
 function cycleCamera(){ camMode=(camMode+1)%CAM_MODES.length; dom.btnCam.textContent=CAM_MODES[camMode][0].toUpperCase()+CAM_MODES[camMode].slice(1); }
 
 let bodyPitch=0, bodyRoll=0, visRoll=0;
 function updateCarVisual(dt){
+  if(impactCooldown>0) impactCooldown-=dt;
   // ground height & banking under car
   const p=track.pts[car.roadIdx];
   const groundY=p?p.pos.y:0;
@@ -1702,7 +1939,7 @@ function updateCarVisual(dt){
     track.roadMat.roughness=lerp(track.roadMat.roughness,wetR,0.1);
     // texture is baked grey; tint white when dry, darker blue-grey when wet
     track.roadMat.color.setHex(S.wet?0x5a6068:0xffffff);
-    track.roadMat.envMapIntensity=S.wet?1.5:0.5;
+    track.roadMat.envMapIntensity=S.wet?1.5:0.3;
   }
 
   // particles: smoke + skid when slipping and grounded
@@ -1761,10 +1998,37 @@ function updateCamera(dt){
   camState.pos.lerp(targetPos, 1-Math.exp(-posRate*dt));
   camState.look.lerp(targetLook, 1-Math.exp(-14*dt));
   camState.fov=lerp(camState.fov, targetFov, 1-Math.exp(-6*dt));
-  camera.position.copy(camState.pos);
-  // keep the camera above the ground (prevents dipping under hills / terrain clip)
   const camGroundY=(track.pts[car.roadIdx]?track.pts[car.roadIdx].pos.y:0);
+  _desired.copy(camState.pos);
+  // ---- occlusion: never let the chase/hood camera end up inside scenery. Cast from a
+  // pivot just above the car toward the desired camera position; if a barrier/tree is in
+  // the way, pull the camera in to just before the hit so we never render from inside a
+  // solid slab. camState.pos still tracks the ideal spot, so the camera eases back out
+  // smoothly once the line of sight is clear again.
+  if(mode!=='cockpit' && occluders.length){
+    _pivot.set(carPos.x, carPos.y+1.2, carPos.z);
+    _dir.copy(_desired).sub(_pivot);
+    const dist=_dir.length();
+    if(dist>0.05){
+      _dir.multiplyScalar(1/dist);
+      _camRay.set(_pivot, _dir); _camRay.far=dist;
+      const hits=_camRay.intersectObjects(occluders, false);
+      if(hits.length){
+        const d=Math.max(1.4, hits[0].distance-0.45);   // skin offset before the occluder
+        _desired.copy(_pivot).addScaledVector(_dir, d);
+      }
+    }
+  }
+  camera.position.copy(_desired);
+  // keep the camera above the ground (prevents dipping under hills / terrain clip)
   if(camera.position.y < camGroundY+0.9) camera.position.y = camGroundY+0.9;
+  // impact shake (decays); applied after positioning so it never fights the occlusion pull-in
+  if(impactShake>0.001){
+    camera.position.x+=(Math.random()-0.5)*impactShake;
+    camera.position.y+=(Math.random()-0.5)*impactShake*0.6;
+    camera.position.z+=(Math.random()-0.5)*impactShake;
+    impactShake*=Math.exp(-6*dt);
+  }
   camera.lookAt(camState.look);
   if(Math.abs(camera.fov-camState.fov)>0.01){ camera.fov=camState.fov; camera.updateProjectionMatrix(); }
 }
@@ -2000,8 +2264,21 @@ async function boot(){
   dom.startBtn.disabled=false;
   dom.btnCam.textContent='Chase';
   // lightweight debug/telemetry hook (read-only introspection for tooling/automation)
-  window.__apex={ car, S, camera, renderer, bloomPass, scene, sunLight, resetCar,
-    setRun:(v)=>{ running=v; }, setCam:(m)=>{ camMode=m%CAM_MODES.length; } };
+  window.__apex={ car, S, camera, renderer, bloomPass, scene, sunLight, resetCar, THREE, track,
+    occluders, sampleTrack, WALL_LIMIT, ROAD_HALF, BARRIER_LAT,
+    setRun:(v)=>{ running=v; }, setCam:(m)=>{ camMode=m%CAM_MODES.length; },
+    setKey:(k,v)=>{ keys[k]=v; },
+    getOccluders:()=>occluders,
+    skidActive:()=>{ if(!skid.alpha) return -1; const a=skid.alpha.array; let n=0; for(let i=0;i<a.length;i++) if(a[i]>0.01)n++; return n; },
+    // nearest occluder distance straight in front of the camera's view ray (for automated
+    // camera-clipping checks): should always exceed the near plane + skin, never 0.
+    camNearestHit:()=>{ const dir=new THREE.Vector3(); camera.getWorldDirection(dir);
+      const rc=new THREE.Raycaster(camera.position.clone(), dir, 0, 500);
+      const h=rc.intersectObjects(occluders,false); return h.length?h[0].distance:Infinity; },
+    placeOnTrack:(idx,speed)=>{ const p=track.pts[idx%track.N]; car.x=p.pos.x; car.z=p.pos.z;
+      car.yaw=Math.atan2(p.tan.x,p.tan.z); const v=speed||0; car.vLong=Math.max(v,0.0001); car.vLat=0;
+      car.yawRate=0; const w=v/PH.wheelR; car.omega=[w,w,w,w]; car.alphaT=[0,0,0,0]; car.offTime=0;
+      car.onTrack=true; car.surfaceMu=1; car.roadIdx=idx%track.N; } };
   frame(); // start render loop (running=false until Start)
 }
 function tick(){ return new Promise(r=>requestAnimationFrame(()=>setTimeout(r,16))); }
