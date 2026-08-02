@@ -17,7 +17,29 @@ rappvision/
   channel.json      the catalog — titles, chapters, sources, live scripts
   media/            the video files
   thumbs/           poster images
+  VERIFY.md         how every live scene here was measured, and what that rejected
+  rooms/            channel: nine ambient places, live-only
+  arcade/           channel: games and emulators, live-only
+  workbench/        channel: production tools, live-only
 ```
+
+## Four channels in one folder
+
+A repo is not limited to one channel — a channel is just a `channel.json`, so
+this folder holds four. Each subfolder is registered separately in the player's
+[`channels.json`](https://github.com/kody-w/rapp-vision/blob/main/channels.json)
+and resolves its apps with `../../`, straight back into this repo.
+
+| Channel | Entries | Video files |
+|---|---|---|
+| `channel.json` — Local First Tools | 3 | 2 |
+| `rooms/` — 🕯️ Rooms | 3 | **0** |
+| `arcade/` — 🕹️ Arcade | 3 | **0** |
+| `workbench/` — 🛠️ The Workbench | 3 | **0** |
+
+The three live-only channels publish 57 KB of JSON between them and drive 31
+scenes across 26 of the apps in this repo. Rendering the same thing as video
+would be north of a gigabyte, and would not let anyone take the wheel.
 
 ## Two forms of the same story
 
@@ -44,6 +66,21 @@ the static video is still published alongside, and the player falls back.
 3. Push.
 
 That's the entire publishing pipeline.
+
+## Adding a *live* entry
+
+Different pipeline, because there is no file to drop:
+
+1. Open the app and read its DOM. Take the real ids of the controls you intend
+   to press — do not guess them, and do not address anything by position.
+2. Write the scene: `app`, a `ready` anchor, and a list of `actions`.
+3. Drive it in the actual player, in headless Chromium, and assert from outside
+   the page that the app is genuinely running.
+
+Step 3 is not optional. A scene that fails to drive its app does not look
+broken — it looks like a video of an app sitting still. Four of the nine live
+entries here failed on the first pass, and two of those failures were bugs in
+the player itself. [`VERIFY.md`](VERIFY.md) has the list.
 
 ## Start your own channel
 
