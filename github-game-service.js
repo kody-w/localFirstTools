@@ -50,7 +50,7 @@ class GitHubService {
         const owner = 'kody-w';
         const name = 'localFirstTools';
         const branch = 'main';
-        const apiUrl = `https://api.github.com/repos/${owner}/${name}/contents?ref=${branch}`;
+        const apiUrl = `https://raw.githubusercontent.com/${owner}/${name}/${branch}/state/root_contents.json` /* Article XXIV: CI snapshot in contents-API shape, never the API */;
 
         try {
             const response = await fetch(apiUrl);
