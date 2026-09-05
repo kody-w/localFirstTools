@@ -266,6 +266,7 @@
                     <span class="stat-value" id="species-count">0</span>
                 </div>
                 <div id="discovered-species"></div>
+                <div id="data-status" role="status" style="max-width:240px; font-size:12px; line-height:1.5;"></div>
             </div>
         </div>
     </div>
@@ -413,10 +414,22 @@
                     return;
                 }
 
+                this.near = 0.1;
+                this.far = 1000;
+                this.fov = Math.PI / 3;
+                this.pointSizeRange = this.gl.getParameter(this.gl.ALIASED_POINT_SIZE_RANGE);
+                this.maxPointSize = this.pointSizeRange[1];
                 this.initShaders();
+                this.buffers = {
+                    position: this.gl.createBuffer(),
+                    color: this.gl.createBuffer(),
+                    size: this.gl.createBuffer()
+                };
                 this.gl.enable(this.gl.DEPTH_TEST);
                 this.gl.enable(this.gl.BLEND);
-                this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE_MINUS_SRC_ALPHA);
+                // Glowing sprites emit light; transparent edges must not write opaque depth.
+                this.gl.depthMask(false);
+                this.gl.blendFunc(this.gl.SRC_ALPHA, this.gl.ONE);
 
                 this.resize();
                 window.addEventListener('resize', () => this.resize());
@@ -437,13 +450,17 @@
                     uniform mat4 uProjection;
                     uniform mat4 uView;
                     uniform vec3 uPosition;
+                    uniform float uPointScale;
+                    uniform vec2 uPointSizeRange;
+                    uniform float uNear;
 
                     varying vec3 vColor;
 
                     void main() {
                         vec3 worldPos = aPosition + uPosition;
                         gl_Position = uProjection * uView * vec4(worldPos, 1.0);
-                        gl_PointSize = aSize / gl_Position.w;
+                        gl_PointSize = clamp(aSize * uPointScale / max(gl_Position.w, uNear),
+                            uPointSizeRange.x, uPointSizeRange.y);
                         vColor = aColor;
                     }
                 `;
@@ -472,7 +489,10 @@
                 this.uniforms = {
                     projection: this.gl.getUniformLocation(this.program, 'uProjection'),
                     view: this.gl.getUniformLocation(this.program, 'uView'),
-                    position: this.gl.getUniformLocation(this.program, 'uPosition')
+                    position: this.gl.getUniformLocation(this.program, 'uPosition'),
+                    pointScale: this.gl.getUniformLocation(this.program, 'uPointScale'),
+                    pointSizeRange: this.gl.getUniformLocation(this.program, 'uPointSizeRange'),
+                    near: this.gl.getUniformLocation(this.program, 'uNear')
                 };
             }
 
@@ -515,18 +535,40 @@
                 this.clear();
 
                 const projection = new Matrix4().perspective(
-                    Math.PI / 3,
+                    this.fov,
                     this.canvas.width / this.canvas.height,
-                    0.1,
-                    1000.0
+                    this.near,
+                    this.far
                 );
 
                 this.gl.uniformMatrix4fv(this.uniforms.projection, false, projection.elements);
                 this.gl.uniformMatrix4fv(this.uniforms.view, false, camera.getViewMatrix().elements);
+                // aSize is a world-space diameter; convert it to framebuffer pixels.
+                this.gl.uniform1f(this.uniforms.pointScale, this.canvas.height * projection.elements[5] / 2);
+                this.maxPointSize = Math.max(this.pointSizeRange[0],
+                    Math.min(this.pointSizeRange[1], Math.min(this.canvas.width, this.canvas.height) * 0.2));
+                this.gl.uniform2f(this.uniforms.pointSizeRange, this.pointSizeRange[0], this.maxPointSize);
+                this.gl.uniform1f(this.uniforms.near, this.near);
 
                 for (const entity of entities) {
                     entity.render(this);
                 }
+            }
+
+            drawPoints(positions, colors, sizes, maxPixels = this.maxPointSize) {
+                const gl = this.gl;
+                gl.uniform2f(this.uniforms.pointSizeRange, this.pointSizeRange[0],
+                    Math.max(this.pointSizeRange[0], Math.min(this.maxPointSize, maxPixels)));
+                for (const [name, data, components] of [
+                    ['position', positions, 3], ['color', colors, 3], ['size', sizes, 1]
+                ]) {
+                    gl.bindBuffer(gl.ARRAY_BUFFER, this.buffers[name]);
+                    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data), gl.DYNAMIC_DRAW);
+                    gl.enableVertexAttribArray(this.attributes[name]);
+                    gl.vertexAttribPointer(this.attributes[name], components, gl.FLOAT, false, 0, 0);
+                }
+                gl.uniform3f(this.uniforms.position, 0, 0, 0);
+                gl.drawArrays(gl.POINTS, 0, sizes.length);
             }
         }
 
@@ -633,34 +675,10 @@
                         this.color[2] * alpha
                     );
 
-                    sizes.push(particle.size);
+                    sizes.push(particle.size * 0.2);
                 }
 
-                const gl = renderer.gl;
-
-                // Position buffer
-                const posBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.position);
-                gl.vertexAttribPointer(renderer.attributes.position, 3, gl.FLOAT, false, 0, 0);
-
-                // Color buffer
-                const colBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.color);
-                gl.vertexAttribPointer(renderer.attributes.color, 3, gl.FLOAT, false, 0, 0);
-
-                // Size buffer
-                const sizeBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sizes), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.size);
-                gl.vertexAttribPointer(renderer.attributes.size, 1, gl.FLOAT, false, 0, 0);
-
-                gl.uniform3f(renderer.uniforms.position, 0, 0, 0);
-                gl.drawArrays(gl.POINTS, 0, this.particles.length);
+                renderer.drawPoints(positions, colors, sizes, 24);
             }
         }
 
@@ -721,7 +739,6 @@
             }
 
             render(renderer) {
-                const gl = renderer.gl;
                 const glow = (Math.sin(this.glowPhase) + 1) / 2;
                 const brightness = this.discovered ? 1.0 : 0.3;
 
@@ -733,29 +750,7 @@
                 ];
                 const sizes = [this.size];
 
-                // Position buffer
-                const posBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.position);
-                gl.vertexAttribPointer(renderer.attributes.position, 3, gl.FLOAT, false, 0, 0);
-
-                // Color buffer
-                const colBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.color);
-                gl.vertexAttribPointer(renderer.attributes.color, 3, gl.FLOAT, false, 0, 0);
-
-                // Size buffer
-                const sizeBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sizes), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.size);
-                gl.vertexAttribPointer(renderer.attributes.size, 1, gl.FLOAT, false, 0, 0);
-
-                gl.uniform3f(renderer.uniforms.position, 0, 0, 0);
-                gl.drawArrays(gl.POINTS, 0, 1);
+                renderer.drawPoints(positions, colors, sizes);
             }
 
             checkDiscovery(playerPos, illuminateActive) {
@@ -795,7 +790,6 @@
             }
 
             render(renderer) {
-                const gl = renderer.gl;
                 const positions = [];
                 const colors = [];
                 const sizes = [];
@@ -807,29 +801,7 @@
                     sizes.push(particle.size);
                 }
 
-                // Position buffer
-                const posBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, posBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(positions), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.position);
-                gl.vertexAttribPointer(renderer.attributes.position, 3, gl.FLOAT, false, 0, 0);
-
-                // Color buffer
-                const colBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, colBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(colors), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.color);
-                gl.vertexAttribPointer(renderer.attributes.color, 3, gl.FLOAT, false, 0, 0);
-
-                // Size buffer
-                const sizeBuffer = gl.createBuffer();
-                gl.bindBuffer(gl.ARRAY_BUFFER, sizeBuffer);
-                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(sizes), gl.STATIC_DRAW);
-                gl.enableVertexAttribArray(renderer.attributes.size);
-                gl.vertexAttribPointer(renderer.attributes.size, 1, gl.FLOAT, false, 0, 0);
-
-                gl.uniform3f(renderer.uniforms.position, 0, 0, 0);
-                gl.drawArrays(gl.POINTS, 0, this.particles.length);
+                renderer.drawPoints(positions, colors, sizes, 48);
             }
         }
 
@@ -845,6 +817,7 @@
                 this.discoveredSpecies = new Set();
                 this.illuminateActive = false;
                 this.isPaused = true;
+                this.frameId = null;
 
                 this.keys = {};
                 this.mouseMovement = { x: 0, y: 0 };
@@ -890,6 +863,7 @@
             }
 
             startGame() {
+                if (!this.isPaused) return;
                 document.getElementById('menu').classList.add('hidden');
                 this.isPaused = false;
 
@@ -903,6 +877,11 @@
 
             pauseGame() {
                 this.isPaused = true;
+                if (this.frameId !== null) cancelAnimationFrame(this.frameId);
+                this.frameId = null;
+                this.keys = {};
+                this.illuminateActive = false;
+                this.mouseMovement = { x: 0, y: 0 };
                 document.exitPointerLock();
                 document.getElementById('menu').classList.remove('hidden');
             }
@@ -1008,7 +987,10 @@
             showNotification(message) {
                 const notification = document.createElement('div');
                 notification.id = 'notification';
-                notification.innerHTML = `<div class="discovery-title">${message}</div>`;
+                const title = document.createElement('div');
+                title.className = 'discovery-title';
+                title.textContent = message;
+                notification.appendChild(title);
                 document.body.appendChild(notification);
 
                 setTimeout(() => {
@@ -1040,12 +1022,13 @@
             }
 
             gameLoop() {
+                this.frameId = null;
                 if (this.isPaused) return;
 
                 this.update();
                 this.renderer.render(this.entities, this.camera);
 
-                requestAnimationFrame(() => this.gameLoop());
+                this.frameId = requestAnimationFrame(() => this.gameLoop());
             }
 
             saveData() {
@@ -1059,30 +1042,40 @@
                     version: '1.0'
                 };
 
-                localStorage.setItem('oceanTrenchData', JSON.stringify(data));
+                try {
+                    localStorage.setItem('oceanTrenchData', JSON.stringify(data));
+                    document.getElementById('data-status').textContent = '';
+                    return true;
+                } catch (error) {
+                    console.warn('Could not save discovery log:', error);
+                    document.getElementById('data-status').textContent = 'Storage unavailable. Export to keep your discoveries.';
+                    return false;
+                }
             }
 
             loadData() {
-                const saved = localStorage.getItem('oceanTrenchData');
-                if (saved) {
-                    try {
-                        const data = JSON.parse(saved);
-                        this.discoveredSpecies = new Set(data.discoveredSpecies || []);
-
-                        if (data.position) {
-                            this.camera.position = new Vec3(
-                                data.position.x,
-                                data.position.y,
-                                data.position.z
-                            );
-                        }
-
-                        this.updateSpeciesList();
-                        this.updateHUD();
-                    } catch (e) {
-                        console.error('Failed to load data:', e);
-                    }
+                try {
+                    const saved = localStorage.getItem('oceanTrenchData');
+                    if (saved !== null) this.applyDiscoveryData(JSON.parse(saved));
+                } catch (error) {
+                    console.warn('Could not restore discovery log:', error);
+                    document.getElementById('data-status').textContent = 'Saved log unavailable. You can still explore; export to keep discoveries.';
                 }
+            }
+
+            applyDiscoveryData(data) {
+                const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+                if (!isObject(data) || (data.version !== undefined && data.version !== '1.0') ||
+                    !Array.isArray(data.discoveredSpecies) ||
+                    data.discoveredSpecies.some(name => typeof name !== 'string' || !name.trim()))
+                    throw new Error('Expected a version 1.0 discovery log with a species-name array.');
+                if (data.position !== undefined && (!isObject(data.position) ||
+                    !['x', 'y', 'z'].every(key => Number.isFinite(data.position[key]))))
+                    throw new Error('Position must contain finite x, y and z numbers.');
+                this.discoveredSpecies = new Set(data.discoveredSpecies);
+                if (data.position) this.camera.position = new Vec3(data.position.x, data.position.y, data.position.z);
+                this.updateSpeciesList();
+                this.updateHUD();
             }
 
             exportData() {
@@ -1113,32 +1106,27 @@
 
                 input.onchange = (e) => {
                     const file = e.target.files[0];
+                    if (!file) return;
                     const reader = new FileReader();
 
                     reader.onload = (event) => {
                         try {
                             const data = JSON.parse(event.target.result);
-                            this.discoveredSpecies = new Set(data.discoveredSpecies || []);
-
-                            if (data.position) {
-                                this.camera.position = new Vec3(
-                                    data.position.x,
-                                    data.position.y,
-                                    data.position.z
-                                );
-                            }
-
-                            this.saveData();
-                            this.updateSpeciesList();
-                            this.updateHUD();
-
-                            alert('Discovery log imported successfully!');
+                            this.applyDiscoveryData(data);
+                            const saved = this.saveData();
+                            alert(saved ? 'Discovery log imported.' : 'Discovery log imported for this session only. Storage is unavailable; export to keep it.');
                         } catch (err) {
-                            alert('Failed to import data: ' + err.message);
+                            alert('Failed to import data: ' + err.message + ' Previous log kept.');
                         }
                     };
 
-                    reader.readAsText(file);
+                    reader.onerror = () => alert('Failed to read the file. Previous log kept.');
+                    reader.onabort = reader.onerror;
+                    try {
+                        reader.readAsText(file);
+                    } catch (error) {
+                        reader.onerror();
+                    }
                 };
 
                 input.click();
@@ -1146,10 +1134,18 @@
 
             resetData() {
                 if (confirm('Are you sure you want to reset all discovery data? This cannot be undone.')) {
-                    localStorage.removeItem('oceanTrenchData');
+                    try {
+                        localStorage.removeItem('oceanTrenchData');
+                    } catch (error) {
+                        console.warn('Could not reset saved discoveries:', error);
+                        alert('Saved data could not be reset because storage is unavailable. Your current log has been kept.');
+                        return;
+                    }
                     this.discoveredSpecies.clear();
+                    for (const creature of this.creatures) creature.discovered = false;
                     this.camera.position = new Vec3(0, -50, 0);
                     this.camera.rotation = new Vec3(0, 0, 0);
+                    this.camera.velocity = new Vec3();
                     this.updateSpeciesList();
                     this.updateHUD();
                     alert('All data has been reset.');

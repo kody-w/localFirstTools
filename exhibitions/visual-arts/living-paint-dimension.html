@@ -212,6 +212,12 @@
             opacity: 1;
         }
 
+        #storageStatus {
+            color: #ffe4a8;
+            border-top: 1px solid #ffe4a8;
+            padding-top: 8px;
+        }
+
         @media (max-width: 768px) {
             .header {
                 flex-direction: column;
@@ -281,6 +287,7 @@
             <p>💨 Dash (Shift): Comet trails</p>
             <p><br>Click & drag to paint</p>
             <p><br>Last reset: <span id="lastReset">Never</span></p>
+            <p id="storageStatus" role="status" aria-live="polite" hidden></p>
         </div>
     </div>
 
@@ -326,24 +333,28 @@
                 // Animation
                 this.animationFrame = null;
                 this.lastFrameTime = 0;
+                this.lastReset = null;
+                this.preserveStoredData = false;
+                this.restoreSequence = 0;
+                this.restoring = false;
 
-                this.init();
+                this.ready = this.init();
             }
 
-            init() {
+            async init() {
                 this.setupEventListeners();
-                this.loadFromStorage();
+                this.resizeCanvas();
+                await this.loadFromStorage();
                 this.checkDailyReset();
                 this.startAnimation();
-                this.resizeCanvas();
 
                 window.addEventListener('resize', () => this.resizeCanvas());
             }
 
             resizeCanvas() {
                 const container = this.canvas.parentElement;
-                const maxWidth = Math.min(1200, container.clientWidth - 40);
-                const maxHeight = Math.min(800, container.clientHeight - 40);
+                const maxWidth = Math.max(1, Math.min(1200, container.clientWidth - 40));
+                const maxHeight = Math.max(1, Math.min(800, container.clientHeight - 40));
 
                 // Store current content
                 const imageData = this.ctx.getImageData(0, 0, this.canvas.width, this.canvas.height);
@@ -407,6 +418,7 @@
             }
 
             handleKeyDown(e) {
+                if (this.restoring || ['INPUT', 'SELECT', 'TEXTAREA', 'BUTTON'].includes(e.target?.tagName)) return;
                 const now = Date.now();
 
                 // Space - Jump (spawn creatures)
@@ -440,12 +452,14 @@
             }
 
             startPainting(e) {
+                if (this.restoring) return;
                 this.painting = true;
                 const pos = this.getMousePos(e);
                 this.lastPos = pos;
 
                 // Track movement for footsteps
                 this.movementPath.push({ ...pos, time: Date.now() });
+                if (this.mode === 'erase') this.erase(pos);
             }
 
             paint(e) {
@@ -475,15 +489,17 @@
                 } else if (this.mode === 'animate') {
                     this.createAnimatedStroke(this.lastPos, pos);
                 } else if (this.mode === 'erase') {
-                    this.erase(pos);
+                    this.erase(pos, this.lastPos);
                 }
 
                 this.lastPos = pos;
             }
 
             stopPainting() {
+                const changed = this.painting;
                 this.painting = false;
                 this.movementPath = [];
+                if (changed) this.saveToStorage();
             }
 
             getMousePos(e) {
@@ -653,12 +669,101 @@
                 }
             }
 
-            erase(pos) {
+            distanceToSegment(point, start, end) {
+                const dx = end.x - start.x, dy = end.y - start.y;
+                const lengthSquared = dx * dx + dy * dy;
+                const t = lengthSquared ? Math.max(0, Math.min(1,
+                    ((point.x - start.x) * dx + (point.y - start.y) * dy) / lengthSquared)) : 0;
+                return Math.hypot(point.x - start.x - t * dx, point.y - start.y - t * dy);
+            }
+
+            strokeOutsideEraser(stroke, from, to, radius) {
+                const a = stroke.start, b = stroke.end;
+                const dx = b.x - a.x, dy = b.y - a.y;
+                const lengthSquared = dx * dx + dy * dy;
+                if (!lengthSquared) {
+                    return this.distanceToSegment(a, from, to) > radius ? [stroke] : [];
+                }
+                const cuts = [0, 1];
+                const addCut = t => { if (t > 0 && t < 1) cuts.push(t); };
+                // The swept brush is a capsule: two circular caps and two parallel sides.
+                for (const center of [from, to]) {
+                    const ox = a.x - center.x, oy = a.y - center.y;
+                    const linear = 2 * (ox * dx + oy * dy);
+                    const constant = ox * ox + oy * oy - radius * radius;
+                    const discriminant = linear * linear - 4 * lengthSquared * constant;
+                    if (discriminant >= 0) {
+                        const root = Math.sqrt(discriminant);
+                        addCut((-linear - root) / (2 * lengthSquared));
+                        addCut((-linear + root) / (2 * lengthSquared));
+                    }
+                }
+                const ex = to.x - from.x, ey = to.y - from.y;
+                const eraserLength = Math.hypot(ex, ey);
+                if (eraserLength) {
+                    const cross = ((a.x - from.x) * ey - (a.y - from.y) * ex) / eraserLength;
+                    const slope = (dx * ey - dy * ex) / eraserLength;
+                    if (Math.abs(slope) > 1e-12) {
+                        for (const side of [-radius, radius]) {
+                            const t = (side - cross) / slope;
+                            const along = ((a.x + t * dx - from.x) * ex +
+                                (a.y + t * dy - from.y) * ey) / eraserLength;
+                            if (along >= 0 && along <= eraserLength) addCut(t);
+                        }
+                    }
+                }
+                cuts.sort((x, y) => x - y);
+                const fragments = [];
+                for (let i = 1; i < cuts.length; i++) {
+                    const start = cuts[i - 1], end = cuts[i], mid = (start + end) / 2;
+                    if (end - start > 1e-10 && this.distanceToSegment(
+                        { x: a.x + mid * dx, y: a.y + mid * dy }, from, to) > radius) {
+                        fragments.push({ ...stroke,
+                            start: { x: a.x + start * dx, y: a.y + start * dy },
+                            end: { x: a.x + end * dx, y: a.y + end * dy } });
+                    }
+                }
+                return fragments;
+            }
+
+            erase(pos, from = pos) {
+                const radius = this.brushSize;
+                this.paintStrokes = this.paintStrokes.flatMap(stroke =>
+                    this.strokeOutsideEraser(stroke, from, pos, radius + stroke.size / 2));
+                const outside = (entity, size) =>
+                    this.distanceToSegment(entity, from, pos) > radius + size;
+                this.flowers = this.flowers.filter(flower => outside(flower, flower.size));
+                this.creatures = this.creatures.filter(creature => outside(creature, creature.size));
+                this.galaxies = this.galaxies.filter(galaxy =>
+                    galaxy.particles.every(particle => {
+                        const angle = particle.angle + galaxy.rotation;
+                        return outside({ x: galaxy.x + Math.cos(angle) * particle.distance,
+                            y: galaxy.y + Math.sin(angle) * particle.distance }, particle.size);
+                    }));
+                this.comets = this.comets.filter(comet => {
+                    if (!outside(comet, comet.size)) return false;
+                    for (let i = 0; i < comet.trail.length; i++) {
+                        const part = { start: comet.trail[i - 1] || comet.trail[i], end: comet.trail[i] };
+                        const pieces = this.strokeOutsideEraser(part, from, pos, radius + comet.size / 2);
+                        if (pieces.length !== 1 || pieces[0].start.x !== part.start.x ||
+                            pieces[0].start.y !== part.start.y || pieces[0].end.x !== part.end.x ||
+                            pieces[0].end.y !== part.end.y) return false;
+                    }
+                    return true;
+                });
+                this.ctx.save();
+                this.ctx.globalAlpha = 1;
                 this.ctx.globalCompositeOperation = 'destination-out';
+                this.ctx.lineWidth = radius * 2;
+                this.ctx.lineCap = 'round';
                 this.ctx.beginPath();
-                this.ctx.arc(pos.x, pos.y, this.brushSize, 0, Math.PI * 2);
+                this.ctx.moveTo(from.x, from.y);
+                this.ctx.lineTo(pos.x, pos.y);
+                this.ctx.stroke();
+                this.ctx.beginPath();
+                this.ctx.arc(pos.x, pos.y, radius, 0, Math.PI * 2);
                 this.ctx.fill();
-                this.ctx.globalCompositeOperation = 'source-over';
+                this.ctx.restore();
             }
 
             showAction(text) {
@@ -872,101 +977,202 @@
 
             clearCanvas() {
                 if (confirm('Clear the entire canvas? This cannot be undone.')) {
-                    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                    this.paintStrokes = [];
-                    this.creatures = [];
-                    this.galaxies = [];
-                    this.flowers = [];
-                    this.comets = [];
-                    this.saveToStorage();
-                    this.showNotification('Canvas cleared!');
+                    this.restoreSequence++;
+                    this.restoring = false;
+                    this.preserveStoredData = false;
+                    this.clearContent();
+                    const saved = this.saveToStorage();
+                    this.showNotification(saved ? 'Canvas cleared!' : 'Canvas cleared in memory. Export to keep your work.');
                 }
+            }
+
+            clearContent() {
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                this.paintStrokes = [];
+                this.creatures = [];
+                this.galaxies = [];
+                this.flowers = [];
+                this.comets = [];
+            }
+
+            storageWarning(message) {
+                const status = document.getElementById('storageStatus');
+                status.textContent = message;
+                status.hidden = false;
+            }
+
+            readStorage(key) {
+                try {
+                    return { ok: true, value: localStorage.getItem(key) };
+                } catch (error) {
+                    this.storageWarning('Local saving unavailable. Drawing still works; Export JSON to keep your work.');
+                    return { ok: false };
+                }
+            }
+
+            validResetDate(value) {
+                return typeof value === 'string' && new Date(value).toDateString() === value;
             }
 
             checkDailyReset() {
-                const lastReset = localStorage.getItem('lpd_lastReset');
+                const stored = this.readStorage('lpd_lastReset');
                 const today = new Date().toDateString();
-
-                if (lastReset !== today) {
-                    // Perform daily reset
-                    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                    this.paintStrokes = [];
-                    this.creatures = [];
-                    this.galaxies = [];
-                    this.flowers = [];
-                    this.comets = [];
-
-                    localStorage.setItem('lpd_lastReset', today);
-
-                    if (lastReset) {
-                        this.showNotification('🌅 Daily canvas reset!');
-                    }
-                }
-
+                const previous = this.lastReset || stored.value;
+                this.lastReset = today;
                 document.getElementById('lastReset').textContent = today;
+                if (!stored.ok || this.preserveStoredData) return false;
+                if (previous && !this.validResetDate(previous)) {
+                    this.storageWarning('Saved reset date is invalid; artwork was not cleared. Export a backup.');
+                    return false;
+                }
+                if (previous && previous !== today) {
+                    this.clearContent();
+                    this.saveToStorage();
+                    this.showNotification('🌅 Daily canvas reset!');
+                }
+                try {
+                    localStorage.setItem('lpd_lastReset', today);
+                } catch (error) {
+                    this.storageWarning('Local saving unavailable. Export JSON to keep your work.');
+                    return false;
+                }
+                return true;
+            }
+
+            serializeData() {
+                return {
+                    version: '1.0',
+                    canvasData: this.canvas.toDataURL(),
+                    paintStrokes: this.paintStrokes,
+                    creatures: this.creatures,
+                    galaxies: this.galaxies,
+                    flowers: this.flowers,
+                    comets: this.comets,
+                    lastReset: this.lastReset || new Date().toDateString()
+                };
             }
 
             saveToStorage() {
+                if (this.restoring || this.preserveStoredData) return false;
+                const json = JSON.stringify(this.serializeData());
                 try {
-                    // Save canvas as data URL
-                    const canvasData = this.canvas.toDataURL();
-
-                    const data = {
-                        canvasData: canvasData,
-                        paintStrokes: this.paintStrokes,
-                        creatures: this.creatures,
-                        galaxies: this.galaxies,
-                        flowers: this.flowers,
-                        comets: this.comets,
-                        lastReset: localStorage.getItem('lpd_lastReset') || new Date().toDateString()
-                    };
-
-                    localStorage.setItem('livingPaintDimension', JSON.stringify(data));
-                } catch (e) {
-                    console.warn('Failed to save to localStorage:', e);
+                    localStorage.setItem('livingPaintDimension', json);
+                } catch (error) {
+                    this.storageWarning('Local save failed (storage unavailable or full). Export JSON to keep your work.');
+                    return false;
                 }
+                document.getElementById('storageStatus').hidden = true;
+                return true;
             }
 
-            loadFromStorage() {
-                try {
-                    const stored = localStorage.getItem('livingPaintDimension');
-                    if (!stored) return;
-
-                    const data = JSON.parse(stored);
-
-                    // Restore canvas
-                    if (data.canvasData) {
-                        const img = new Image();
-                        img.onload = () => {
-                            this.ctx.drawImage(img, 0, 0);
-                        };
-                        img.src = data.canvasData;
+            validateData(data) {
+                if (!data || typeof data !== 'object' || Array.isArray(data) ||
+                    (data.version !== undefined && data.version !== '1.0')) {
+                    throw new Error('Unsupported paint file.');
+                }
+                const finite = (value, min = -1000000, max = 1000000) =>
+                    Number.isFinite(value) && value >= min && value <= max;
+                const point = value => value && finite(value.x) && finite(value.y);
+                const color = value => typeof value === 'string' &&
+                    /^#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value);
+                const living = value => value && finite(value.age, 0) &&
+                    finite(value.maxAge, 1) && finite(value.size, 0.01, 2000);
+                const checks = {
+                    paintStrokes: stroke => living(stroke) && point(stroke.start) && point(stroke.end) &&
+                        color(stroke.color) && finite(stroke.pulseSpeed, 0, 10) && finite(stroke.pulsePhase),
+                    flowers: flower => living(flower) && point(flower) && color(flower.color) &&
+                        Number.isInteger(flower.petalCount) && finite(flower.petalCount, 1, 32) &&
+                        finite(flower.growthRate, 0, 10) && finite(flower.rotation) && finite(flower.rotationSpeed),
+                    creatures: creature => living(creature) && point(creature) &&
+                        finite(creature.vx) && finite(creature.vy) && finite(creature.rotation) &&
+                        finite(creature.rotationSpeed) && typeof creature.type === 'string' &&
+                        creature.type.length > 0 && creature.type.length <= 32,
+                    galaxies: galaxy => living(galaxy) && point(galaxy) && finite(galaxy.rotation) &&
+                        finite(galaxy.rotationSpeed) && Array.isArray(galaxy.colors) &&
+                        galaxy.colors.length > 0 && galaxy.colors.length <= 32 && galaxy.colors.every(color) &&
+                        Array.isArray(galaxy.particles) && galaxy.particles.length <= 1000 &&
+                        galaxy.particles.every(particle => particle && finite(particle.angle) &&
+                            finite(particle.distance, 0, 10000) && finite(particle.size, 0.01, 2000) &&
+                            Number.isInteger(particle.colorIndex) &&
+                            finite(particle.colorIndex, 0, galaxy.colors.length - 1)),
+                    comets: comet => living(comet) && point(comet) && color(comet.color) &&
+                        finite(comet.vx) && finite(comet.vy) && Array.isArray(comet.trail) &&
+                        comet.trail.length <= 1000 && comet.trail.every(point)
+                };
+                const limits = { paintStrokes: 30000, flowers: 100, creatures: 50, galaxies: 10, comets: 20 };
+                for (const [name, check] of Object.entries(checks)) {
+                    if (data[name] !== undefined && (!Array.isArray(data[name]) ||
+                        data[name].length > limits[name] || !data[name].every(check))) {
+                        throw new Error(`Invalid ${name} in paint file.`);
                     }
+                }
+                if (data.canvasData !== undefined && (typeof data.canvasData !== 'string' ||
+                    data.canvasData.length > 20000000 ||
+                    !/^data:image\/(?:png|jpeg|webp);base64,[a-z0-9+/=]+$/i.test(data.canvasData))) {
+                    throw new Error('Paint snapshots must be embedded PNG, JPEG, or WebP images.');
+                }
+                if (data.lastReset !== undefined && !this.validResetDate(data.lastReset)) {
+                    throw new Error('Invalid saved reset date.');
+                }
+                if (data.canvasData === undefined && !Object.keys(checks).some(key => data[key] !== undefined)) {
+                    throw new Error('This file does not contain a painting.');
+                }
+                return JSON.parse(JSON.stringify(data));
+            }
 
-                    // Restore entities
-                    this.paintStrokes = data.paintStrokes || [];
-                    this.creatures = data.creatures || [];
-                    this.galaxies = data.galaxies || [];
-                    this.flowers = data.flowers || [];
-                    this.comets = data.comets || [];
+            async restoreData(data) {
+                const valid = this.validateData(data);
+                const sequence = ++this.restoreSequence;
+                this.restoring = true;
+                let image;
+                if (valid.canvasData) {
+                    try {
+                        image = await new Promise((resolve, reject) => {
+                            const img = new Image();
+                            img.onload = () => {
+                                if (img.naturalWidth > 8192 || img.naturalHeight > 8192) {
+                                    reject(new Error('Paint snapshot is too large.'));
+                                } else resolve(img);
+                            };
+                            img.onerror = () => reject(new Error('Paint snapshot could not be decoded.'));
+                            img.src = valid.canvasData;
+                        });
+                    } catch (error) {
+                        if (sequence === this.restoreSequence) this.restoring = false;
+                        throw error;
+                    }
+                }
+                if (sequence !== this.restoreSequence) return false;
+                this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
+                if (image) this.ctx.drawImage(image, 0, 0);
+                for (const key of ['paintStrokes', 'creatures', 'galaxies', 'flowers', 'comets']) {
+                    this[key] = valid[key] ?? [];
+                }
+                this.lastReset = valid.lastReset || new Date().toDateString();
+                this.restoring = false;
+                this.painting = false;
+                return true;
+            }
 
-                } catch (e) {
-                    console.warn('Failed to load from localStorage:', e);
+            async loadFromStorage() {
+                const stored = this.readStorage('livingPaintDimension');
+                if (!stored.ok || !stored.value) return false;
+                try {
+                    return await this.restoreData(JSON.parse(stored.value));
+                } catch (error) {
+                    this.preserveStoredData = true;
+                    this.storageWarning('Saved painting could not be read and was kept untouched. Export current work; Clear or Import to replace it.');
+                    return false;
                 }
             }
 
             exportData() {
+                if (this.restoring) {
+                    this.showNotification('Please wait for the painting to finish loading.');
+                    return;
+                }
                 try {
-                    const data = {
-                        version: '1.0',
-                        canvasData: this.canvas.toDataURL(),
-                        paintStrokes: this.paintStrokes,
-                        creatures: this.creatures,
-                        galaxies: this.galaxies,
-                        flowers: this.flowers,
-                        comets: this.comets,
-                        exportDate: new Date().toISOString()
-                    };
+                    const data = { ...this.serializeData(), exportDate: new Date().toISOString() };
 
                     const json = JSON.stringify(data, null, 2);
                     const blob = new Blob([json], { type: 'application/json' });
@@ -993,33 +1199,20 @@
                     if (!file) return;
 
                     const reader = new FileReader();
-                    reader.onload = (event) => {
+                    reader.onload = async (event) => {
                         try {
                             const data = JSON.parse(event.target.result);
-
-                            // Restore canvas
-                            if (data.canvasData) {
-                                const img = new Image();
-                                img.onload = () => {
-                                    this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
-                                    this.ctx.drawImage(img, 0, 0);
-                                };
-                                img.src = data.canvasData;
-                            }
-
-                            // Restore entities
-                            this.paintStrokes = data.paintStrokes || [];
-                            this.creatures = data.creatures || [];
-                            this.galaxies = data.galaxies || [];
-                            this.flowers = data.flowers || [];
-                            this.comets = data.comets || [];
-
-                            this.saveToStorage();
-                            this.showNotification('Imported successfully!');
+                            if (!await this.restoreData(data)) return;
+                            this.lastReset = new Date().toDateString();
+                            document.getElementById('lastReset').textContent = this.lastReset;
+                            this.preserveStoredData = false;
+                            const saved = this.saveToStorage();
+                            this.showNotification(saved ? 'Imported and saved!' : 'Imported in memory. Export to keep your work.');
                         } catch (e) {
                             alert('Import failed: ' + e.message);
                         }
                     };
+                    reader.onerror = () => alert('Import failed: the file could not be read.');
 
                     reader.readAsText(file);
                 };
@@ -1057,6 +1250,9 @@
             if (app) {
                 app.saveToStorage();
             }
+        });
+        window.addEventListener('pagehide', () => {
+            if (app) app.saveToStorage();
         });
 
         // Periodic auto-save

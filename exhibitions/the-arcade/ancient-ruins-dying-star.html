@@ -149,7 +149,12 @@
             padding: 40px;
             border-radius: 15px;
             z-index: 200;
+            width: calc(100% - 32px);
             max-width: 600px;
+            max-height: calc(100vh - 32px);
+            max-height: calc(100dvh - 32px);
+            overflow-y: auto;
+            overscroll-behavior: contain;
             box-shadow: 0 0 30px #ff2200;
         }
 
@@ -344,7 +349,7 @@
 
         class Camera {
             constructor() {
-                this.pos = new Vec3(0, 5, 20);
+                this.pos = new Vec3(0, 3, 0);
                 this.rot = { x: 0, y: 0 };
                 this.fov = 75;
             }
@@ -367,17 +372,17 @@
                 let y = dy;
 
                 // Rotate around X axis
-                const y2 = y * cosX - z * sinX;
-                const z2 = y * sinX + z * cosX;
+                const y2 = y * cosX + z * sinX;
+                const depth = y * sinX - z * cosX;
 
-                if (z2 <= 0.1) return null; // Behind camera
+                if (depth <= 0.1) return null; // Behind camera
 
-                const scale = (canvas.width / 2) / Math.tan((this.fov * Math.PI / 180) / 2) / z2;
+                const scale = (canvas.width / 2) / Math.tan((this.fov * Math.PI / 180) / 2) / depth;
 
                 return {
                     x: canvas.width / 2 + x * scale,
                     y: canvas.height / 2 - y2 * scale,
-                    z: z2
+                    z: depth
                 };
             }
         }
@@ -400,9 +405,9 @@
                 this.score = 0;
                 this.temperature = 0; // 0-100
                 this.player = {
-                    pos: new Vec3(0, 1, 20),
+                    pos: new Vec3(0, 1, 0),
                     vel: new Vec3(0, 0, 0),
-                    onGround: false,
+                    onGround: true,
                     health: 100
                 };
 
@@ -419,6 +424,7 @@
 
                 // Time tracking
                 this.lastTime = 0;
+                this.animationId = null;
                 this.solarFlareTimer = 0;
 
                 this.setupCanvas();
@@ -439,20 +445,26 @@
             setupEventListeners() {
                 // Keyboard
                 window.addEventListener('keydown', (e) => {
-                    this.keys[e.key.toLowerCase()] = true;
-
-                    if (e.key === ' ' && this.player.onGround) {
-                        this.player.vel.y = 0.5;
-                        this.player.onGround = false;
-                    }
-
                     if (e.key === 'Escape') {
                         this.togglePause();
+                        return;
+                    }
+                    if (!this.running || this.paused ||
+                        e.target?.closest?.('button, input, textarea, select, a, [contenteditable]')) return;
+                    this.keys[e.key.toLowerCase()] = true;
+                    if (e.key === ' ' && !e.repeat && this.player.onGround) {
+                        e.preventDefault();
+                        this.player.vel.y = 16;
+                        this.player.onGround = false;
                     }
                 });
 
                 window.addEventListener('keyup', (e) => {
                     this.keys[e.key.toLowerCase()] = false;
+                });
+                window.addEventListener('blur', () => { this.keys = {}; });
+                document.addEventListener('visibilitychange', () => {
+                    if (document.hidden) this.keys = {};
                 });
 
                 // Mouse
@@ -464,6 +476,7 @@
 
                 document.addEventListener('pointerlockchange', () => {
                     this.mouse.locked = document.pointerLockElement === this.canvas;
+                    if (!this.mouse.locked) this.keys = {};
                 });
 
                 window.addEventListener('mousemove', (e) => {
@@ -476,12 +489,23 @@
             }
 
             startGame() {
+                if (!this.running) {
+                    this.timeRemaining = 300;
+                    this.artifactsCollected = 0;
+                    this.score = 0;
+                    this.solarFlareTimer = 0;
+                    this.solarFlares = [];
+                    this.particles = [];
+                    this.respawnPlayer();
+                    this.generateWorld();
+                }
                 document.getElementById('menu').classList.add('hidden');
                 document.getElementById('controls').classList.remove('hidden');
                 this.running = true;
                 this.paused = false;
-                this.generateWorld();
-                this.gameLoop();
+                this.keys = {};
+                this.lastTime = 0;
+                if (this.animationId === null) this.gameLoop();
             }
 
             generateWorld() {
@@ -533,11 +557,13 @@
 
                 // Lava areas between platforms
                 for (let i = 0; i < 20; i++) {
+                    const angle = Math.random() * Math.PI * 2;
+                    const distance = 12 + Math.random() * 28;
                     this.lavaAreas.push({
                         pos: new Vec3(
-                            Math.random() * 80 - 40,
+                            Math.cos(angle) * distance,
                             -2,
-                            Math.random() * 80 - 40
+                            Math.sin(angle) * distance
                         ),
                         radius: 3 + Math.random() * 5
                     });
@@ -602,7 +628,6 @@
 
             updatePlayer(dt) {
                 const speed = 10;
-                const friction = 0.85;
                 const gravity = -20;
 
                 // Movement input
@@ -618,11 +643,12 @@
                 const cosY = Math.cos(this.camera.rot.y);
                 const sinY = Math.sin(this.camera.rot.y);
 
-                const worldMoveX = moveX * cosY - moveZ * sinY;
-                const worldMoveZ = moveX * sinY + moveZ * cosY;
+                const magnitude = Math.hypot(moveX, moveZ) || 1;
+                const worldMoveX = (moveX * cosY + moveZ * sinY) / magnitude;
+                const worldMoveZ = (-moveX * sinY + moveZ * cosY) / magnitude;
 
-                this.player.vel.x = worldMoveX * speed * dt;
-                this.player.vel.z = worldMoveZ * speed * dt;
+                this.player.vel.x = worldMoveX * speed;
+                this.player.vel.z = worldMoveZ * speed;
 
                 // Apply gravity
                 if (!this.player.onGround) {
@@ -630,11 +656,8 @@
                 }
 
                 // Update position
-                this.player.pos = this.player.pos.add(this.player.vel);
-
-                // Apply friction
-                this.player.vel.x *= friction;
-                this.player.vel.z *= friction;
+                const previousY = this.player.pos.y;
+                this.player.pos = this.player.pos.add(this.player.vel.mul(dt));
 
                 // Check platform collisions
                 this.player.onGround = false;
@@ -642,11 +665,11 @@
                 for (const platform of this.platforms) {
                     const dx = Math.abs(this.player.pos.x - platform.pos.x);
                     const dz = Math.abs(this.player.pos.z - platform.pos.z);
-                    const dy = this.player.pos.y - platform.pos.y;
+                    const top = platform.pos.y + platform.size.y;
 
                     if (dx < platform.size.x / 2 && dz < platform.size.z / 2) {
-                        if (dy < 1 && dy > 0 && this.player.vel.y <= 0) {
-                            this.player.pos.y = platform.pos.y + 1;
+                        if (previousY >= top && this.player.pos.y <= top && this.player.vel.y <= 0) {
+                            this.player.pos.y = top;
                             this.player.vel.y = 0;
                             this.player.onGround = true;
                         }
@@ -729,15 +752,15 @@
 
                         if (dist < flare.radius) {
                             // Check if protected by obelisk
-                            let protected = false;
+                            let isProtected = false;
                             this.obelisks.forEach(obelisk => {
                                 const obeliskDist = new Vec3(this.player.pos.x, 0, this.player.pos.z).sub(
                                     new Vec3(obelisk.pos.x, 0, obelisk.pos.z)
                                 ).length();
-                                if (obeliskDist < 3) protected = true;
+                                if (obeliskDist < 3) isProtected = true;
                             });
 
-                            if (!protected) {
+                            if (!isProtected) {
                                 this.showNotification('💥 Hit by solar flare!');
                                 this.player.health -= 50;
                                 if (this.player.health <= 0) {
@@ -1022,8 +1045,9 @@
             }
 
             respawnPlayer() {
-                this.player.pos = new Vec3(0, 5, 20);
+                this.player.pos = new Vec3(0, 1, 0);
                 this.player.vel = new Vec3(0, 0, 0);
+                this.player.onGround = true;
                 this.player.health = 100;
                 this.temperature = 0;
                 this.score = Math.max(0, this.score - 50);
@@ -1063,6 +1087,8 @@
             }
 
             togglePause() {
+                this.keys = {};
+                if (!this.running) return;
                 this.paused = !this.paused;
                 const menu = document.getElementById('menu');
 
@@ -1106,30 +1132,71 @@ SCORING:
             }
 
             saveGameData() {
+                let previous;
+                try {
+                    previous = this.readStatistics();
+                } catch (error) {
+                    console.warn('Could not read expedition statistics:', error);
+                    this.showNotification('Statistics could not be saved in this browser.');
+                    return false;
+                }
                 const data = {
-                    highScore: Math.max(this.score, parseInt(localStorage.getItem('dyingStarHighScore') || '0')),
-                    gamesPlayed: parseInt(localStorage.getItem('dyingStarGamesPlayed') || '0') + 1,
+                    highScore: Math.max(this.score, previous.highScore),
+                    gamesPlayed: previous.gamesPlayed + 1,
                     artifactsCollected: this.artifactsCollected,
                     lastPlayed: new Date().toISOString()
                 };
 
-                localStorage.setItem('dyingStarHighScore', data.highScore);
-                localStorage.setItem('dyingStarGamesPlayed', data.gamesPlayed);
-                localStorage.setItem('dyingStarData', JSON.stringify(data));
-            }
-
-            loadGameData() {
-                const data = localStorage.getItem('dyingStarData');
-                if (data) {
-                    const parsed = JSON.parse(data);
-                    console.log('Previous high score:', parsed.highScore);
+                try {
+                    localStorage.setItem('dyingStarHighScore', data.highScore);
+                    localStorage.setItem('dyingStarGamesPlayed', data.gamesPlayed);
+                    localStorage.setItem('dyingStarData', JSON.stringify(data));
+                    return true;
+                } catch (error) {
+                    console.warn('Could not save expedition statistics:', error);
+                    this.showNotification('Statistics could not be saved in this browser.');
+                    return false;
                 }
             }
 
+            loadGameData() {
+                try {
+                    const data = localStorage.getItem('dyingStarData');
+                    if (!data) return;
+                    const parsed = this.validateStatistics(JSON.parse(data));
+                    console.log('Previous high score:', parsed.highScore);
+                } catch (error) {
+                    console.warn('Saved expedition statistics are unavailable:', error);
+                    this.showNotification('Saved statistics are unavailable. You can still start an expedition.');
+                }
+            }
+
+            validateStatistics(data) {
+                if (!data || typeof data !== 'object' || Array.isArray(data) ||
+                    !['highScore', 'gamesPlayed'].every(key => Number.isSafeInteger(data[key]) && data[key] >= 0)) {
+                    throw new Error('Invalid expedition statistics');
+                }
+                return { highScore: data.highScore, gamesPlayed: data.gamesPlayed };
+            }
+
+            readStatistics() {
+                return this.validateStatistics({
+                    highScore: Number(localStorage.getItem('dyingStarHighScore') ?? 0),
+                    gamesPlayed: Number(localStorage.getItem('dyingStarGamesPlayed') ?? 0),
+                });
+            }
+
             exportData() {
+                let statistics;
+                try {
+                    statistics = this.readStatistics();
+                } catch (error) {
+                    console.warn('Could not export expedition statistics:', error);
+                    this.showNotification('Saved statistics are unavailable; export could not finish.');
+                    return;
+                }
                 const data = {
-                    highScore: parseInt(localStorage.getItem('dyingStarHighScore') || '0'),
-                    gamesPlayed: parseInt(localStorage.getItem('dyingStarGamesPlayed') || '0'),
+                    ...statistics,
                     currentScore: this.score,
                     artifactsCollected: this.artifactsCollected,
                     exportDate: new Date().toISOString()
@@ -1153,20 +1220,29 @@ SCORING:
 
                 input.onchange = (e) => {
                     const file = e.target.files[0];
+                    if (!file) return;
                     const reader = new FileReader();
 
                     reader.onload = (event) => {
+                        let data;
                         try {
-                            const data = JSON.parse(event.target.result);
-
-                            if (data.highScore) localStorage.setItem('dyingStarHighScore', data.highScore);
-                            if (data.gamesPlayed) localStorage.setItem('dyingStarGamesPlayed', data.gamesPlayed);
-
-                            this.showNotification('📁 Data imported successfully!');
+                            data = this.validateStatistics(JSON.parse(event.target.result));
                         } catch (error) {
                             this.showNotification('❌ Invalid save file!');
+                            return;
                         }
+                        try {
+                            localStorage.setItem('dyingStarHighScore', data.highScore);
+                            localStorage.setItem('dyingStarGamesPlayed', data.gamesPlayed);
+                            localStorage.setItem('dyingStarData', JSON.stringify(data));
+                        } catch (error) {
+                            console.warn('Could not import expedition statistics:', error);
+                            this.showNotification('Statistics could not be imported in this browser.');
+                            return;
+                        }
+                        this.showNotification('📁 Data imported successfully!');
                     };
+                    reader.onerror = () => this.showNotification('The save file could not be read.');
 
                     reader.readAsText(file);
                 };
@@ -1176,9 +1252,15 @@ SCORING:
 
             resetGame() {
                 if (confirm('Reset all game data? This cannot be undone!')) {
-                    localStorage.removeItem('dyingStarHighScore');
-                    localStorage.removeItem('dyingStarGamesPlayed');
-                    localStorage.removeItem('dyingStarData');
+                    try {
+                        localStorage.removeItem('dyingStarHighScore');
+                        localStorage.removeItem('dyingStarGamesPlayed');
+                        localStorage.removeItem('dyingStarData');
+                    } catch (error) {
+                        console.warn('Could not reset expedition statistics:', error);
+                        this.showNotification('Saved statistics could not be reset in this browser.');
+                        return;
+                    }
                     this.showNotification('🔄 Game data reset!');
                     location.reload();
                 }
@@ -1192,7 +1274,7 @@ SCORING:
                 this.update(dt);
                 this.render();
 
-                requestAnimationFrame((t) => this.gameLoop(t));
+                this.animationId = requestAnimationFrame((t) => this.gameLoop(t));
             }
         }
 

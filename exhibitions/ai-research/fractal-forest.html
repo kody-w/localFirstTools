@@ -331,10 +331,11 @@
 
         <div id="scale-panel">
             <div class="scale-label">Reality Scale</div>
-            <input type="range" id="scale-slider" min="0" max="100" value="50" step="1">
+            <input type="range" id="scale-slider" aria-label="Reality scale" min="0" max="100" value="50" step="1">
             <div class="scale-value" id="scale-value">1.0x</div>
             <div style="margin-top: 15px; font-size: 12px; color: #ffd700;">
                 <div>🔬 Micro → Macro 🌍</div>
+                <div style="margin-top: 8px;">Seven nested ecosystems; zoom between layers.</div>
             </div>
         </div>
 
@@ -346,6 +347,10 @@
             <div class="info-item">
                 <span class="info-label">Current Scale:</span>
                 <span id="current-scale">Normal</span>
+            </div>
+            <div class="info-item">
+                <span class="info-label">Ecosystem Layer:</span>
+                <span id="ecosystem-layer">0</span>
             </div>
             <div class="info-item">
                 <span class="info-label">Trees Visible:</span>
@@ -528,7 +533,7 @@
 
                 // Camera settings
                 this.camera = {
-                    pos: new Vector3(0, 5, 20),
+                    pos: new Vector3(0, 8, -55),
                     rot: new Vector3(0, 0, 0),
                     fov: Math.PI / 3,
                     near: 0.1,
@@ -537,9 +542,16 @@
 
                 // World state
                 this.scale = 1.0;
+                this.worldZoom = 1;
+                this.layer = 0;
+                this.layers = {};
+                this.worldSeed = 0;
+                this.layerSeed = 0;
                 this.recursionDepth = 3;
                 this.trees = [];
                 this.particles = [];
+                this.leafTargets = [];
+                this.preserveStoredState = false;
 
                 // Input state
                 this.keys = {};
@@ -585,12 +597,14 @@
                 window.addEventListener('resize', () => this.resizeCanvas());
 
                 document.addEventListener('keydown', (e) => {
+                    if (['SELECT', 'TEXTAREA', 'BUTTON'].includes(e.target?.tagName) ||
+                        (e.target?.tagName === 'INPUT' && e.target.type !== 'range')) return;
                     this.keys[e.key.toLowerCase()] = true;
 
-                    if (e.key.toLowerCase() === 'r') {
+                    if (e.key.toLowerCase() === 'r' && !e.repeat) {
                         this.generateForest();
                     }
-                    if (e.key === ' ') {
+                    if (e.key === ' ' && !e.repeat) {
                         e.preventDefault();
                         this.jumpLayer();
                     }
@@ -607,15 +621,33 @@
                     }
                 });
 
-                this.canvas.addEventListener('click', () => {
+                this.canvas.addEventListener('click', (e) => {
+                    const rect = this.canvas.getBoundingClientRect();
+                    const x = this.mouse.locked ? this.width / 2 :
+                        (e.clientX - rect.left) * this.width / rect.width;
+                    const y = this.mouse.locked ? this.height / 2 :
+                        (e.clientY - rect.top) * this.height / rect.height;
+                    const leaf = [...this.leafTargets].reverse().find(target =>
+                        Math.hypot(x - target.x, y - target.y) <= Math.max(6, target.radius));
+                    if (leaf) {
+                        this.enterLeaf(leaf);
+                        return;
+                    }
                     if (!this.mouse.locked) {
-                        this.canvas.requestPointerLock();
+                        const request = this.canvas.requestPointerLock?.();
+                        if (request) request.catch(() => showNotification('Mouse look unavailable; WASD and leaf clicks still work.'));
                     }
                 });
 
                 document.addEventListener('pointerlockchange', () => {
                     this.mouse.locked = document.pointerLockElement === this.canvas;
                 });
+                window.addEventListener('blur', () => {
+                    this.keys = {};
+                    this.mouse.dx = this.mouse.dy = 0;
+                });
+                window.addEventListener('pagehide', () => this.saveState());
+                window.addEventListener('beforeunload', () => this.saveState());
 
                 // Scale slider
                 const slider = document.getElementById('scale-slider');
@@ -625,15 +657,43 @@
                 });
             }
 
-            setScale(sliderValue) {
-                // Map slider (0-100) to scale (0.001 - 1000)
-                // Use logarithmic scale for better feel
-                const normalized = sliderValue / 100; // 0 to 1
-                this.scale = Math.pow(10, (normalized - 0.5) * 6); // 10^-3 to 10^3
+            setScale(sliderValue, leafSeed) {
+                if (!Number.isFinite(sliderValue)) return false;
+                sliderValue = Math.max(0, Math.min(100, sliderValue));
+                const scale = Math.pow(10, (sliderValue / 100 - 0.5) * 6);
+                const layer = -Math.round(Math.log10(scale));
+                if (layer !== this.layer || leafSeed !== undefined) {
+                    this.rememberLayer();
+                    if (leafSeed !== undefined) {
+                        for (const key of Object.keys(this.layers)) {
+                            if (Number(key) >= layer) delete this.layers[key];
+                        }
+                    }
+                    this.layer = layer;
+                    const saved = this.layers[layer];
+                    if (saved) {
+                        this.restoreLayer(saved);
+                    } else {
+                        this.recursionDepth = Math.max(2, Math.min(4, 3 + layer));
+                        this.layerSeed = leafSeed ?? `${this.worldSeed}:${layer}`;
+                        this.trees = this.createGrove(this.layerSeed);
+                        this.camera.pos.set(0, 8, -55);
+                        this.camera.rot.set(0, 0, 0);
+                    }
+                    this.keys = {};
+                }
+                this.scale = scale;
+                // Rebase each decade into a bounded local ecosystem. Within a layer,
+                // magnification changes model coordinates, not merely the movement speed.
+                this.worldZoom = Math.pow(10, -Math.log10(scale) - this.layer);
+                this.updateScaleUI();
+                this.triggerScaleTransition();
+                return true;
+            }
 
+            updateScaleUI() {
+                document.getElementById('scale-slider').value = Math.log10(this.scale) / 6 * 100 + 50;
                 document.getElementById('scale-value').textContent = this.scale.toFixed(3) + 'x';
-
-                // Update scale description
                 let scaleDesc = 'Normal';
                 if (this.scale < 0.01) scaleDesc = 'Microscopic';
                 else if (this.scale < 0.1) scaleDesc = 'Tiny';
@@ -644,34 +704,68 @@
                 else scaleDesc = 'Cosmic';
 
                 document.getElementById('current-scale').textContent = scaleDesc;
-
-                // Trigger transition effect
-                this.triggerScaleTransition();
+                document.getElementById('recursion-depth').textContent = this.recursionDepth;
+                document.getElementById('ecosystem-layer').textContent = this.layer;
+                document.getElementById('tree-count').textContent = this.trees.length;
             }
 
             triggerScaleTransition() {
                 const overlay = document.getElementById('transition-overlay');
                 overlay.classList.add('active');
-                setTimeout(() => {
+                clearTimeout(this.transitionTimer);
+                this.transitionTimer = setTimeout(() => {
                     overlay.classList.remove('active');
                 }, 500);
             }
 
             jumpLayer() {
-                // Jump to a random scale level
-                const randomScale = Math.random() * 100;
-                document.getElementById('scale-slider').value = randomScale;
-                this.setScale(randomScale);
+                const next = this.layer === 3 ? -3 : this.layer + 1;
+                this.setScale(50 - next * 100 / 6);
+            }
+
+            enterLeaf(leaf) {
+                if (this.layer >= 3) {
+                    showNotification('Smallest ecosystem reached. Space returns to the macro layers.');
+                    return;
+                }
+                this.setScale(50 - (this.layer + 1) * 100 / 6, leaf.seed);
+                showNotification(`Inside this leaf's ecosystem — layer ${this.layer}`);
+            }
+
+            seededRandom(seed) {
+                let state = 2166136261;
+                for (const char of String(seed)) state = Math.imul(state ^ char.charCodeAt(0), 16777619);
+                return () => {
+                    state += 0x6D2B79F5;
+                    let value = Math.imul(state ^ state >>> 15, 1 | state);
+                    value ^= value + Math.imul(value ^ value >>> 7, 61 | value);
+                    return ((value ^ value >>> 14) >>> 0) / 4294967296;
+                };
             }
 
             generateForest() {
-                this.trees = [];
+                this.worldSeed = Math.random();
+                this.layerSeed = this.worldSeed;
+                this.layer = 0;
+                this.layers = {};
+                this.scale = this.worldZoom = 1;
+                this.recursionDepth = 3;
+                this.trees = this.createGrove(this.worldSeed);
+                this.camera.pos.set(0, 8, -55);
+                this.camera.rot.set(0, 0, 0);
+                this.updateScaleUI();
+            }
+
+            createGrove(seed) {
+                const random = this.seededRandom(seed);
+                const trees = [];
                 const numTrees = 12;
                 const radius = 30;
+                const rotation = random() * Math.PI * 2;
 
                 for (let i = 0; i < numTrees; i++) {
-                    const angle = (i / numTrees) * Math.PI * 2;
-                    const distance = radius * (0.5 + Math.random() * 0.5);
+                    const angle = (i / numTrees) * Math.PI * 2 + rotation;
+                    const distance = radius * (0.5 + random() * 0.5);
 
                     const tree = {
                         pos: new Vector3(
@@ -679,56 +773,48 @@
                             0,
                             Math.sin(angle) * distance
                         ),
-                        seed: Math.random(),
-                        height: 8 + Math.random() * 6,
+                        seed: random(),
+                        height: 8 + random() * 6,
                         branches: []
                     };
 
                     this.generateTreeRecursive(tree, 0);
-                    this.trees.push(tree);
+                    trees.push(tree);
                 }
-
-                document.getElementById('tree-count').textContent = this.trees.length;
+                return trees;
             }
 
             generateTreeRecursive(tree, depth) {
-                if (depth >= this.recursionDepth) return;
-
-                const numBranches = 4 + Math.floor(Math.random() * 4);
-                const baseHeight = tree.height / (depth + 1);
-
-                for (let i = 0; i < numBranches; i++) {
-                    const angle = (i / numBranches) * Math.PI * 2 + Math.random() * 0.5;
-                    const height = baseHeight * (0.6 + Math.random() * 0.4);
-                    const startHeight = baseHeight * 0.3 + Math.random() * baseHeight * 0.4;
-
-                    const branch = {
-                        angle: angle,
-                        height: height,
-                        startHeight: startHeight,
-                        thickness: 0.3 / (depth + 1),
-                        depth: depth,
-                        subBranches: []
-                    };
-
-                    // Recursively generate sub-branches (fractal!)
-                    if (depth < this.recursionDepth - 1 && Math.random() > 0.3) {
-                        const subTree = {
-                            pos: new Vector3(0, 0, 0),
-                            seed: Math.random(),
-                            height: height * 0.5,
-                            branches: []
+                const random = this.seededRandom(tree.seed);
+                let remaining = 256;
+                const grow = (parent, level) => {
+                    if (level >= this.recursionDepth) return;
+                    const numBranches = 4 + Math.floor(random() * 4);
+                    const baseHeight = parent.height / (level + 1);
+                    for (let i = 0; i < numBranches && remaining > 0; i++) {
+                        remaining--;
+                        const branch = {
+                            angle: (i / numBranches) * Math.PI * 2 + random() * 0.5,
+                            height: baseHeight * (0.6 + random() * 0.4),
+                            startHeight: baseHeight * (0.3 + random() * 0.4),
+                            thickness: 0.3 / (level + 1),
+                            depth: level,
+                            seed: random(),
+                            subBranches: []
                         };
-                        this.generateTreeRecursive(subTree, depth + 1);
-                        branch.subBranches = subTree.branches;
+                        if (level < this.recursionDepth - 1 && random() > 0.3) {
+                            const child = { height: branch.height * 0.5, branches: [] };
+                            grow(child, level + 1);
+                            branch.subBranches = child.branches;
+                        }
+                        parent.branches.push(branch);
                     }
-
-                    tree.branches.push(branch);
-                }
+                };
+                grow(tree, depth);
             }
 
             updateCamera(deltaTime) {
-                const moveSpeed = 10 * deltaTime * this.scale;
+                const moveSpeed = 10 * Math.max(0, Math.min(0.1, deltaTime));
                 const lookSpeed = 0.002;
 
                 // Mouse look
@@ -742,14 +828,14 @@
 
                 // WASD movement
                 const forward = new Vector3(
-                    Math.sin(this.camera.rot.y),
+                    -Math.sin(this.camera.rot.y),
                     0,
                     Math.cos(this.camera.rot.y)
                 );
                 const right = new Vector3(
                     Math.cos(this.camera.rot.y),
                     0,
-                    -Math.sin(this.camera.rot.y)
+                    Math.sin(this.camera.rot.y)
                 );
 
                 if (this.keys['w']) {
@@ -771,10 +857,10 @@
             }
 
             project(point) {
-                // Simple perspective projection
-                const dx = point.x - this.camera.pos.x;
-                const dy = point.y - this.camera.pos.y;
-                const dz = point.z - this.camera.pos.z;
+                if (![point.x, point.y, point.z].every(Number.isFinite)) return null;
+                const dx = point.x * this.worldZoom - this.camera.pos.x;
+                const dy = point.y * this.worldZoom - this.camera.pos.y;
+                const dz = point.z * this.worldZoom - this.camera.pos.z;
 
                 // Rotate by camera rotation
                 const cosY = Math.cos(-this.camera.rot.y);
@@ -792,18 +878,22 @@
                 z = y * sinX + z * cosX;
                 y = y2;
 
-                if (z <= 0.1) return null;
+                if (!Number.isFinite(z) || z <= this.camera.near || z >= this.camera.far) return null;
 
                 const scale = (this.height / 2) / Math.tan(this.camera.fov / 2) / z;
+                const screenX = this.width / 2 + x * scale;
+                const screenY = this.height / 2 - y * scale;
+                if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
                 return {
-                    x: this.width / 2 + x * scale,
-                    y: this.height / 2 - y * scale,
+                    x: screenX,
+                    y: screenY,
                     z: z,
-                    scale: scale
+                    scale: scale * this.worldZoom
                 };
             }
 
             render() {
+                this.leafTargets = [];
                 // Clear canvas with sky gradient
                 const gradient = this.ctx.createLinearGradient(0, 0, 0, this.height);
                 gradient.addColorStop(0, this.colors.sky);
@@ -817,12 +907,12 @@
                 // Sort trees by distance for proper rendering
                 const sortedTrees = [...this.trees].sort((a, b) => {
                     const distA = Math.sqrt(
-                        Math.pow(a.pos.x - this.camera.pos.x, 2) +
-                        Math.pow(a.pos.z - this.camera.pos.z, 2)
+                        Math.pow(a.pos.x * this.worldZoom - this.camera.pos.x, 2) +
+                        Math.pow(a.pos.z * this.worldZoom - this.camera.pos.z, 2)
                     );
                     const distB = Math.sqrt(
-                        Math.pow(b.pos.x - this.camera.pos.x, 2) +
-                        Math.pow(b.pos.z - this.camera.pos.z, 2)
+                        Math.pow(b.pos.x * this.worldZoom - this.camera.pos.x, 2) +
+                        Math.pow(b.pos.z * this.worldZoom - this.camera.pos.z, 2)
                     );
                     return distB - distA;
                 });
@@ -871,7 +961,7 @@
                 if (!baseProj || !topProj) return;
 
                 this.ctx.strokeStyle = this.colors.bark;
-                this.ctx.lineWidth = Math.max(2, 10 / topProj.z);
+                this.ctx.lineWidth = Math.max(1, Math.min(30, topProj.scale * 0.3));
                 this.ctx.beginPath();
                 this.ctx.moveTo(baseProj.x, baseProj.y);
                 this.ctx.lineTo(topProj.x, topProj.y);
@@ -884,7 +974,8 @@
 
                 // Draw foliage at top
                 if (topProj.z > 0) {
-                    const size = Math.max(20, 200 / topProj.z) * (1 + Math.sin(tree.seed * 100) * 0.2);
+                    const size = Math.max(6, Math.min(180, topProj.scale * 1.4 *
+                        (1 + Math.sin(tree.seed * 100) * 0.2)));
                     const gradient = this.ctx.createRadialGradient(
                         topProj.x, topProj.y, 0,
                         topProj.x, topProj.y, size
@@ -897,6 +988,7 @@
                     this.ctx.beginPath();
                     this.ctx.arc(topProj.x, topProj.y, size, 0, Math.PI * 2);
                     this.ctx.fill();
+                    this.addLeafTarget(topProj, size, tree.seed);
 
                     // Add golden highlights (fractal indicators)
                     this.ctx.fillStyle = this.colors.gold;
@@ -914,7 +1006,13 @@
                 }
             }
 
-            drawBranch(basePos, branch, parentHeight) {
+            addLeafTarget(point, radius, seed) {
+                if (point.x >= 0 && point.x <= this.width && point.y >= 0 && point.y <= this.height) {
+                    this.leafTargets.push({ x: point.x, y: point.y, radius, seed, z: point.z });
+                }
+            }
+
+            drawBranch(basePos, branch) {
                 const startPos = new Vector3(
                     basePos.x,
                     basePos.y + branch.startHeight,
@@ -932,18 +1030,19 @@
 
                 if (startProj && endProj) {
                     this.ctx.strokeStyle = this.colors.bark;
-                    this.ctx.lineWidth = Math.max(1, branch.thickness * 20 / endProj.z);
+                    this.ctx.lineWidth = Math.max(0.7, Math.min(15, branch.thickness * endProj.scale * 0.3));
                     this.ctx.beginPath();
                     this.ctx.moveTo(startProj.x, startProj.y);
                     this.ctx.lineTo(endProj.x, endProj.y);
                     this.ctx.stroke();
 
                     // Draw leaves at branch end
-                    const leafSize = Math.max(5, 30 / endProj.z) / (branch.depth + 1);
+                    const leafSize = Math.max(3, Math.min(24, endProj.scale * 0.3 / (branch.depth + 1)));
                     this.ctx.fillStyle = branch.depth % 2 === 0 ? this.colors.leaves : this.colors.leavesLight;
                     this.ctx.beginPath();
                     this.ctx.arc(endProj.x, endProj.y, leafSize, 0, Math.PI * 2);
                     this.ctx.fill();
+                    this.addLeafTarget(endProj, leafSize, branch.seed);
                 }
 
                 // Draw sub-branches recursively
@@ -964,7 +1063,7 @@
                     if (proj && proj.z > 0) {
                         this.ctx.fillStyle = `rgba(255, 215, 0, ${0.3 + Math.sin(time * 2 + i) * 0.2})`;
                         this.ctx.beginPath();
-                        this.ctx.arc(proj.x, proj.y, 3 / proj.z * 10, 0, Math.PI * 2);
+                        this.ctx.arc(proj.x, proj.y, Math.max(0.5, Math.min(12, proj.scale * 0.05)), 0, Math.PI * 2);
                         this.ctx.fill();
                     }
                 }
@@ -988,60 +1087,142 @@
                 requestAnimationFrame(() => this.animate());
             }
 
-            // Data persistence methods
-            saveState() {
-                const state = {
-                    camera: {
-                        pos: { x: this.camera.pos.x, y: this.camera.pos.y, z: this.camera.pos.z },
-                        rot: { x: this.camera.rot.x, y: this.camera.rot.y, z: this.camera.rot.z }
-                    },
-                    scale: this.scale,
+            layerState() {
+                return {
+                    seed: this.layerSeed,
+                    camera: { pos: { ...this.camera.pos }, rot: { ...this.camera.rot } },
                     recursionDepth: this.recursionDepth,
                     trees: this.trees.map(tree => ({
                         pos: { x: tree.pos.x, y: tree.pos.y, z: tree.pos.z },
                         seed: tree.seed,
                         height: tree.height
-                    })),
+                    }))
+                };
+            }
+
+            rememberLayer() {
+                this.layers[this.layer] = this.layerState();
+            }
+
+            restoreLayer(state) {
+                this.layerSeed = state.seed;
+                this.recursionDepth = state.recursionDepth;
+                this.camera.pos.copy(state.camera.pos);
+                this.camera.rot.copy(state.camera.rot);
+                this.trees = state.trees.map(data => {
+                    const tree = { pos: new Vector3().copy(data.pos), seed: data.seed,
+                        height: data.height, branches: [] };
+                    this.generateTreeRecursive(tree, 0);
+                    return tree;
+                });
+            }
+
+            getState() {
+                this.rememberLayer();
+                return {
+                    version: 2,
+                    ...this.layerState(),
+                    worldSeed: this.worldSeed,
+                    layer: this.layer,
+                    layers: this.layers,
+                    scale: this.scale,
                     timestamp: Date.now()
                 };
+            }
 
-                localStorage.setItem('fractalForestState', JSON.stringify(state));
+            validateState(state) {
+                const finite = (value, min, max) =>
+                    Number.isFinite(value) && value >= min && value <= max;
+                const vector = value => value && ['x', 'y', 'z'].every(axis =>
+                    finite(value[axis], -1000000, 1000000));
+                const layerState = value => value && value.camera &&
+                    vector(value.camera.pos) && vector(value.camera.rot) &&
+                    Number.isInteger(value.recursionDepth) && finite(value.recursionDepth, 1, 4) &&
+                    Array.isArray(value.trees) && value.trees.length <= 24 &&
+                    value.trees.every(tree => tree && vector(tree.pos) &&
+                        finite(tree.seed, 0, 1) && finite(tree.height, 0.01, 1000));
+                if (!state || (state.version !== undefined && state.version !== 2) ||
+                    !finite(state.scale, 0.001, 1000) || !layerState(state)) {
+                    throw new Error('Invalid forest state, scale, or tree geometry.');
+                }
+                const layer = -Math.round(Math.log10(state.scale));
+                if (state.layer !== undefined && state.layer !== layer) {
+                    throw new Error('The ecosystem layer does not match its scale.');
+                }
+                if (state.worldSeed !== undefined && !finite(state.worldSeed, 0, 1)) {
+                    throw new Error('Invalid forest seed.');
+                }
+                const seed = value => (typeof value === 'string' && value.length <= 100) ||
+                    finite(value, 0, 1);
+                if (state.seed !== undefined && !seed(state.seed)) {
+                    throw new Error('Invalid ecosystem seed.');
+                }
+                if (state.layers !== undefined && (!state.layers || typeof state.layers !== 'object' ||
+                    Array.isArray(state.layers) || Object.keys(state.layers).length > 7 ||
+                    Object.entries(state.layers).some(([key, value]) =>
+                        !/^-?[0-3]$/.test(key) || key === '-0' || !layerState(value) ||
+                        !seed(value.seed)))) {
+                    throw new Error('Invalid saved ecosystem layers.');
+                }
+                const copy = JSON.parse(JSON.stringify(state));
+                copy.layer = layer;
+                copy.worldSeed ??= this.seededRandom(JSON.stringify(copy.trees))();
+                copy.seed ??= copy.worldSeed;
+                copy.layers ??= {};
+                return copy;
+            }
+
+            applyState(state) {
+                this.layer = state.layer;
+                this.worldSeed = state.worldSeed;
+                this.layers = state.layers;
+                this.scale = state.scale;
+                this.worldZoom = Math.pow(10, -Math.log10(state.scale) - this.layer);
+                this.restoreLayer(state);
+                this.keys = {};
+                this.updateScaleUI();
+                this.render();
+            }
+
+            saveState() {
+                if (this.preserveStoredState) return false;
+                const state = this.getState();
+                try {
+                    localStorage.setItem('fractalForestState', JSON.stringify(state));
+                } catch (error) {
+                    showNotification('Local saving unavailable. Export to keep this forest.');
+                    return false;
+                }
                 return state;
             }
 
             loadState() {
-                const saved = localStorage.getItem('fractalForestState');
-                if (saved) {
-                    const state = JSON.parse(saved);
-                    this.camera.pos.set(state.camera.pos.x, state.camera.pos.y, state.camera.pos.z);
-                    this.camera.rot.set(state.camera.rot.x, state.camera.rot.y, state.camera.rot.z);
-                    this.scale = state.scale;
-                    this.recursionDepth = state.recursionDepth;
-
-                    // Restore trees
-                    this.trees = state.trees.map(treeData => {
-                        const tree = {
-                            pos: new Vector3(treeData.pos.x, treeData.pos.y, treeData.pos.z),
-                            seed: treeData.seed,
-                            height: treeData.height,
-                            branches: []
-                        };
-                        this.generateTreeRecursive(tree, 0);
-                        return tree;
-                    });
-
-                    // Update UI
-                    const sliderValue = Math.log10(this.scale) / 6 * 100 + 50;
-                    document.getElementById('scale-slider').value = sliderValue;
-                    this.setScale(sliderValue);
-
-                    return true;
+                this.stateError = '';
+                let saved;
+                try {
+                    saved = localStorage.getItem('fractalForestState');
+                } catch (error) {
+                    this.stateError = 'Local storage unavailable. You can still explore and Export.';
+                    showNotification(this.stateError);
+                    return false;
                 }
-                return false;
+                if (!saved) return false;
+                let state;
+                try {
+                    state = this.validateState(JSON.parse(saved));
+                } catch (error) {
+                    this.preserveStoredState = true;
+                    this.stateError = 'Saved forest is invalid and was kept untouched. Export current work or Import a valid file.';
+                    showNotification(this.stateError);
+                    return false;
+                }
+                this.applyState(state);
+                this.preserveStoredState = false;
+                return true;
             }
 
             exportData() {
-                const state = this.saveState();
+                const state = this.getState();
                 const json = JSON.stringify(state, null, 2);
                 const blob = new Blob([json], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
@@ -1053,25 +1234,23 @@
             }
 
             importData(jsonData) {
+                let state;
                 try {
-                    const state = typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData;
-                    localStorage.setItem('fractalForestState', JSON.stringify(state));
-                    this.loadState();
-                    return true;
+                    state = this.validateState(typeof jsonData === 'string' ? JSON.parse(jsonData) : jsonData);
                 } catch (error) {
                     console.error('Import failed:', error);
                     return false;
                 }
+                this.applyState(state);
+                this.preserveStoredState = false;
+                this.saveState();
+                return true;
             }
 
             reset() {
-                this.camera.pos.set(0, 5, 20);
-                this.camera.rot.set(0, 0, 0);
-                this.scale = 1.0;
-                document.getElementById('scale-slider').value = 50;
-                this.setScale(50);
                 this.generateForest();
-                localStorage.removeItem('fractalForestState');
+                this.preserveStoredState = false;
+                this.saveState();
             }
         }
 
@@ -1139,15 +1318,15 @@
 
             // Setup UI event handlers
             document.getElementById('save-btn').addEventListener('click', () => {
-                engine.saveState();
-                showNotification('Forest state saved!');
+                if (engine.saveState()) showNotification('Forest state saved!');
+                else if (engine.preserveStoredState) showNotification(engine.stateError);
             });
 
             document.getElementById('load-btn').addEventListener('click', () => {
                 if (engine.loadState()) {
                     showNotification('Forest state loaded!');
                 } else {
-                    showNotification('No saved state found');
+                    showNotification(engine.stateError || 'No saved state found');
                 }
             });
 

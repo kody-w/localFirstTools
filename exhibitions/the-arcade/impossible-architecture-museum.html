@@ -201,8 +201,8 @@
             </div>
 
             <div id="controls-info">
-                <p><strong>Desktop:</strong> WASD/Arrows - Move | Mouse - Look | Space - Jump | E - Interact</p>
-                <p><strong>Special:</strong> R - Rotate Gravity | T - Toggle Perspective | P - Portal</p>
+                <p><strong>Desktop:</strong> WASD/Arrows - Move | Mouse - Look | Space - Jump</p>
+                <p><strong>Special:</strong> R - Rotate Gravity | Walk into golden doors to use portals</p>
             </div>
 
             <div id="mobile-controls">
@@ -336,6 +336,7 @@
             name: 'Impossible Architecture Museum',
             version: '1.0.0',
             playerSpeed: 0.15,
+            playerRadius: 2,
             jumpForce: 0.3,
             gravity: 0.02,
             mouseSensitivity: 0.002,
@@ -399,6 +400,20 @@
                 lastFrame: performance.now()
             }
         };
+
+        function getPlayerBasis(player) {
+            const up = player.gravityDir.clone().multiply(-1);
+            // A Z-facing wall needs a different reference to avoid a parallel look/up pair.
+            const reference = Math.abs(up.z) === 1 ? new Vector3(0, 1, 0) : new Vector3(0, 0, -1);
+            const referenceRight = reference.clone().cross(up).normalize();
+            const cos = Math.cos(player.rotation.yaw);
+            const sin = Math.sin(player.rotation.yaw);
+            return {
+                up,
+                forward: reference.clone().multiply(cos).add(referenceRight.clone().multiply(sin)),
+                right: referenceRight.multiply(cos).sub(reference.multiply(sin))
+            };
+        }
 
         // ============================================
         // IMPOSSIBLE GEOMETRY GENERATORS
@@ -583,26 +598,15 @@
             }
 
             createEntranceHall() {
-                const room = {
-                    name: 'entrance',
-                    bounds: { x: -20, y: 0, z: -20, width: 40, height: 10, depth: 40 },
-                    floor: this.createFloor(-20, 0, -20, 40, 40),
-                    walls: this.createWalls(-20, 0, -20, 40, 10, 40),
-                    ceiling: this.createCeiling(-20, 10, -20, 40, 40)
-                };
-                this.rooms.set('entrance', room);
+                this.createRoom('entrance', { x: -20, y: 0, z: -20, width: 40, height: 10, depth: 40 });
             }
 
             createPenroseRoom() {
                 const staircase = new PenroseStaircase(30, 0, 0, 15);
                 this.staircases.push(staircase);
 
-                const room = {
-                    name: 'penrose',
-                    bounds: { x: 10, y: 0, z: -20, width: 40, height: 20, depth: 40 },
-                    staircase: staircase
-                };
-                this.rooms.set('penrose', room);
+                this.createRoom('penrose', { x: 10, y: 0, z: -20, width: 40, height: 20, depth: 40 },
+                    { staircase });
             }
 
             createMobiusHall() {
@@ -616,13 +620,48 @@
 
             createInfiniteGallery() {
                 // Gallery that appears to extend infinitely through reflections
-                const room = {
-                    name: 'gallery',
-                    bounds: { x: -60, y: 0, z: -20, width: 30, height: 10, depth: 60 },
-                    mirrors: true,
-                    infinite: true
+                this.createRoom('gallery', { x: -60, y: 0, z: -20, width: 30, height: 10, depth: 60 },
+                    { mirrors: true, infinite: true });
+            }
+
+            createRoom(name, bounds, details = {}) {
+                const { x, y, z, width, height, depth } = bounds;
+                this.rooms.set(name, {
+                    name, bounds, ...details,
+                    floor: this.createFloor(x, y, z, width, depth),
+                    walls: this.createWalls(x, y, z, width, height, depth),
+                    ceiling: this.createCeiling(x, y + height, z, width, depth)
+                });
+            }
+
+            findRoom(position, preferredName) {
+                const contains = room => {
+                    const b = room.bounds;
+                    return position.x >= b.x && position.x <= b.x + b.width &&
+                        position.y >= b.y && position.y <= b.y + b.height &&
+                        position.z >= b.z && position.z <= b.z + b.depth;
                 };
-                this.rooms.set('gallery', room);
+                const preferred = this.rooms.get(preferredName);
+                if (preferred && contains(preferred)) return preferred;
+                for (const room of this.rooms.values()) {
+                    if (contains(room)) return room;
+                }
+                // Older saves could escape their room before gravity-aware collision existed.
+                if (preferred) return preferred;
+                let nearest, nearestDistance = Infinity;
+                for (const room of this.rooms.values()) {
+                    const b = room.bounds;
+                    const distance = Math.hypot(
+                        Math.max(b.x - position.x, 0, position.x - b.x - b.width),
+                        Math.max(b.y - position.y, 0, position.y - b.y - b.height),
+                        Math.max(b.z - position.z, 0, position.z - b.z - b.depth)
+                    );
+                    if (!nearest || distance < nearestDistance) {
+                        nearest = room;
+                        nearestDistance = distance;
+                    }
+                }
+                return nearest;
             }
 
             createPortalNetwork() {
@@ -932,8 +971,14 @@
         // ============================================
 
         class PhysicsController {
+            constructor(world) {
+                this.world = world;
+            }
+
             update(deltaTime) {
                 const player = GAME_STATE.player;
+                const room = this.world.findRoom(player.position, player.currentRoom);
+                player.currentRoom = room.name;
 
                 // Apply gravity
                 player.velocity.add(
@@ -953,17 +998,30 @@
                     )
                 );
 
-                // Simple ground collision
-                if (player.position.y < 2) {
-                    player.position.y = 2;
-                    player.velocity.y = 0;
-                    player.onGround = true;
-                } else {
-                    player.onGround = false;
-                }
+                this.constrainToRoom(room);
 
                 // Damping
                 player.velocity.multiply(0.9);
+            }
+
+            constrainToRoom(room) {
+                const player = GAME_STATE.player;
+                const bounds = room.bounds;
+                const radius = WORLD_CONFIG.playerRadius;
+                player.onGround = false;
+                for (const [axis, dimension] of [['x', 'width'], ['y', 'height'], ['z', 'depth']]) {
+                    const min = bounds[axis] + radius;
+                    const max = bounds[axis] + bounds[dimension] - radius;
+                    if (player.position[axis] <= min) {
+                        player.position[axis] = min;
+                        if (player.velocity[axis] < 0) player.velocity[axis] = 0;
+                        if (player.gravityDir[axis] < 0) player.onGround = true;
+                    } else if (player.position[axis] >= max) {
+                        player.position[axis] = max;
+                        if (player.velocity[axis] > 0) player.velocity[axis] = 0;
+                        if (player.gravityDir[axis] > 0) player.onGround = true;
+                    }
+                }
             }
 
             rotateGravity() {
@@ -986,6 +1044,7 @@
 
                 currentIndex = (currentIndex + 1) % directions.length;
                 player.gravityDir.copy(directions[currentIndex]);
+                player.onGround = false;
 
                 // Update camera up vector
                 this.updateCameraOrientation();
@@ -1018,7 +1077,7 @@
 
                 // Mouse
                 document.addEventListener('mousemove', (e) => this.onMouseMove(e));
-                document.addEventListener('click', () => this.requestPointerLock());
+                document.getElementById('world-canvas').addEventListener('click', () => this.requestPointerLock());
 
                 // Pointer lock
                 document.addEventListener('pointerlockchange', () => this.onPointerLockChange());
@@ -1058,7 +1117,8 @@
                 GAME_STATE.player.rotation.pitch -= e.movementY * sensitivity;
 
                 // Clamp pitch
-                GAME_STATE.player.rotation.pitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, GAME_STATE.player.rotation.pitch));
+                const pitchLimit = Math.PI / 2 - 0.01;
+                GAME_STATE.player.rotation.pitch = Math.max(-pitchLimit, Math.min(pitchLimit, GAME_STATE.player.rotation.pitch));
             }
 
             requestPointerLock() {
@@ -1083,17 +1143,14 @@
                 if (input.left) moveX -= 1;
                 if (input.right) moveX += 1;
 
-                // Apply rotation
-                const yaw = player.rotation.yaw;
-                const dx = moveX * Math.cos(yaw) - moveZ * Math.sin(yaw);
-                const dz = moveX * Math.sin(yaw) + moveZ * Math.cos(yaw);
-
-                player.velocity.x += dx * speed;
-                player.velocity.z += dz * speed;
+                const basis = getPlayerBasis(player);
+                player.velocity.add(basis.right.multiply(moveX * speed));
+                player.velocity.add(basis.forward.multiply(-moveZ * speed));
 
                 // Jump
                 if (input.jump && player.onGround) {
-                    player.velocity.y = WORLD_CONFIG.jumpForce;
+                    player.velocity.add(player.gravityDir.clone().multiply(-WORLD_CONFIG.jumpForce));
+                    player.onGround = false;
                 }
             }
         }
@@ -1131,8 +1188,8 @@
                 // Update
                 this.input.processInput(deltaTime);
                 this.physics.update(deltaTime);
-                this.updateCamera();
                 this.checkPortals();
+                this.updateCamera();
                 this.updateUI();
 
                 // Render
@@ -1153,23 +1210,27 @@
                 camera.position.copy(player.position);
 
                 // Calculate look target
-                const pitch = player.rotation.pitch;
-                const yaw = player.rotation.yaw;
-
-                camera.target.set(
-                    player.position.x + Math.sin(yaw) * Math.cos(pitch),
-                    player.position.y + Math.sin(pitch),
-                    player.position.z - Math.cos(yaw) * Math.cos(pitch)
-                );
+                const pitchLimit = Math.PI / 2 - 0.01;
+                const pitch = Math.max(-pitchLimit, Math.min(pitchLimit, player.rotation.pitch));
+                const basis = getPlayerBasis(player);
+                camera.up.copy(basis.up);
+                camera.target.copy(player.position)
+                    .add(basis.forward.multiply(Math.cos(pitch)))
+                    .add(basis.up.multiply(Math.sin(pitch)));
             }
 
             checkPortals() {
                 const player = GAME_STATE.player;
-                this.world.portals.forEach(portal => {
+                for (const portal of this.world.portals) {
                     if (portal.teleport(player)) {
+                        const room = this.world.findRoom(player.position);
+                        player.currentRoom = room.name;
+                        player.velocity.set(0, 0, 0);
+                        this.physics.constrainToRoom(room);
                         console.log('Teleported through portal!');
+                        break;
                     }
-                });
+                }
             }
 
             updateUI() {
@@ -1201,19 +1262,74 @@
         // ============================================
 
         class DataManager {
+            playerData() {
+                const player = GAME_STATE.player;
+                return {
+                    position: { x: player.position.x, y: player.position.y, z: player.position.z },
+                    rotation: { ...player.rotation },
+                    gravityDir: { x: player.gravityDir.x, y: player.gravityDir.y, z: player.gravityDir.z },
+                    currentRoom: player.currentRoom
+                };
+            }
+
+            validateGravity(gravity) {
+                if (gravity === undefined) return new Vector3(0, -1, 0);
+                if (!gravity || !['x', 'y', 'z'].every(axis => [-1, 0, 1].includes(gravity[axis])) ||
+                    Math.abs(gravity.x) + Math.abs(gravity.y) + Math.abs(gravity.z) !== 1) {
+                    throw new Error('Invalid gravity direction');
+                }
+                return new Vector3(gravity.x, gravity.y, gravity.z);
+            }
+
+            applyData(data) {
+                const player = data && data.player;
+                const finiteVector = value => value && ['x', 'y', 'z'].every(axis => Number.isFinite(value[axis]));
+                if (!player || !finiteVector(player.position)) throw new Error('Invalid player position');
+                const rotation = player.rotation;
+                if (!rotation || !Number.isFinite(rotation.yaw) || !Number.isFinite(rotation.pitch) ||
+                    (rotation.roll !== undefined && !Number.isFinite(rotation.roll))) {
+                    throw new Error('Invalid player rotation');
+                }
+                if (player.currentRoom !== undefined && !world.rooms.has(player.currentRoom)) {
+                    throw new Error('Unknown museum room');
+                }
+                const gravity = this.validateGravity(player.gravityDir);
+                const position = new Vector3(player.position.x, player.position.y, player.position.z);
+                const room = world.findRoom(position, player.currentRoom);
+                const settings = data.settings === undefined ? {} : data.settings;
+                if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+                    throw new Error('Invalid settings');
+                }
+                const mouseSensitivity = settings.mouseSensitivity === undefined ?
+                    WORLD_CONFIG.mouseSensitivity : settings.mouseSensitivity;
+                const renderDistance = settings.renderDistance === undefined ?
+                    WORLD_CONFIG.renderDistance : settings.renderDistance;
+                if (!Number.isFinite(mouseSensitivity) || mouseSensitivity <= 0 ||
+                    !Number.isFinite(renderDistance) || renderDistance <= 0) {
+                    throw new Error('Invalid settings');
+                }
+
+                // Validate the entire record before replacing any live state.
+                GAME_STATE.player.position.copy(position);
+                GAME_STATE.player.rotation = { yaw: rotation.yaw, pitch: rotation.pitch, roll: rotation.roll ?? 0 };
+                GAME_STATE.player.gravityDir.copy(gravity);
+                GAME_STATE.player.currentRoom = room.name;
+                GAME_STATE.player.velocity.set(0, 0, 0);
+                WORLD_CONFIG.mouseSensitivity = mouseSensitivity;
+                WORLD_CONFIG.renderDistance = renderDistance;
+                physics.constrainToRoom(room);
+                physics.updateCameraOrientation();
+                if (gameLoop) {
+                    gameLoop.updateCamera();
+                    gameLoop.updateUI();
+                }
+            }
+
             save() {
                 const saveData = {
                     version: WORLD_CONFIG.version,
                     timestamp: Date.now(),
-                    player: {
-                        position: {
-                            x: GAME_STATE.player.position.x,
-                            y: GAME_STATE.player.position.y,
-                            z: GAME_STATE.player.position.z
-                        },
-                        rotation: GAME_STATE.player.rotation,
-                        currentRoom: GAME_STATE.player.currentRoom
-                    },
+                    player: this.playerData(),
                     settings: {
                         mouseSensitivity: WORLD_CONFIG.mouseSensitivity,
                         renderDistance: WORLD_CONFIG.renderDistance
@@ -1230,22 +1346,7 @@
 
                 try {
                     const data = JSON.parse(saved);
-
-                    // Restore player position
-                    GAME_STATE.player.position.set(
-                        data.player.position.x,
-                        data.player.position.y,
-                        data.player.position.z
-                    );
-
-                    GAME_STATE.player.rotation = data.player.rotation;
-                    GAME_STATE.player.currentRoom = data.player.currentRoom;
-
-                    // Restore settings
-                    if (data.settings) {
-                        WORLD_CONFIG.mouseSensitivity = data.settings.mouseSensitivity;
-                        WORLD_CONFIG.renderDistance = data.settings.renderDistance;
-                    }
+                    this.applyData(data);
 
                     console.log('Game loaded');
                     return true;
@@ -1261,14 +1362,7 @@
                     world: WORLD_CONFIG.name,
                     exported: new Date().toISOString(),
                     data: {
-                        player: {
-                            position: {
-                                x: GAME_STATE.player.position.x,
-                                y: GAME_STATE.player.position.y,
-                                z: GAME_STATE.player.position.z
-                            },
-                            rotation: GAME_STATE.player.rotation
-                        }
+                        player: this.playerData()
                     }
                 };
 
@@ -1288,21 +1382,17 @@
                         try {
                             const data = JSON.parse(e.target.result);
 
-                            if (data.version && data.data) {
-                                GAME_STATE.player.position.set(
-                                    data.data.player.position.x,
-                                    data.data.player.position.y,
-                                    data.data.player.position.z
-                                );
-                                GAME_STATE.player.rotation = data.data.player.rotation;
-                                resolve();
-                            } else {
-                                reject('Invalid save file format');
+                            if (typeof data.version !== 'string' || !data.version || !data.data) {
+                                throw new Error('Invalid save file format');
                             }
+                            this.applyData(data.data);
+                            this.save();
+                            resolve();
                         } catch (err) {
                             reject(err);
                         }
                     };
+                    reader.onerror = () => reject(reader.error || new Error('Unable to read world data'));
                     reader.readAsText(file);
                 });
             }
@@ -1321,7 +1411,7 @@
             // Initialize systems
             renderer = new SimpleRenderer(canvas);
             world = new MuseumWorld();
-            physics = new PhysicsController();
+            physics = new PhysicsController(world);
             input = new InputHandler();
             dataManager = new DataManager();
 
@@ -1366,6 +1456,7 @@
                 input.type = 'file';
                 input.accept = 'application/json';
                 input.onchange = async (e) => {
+                    if (!e.target.files[0]) return;
                     try {
                         await dataManager.import(e.target.files[0]);
                         alert('World data imported successfully!');

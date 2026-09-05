@@ -237,7 +237,7 @@
         </button>
         <button class="module-btn" data-type="solar">
             ☀️ Solar Array
-            <div class="module-info">Generates power • +20kW</div>
+            <div class="module-info">Sun-tracking • +20kW in daylight</div>
         </button>
         <button class="module-btn" data-type="lab">
             🔬 Laboratory
@@ -552,17 +552,33 @@
                 this.time += dt;
             }
 
+            getSunDirection() {
+                return new Vec3(-Math.cos(this.orbitAngle), 0, -Math.sin(this.orbitAngle));
+            }
+
+            isSunlit() {
+                return Math.cos(this.orbitAngle) > 0;
+            }
+
+            getModuleRotation(module) {
+                if (!MODULE_TYPES[module.type].tracksSun) return module.rot;
+                const sunDir = this.getSunDirection();
+                // Tilt the panel's local +Y normal toward the sun, not around that normal.
+                const axis = new Vec3(sunDir.z, 0, -sunDir.x);
+                return Quat.fromAxisAngle(axis, Math.PI / 2);
+            }
+
             calculatePower() {
                 let totalPower = 0;
-                const sunDir = new Vec3(Math.cos(this.orbitAngle), 0, Math.sin(this.orbitAngle));
+                const sunDir = this.getSunDirection();
 
                 for (const module of this.modules) {
                     const config = MODULE_TYPES[module.type];
                     if (config.tracksSun) {
-                        // Solar panels - check sun exposure
-                        const panelNormal = module.rot.rotateVec(new Vec3(0, 1, 0));
+                        const panelNormal = this.getModuleRotation(module).rotateVec(new Vec3(0, 1, 0));
                         const efficiency = Math.max(0, panelNormal.dot(sunDir));
-                        totalPower += config.power * efficiency;
+                        // The same half-orbit shadow drives the scene and the power system.
+                        if (this.isSunlit()) totalPower += config.power * efficiency;
                     } else {
                         totalPower += config.power;
                     }
@@ -576,7 +592,7 @@
                 const h = this.canvas.height;
 
                 // Clear with space background
-                const isDayPhase = Math.cos(this.orbitAngle) > 0;
+                const isDayPhase = this.isSunlit();
                 ctx.fillStyle = isDayPhase ? '#000814' : '#000000';
                 ctx.fillRect(0, 0, w, h);
 
@@ -630,7 +646,7 @@
                 }
 
                 // Sun (opposite side)
-                const sunPos = earthPos.mul(-1);
+                const sunPos = this.getSunDirection().mul(earthDist);
                 const sunScreen = this.worldToScreen(sunPos, w, h);
                 if (sunScreen && sunScreen.z > 0) {
                     const sunSize = 10000 / sunScreen.z;
@@ -678,13 +694,7 @@
                     new Vec3(-size.x/2, size.y/2, size.z/2)
                 ];
 
-                // Rotate solar panels to track sun
-                let moduleRot = module.rot;
-                if (config.tracksSun) {
-                    const sunDir = new Vec3(Math.cos(this.orbitAngle), 0, Math.sin(this.orbitAngle));
-                    const angle = Math.atan2(sunDir.z, sunDir.x) + Math.PI / 2;
-                    moduleRot = Quat.fromAxisAngle(new Vec3(0, 1, 0), angle);
-                }
+                const moduleRot = this.getModuleRotation(module);
 
                 // Transform vertices to world space
                 const worldVertices = vertices.map(v => {
@@ -692,11 +702,9 @@
                     return module.pos.add(rotated);
                 });
 
-                // Project to screen
-                const screenVertices = worldVertices.map(v => this.worldToScreen(v, w, h));
+                const cameraVertices = worldVertices.map(v => this.worldToCamera(v));
 
-                // Check if any vertex is visible
-                if (!screenVertices.some(v => v && v.z > 0)) return;
+                if (cameraVertices.every(v => v.z < this.camera.near)) return;
 
                 // Draw faces
                 const faces = [
@@ -710,7 +718,8 @@
 
                 for (let i = 0; i < faces.length; i++) {
                     const face = faces[i];
-                    const verts = face.map(idx => screenVertices[idx]).filter(v => v);
+                    const clipped = this.clipToNearPlane(face.map(idx => cameraVertices[idx]));
+                    const verts = clipped.map(v => this.projectCameraPoint(v, w, h));
 
                     if (verts.length >= 3) {
                         // Calculate face normal for shading
@@ -719,7 +728,7 @@
                         const normal = v1.cross(v2).normalize();
 
                         // Sun lighting
-                        const sunDir = new Vec3(Math.cos(this.orbitAngle), 0.3, Math.sin(this.orbitAngle)).normalize();
+                        const sunDir = this.getSunDirection();
                         const lighting = Math.max(0.2, normal.dot(sunDir));
 
                         // Parse color and apply lighting
@@ -752,19 +761,34 @@
                 }
             }
 
-            worldToScreen(worldPos, w, h) {
-                // Transform to camera space
+            worldToCamera(worldPos) {
                 const relative = worldPos.sub(this.camera.pos);
-                const cameraSpace = new Vec3(
-                    -this.camera.rot.rotateVec(new Vec3(-1, 0, 0)).dot(relative),
+                // Camera forward is local -Z for thrust, placement, and positive projection depth.
+                return new Vec3(
+                    this.camera.rot.rotateVec(new Vec3(1, 0, 0)).dot(relative),
                     this.camera.rot.rotateVec(new Vec3(0, 1, 0)).dot(relative),
-                    -this.camera.rot.rotateVec(new Vec3(0, 0, -1)).dot(relative)
+                    this.camera.rot.rotateVec(new Vec3(0, 0, -1)).dot(relative)
                 );
+            }
 
-                // Check if behind camera
-                if (cameraSpace.z <= this.camera.near) return null;
+            clipToNearPlane(vertices) {
+                const clipped = [];
+                const near = this.camera.near;
+                for (let i = 0; i < vertices.length; i++) {
+                    const a = vertices[i];
+                    const b = vertices[(i + 1) % vertices.length];
+                    const aInside = a.z >= near;
+                    const bInside = b.z >= near;
+                    if (aInside) clipped.push(a);
+                    if (aInside !== bInside) {
+                        const t = (near - a.z) / (b.z - a.z);
+                        clipped.push(new Vec3(a.x + t * (b.x - a.x), a.y + t * (b.y - a.y), near));
+                    }
+                }
+                return clipped;
+            }
 
-                // Perspective projection
+            projectCameraPoint(cameraSpace, w, h) {
                 const fovRad = this.camera.fov * Math.PI / 180;
                 const scale = (h / 2) / Math.tan(fovRad / 2);
 
@@ -772,6 +796,12 @@
                 const y = (-cameraSpace.y * scale / cameraSpace.z) + h / 2;
 
                 return { x, y, z: cameraSpace.z };
+            }
+
+            worldToScreen(worldPos, w, h) {
+                const cameraSpace = this.worldToCamera(worldPos);
+                if (cameraSpace.z < this.camera.near) return null;
+                return this.projectCameraPoint(cameraSpace, w, h);
             }
 
             hexToRgb(hex) {
@@ -798,7 +828,7 @@
                 const vel = this.camera.vel.length();
                 document.getElementById('velocity').textContent = `${vel.toFixed(2)} m/s`;
 
-                const isDayPhase = Math.cos(this.orbitAngle) > 0;
+                const isDayPhase = this.isSunlit();
                 document.getElementById('orbit').textContent = isDayPhase ? 'Day' : 'Night';
             }
 

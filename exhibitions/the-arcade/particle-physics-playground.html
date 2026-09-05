@@ -262,6 +262,12 @@
                 text-shadow: 0 0 10px #00aaff, 0 0 20px #00aaff, 0 0 30px #00aaff;
             }
         }
+        #dataStatus {
+            position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+            max-width: calc(100% - 32px); padding: 10px 14px; z-index: 1000;
+            background: rgba(0,0,0,0.9); border: 1px solid #00aaff; border-radius: 8px;
+            color: #aaddff; pointer-events: none; text-align: center;
+        }
     </style>
 </head>
 <body>
@@ -364,6 +370,7 @@
     </div>
 
     <input type="file" id="fileInput" style="display: none;" accept=".json">
+    <div id="dataStatus" class="hidden" role="status"></div>
 
     <script>
         // ==================== GAME STATE ====================
@@ -375,11 +382,14 @@
             running: false,
             paused: false,
             particleType: 'electron',
+            animationId: null,
+            importId: 0,
+            initialInfoText: '',
 
             // Player state
             player: {
                 x: 0,
-                y: 0,
+                y: -400,
                 z: 0,
                 vx: 0,
                 vy: 0,
@@ -470,6 +480,7 @@
         function init() {
             GameState.canvas = document.getElementById('gameCanvas');
             GameState.ctx = GameState.canvas.getContext('2d');
+            GameState.initialInfoText = document.getElementById('infoText').textContent.trim();
 
             resizeCanvas();
             window.addEventListener('resize', resizeCanvas);
@@ -489,11 +500,13 @@
         function setupEventListeners() {
             // Keyboard
             document.addEventListener('keydown', (e) => {
-                GameState.keys[e.key.toLowerCase()] = true;
-
                 if (e.key === 'Escape') {
                     toggleMenu();
-                } else if (e.key.toLowerCase() === 'q') {
+                    return;
+                }
+                if (!GameState.running || GameState.paused) return;
+                GameState.keys[e.key.toLowerCase()] = true;
+                if (e.key.toLowerCase() === 'q') {
                     activateTunneling();
                 } else if (e.key.toLowerCase() === 'e') {
                     activateSuperposition();
@@ -505,6 +518,7 @@
             document.addEventListener('keyup', (e) => {
                 GameState.keys[e.key.toLowerCase()] = false;
             });
+            window.addEventListener('blur', () => { GameState.keys = {}; });
 
             // UI Buttons
             document.querySelectorAll('.particle-btn').forEach(btn => {
@@ -642,18 +656,19 @@
 
             GameState.running = true;
             GameState.paused = false;
-
-            resetPlayerPosition();
-            gameLoop();
+            GameState.keys = {};
+            document.getElementById('startBtn').textContent = 'RESUME EXPERIMENT';
+            if (GameState.animationId === null) gameLoop();
         }
 
         function gameLoop() {
+            GameState.animationId = null;
             if (!GameState.running) return;
 
             update();
             render();
 
-            requestAnimationFrame(gameLoop);
+            GameState.animationId = requestAnimationFrame(gameLoop);
         }
 
         // ==================== UPDATE ====================
@@ -792,8 +807,8 @@
             }
 
             // Update stats
-            GameState.player.speed = speed;
-            GameState.stats.distance += speed;
+            GameState.player.speed = Math.hypot(GameState.player.vx, GameState.player.vy, GameState.player.vz);
+            GameState.stats.distance += GameState.player.speed;
         }
 
         function updateParticles() {
@@ -909,7 +924,7 @@
             if (GameState.quantum.tunnelingCooldown === 0) {
                 GameState.quantum.tunneling = true;
                 GameState.quantum.tunnelingCooldown = GameState.TUNNEL_DURATION;
-                updateInfoPanel('Quantum Tunneling Active! Pass through barriers.');
+                updateUI();
             }
         }
 
@@ -938,7 +953,7 @@
                     }
                 ];
 
-                updateInfoPanel('Superposition Active! You exist in multiple states.');
+                updateUI();
             }
         }
 
@@ -949,7 +964,9 @@
             GameState.player.vx = 0;
             GameState.player.vy = 0;
             GameState.player.vz = 0;
+            GameState.player.speed = 0;
             GameState.player.trail = [];
+            updateCamera();
         }
 
         // ==================== RENDERING ====================
@@ -984,18 +1001,34 @@
         }
 
         function project3D(x, y, z) {
-            // Simple 3D to 2D projection
             const dx = x - GameState.camera.x;
             const dy = y - GameState.camera.y;
-            const dz = z - GameState.camera.z;
+            // The follow camera sits on +Z and looks toward the player on -Z.
+            const depth = GameState.camera.z - z;
+            if (!Number.isFinite(depth) || depth < 1) return null;
+            const scale = 400 / depth;
+            const screenX = GameState.width / 2 + dx * scale;
+            const screenY = GameState.height / 2 + dy * scale;
+            if (!Number.isFinite(screenX) || !Number.isFinite(screenY)) return null;
+            return { x: screenX, y: screenY, scale };
+        }
 
-            const scale = 400 / (400 + dz);
-
-            return {
-                x: GameState.width / 2 + dx * scale,
-                y: GameState.height / 2 + dy * scale,
-                scale: scale
-            };
+        function projectSegment(start, end) {
+            const nearZ = GameState.camera.z - 1;
+            if (start.z > nearZ && end.z > nearZ) return null;
+            if (start.z > nearZ || end.z > nearZ) {
+                const t = (nearZ - start.z) / (end.z - start.z);
+                const clipped = {
+                    x: start.x + (end.x - start.x) * t,
+                    y: start.y + (end.y - start.y) * t,
+                    z: nearZ,
+                };
+                if (start.z > nearZ) start = clipped;
+                else end = clipped;
+            }
+            const first = project3D(start.x, start.y, start.z);
+            const last = project3D(end.x, end.y, end.z);
+            return first && last ? [first, last] : null;
         }
 
         function drawStars(ctx, width, height) {
@@ -1009,8 +1042,12 @@
 
         function drawAccelerators(ctx, width, height) {
             GameState.accelerators.forEach(acc => {
-                const p1 = project3D(acc.x1, acc.y1, acc.z1);
-                const p2 = project3D(acc.x2, acc.y2, acc.z2);
+                const projected = projectSegment(
+                    { x: acc.x1, y: acc.y1, z: acc.z1 },
+                    { x: acc.x2, y: acc.y2, z: acc.z2 }
+                );
+                if (!projected) return;
+                const [p1, p2] = projected;
 
                 // Draw tube
                 ctx.strokeStyle = '#00aaff';
@@ -1033,6 +1070,7 @@
         function drawBarriers(ctx, width, height) {
             GameState.barriers.forEach(barrier => {
                 const p = project3D(barrier.x, barrier.y, barrier.z);
+                if (!p) return;
 
                 const size = barrier.width * p.scale;
 
@@ -1050,6 +1088,7 @@
         function drawMagneticFields(ctx, width, height) {
             GameState.magneticFields.forEach(field => {
                 const p = project3D(field.x, field.y, field.z);
+                if (!p) return;
                 const radius = field.radius * p.scale;
 
                 // Draw field
@@ -1078,6 +1117,7 @@
         function drawParticles(ctx, width, height) {
             GameState.particles.forEach(particle => {
                 const p = project3D(particle.x, particle.y, particle.z);
+                if (!p) return;
                 const radius = particle.radius * p.scale;
 
                 const color = ParticleTypes[particle.type].color;
@@ -1104,12 +1144,17 @@
             ctx.globalAlpha = 0.5;
             ctx.beginPath();
 
+            let penDown = false;
             for (let i = 0; i < GameState.player.trail.length; i++) {
                 const point = GameState.player.trail[i];
                 const p = project3D(point.x, point.y, point.z);
-
-                if (i === 0) {
+                if (!p) {
+                    penDown = false;
+                    continue;
+                }
+                if (!penDown) {
                     ctx.moveTo(p.x, p.y);
+                    penDown = true;
                 } else {
                     ctx.lineTo(p.x, p.y);
                 }
@@ -1119,6 +1164,7 @@
 
             // Draw player
             const p = project3D(GameState.player.x, GameState.player.y, GameState.player.z);
+            if (!p) return;
             const radius = GameState.player.radius * 2;
 
             // Glow effect
@@ -1144,6 +1190,7 @@
         function drawSuperpositionClones(ctx, width, height) {
             GameState.quantum.superpositionClones.forEach(clone => {
                 const p = project3D(clone.x, clone.y, clone.z);
+                if (!p) return;
                 const radius = GameState.player.radius * 2;
 
                 ctx.globalAlpha = 0.4;
@@ -1198,10 +1245,19 @@
             if (GameState.quantum.tunneling) state = 'Tunneling';
             else if (GameState.quantum.superposition) state = 'Superposition';
             document.getElementById('quantumState').textContent = state;
+            let info = GameState.initialInfoText;
+            if (GameState.quantum.tunneling && GameState.quantum.superposition)
+                info = 'Tunneling and Superposition Active! Pass through barriers in multiple states.';
+            else if (GameState.quantum.tunneling)
+                info = 'Quantum Tunneling Active! Pass through barriers.';
+            else if (GameState.quantum.superposition)
+                info = 'Superposition Active! You exist in multiple states.';
+            updateInfoPanel(info);
         }
 
         function updateInfoPanel(text) {
-            document.getElementById('infoText').textContent = text;
+            const panel = document.getElementById('infoText');
+            if (panel.textContent !== text) panel.textContent = text;
         }
 
         // ==================== UTILITY FUNCTIONS ====================
@@ -1225,8 +1281,13 @@
 
         // ==================== GAME CONTROLS ====================
         function toggleMenu() {
+            GameState.keys = {};
+            if (!GameState.running) {
+                document.getElementById('menu').classList.remove('hidden');
+                return;
+            }
             GameState.paused = !GameState.paused;
-            document.getElementById('menu').classList.toggle('hidden');
+            document.getElementById('menu').classList.toggle('hidden', !GameState.paused);
         }
 
         function toggleInfo() {
@@ -1251,15 +1312,27 @@
             document.getElementById('beryllium').textContent = '0';
 
             GameState.player.energy = 100;
+            GameState.keys = {};
+            GameState.quantum.tunneling = false;
+            GameState.quantum.superposition = false;
+            GameState.quantum.tunnelingCooldown = 0;
+            GameState.quantum.superpositionCooldown = 0;
+            GameState.quantum.superpositionClones = [];
             resetPlayerPosition();
             generateWorld();
+            updateUI();
+            if (GameState.running && GameState.animationId === null) gameLoop();
         }
 
         // ==================== DATA PERSISTENCE ====================
-        function saveGameData() {
-            const data = {
+        function getGameData() {
+            return {
                 particleType: GameState.particleType,
-                stats: GameState.stats,
+                stats: {
+                    collisions: GameState.stats.collisions,
+                    distance: GameState.stats.distance,
+                    elementsCreated: { ...GameState.stats.elementsCreated },
+                },
                 player: {
                     energy: GameState.player.energy,
                     x: GameState.player.x,
@@ -1268,37 +1341,93 @@
                 }
             };
 
-            localStorage.setItem('particlePhysicsPlayground', JSON.stringify(data));
         }
 
-        function loadGameData() {
-            const saved = localStorage.getItem('particlePhysicsPlayground');
-            if (saved) {
-                try {
-                    const data = JSON.parse(saved);
-                    GameState.particleType = data.particleType || 'electron';
-                    GameState.stats = data.stats || GameState.stats;
+        function showDataStatus(message) {
+            const status = document.getElementById('dataStatus');
+            status.textContent = message;
+            status.classList.toggle('hidden', !message);
+        }
 
-                    if (data.player) {
-                        GameState.player.energy = data.player.energy;
-                    }
-
-                    selectParticle(GameState.particleType);
-                } catch (e) {
-                    console.error('Failed to load game data:', e);
-                }
+        function saveGameData() {
+            const data = JSON.stringify(getGameData());
+            try {
+                localStorage.setItem('particlePhysicsPlayground', data);
+                showDataStatus('');
+                return true;
+            } catch (error) {
+                console.warn('Could not save particle experiment:', error);
+                showDataStatus('Local save unavailable. Export your experiment to keep a copy.');
+                return false;
             }
         }
 
-        function exportData() {
-            const data = {
-                particleType: GameState.particleType,
-                stats: GameState.stats,
-                player: {
-                    energy: GameState.player.energy
-                },
-                exportDate: new Date().toISOString()
+        function validateGameData(data) {
+            const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+            const count = value => Number.isSafeInteger(value) && value >= 0;
+            if (!object(data) || !Object.hasOwn(ParticleTypes, data.particleType) ||
+                !object(data.stats) || !count(data.stats.collisions) ||
+                !Number.isFinite(data.stats.distance) || data.stats.distance < 0 ||
+                !object(data.stats.elementsCreated) ||
+                !['hydrogen', 'helium', 'lithium', 'beryllium'].every(key => count(data.stats.elementsCreated[key])) ||
+                !object(data.player) || !Number.isFinite(data.player.energy) || data.player.energy < 0) {
+                throw new Error('Use a valid Particle Physics export.');
+            }
+            const hasPosition = ['x', 'y', 'z'].some(key => key in data.player);
+            if (hasPosition && !['x', 'y', 'z'].every(key => Number.isFinite(data.player[key])))
+                throw new Error('Saved particle position must have three finite coordinates.');
+            return data;
+        }
+
+        function applyGameData(data) {
+            selectParticle(data.particleType);
+            GameState.stats = {
+                collisions: data.stats.collisions,
+                distance: data.stats.distance,
+                elementsCreated: Object.fromEntries(
+                    ['hydrogen', 'helium', 'lithium', 'beryllium'].map(key => [key, data.stats.elementsCreated[key]])
+                ),
             };
+            GameState.player.energy = data.player.energy;
+            if ('x' in data.player) {
+                for (const key of ['x', 'y', 'z']) GameState.player[key] = data.player[key];
+            }
+            GameState.player.vx = GameState.player.vy = GameState.player.vz = GameState.player.speed = 0;
+            GameState.player.trail = [];
+            GameState.keys = {};
+            GameState.quantum.tunneling = GameState.quantum.superposition = false;
+            GameState.quantum.tunnelingCooldown = GameState.quantum.superpositionCooldown = 0;
+            GameState.quantum.superpositionClones = [];
+            for (const key of Object.keys(GameState.stats.elementsCreated)) {
+                document.getElementById(key).textContent = GameState.stats.elementsCreated[key];
+            }
+            updateCamera();
+            updateUI();
+        }
+
+        function loadGameData() {
+            let raw;
+            try {
+                raw = localStorage.getItem('particlePhysicsPlayground');
+            } catch (error) {
+                console.warn('Could not read particle experiment:', error);
+                showDataStatus('Browser storage is unavailable. You can still play and export your experiment.');
+                return;
+            }
+            if (raw === null) return;
+            let data;
+            try {
+                data = validateGameData(JSON.parse(raw));
+            } catch (error) {
+                console.warn('Could not restore particle experiment:', error);
+                showDataStatus('Saved experiment is invalid. Starting with safe defaults.');
+                return;
+            }
+            applyGameData(data);
+        }
+
+        function exportData() {
+            const data = { ...getGameData(), exportDate: new Date().toISOString() };
 
             const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
             const url = URL.createObjectURL(blob);
@@ -1316,35 +1445,38 @@
         function handleFileImport(e) {
             const file = e.target.files[0];
             if (!file) return;
+            e.target.value = '';
+            const importId = ++GameState.importId;
+            if (file.size > 65536) {
+                showDataStatus('Import failed: experiment snapshots must be 64 KB or smaller.');
+                return;
+            }
 
             const reader = new FileReader();
             reader.onload = (event) => {
+                if (importId !== GameState.importId) return;
+                let data;
                 try {
-                    const data = JSON.parse(event.target.result);
-
-                    if (data.particleType) {
-                        GameState.particleType = data.particleType;
-                        selectParticle(data.particleType);
-                    }
-
-                    if (data.stats) {
-                        GameState.stats = data.stats;
-                        document.getElementById('hydrogen').textContent = data.stats.elementsCreated.hydrogen || 0;
-                        document.getElementById('helium').textContent = data.stats.elementsCreated.helium || 0;
-                        document.getElementById('lithium').textContent = data.stats.elementsCreated.lithium || 0;
-                        document.getElementById('beryllium').textContent = data.stats.elementsCreated.beryllium || 0;
-                    }
-
-                    if (data.player) {
-                        GameState.player.energy = data.player.energy;
-                    }
-
-                    alert('Data imported successfully!');
+                    data = validateGameData(JSON.parse(event.target.result));
                 } catch (error) {
-                    alert('Failed to import data: ' + error.message);
+                    showDataStatus('Import failed. ' + error.message + ' Current experiment kept.');
+                    return;
                 }
+                applyGameData(data);
+                showDataStatus(saveGameData() ? 'Experiment imported.'
+                    : 'Imported for this tab. Local save is unavailable; export a copy to keep it.');
             };
-            reader.readAsText(file);
+            const failed = () => {
+                if (importId === GameState.importId)
+                    showDataStatus('Could not read the snapshot. Current experiment kept.');
+            };
+            reader.onerror = failed;
+            reader.onabort = failed;
+            try {
+                reader.readAsText(file);
+            } catch (error) {
+                failed();
+            }
         }
 
         // Auto-save periodically
@@ -1353,6 +1485,10 @@
                 saveGameData();
             }
         }, 30000); // Save every 30 seconds
+        window.addEventListener('pagehide', () => {
+            GameState.keys = {};
+            if (GameState.running) saveGameData();
+        });
 
         // ==================== INITIALIZE ====================
         window.addEventListener('load', init);
