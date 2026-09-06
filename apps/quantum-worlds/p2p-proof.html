@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zero Servers — a live P2P proof</title>
+<meta name="description" content="Two browsers connected directly over WebRTC, without TURN relays — with a verified ICE path, distance between approximate IP locations, and timestamp-based delay.">
+<style>
+    * { box-sizing: border-box; }
+    body {
+        margin: 0; min-height: 100vh; background: #05060f; color: #eee;
+        font-family: 'Segoe UI', system-ui, sans-serif;
+        display: flex; flex-direction: column; align-items: center; padding: 24px 16px 60px;
+    }
+    h1 { font-size: 22px; margin: 8px 0 2px; text-align: center; }
+    .sub { color: #9aa; font-size: 14px; margin-bottom: 20px; text-align: center; max-width: 560px; }
+    .panel {
+        width: 100%; max-width: 620px; background: #10121e; border: 1px solid #2a2d45;
+        border-radius: 12px; padding: 18px 20px; margin-bottom: 16px;
+    }
+    .panel h2 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.05em; color: #8aa; margin: 0 0 10px; }
+    .row { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; margin: 5px 0; }
+    .row .v { color: #7ee787; font-weight: 600; text-align: right; max-width: 62%; overflow-wrap: anywhere; }
+    .row .v.pending { color: #d29922; }
+    .row .v.bad { color: #f85149; }
+    #link-box { display: flex; gap: 8px; margin-top: 10px; }
+    #link-box input { flex: 1; min-width: 0; background: #05060f; border: 1px solid #2a2d45; color: #eee; border-radius: 6px; padding: 8px 10px; font-size: 12.5px; }
+    #link-box button { background: #2a2d45; color: #eee; border: none; border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 12.5px; }
+    #link-box button:disabled { opacity: 0.5; cursor: default; }
+    #copy-status { color: #9aa; font-size: 12px; margin-top: 6px; }
+
+    #surface {
+        position: relative; width: 100%; max-width: 620px; height: 320px;
+        background: radial-gradient(circle at 50% 30%, #131533, #05060f);
+        border: 1px solid #2a2d45; border-radius: 12px; overflow: hidden; touch-action: none;
+        margin-bottom: 16px;
+    }
+    #surface .hint { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: #445; font-size: 13px; text-align: center; pointer-events: none; }
+    .dot { position: absolute; width: 22px; height: 22px; border-radius: 50%; transform: translate(-50%,-50%); transition: box-shadow 0.2s; user-select: none; }
+    #dot-me { left: 30%; top: 50%; background: #58a6ff; box-shadow: 0 0 16px #58a6ff; cursor: grab; }
+    #dot-me:active { cursor: grabbing; }
+    #dot-peer { left: 70%; top: 50%; background: #ff7b72; box-shadow: 0 0 16px #ff7b72; pointer-events: none; }
+    .dot-label { position: absolute; top: 26px; left: 50%; transform: translateX(-50%); font-size: 10.5px; color: #99a; white-space: nowrap; pointer-events: none; }
+
+    .proof-line { font-size: 12px; color: #667; text-align: center; max-width: 560px; margin-top: 4px; }
+    .proof-line b { color: #9ab; }
+    #log { width: 100%; max-width: 620px; font-size: 11.5px; color: #567; font-family: ui-monospace, monospace; max-height: 100px; overflow-y: auto; }
+    #log div { padding: 1px 0; }
+</style>
+</head>
+<body>
+    <h1>🌍 Zero Servers</h1>
+    <div class="sub">Drag your dot. Your peer sees it move over an encrypted WebRTC data channel — not through the signaling server.</div>
+
+    <div class="panel">
+        <h2>Connection</h2>
+        <div class="row"><span>Your peer ID</span><span class="v pending" id="my-id">acquiring…</span></div>
+        <div class="row"><span>Status</span><span class="v pending" id="status" role="status">loading PeerJS…</span></div>
+        <div class="row"><span>Selected data path</span><span class="v pending" id="data-path">not connected</span></div>
+        <div class="row"><span>Your approx. location</span><span class="v pending" id="my-loc">looking up…</span></div>
+        <div class="row"><span>Their approx. location</span><span class="v pending" id="peer-loc">no peer yet</span></div>
+        <div class="row"><span>Distance between IP estimates</span><span class="v" id="distance">—</span></div>
+        <div class="row"><span>Messages exchanged (P2P, not server)</span><span class="v" id="msg-count">0</span></div>
+        <div class="row"><span>Last message one-way delay*</span><span class="v" id="latency">—</span></div>
+        <div id="link-box">
+            <input id="share-link" aria-label="Shareable peer link" readonly placeholder="Your link appears when the broker is online…">
+            <button id="copy-btn" disabled>Copy</button>
+        </div>
+        <div id="copy-status" role="status"></div>
+    </div>
+
+    <div id="surface">
+        <div class="hint" id="surface-hint">drag your dot — connect a peer to send</div>
+        <div class="dot" id="dot-me"><div class="dot-label">you</div></div>
+        <div class="dot" id="dot-peer" hidden><div class="dot-label">them</div></div>
+    </div>
+
+    <div class="proof-line">PeerJS comes from jsDelivr; the public PeerJS broker and STUN help set up the connection. <b>No TURN relay is configured.</b> Networks that require one cannot connect here. IP-based locations from ipapi.co are approximate and shared with your connected peer; they are not GPS fixes. A local <code>file://</code> link only works where the same file path exists; for another device, open its copy with <code>?peer=</code> and your peer ID, or share a hosted copy.</div>
+    <div class="proof-line">*One-way delay is the difference between two machines' timestamps. It includes clock offset, can be negative, and is neither a ping nor a bound on network latency.</div>
+
+    <div id="log"></div>
+
+    <script>
+        'use strict';
+
+        const PEERJS_URL = 'https://cdn.jsdelivr.net/npm/peerjs@1.5.2/dist/peerjs.min.js';
+        const FETCH_TIMEOUT_MS = 6000;
+        const SETUP_TIMEOUT_MS = 20000;
+        const MAX_MESSAGE_LENGTH = 2048;
+        const MAX_BUFFER_BYTES = 65536;
+        const LOCATION_UNAVAILABLE = 'unavailable (lookup failed — not fabricated)';
+        const $ = (id) => document.getElementById(id);
+
+        // ---------- geolocation (real, keyless, honest-on-failure) ----------
+        function validLocation(loc) {
+            return !!loc && Number.isFinite(loc.lat) && Math.abs(loc.lat) <= 90
+                && Number.isFinite(loc.lon) && Math.abs(loc.lon) <= 180;
+        }
+
+        function cleanLabel(value) {
+            return typeof value === 'string' ? value.trim().slice(0, 100) : '';
+        }
+
+        function locationText(loc) {
+            const name = [cleanLabel(loc.city), cleanLabel(loc.country)].filter(Boolean).join(', ');
+            return name || `${loc.lat.toFixed(3)}°, ${loc.lon.toFixed(3)}°`;
+        }
+
+        async function fetchApproxLocation() {
+            let timer;
+            try {
+                const controller = new AbortController();
+                timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+                const res = await fetch('https://ipapi.co/json/', { cache: 'no-store', signal: controller.signal });
+                if (!res.ok) throw new Error('HTTP ' + res.status);
+                const d = await res.json();
+                const loc = d && { lat: d.latitude, lon: d.longitude, city: cleanLabel(d.city), country: cleanLabel(d.country_name) };
+                if (d?.error || !validLocation(loc)) throw new Error('no valid coordinates in response');
+                return loc;
+            } catch (e) {
+                log('location lookup failed: ' + e.message);
+                return null;
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        function haversineKm(a, b) {
+            const R = 6371;
+            const toRad = (x) => x * Math.PI / 180;
+            const dLat = toRad(b.lat - a.lat), dLon = toRad(b.lon - a.lon);
+            const s = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLon / 2) ** 2;
+            return Math.round(2 * R * Math.asin(Math.sqrt(Math.max(0, Math.min(1, s)))));
+        }
+
+        function log(msg) {
+            const el = $('log');
+            const line = document.createElement('div');
+            line.textContent = `[${new Date().toISOString().slice(11, 19)}] ${msg}`;
+            el.appendChild(line);
+            while (el.childElementCount > 100) el.firstElementChild.remove();
+            el.scrollTop = el.scrollHeight;
+        }
+
+        function setStatus(text, cls) {
+            const el = $('status');
+            if (el.textContent !== text) el.textContent = text;
+            el.className = 'v ' + (cls || '');
+        }
+
+        // ---------- state ----------
+        let myLoc = null, peerLoc = null, locationReady = false;
+        let peer = null, conn = null;
+        let msgCount = 0, brokerTimer, brokerFailure = '';
+        let myPosition = { x: new URLSearchParams(location.search).get('peer') ? 70 : 30, y: 50 }, peerPosition = null;
+        const surface = $('surface'), dotMe = $('dot-me'), dotPeer = $('dot-peer');
+
+        function positionDot(el, x, y) {
+            const insetX = Math.min(50, 11 / Math.max(1, surface.clientWidth) * 100);
+            const insetY = Math.min(50, 11 / Math.max(1, surface.clientHeight) * 100);
+            const pos = { x: Math.max(insetX, Math.min(100 - insetX, x)), y: Math.max(insetY, Math.min(100 - insetY, y)) };
+            el.style.left = pos.x + '%';
+            el.style.top = pos.y + '%';
+            return pos;
+        }
+
+        function makeDraggable(el) {
+            let pointerId = null;
+            const stop = () => {
+                const id = pointerId;
+                pointerId = null;
+                try {
+                    if (id !== null && el.hasPointerCapture(id)) el.releasePointerCapture(id);
+                } catch (e) { /* The browser may already have canceled capture. */ }
+            };
+            el.addEventListener('pointerdown', (e) => {
+                if (!e.isPrimary || e.button !== 0) return;
+                e.preventDefault();
+                pointerId = e.pointerId;
+                try { el.setPointerCapture(pointerId); } catch (e) { /* Window listeners still handle the drag. */ }
+            });
+            window.addEventListener('pointermove', (e) => {
+                if (pointerId !== e.pointerId) return;
+                if (e.pointerType === 'mouse' && e.buttons === 0) { stop(); return; }
+                const rect = surface.getBoundingClientRect();
+                myPosition = positionDot(el, (e.clientX - rect.left - surface.clientLeft) / Math.max(1, surface.clientWidth) * 100,
+                    (e.clientY - rect.top - surface.clientTop) / Math.max(1, surface.clientHeight) * 100);
+                sendPosition();
+            });
+            for (const event of ['pointerup', 'pointercancel', 'lostpointercapture']) {
+                window.addEventListener(event, (e) => { if (e.pointerId === pointerId) stop(); });
+            }
+            window.addEventListener('blur', stop);
+        }
+
+        function countMessage() {
+            $('msg-count').textContent = ++msgCount;
+        }
+
+        function sendToPeer(payload) {
+            const session = conn;
+            if (!session || !session.ready) return false;
+            const c = session.channel;
+            try {
+                if (!c.open || c.dataChannel?.readyState !== 'open') throw new Error('data channel is not open');
+                if (c.bufferSize > 0 || c.dataChannel.bufferedAmount > MAX_BUFFER_BYTES) {
+                    log('data channel busy — message not sent');
+                    return false;
+                }
+                // Raw PeerJS transport keeps parsing inside our own guarded boundary.
+                const result = c.send(JSON.stringify(payload));
+                if (result === false) throw new Error('data channel rejected the message');
+                if (conn !== session || !c.open || c.bufferSize > 0) return false;
+                countMessage();
+                return true;
+            } catch (e) {
+                endConnection(session, 'send failed — ' + e.message);
+                return false;
+            }
+        }
+
+        function updateDistance() {
+            $('distance').textContent = myLoc && peerLoc ? haversineKm(myLoc, peerLoc).toLocaleString() + ' km' : '—';
+        }
+
+        function sendHello() {
+            sendToPeer({ type: 'hello', loc: myLoc, pending: !locationReady });
+        }
+
+        function sendPosition() {
+            sendToPeer({ type: 'move', ...myPosition, t: Date.now() });
+        }
+
+        function resetPeer() {
+            peerLoc = null;
+            peerPosition = null;
+            dotPeer.hidden = true;
+            $('surface-hint').hidden = false;
+            $('peer-loc').textContent = 'no peer connected';
+            $('peer-loc').className = 'v pending';
+            $('latency').textContent = '—';
+            $('data-path').textContent = 'not connected';
+            $('data-path').className = 'v pending';
+            updateDistance();
+        }
+
+        function closeChannel(c) {
+            try { c.close(); } catch (e) { log('connection cleanup failed: ' + e.message); }
+        }
+
+        function endConnection(session, message) {
+            if (conn !== session) return;
+            conn = null;
+            clearTimeout(session.timeout);
+            clearTimeout(session.pathTimer);
+            closeChannel(session.channel);
+            resetPeer();
+            setStatus(message, 'bad');
+            log(message);
+        }
+
+        function pauseConnection(session, message) {
+            session.ready = false;
+            dotPeer.hidden = true;
+            $('surface-hint').hidden = false;
+            $('latency').textContent = '—';
+            $('data-path').textContent = 'not yet verified';
+            $('data-path').className = 'v pending';
+            setStatus(message, 'pending');
+        }
+
+        function readMessage(raw) {
+            try {
+                if (typeof raw !== 'string' || raw.length > MAX_MESSAGE_LENGTH) throw new Error('invalid message size or encoding');
+                const data = JSON.parse(raw);
+                if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('not a message object');
+                if (data.type === 'hello') {
+                    if (data.loc !== null && !validLocation(data.loc)) throw new Error('invalid peer coordinates');
+                    if (typeof data.pending !== 'boolean') throw new Error('invalid lookup state');
+                } else if (data.type === 'move') {
+                    if (!Number.isFinite(data.x) || data.x < 0 || data.x > 100
+                        || !Number.isFinite(data.y) || data.y < 0 || data.y > 100
+                        || !Number.isSafeInteger(data.t) || data.t <= 0) throw new Error('invalid move');
+                } else {
+                    throw new Error('unknown message type');
+                }
+                return data;
+            } catch (e) {
+                log('ignored peer message: ' + e.message);
+                return null;
+            }
+        }
+
+        function displayMessage(data) {
+            if (data.type === 'hello') {
+                peerLoc = data.loc;
+                $('peer-loc').textContent = peerLoc ? locationText(peerLoc)
+                    : data.pending ? 'looking up…' : 'unavailable (lookup failed on their end)';
+                $('peer-loc').className = peerLoc ? 'v' : data.pending ? 'v pending' : 'v bad';
+                updateDistance();
+            } else {
+                peerPosition = { x: data.x, y: data.y };
+                positionDot(dotPeer, data.x, data.y);
+                dotPeer.hidden = false;
+                $('latency').textContent = (Date.now() - data.t) + ' ms';
+            }
+        }
+
+        // PeerJS's defaults include TURN. An open channel alone is not proof of
+        // a direct route: refuse relay/unknown candidates before sending anything.
+        async function checkDirectPath(session) {
+            if (conn !== session) return;
+            try {
+                const pc = session.channel.peerConnection;
+                const stats = await pc.getStats();
+                if (conn !== session) return;
+                const entries = [...stats.values()];
+                const transport = entries.find(s => s.type === 'transport' && s.selectedCandidatePairId);
+                const pair = transport ? stats.get(transport.selectedCandidatePairId)
+                    : entries.find(s => s.type === 'candidate-pair' && s.state === 'succeeded' && s.nominated);
+                const local = pair && stats.get(pair.localCandidateId);
+                const remote = pair && stats.get(pair.remoteCandidateId);
+                if (local?.candidateType === 'relay' || remote?.candidateType === 'relay') {
+                    throw new Error('relay refused — this proof requires a direct route');
+                }
+                const directTypes = ['host', 'srflx', 'prflx'];
+                const connected = pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed';
+                if (!connected || !directTypes.includes(local?.candidateType) || !directTypes.includes(remote?.candidateType)) {
+                    pauseConnection(session, 'checking direct data path…');
+                    if (!session.timeout) session.timeout = setTimeout(() => endConnection(session, 'direct path unavailable — no relay fallback'), SETUP_TIMEOUT_MS);
+                    session.pathTimer = setTimeout(() => checkDirectPath(session), 100);
+                    return;
+                }
+                const first = !session.ready;
+                session.ready = true;
+                clearTimeout(session.timeout);
+                session.timeout = null;
+                $('data-path').textContent = `direct (${local.candidateType} ↔ ${remote.candidateType}; no TURN)`;
+                $('data-path').className = 'v';
+                setStatus(peer?.disconnected ? 'signaling offline — direct channel still open' : '🟢 connected — verified direct data channel', '');
+                dotPeer.hidden = peerPosition === null;
+                $('surface-hint').hidden = true;
+                if (first) {
+                    log('verified direct data channel with ' + session.channel.peer);
+                    for (const data of Object.values(session.pending)) displayMessage(data);
+                    session.pending = {};
+                    sendHello();
+                    sendPosition();
+                }
+                if (conn === session) session.pathTimer = setTimeout(() => checkDirectPath(session), 2000);
+            } catch (e) {
+                endConnection(session, 'could not verify direct path: ' + e.message);
+            }
+        }
+
+        function setupConnection(c) {
+            if (!c) { setStatus('could not create a data connection', 'bad'); return; }
+            c.on('error', (e) => {
+                if (conn?.channel === c) endConnection(conn, 'connection failed: ' + (e.type || e.message));
+            });
+            if (conn || c.serialization !== 'raw') {
+                log('declined peer — one compatible connection at a time');
+                closeChannel(c);
+                return;
+            }
+            const session = { channel: c, ready: false, pending: {}, timeout: null, pathTimer: null };
+            conn = session;
+            resetPeer();
+            setStatus('connecting direct data channel…', 'pending');
+            session.timeout = setTimeout(() => endConnection(session, 'direct connection timed out — peer unavailable or network requires a relay'), SETUP_TIMEOUT_MS);
+            c.on('open', () => checkDirectPath(session));
+            c.on('data', (raw) => {
+                if (conn !== session) return;
+                countMessage();
+                const data = readMessage(raw);
+                if (!data) return;
+                if (session.ready) displayMessage(data);
+                else session.pending[data.type] = data;
+            });
+            c.on('close', () => endConnection(session, 'peer disconnected'));
+            c.on('iceStateChanged', (state) => {
+                if (conn !== session || state !== 'disconnected') return;
+                pauseConnection(session, 'connection interrupted — waiting for a direct route');
+            });
+        }
+
+        function clearShareLink() {
+            $('my-id').textContent = 'unavailable (not registered)';
+            $('my-id').className = 'v bad';
+            $('share-link').value = '';
+            $('copy-btn').disabled = true;
+            $('copy-status').textContent = '';
+        }
+
+        function loadPeerJS() {
+            return new Promise((resolve, reject) => {
+                const script = document.createElement('script');
+                const timer = setTimeout(() => finish(new Error('PeerJS CDN timed out — reload to retry')), FETCH_TIMEOUT_MS);
+                function finish(error) {
+                    clearTimeout(timer);
+                    script.onload = script.onerror = null;
+                    if (error) { script.remove(); reject(error); }
+                    else resolve();
+                }
+                script.src = PEERJS_URL;
+                script.async = true;
+                script.onload = () => finish(typeof window.Peer === 'function' ? null : new Error('PeerJS CDN did not provide the library'));
+                script.onerror = () => finish(new Error('PeerJS unavailable — CDN blocked or offline; reload to retry'));
+                document.head.appendChild(script);
+            });
+        }
+
+        async function init() {
+            try {
+                await loadPeerJS();
+                if (typeof RTCPeerConnection !== 'function') throw new Error('WebRTC unavailable in this browser');
+                setStatus('connecting to signaling broker…', 'pending');
+                peer = new Peer({ debug: 0, config: { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] } });
+                brokerTimer = setTimeout(() => {
+                    brokerFailure = 'signaling broker timed out — reload to retry';
+                    clearShareLink();
+                    setStatus(brokerFailure, 'bad');
+                    try { peer.destroy(); } catch (e) { log('broker cleanup failed: ' + e.message); }
+                }, SETUP_TIMEOUT_MS);
+                peer.on('open', (id) => {
+                    clearTimeout(brokerTimer);
+                    brokerFailure = '';
+                    $('my-id').textContent = id;
+                    $('my-id').className = 'v';
+                    if (!conn?.ready) setStatus('🟡 online — waiting for a peer', 'pending');
+                    const link = new URL(location.href);
+                    link.searchParams.set('peer', id);
+                    $('share-link').value = link.href;
+                    $('copy-btn').disabled = false;
+                    log('acquired peer id ' + id);
+                    const target = new URLSearchParams(location.search).get('peer');
+                    if (target && target !== id && !conn) {
+                        if (!/^[A-Za-z0-9_-]{1,128}$/.test(target)) {
+                            setStatus('invalid peer ID in link — no connection attempted', 'bad');
+                            return;
+                        }
+                        try { setupConnection(peer.connect(target, { reliable: true, serialization: 'raw' })); }
+                        catch (e) { setStatus('could not connect: ' + e.message, 'bad'); }
+                    }
+                });
+                peer.on('connection', setupConnection);
+                peer.on('error', (err) => {
+                    clearTimeout(brokerTimer);
+                    const message = 'signaling error: ' + (err.type || err.message);
+                    log(message);
+                    if (!peer.open) {
+                        brokerFailure = message + ' — reload to retry';
+                        clearShareLink();
+                    }
+                    if (conn?.ready) setStatus('signaling unavailable — direct channel still open', '');
+                    else if (conn) endConnection(conn, message);
+                    else setStatus(message + ' — reload to retry', 'bad');
+                });
+                peer.on('disconnected', () => {
+                    clearTimeout(brokerTimer);
+                    clearShareLink();
+                    if (conn?.ready) setStatus('signaling offline — direct channel still open', '');
+                    else setStatus(brokerFailure || 'signaling disconnected — reload to retry', 'bad');
+                });
+            } catch (e) {
+                clearTimeout(brokerTimer);
+                clearShareLink();
+                setStatus(e.message, 'bad');
+                log(e.message);
+            }
+        }
+
+        $('copy-btn').addEventListener('click', async () => {
+            const input = $('share-link');
+            let selected = false;
+            try {
+                if (!input.value || !peer?.open) throw new Error('no live link');
+                input.focus();
+                input.select();
+                selected = input.selectionStart === 0 && input.selectionEnd === input.value.length;
+                const clipboard = navigator.clipboard;
+                if (!clipboard || typeof clipboard.writeText !== 'function') throw new Error('clipboard unavailable');
+                const written = clipboard.writeText(input.value);
+                if (!written || typeof written.then !== 'function') throw new Error('clipboard did not confirm a write');
+                await written;
+                $('copy-status').textContent = 'Link copied.';
+            } catch (e) {
+                $('copy-status').textContent = selected ? 'Clipboard unavailable — link selected; copy it manually.'
+                    : 'Clipboard unavailable — select and copy the link manually.';
+            }
+        });
+
+        myPosition = positionDot(dotMe, myPosition.x, myPosition.y);
+        makeDraggable(dotMe);
+        window.addEventListener('resize', () => {
+            const previous = myPosition;
+            myPosition = positionDot(dotMe, previous.x, previous.y);
+            if (peerPosition) positionDot(dotPeer, peerPosition.x, peerPosition.y);
+            if (previous.x !== myPosition.x || previous.y !== myPosition.y) sendPosition();
+        });
+        init();
+        (async () => {
+            myLoc = await fetchApproxLocation();
+            locationReady = true;
+            $('my-loc').textContent = myLoc ? locationText(myLoc) : LOCATION_UNAVAILABLE;
+            $('my-loc').className = myLoc ? 'v' : 'v bad';
+            updateDistance();
+            sendHello();
+        })();
+    </script>
+</body>
+</html>
