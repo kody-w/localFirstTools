@@ -1,0 +1,105 @@
+name: Repository autocomplete
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/autocomplete-check.yml"
+      - "scripts/autocomplete_*.py"
+      - "scripts/check_autocomplete.py"
+      - "tests/test_autocomplete_*"
+      - "landgrab/autocomplete/**"
+      - "landgrab/hq.html"
+      - "landgrab/README.md"
+      - "AGENTS.md"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/autocomplete-check.yml"
+      - "scripts/autocomplete_*.py"
+      - "scripts/check_autocomplete.py"
+      - "tests/test_autocomplete_*"
+      - "landgrab/autocomplete/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: autocomplete-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  qualify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Obtain the pinned public RAPP reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          reference="$RUNNER_TEMP/autocomplete-rapp-reference"
+          git init --quiet "$reference"
+          git -C "$reference" remote add origin https://github.com/kody-w/rapp-1.git
+          git -C "$reference" fetch --quiet --depth=1 origin eb50008011447f5e69372ac22a1755f0978d15ed
+          git -C "$reference" checkout --quiet --detach FETCH_HEAD
+          test "$(git -C "$reference" rev-parse HEAD)" = eb50008011447f5e69372ac22a1755f0978d15ed
+          echo "RAPP_REFERENCE=$reference" >> "$GITHUB_ENV"
+
+      - name: Qualify real source, parallel frames, and browser behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          chrome="$(command -v google-chrome || command -v chromium || command -v chromium-browser || true)"
+          if [ -z "$chrome" ]; then
+            echo "::error::An installed Chromium browser is required; the browser gate cannot be skipped."
+            exit 1
+          fi
+          profile="$(mktemp -d "$RUNNER_TEMP/autocomplete-chrome.XXXXXX")"
+          browser_pid=""
+          python3 -m http.server 18766 --bind 127.0.0.1 > "$RUNNER_TEMP/autocomplete-http.log" 2>&1 &
+          server_pid=$!
+          cleanup() {
+            kill "$server_pid" 2>/dev/null || true
+            if [ -n "$browser_pid" ]; then
+              kill "$browser_pid" 2>/dev/null || true
+            fi
+          }
+          trap cleanup EXIT
+          "$chrome" --headless=new --user-data-dir="$profile" \
+            --remote-debugging-port=0 --remote-debugging-address=127.0.0.1 \
+            --no-first-run --no-default-browser-check --disable-background-networking \
+            --disable-extensions --log-level=3 about:blank \
+            > "$RUNNER_TEMP/autocomplete-chrome.log" 2>&1 &
+          browser_pid=$!
+          ready=0
+          for attempt in $(seq 1 100); do
+            if [ -s "$profile/DevToolsActivePort" ] && \
+              curl --fail --silent http://127.0.0.1:18766/landgrab/autocomplete/index.html > /dev/null; then
+              ready=1
+              break
+            fi
+            sleep 0.2
+          done
+          if [ "$ready" != 1 ]; then
+            tail -n 40 "$RUNNER_TEMP/autocomplete-chrome.log"
+            echo "::error::The isolated browser and static preview did not become ready."
+            exit 1
+          fi
+          port="$(head -n 1 "$profile/DevToolsActivePort")"
+          curl --fail --silent "http://127.0.0.1:$port/json/version" > /dev/null
+          python3 scripts/check_autocomplete.py \
+            --rapp-dir "$RAPP_REFERENCE" \
+            --cdp "http://127.0.0.1:$port" \
+            --url http://127.0.0.1:18766/landgrab/autocomplete/index.html
