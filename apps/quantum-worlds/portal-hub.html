@@ -1506,6 +1506,34 @@ function updateController(dt) {
     }
 }
 
+// -------- Live peer-presence relay into the active world's iframe ------
+// The world itself has no P2P of its own; this hub already maintains a real
+// PeerJS mesh, so it relays "who else is in this same world right now" into
+// the iframe via postMessage. Any world (or the DOGG Companion Lens) can
+// listen for {type:'rapp-peers-update', peers:[{id,name,color}], world}.
+// setTimeout self-rescheduling rather than setInterval: avoids overlapping
+// ticks if a relay takes longer than the period, and needs no extra global.
+let presenceRelayTimer = null;
+function startPresenceRelay(iframe, worldId) {
+    stopPresenceRelay();
+    const tick = () => {
+        const inWorld = [];
+        peers.forEach((p, id) => {
+            if (p.world === worldId) inWorld.push({ id, name: p.name || 'Wanderer', color: p.color || '#888888' });
+        });
+        try {
+            iframe.contentWindow.postMessage({ type: 'rapp-peers-update', peers: inWorld, world: worldId }, '*');
+        } catch (e) {
+            // iframe mid-navigation or torn down; the next tick retries, exitWorld() stops us for good
+        }
+        presenceRelayTimer = setTimeout(tick, 1000);
+    };
+    presenceRelayTimer = setTimeout(tick, 1000);
+}
+function stopPresenceRelay() {
+    if (presenceRelayTimer) { clearTimeout(presenceRelayTimer); presenceRelayTimer = null; }
+}
+
 // -------- World iframe lifecycle ---------------------------------------
 function enterWorld(world) {
     if (activeWorld) return;
@@ -1628,6 +1656,7 @@ async function loadWorld(world) {
         iframe.hidden = false;
         iframe.inert = false;
         iframe.focus();
+        startPresenceRelay(iframe, world.id);
     });
     iframe.addEventListener('error', () => fail('The browser could not open this world. Try again, or use Open full page.'));
     iframe.src = url.href;
@@ -1638,6 +1667,7 @@ function exitWorld() {
     const world = activeWorld;
     ++worldLoadId;
     cancelWorldLoad();
+    stopPresenceRelay();
     resetMovement();
     if (document.pointerLockElement) document.exitPointerLock();
 
