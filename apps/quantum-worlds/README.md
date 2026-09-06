@@ -5,14 +5,14 @@
 ### What You Have Now
 
 **File:** `quantum-worlds-store.html` (at root level)
-- Beautiful app store showcasing 10 experimental P2P worlds
+- Beautiful app store showcasing 11 experimental P2P worlds
 - Fully functional UI with filtering, modals, and animations
 - Local-first architecture (no external dependencies)
 - Ready to launch from main `index.html` gallery
 
 ---
 
-## 📦 The 10 Quantum Worlds
+## 📦 The 11 Quantum Worlds
 
 ### 1. 🏝️ Quantum Garden of Floating Islands
 **Category:** Fantastical, Social
@@ -53,6 +53,10 @@
 ### 10. ⭐ Ancient Ruins on a Dying Star
 **Category:** Fantastical, Scientific
 **Description:** Explore alien temples on a red giant about to go supernova. Lava walkways over plasma seas, solar flares, ancient obelisks. Race against time before the star explodes.
+
+### 11. 🐝 Agent Swarm Nebula
+**Category:** Scientific, Social
+**Description:** Task a living swarm of autonomous AI agents to converge on any point in the nebula and grow a glowing crystalline monument — watch them build without touching a single brick. Every player can dispatch their own squad; monuments persist across sessions.
 
 ---
 

@@ -12,10 +12,10 @@ SOURCE = PAGE.read_text(encoding='utf-8')
 WORLDS = re.findall(r"id:\s*'([^']+)',\s*file:\s*'([^']+)'", SOURCE)
 
 
-def test_all_ten_portals_have_unique_destinations():
-    assert len(WORLDS) == 10
-    assert len({world_id for world_id, _ in WORLDS}) == 10
-    assert len({path for _, path in WORLDS}) == 10
+def test_all_portals_have_unique_destinations():
+    assert len(WORLDS) == 11
+    assert len({world_id for world_id, _ in WORLDS}) == 11
+    assert len({path for _, path in WORLDS}) == 11
 
 
 @pytest.mark.parametrize('world_id,path', WORLDS)
