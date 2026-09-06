@@ -127,6 +127,33 @@
         goddSave(entries);
         return entries.length;
     }
+    function goddExport() {
+        const entries = goddLoad();
+        const blob = new Blob([JSON.stringify({ schema: 'godd/0-ledger', entries }, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `godd-ledger-${Date.now()}.json`;
+        a.click();
+        URL.revokeObjectURL(url);
+    }
+    function goddImport(file, onDone) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            try {
+                const data = JSON.parse(e.target.result);
+                const incoming = Array.isArray(data.entries) ? data.entries : (Array.isArray(data) ? data : null);
+                if (!incoming) throw new Error('no entries array in file');
+                const merged = goddLoad().concat(incoming);
+                goddSave(merged);
+                onDone({ ok: true, count: merged.length });
+            } catch (err) {
+                onDone({ ok: false, error: err.message });
+            }
+        };
+        reader.onerror = () => onDone({ ok: false, error: 'could not read file' });
+        reader.readAsText(file);
+    }
 
     // -------- Companion role definitions (mirrors the published lens frame) --------
     const WORLD_ID = (document.title || location.pathname).slice(0, 60);
@@ -277,6 +304,44 @@
             bar.appendChild(btn);
         }
         document.body.appendChild(bar);
+        avoidCollisions(bar);
+        window.addEventListener('resize', () => avoidCollisions(bar));
+    }
+
+    // Every host world reserves ITS OWN corner for its native HUD, and which
+    // corner varies per world (checked across all 11 - no single fixed corner
+    // is universally free; one world's own Export/Import/Reset row sat exactly
+    // where this bar defaulted to). Rather than guess or hardcode a per-world
+    // exception, detect a real visual collision at runtime and nudge clear of
+    // it - this stays correct for worlds this lens hasn't been checked against
+    // yet, including future ones.
+    function avoidCollisions(bar) {
+        const MAX_ITERATIONS = 6;
+        const MARGIN = 12;
+        for (let i = 0; i < MAX_ITERATIONS; i++) {
+            const barRect = bar.getBoundingClientRect();
+            const blocker = [...document.body.querySelectorAll('*')].find(el => {
+                if (el === bar || bar.contains(el)) return false;
+                const style = getComputedStyle(el);
+                if (style.position !== 'fixed' && style.position !== 'absolute') return false;
+                const r = el.getBoundingClientRect();
+                // Ignore near-full-viewport containers (overlay wrappers) - a real
+                // HUD control is a small, bounded element, not a screen-sized div.
+                if (r.width === 0 || r.height === 0) return false;
+                if (r.width > window.innerWidth * 0.6 && r.height > window.innerHeight * 0.6) return false;
+                return !(r.right < barRect.left || r.left > barRect.right || r.bottom < barRect.top || r.top > barRect.bottom);
+            });
+            if (!blocker) return;
+            const bRect = blocker.getBoundingClientRect();
+            // Push the bar up just enough that its bottom edge clears the
+            // blocker's top edge, with a margin. Computed directly in viewport
+            // coordinates rather than accumulated deltas - much easier to get
+            // right and to verify.
+            const neededBottom = Math.round(window.innerHeight - bRect.top + MARGIN);
+            const currentBottom = parseFloat(getComputedStyle(bar).bottom) || 16;
+            if (neededBottom <= currentBottom) return; // already clear; avoid drifting further
+            bar.style.bottom = neededBottom + 'px';
+        }
     }
 
     async function togglePanel(id, btn) {
@@ -320,6 +385,32 @@
                 goddLine.style.marginTop = '8px';
                 goddLine.textContent = `GODD ledger: ${count} verified summons recorded on this device.`;
                 panel.appendChild(goddLine);
+
+                const goddRow = document.createElement('div');
+                goddRow.style.display = 'flex';
+                goddRow.style.gap = '6px';
+                const exportBtn = document.createElement('button');
+                exportBtn.className = 'rapp-action';
+                exportBtn.textContent = 'Export ledger';
+                exportBtn.addEventListener('click', () => goddExport());
+                const importBtn = document.createElement('button');
+                importBtn.className = 'rapp-action';
+                importBtn.textContent = 'Import ledger';
+                importBtn.addEventListener('click', () => {
+                    const input = document.createElement('input');
+                    input.type = 'file';
+                    input.accept = '.json';
+                    input.addEventListener('change', () => {
+                        if (!input.files[0]) return;
+                        goddImport(input.files[0], (r) => {
+                            importBtn.textContent = r.ok ? `✅ merged (${r.count} total)` : '⚠️ ' + r.error;
+                        });
+                    });
+                    input.click();
+                });
+                goddRow.appendChild(exportBtn);
+                goddRow.appendChild(importBtn);
+                panel.appendChild(goddRow);
             } else {
                 statusEl.textContent = `⚠️ could not verify live DOGG data (${cachedError}). ${c.name} has nothing real to say right now.`;
             }
