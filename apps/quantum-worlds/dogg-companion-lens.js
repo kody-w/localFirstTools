@@ -26,20 +26,120 @@
     const GODD_KEY = 'rapp_godd_ledger';
     const GODD_MAX_ENTRIES = 500; // defensive cap, same lesson as the monument-import cap
 
-    // -------- rapp/1 canonical hashing (validated byte-for-byte against the real
-    // Python reference implementation on live ASCII, unicode, and tampered frames
-    // before this file was ever deployed) --------
+    // -------- rapp/1 (rev-17) §4 strict JSON, canonical form and §5 hashing --------
+    // The lens parses every octet it fetches itself: res.json() would repair what §4 refuses (duplicate
+    // names, lone surrogates, numbers that do not survive binary64, over-deep nesting).
+    const MAX_CANONICAL_BYTES = 1024 * 1024;
+    const NON_INTEGER_TOKEN = new WeakMap(); // object -> names of members whose number token was not an integer token
+
+    function checkString(s) {
+        for (const ch of s) {
+            const cp = ch.codePointAt(0);
+            if ((cp >= 0xD800 && cp <= 0xDFFF) || (cp >= 0xFDD0 && cp <= 0xFDEF) || (cp & 0xFFFE) === 0xFFFE) {
+                throw new Error('string holds U+' + cp.toString(16).toUpperCase().padStart(4, '0') + ', a surrogate or noncharacter outside I-JSON (§4 (b))');
+            }
+        }
+        return s;
+    }
+
+    // The exact decimal value of a number token (or of a Number::toString result), as sign, digits and exponent.
+    function decimalValue(text) {
+        const m = /^(-?)(\d+)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(text);
+        const all = (m[2] + (m[3] || '')).replace(/^0+/, '');
+        if (!all) return '0';
+        const digits = all.replace(/0+$/, '');
+        return m[1] + digits + 'e' + (BigInt(m[4] || 0) - BigInt((m[3] || '').length) + BigInt(all.length - digits.length));
+    }
+
+    function parseStrict(octets) {
+        const bytes = new Uint8Array(octets);
+        if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) throw new Error('JSON text starts with a byte-order mark; §4 refuses it');
+        const text = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes);
+        const ESC = { '"': '"', '\\': '\\', '/': '/', b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' };
+        let i = 0, integerToken = false;
+        const ws = () => { while (text[i] === ' ' || text[i] === '\t' || text[i] === '\n' || text[i] === '\r') i++; };
+        const fail = (what) => { throw new Error('not a §4 JSON text: ' + what + ' at offset ' + i); };
+        function string() {
+            let out = '';
+            for (i++; ;) {
+                if (i >= text.length) fail('unterminated string');
+                const c = text[i++];
+                if (c === '"') return checkString(out);
+                if (c < ' ') fail('control character in a string');
+                if (c !== '\\') { out += c; continue; }
+                const e = text[i++];
+                if (Object.prototype.hasOwnProperty.call(ESC, e)) out += ESC[e];
+                else if (e === 'u' && /^[0-9a-fA-F]{4}$/.test(text.slice(i, i + 4))) { out += String.fromCharCode(parseInt(text.slice(i, i + 4), 16)); i += 4; }
+                else fail('bad escape');
+            }
+        }
+        function number() {
+            const re = /-?(?:0|[1-9]\d*)(\.\d+)?([eE][+-]?\d+)?/y;
+            re.lastIndex = i;
+            const m = re.exec(text);
+            if (!m) fail('bad value');
+            i = re.lastIndex;
+            const d = Number(m[0]);
+            if (!Number.isFinite(d)) throw new Error('number token ' + m[0].slice(0, 40) + ' is not a finite binary64 value (§4 (c))');
+            if (decimalValue(m[0]) !== decimalValue(String(d))) throw new Error('number token ' + m[0].slice(0, 40) + ' does not survive the binary64 round trip (§4 (c))');
+            integerToken = !m[1] && !m[2] && m[0] !== '-0';
+            return d;
+        }
+        function value(depth) {
+            ws();
+            const c = text[i];
+            if (c === '{' || c === '[') {
+                if (depth > 64) throw new Error('JSON nesting depth exceeds 64 (§4 (d))');
+                i++; ws();
+                const close = c === '{' ? '}' : ']';
+                const out = c === '{' ? {} : [];
+                let nonInteger = null;
+                if (text[i] === close) { i++; return out; }
+                for (;;) {
+                    if (c === '[') out.push(value(depth + 1));
+                    else {
+                        ws();
+                        if (text[i] !== '"') fail('expected a member name');
+                        const key = string();
+                        if (Object.prototype.hasOwnProperty.call(out, key)) throw new Error('duplicate JSON member: ' + key);
+                        ws();
+                        if (text[i++] !== ':') fail('expected :');
+                        const v = value(depth + 1);
+                        if (typeof v === 'number' && !integerToken) (nonInteger || (nonInteger = new Set())).add(key);
+                        Object.defineProperty(out, key, { value: v, enumerable: true, writable: true, configurable: true });
+                    }
+                    ws();
+                    if (text[i] === ',') { i++; continue; }
+                    if (text[i++] === close) break;
+                    fail('expected , or ' + close);
+                }
+                if (nonInteger) NON_INTEGER_TOKEN.set(out, nonInteger);
+                return out;
+            }
+            if (c === '"') return string();
+            for (const [word, v] of [['true', true], ['false', false], ['null', null]]) {
+                if (text.startsWith(word, i)) { i += word.length; return v; }
+            }
+            return number();
+        }
+        const root = value(1);
+        ws();
+        if (i !== text.length) fail('trailing data');
+        if (new TextEncoder().encode(canonical(root)).length > MAX_CANONICAL_BYTES) throw new Error('canonical JSON exceeds the 1 MiB ceiling (§4 (d))');
+        return root;
+    }
+
     function canonical(v) {
         if (v === null || typeof v === 'boolean') return JSON.stringify(v);
         if (typeof v === 'number') {
-            if (!Number.isInteger(v)) throw new Error('floats not supported in this profile');
-            return JSON.stringify(v);
+            if (!Number.isFinite(v)) throw new Error('NaN and infinities are outside the §4 domain');
+            return JSON.stringify(v); // ECMA-262 Number::toString, the RFC 8785 number form (-0 serializes as 0)
         }
-        if (typeof v === 'string') return JSON.stringify(v);
-        if (Array.isArray(v)) return '[' + v.map(canonical).join(',') + ']';
+        if (typeof v === 'string') return JSON.stringify(checkString(v));
+        if (Array.isArray(v)) return '[' + v.map((x) => canonical(x)).join(',') + ']';
         if (typeof v === 'object') {
-            const keys = Object.keys(v).sort();
-            return '{' + keys.map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+            const keys = Object.keys(v).sort(); // UTF-16 code-unit order, as RFC 8785 requires
+            return '{' + keys.map(k => JSON.stringify(checkString(k)) + ':' + canonical(v[k])).join(',') + '}';
         }
         throw new Error('non-serializable value: ' + typeof v);
     }
@@ -49,21 +149,140 @@
         return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
     }
 
+    // §5 (rev-17 E-7): H takes only its own tags; every other tag is refused.
+    const H_SPACES = ['rapp/1:particle', 'rapp/1:wave', 'rapp/1:egg-manifest', 'rapp/1:sealed-aad', 'rapp/1:sealed-key-request'];
     async function H(space, v) {
+        if (!H_SPACES.includes(space)) throw new Error('§5: H is used only with the tags ' + H_SPACES.join(', ') + '; refused ' + JSON.stringify(space));
         return sha256Hex(space + '\n' + canonical(v));
     }
 
-    async function verifyFrame(frame) {
+    // -------- rapp/1 (rev-17) §7.5 consumer checklist (registry-less, no signature verifier) --------
+    const LCLABEL = '[a-z0-9]+(?:-[a-z0-9]+)*';
+    const LCLABEL_RE = new RegExp('^' + LCLABEL + '$');
+    const RAPPID_RE = new RegExp('^rappid:@(' + LCLABEL + ')/(' + LCLABEL + '):([0-9a-f]{64})$');
+    const KIND_RE = new RegExp('^(' + LCLABEL + ')\\.(' + LCLABEL + ')$');
+    const UTC_RE = /^([0-9]{4})-([0-9]{2})-([0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})\.[0-9]{3}Z$/;
+    const HEX64_RE = /^[0-9a-f]{64}$/;
+    const FRAME_KEYS = ['spec', 'kind', 'stream_id', 'seq', 'utc', 'payload', 'payload_hash', 'frame_hash', 'prev', 'prev_wave', 'sig'];
+    const isObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
+    const hasExactly = (o, keys) => Object.keys(o).length === keys.length && keys.every(k => Object.prototype.hasOwnProperty.call(o, k));
+    const isHex64 = (v) => typeof v === 'string' && HEX64_RE.test(v);
+
+    function rappidValid(s) {
+        const m = typeof s === 'string' ? RAPPID_RE.exec(s) : null;
+        return !!m && m[1].length <= 39 && m[2].length <= 100;
+    }
+    function kindValid(k) {
+        const m = typeof k === 'string' ? KIND_RE.exec(k) : null;
+        return !!m && m[1].length <= 64 && m[2].length <= 64;
+    }
+    // §6.1.1: 'memory-stream', 'body-stream', 'swarm-stream', or null.
+    function streamForm(id) {
+        if (typeof id !== 'string') return null;
+        if (id.startsWith('net:')) return LCLABEL_RE.test(id.slice(4)) ? 'swarm-stream' : null;
+        if (rappidValid(id)) return 'body-stream';
+        const at = id.lastIndexOf(':');
+        const instance = id.slice(at + 1);
+        return at >= 0 && rappidValid(id.slice(0, at)) && LCLABEL_RE.test(instance) && instance.length <= 64 ? 'memory-stream' : null;
+    }
+    // §7.4 (rev-17 E-1): the 24-octet ASCII form, calendar-valid for years 0000-9999, seconds 00-59.
+    function utcValid(v) {
+        const m = typeof v === 'string' && v.length === 24 ? UTC_RE.exec(v) : null;
+        if (!m) return false;
+        const [y, mo, d, h, mi, s] = m.slice(1).map(Number);
+        const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+        const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        return mo >= 1 && mo <= 12 && d >= 1 && d <= days[mo - 1] && h <= 23 && mi <= 59 && s <= 59;
+    }
+    // §7.4 uint53: an integer number token (never -0, a fraction or an exponent) from 0 to 2^53-1 (rev-17 E-2, E-9).
+    function uint53(obj, key) {
+        const v = obj[key];
+        return typeof v === 'number' && Number.isSafeInteger(v) && v >= 0 && !(NON_INTEGER_TOKEN.get(obj) || new Set()).has(key);
+    }
+    function b64urlDecode(s) {
+        if (typeof s !== 'string' || !/^[A-Za-z0-9_-]*$/.test(s) || s.length % 4 === 1) throw new Error('base64url value must be unpadded');
+        const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - s.length % 4) % 4));
+        if (btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') !== s) throw new Error('base64url value is not canonical');
+        return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+    }
+    // §10 detached JWS form and protected-header profile (checked at §7.5 step 1; no cryptography).
+    function checkDetachedJws(sig) {
+        const parts = typeof sig === 'string' ? sig.split('.') : [];
+        if (parts.length !== 3 || parts[1] !== '') throw new Error('JWS must use detached compact serialization');
+        const headerOctets = b64urlDecode(parts[0]);
+        const header = parseStrict(headerOctets);
+        if (!isObject(header) || !hasExactly(header, ['alg', 'b64', 'crit', 'kid'])) throw new Error('JWS protected header must have exactly alg,b64,crit,kid');
+        if (header.alg !== 'EdDSA' && header.alg !== 'ES256') throw new Error('JWS alg must be EdDSA or ES256');
+        if (header.b64 !== false || !Array.isArray(header.crit) || header.crit.length !== 1 || header.crit[0] !== 'b64') throw new Error("JWS must use b64=false with crit=['b64']");
+        if (!rappidValid(header.kid)) throw new Error('JWS kid must be a valid keyed RAPPID');
+        if (new TextEncoder().encode(canonical(header)).join() !== headerOctets.join()) throw new Error('JWS protected header is not canonical');
+        if (b64urlDecode(parts[2]).length !== 64) throw new Error('JWS signature must be exactly 64 octets');
+    }
+    // §12.1 step 2 (rev-17 E-22): the one re-genesis payload shape.
+    function regenesisPayloadError(p) {
+        if (!hasExactly(p, ['migrated_from'])) return 're-genesis payload must be exactly {"migrated_from": {...}}';
+        const m = p.migrated_from;
+        if (!isObject(m) || !hasExactly(m, ['stream_id', 'terminal_seal', 'terminal_seq'])) return 're-genesis migrated_from must be exactly stream_id, terminal_seal, terminal_seq';
+        if (streamForm(m.stream_id) === null) return 're-genesis migrated_from.stream_id is not a §6.1.1 stream_id';
+        if (!isHex64(m.terminal_seal)) return 're-genesis migrated_from.terminal_seal is not 64 lowercase hex';
+        if (!uint53(m, 'terminal_seq')) return 're-genesis migrated_from.terminal_seq is not a uint53';
+        return null;
+    }
+
+    // Returns { ok, step, reason }; step is the first failing §7.5 step. `head` is the last frame this consumer
+    // verified on the stream (null: the frame must be a genesis); `streamIdOfRecord` is the stream being read.
+    async function verifyFrame(frame, head, streamIdOfRecord) {
+        const no = (step, reason) => ({ ok: false, step, reason });
         try {
-            const payloadHash = await H('rapp/1:particle', frame.payload);
-            if (payloadHash !== frame.payload_hash) return { ok: false, reason: 'payload_hash mismatch' };
+            // 1 shape & types
+            if (!isObject(frame)) return no('1', 'frame is not a JSON object');
+            if (!hasExactly(frame, FRAME_KEYS)) return no('1', 'key set is not the eleven §7.1 keys');
+            if (frame.spec !== 'rapp/1') return no('1', 'spec != rapp/1');
+            if (!kindValid(frame.kind)) return no('1', 'kind grammar (§6.1.1)');
+            const form = streamForm(frame.stream_id);
+            if (form === null) return no('1', 'stream_id grammar (§6.1.1)');
+            if (!uint53(frame, 'seq')) return no('1', 'seq not uint53');
+            if (!utcValid(frame.utc)) return no('1', 'utc not the §7.4 fixed form');
+            if (!isObject(frame.payload)) return no('1', 'payload not object');
+            if (!isHex64(frame.payload_hash) || !isHex64(frame.frame_hash)) return no('1', 'payload_hash/frame_hash not 64hex');
+            if ((frame.prev !== null && !isHex64(frame.prev)) || (frame.prev_wave !== null && !isHex64(frame.prev_wave))) return no('1', 'prev/prev_wave not null|64hex');
+            if (frame.sig !== null) {
+                try { checkDetachedJws(frame.sig); } catch (e) { return no('1', 'sig is not null or a §10 detached JWS: ' + e.message); }
+            }
+            const regenesis = frame.kind.split('.')[1] === 're-genesis';
+            if (regenesis) {
+                const why = regenesisPayloadError(frame.payload);
+                if (why) return no('1', why);
+            }
+            // 1a stream binding
+            if (streamIdOfRecord != null && frame.stream_id !== streamIdOfRecord) return no('1a', 'stream_id mismatch (cross-stream replay)');
+            // 2 particle
+            if (frame.payload_hash !== await H('rapp/1:particle', frame.payload)) return no('2', 'payload_hash mismatch');
+            // 3 wave
             const pre = {};
             for (const k of Object.keys(frame)) if (k !== 'frame_hash' && k !== 'sig') pre[k] = frame[k];
-            const frameHash = await H('rapp/1:wave', pre);
-            if (frameHash !== frame.frame_hash) return { ok: false, reason: 'frame_hash mismatch' };
-            return { ok: true };
+            if (frame.frame_hash !== await H('rapp/1:wave', pre)) return no('3', 'frame_hash mismatch');
+            // 4 chain
+            if (regenesis && (frame.seq !== 0 || frame.prev !== null)) return no('4', 'a re-genesis frame must be a genesis');
+            if (head == null) {
+                if (frame.seq !== 0 || frame.prev !== null) return no('4', 'no verified head: only a genesis (seq=0, prev=null) can be accepted');
+            } else {
+                if (frame.seq !== head.seq + 1) return no('4', 'seq not contiguous');
+                if (frame.prev !== head.payload_hash) return no('4', 'prev != head payload_hash');
+                if (frame.utc < head.utc) return no('4', 'utc < head utc');
+            }
+            // 5 wire
+            const swarm = form === 'swarm-stream';
+            if (swarm && frame.seq > 0) {
+                if (head != null && frame.prev_wave !== head.frame_hash) return no('5', 'prev_wave != head frame_hash');
+            } else if (frame.prev_wave !== null) return no('5', 'prev_wave must be null off swarm');
+            // 6 signature
+            if (swarm && frame.sig === null) return no('6', 'swarm frame must be signed');
+            if (regenesis && frame.sig === null) return no('6', 'a re-genesis frame must be owner-signed');
+            if (frame.sig !== null) return no('6', 'signed frame: this lens has no §13 key discovery or §10 verifier');
+            return { ok: true, step: null, reason: 'ok' };
         } catch (e) {
-            return { ok: false, reason: 'verify threw: ' + e.message };
+            return no(null, 'verify threw: ' + e.message);
         }
     }
 
@@ -73,7 +292,7 @@
         try {
             const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
             if (!res.ok) throw new Error('HTTP ' + res.status);
-            return await res.json();
+            return parseStrict(await res.arrayBuffer());
         } finally {
             clearTimeout(t);
         }
@@ -92,12 +311,12 @@
             const k = Math.floor(lastSeq / E);
             const text = await (await fetch(`${DOGG_RAW}/world/epochs/${k}.jsonl`, { cache: 'no-store' })).text();
             const lines = text.trim().split('\n');
-            frame = JSON.parse(lines[lastSeq - k * E]);
+            frame = parseStrict(new TextEncoder().encode(lines[lastSeq - k * E]));
         } else {
             frame = await fetchJson(`${DOGG_RAW}/world/${lastSeq}.json`);
         }
-        const v = await verifyFrame(frame);
-        if (!v.ok) throw new Error('world frame failed verification: ' + v.reason);
+        const v = await verifyFrame(frame, null, head.stream_id);
+        if (!v.ok) throw new Error('world frame failed §7.5 step ' + v.step + ': ' + v.reason);
         if (frame.frame_hash !== head.head_frame) {
             throw new Error('world frame_hash does not match HEAD.json head_frame (possible tamper or race)');
         }
