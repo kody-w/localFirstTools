@@ -1,0 +1,332 @@
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+const args = process.argv.slice(2);
+const option = name => args[args.indexOf(name) + 1];
+assert(args.includes('--cdp') && args.includes('--url'),
+  'Usage: node tests/test_autocomplete_workbench.mjs --cdp http://127.0.0.1:PORT --url http://127.0.0.1:PORT/landgrab/autocomplete/index.html (isolated browser only)');
+const cdp = new URL(option('--cdp'));
+const pageUrl = new URL(option('--url'));
+for (const url of [cdp, pageUrl]) {
+  assert(['localhost', '127.0.0.1', '[::1]'].includes(url.hostname) && url.protocol === 'http:',
+    'Use an explicitly started isolated browser and loopback preview, never an authenticated live profile.');
+}
+
+const versionResponse = await fetch(new URL('/json/version', cdp));
+assert(versionResponse.ok, 'The isolated browser must be running.');
+const version = await versionResponse.json();
+const socket = new WebSocket(version.webSocketDebuggerUrl);
+await new Promise((resolve, reject) => {
+  socket.addEventListener('open', resolve, { once: true });
+  socket.addEventListener('error', reject, { once: true });
+});
+let serial = 0;
+const pending = new Map();
+const exceptions = [];
+socket.addEventListener('message', event => {
+  const message = JSON.parse(event.data);
+  if (message.method === 'Runtime.exceptionThrown') exceptions.push(message.params.exceptionDetails);
+  if (!pending.has(message.id)) return;
+  const request = pending.get(message.id);
+  pending.delete(message.id);
+  clearTimeout(request.timeout);
+  if (message.error) request.reject(new Error(JSON.stringify(message.error)));
+  else request.resolve(message.result);
+});
+socket.addEventListener('close', () => {
+  for (const request of pending.values()) {
+    clearTimeout(request.timeout); request.reject(new Error('Browser connection closed.'));
+  }
+  pending.clear();
+});
+function send(method, params = {}, sessionId) {
+  const id = ++serial;
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      pending.delete(id); reject(new Error('CDP timeout: ' + method));
+    }, 15000);
+    pending.set(id, { resolve, reject, timeout });
+    socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+  });
+}
+
+let targetId;
+let checks = 0;
+try {
+  ({ targetId } = await send('Target.createTarget', { url: 'about:blank' }));
+  const { sessionId } = await send('Target.attachToTarget', { targetId, flatten: true });
+  await send('Browser.setDownloadBehavior', { behavior: 'deny' });
+  await send('Runtime.enable', {}, sessionId);
+  const evaluate = async expression => {
+    const result = await send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true }, sessionId);
+    assert(!result.exceptionDetails, JSON.stringify(result.exceptionDetails));
+    return result.result.value;
+  };
+  const waitFor = async expression => {
+    for (let attempt = 0; attempt < 100; attempt++) {
+      if (await evaluate(expression)) return;
+      await new Promise(resolve => setTimeout(resolve, 30));
+    }
+    assert.fail('Timed out: ' + expression);
+  };
+  await send('Page.navigate', { url: pageUrl.href }, sessionId);
+  await waitFor("document.getElementById('load-status') && !document.getElementById('load-status').textContent.startsWith('Loading')");
+  if (args.includes('--require-published')) {
+    assert((await evaluate("document.getElementById('load-status').textContent")).startsWith('Loaded the published'),
+      'The integrated gate must load the real generated catalog, not silently substitute fixtures.');
+    assert(await evaluate("state.catalog.tools.length > 0 && state.evidence && state.evidence.counts.streams >= 2 && state.evidence.counts.frames >= 2"),
+      'The real published data must include canonical tools and actual parallel evidence.');
+    checks++;
+  }
+  const source = '<!doctype html><html lang="en"><title>Fixture</title><body>Known source bytes.</body></html>';
+  const hash = createHash('sha256').update(source).digest('hex');
+  const tools = Array.from({ length: 26 }, (_, index) => ({
+    id: 'fixture-' + index,
+    title: index === 1 ? '<img src=x onerror="window.unexpectedExecution=true">' : 'Fixture ' + index,
+    description: 'A public test fixture, not a claimed repository implementation.',
+    path: 'fixtures/tool-' + index + '.html',
+    url: index === 1 ? 'javascript:window.unexpectedExecution=true' : 'https://example.com/tool-' + index + '.html',
+    source_url: 'https://github.com/example/repo/blob/' + 'a'.repeat(40) + '/tool-' + index + '.html',
+    sha256: index === 0 ? hash : createHash('sha256').update('fixture ' + index).digest('hex'),
+    bytes: Buffer.byteLength(source),
+    category: index % 2 ? 'beta' : 'alpha',
+    aliases: index === 0 ? ['legacy-alias.html'] : [],
+    equivalent_paths: [],
+    signals: { local_persistence: false, external_scripts: false, import_export_mentions: false }
+  }));
+  const fixture = {
+    schema: 'localfirst-autocomplete-catalog/v1',
+    generated_at: '2026-09-05T00:00:00.000Z',
+    repository: { full_name: 'example/repo', url: 'https://github.com/example/repo', commit: 'a'.repeat(40), tree: 'b'.repeat(40) },
+    counts: { tracked_paths: 27, html_paths: 27, redirect_paths: 1, canonical_tools: 26, duplicate_paths: 0, unresolved_paths: 0 },
+    tools, unresolved: [],
+    tasks: [{ id: 'fixture-task', operation: 'improve', title: 'Fixture improvement', why: 'An explicit fixture gap.',
+      paths: ['fixtures/tool-0.html'], acceptance: ['The fixture behavior is preserved.'], score: 1 }],
+    limitations: ['Synthetic fixture for exercising the workbench only.']
+  };
+  const importThroughInput = async data => {
+    await evaluate(`{
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([${JSON.stringify(JSON.stringify(data))}], 'fixture.json', {type:'application/json'}));
+      const input = document.getElementById('import-file');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', {bubbles:true}));
+    }`);
+  };
+  await importThroughInput(fixture);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 24);
+  assert.equal(await evaluate("document.getElementById('count-canonical').textContent"), '26');
+  checks++;
+
+  const secondPrecision = structuredClone(fixture);
+  secondPrecision.generated_at = '2026-09-05T00:00:00Z';
+  await importThroughInput(secondPrecision);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  assert.equal(await evaluate("state.catalog.generated_at"), secondPrecision.generated_at);
+  await importThroughInput(fixture);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  checks++;
+
+  await evaluate("document.getElementById('more').click()");
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 26);
+  checks++;
+  assert.equal(await evaluate("document.querySelectorAll('#tools img').length"), 0);
+  assert.equal(await evaluate("Boolean(window.unexpectedExecution)"), false);
+  assert.equal(await evaluate("[...document.querySelectorAll('#tools a')].some(a => a.getAttribute('href')?.startsWith('javascript:'))"), false);
+  checks++;
+
+  await evaluate("document.getElementById('search').value='legacy-alias'; document.getElementById('search').dispatchEvent(new Event('input'))");
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 1);
+  await evaluate("document.getElementById('category').value='beta'; document.getElementById('category').dispatchEvent(new Event('change'))");
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 0);
+  await evaluate("document.getElementById('category').value=''; document.getElementById('category').dispatchEvent(new Event('change'))");
+  checks++;
+
+  await evaluate("[...document.querySelectorAll('#tools button')].find(b=>b.textContent==='Copy citation').click()");
+  const citation = await evaluate("document.getElementById('copy-text').value");
+  assert(citation.includes(hash) && citation.includes('a'.repeat(40)) && citation.includes('not first invention'));
+  checks++;
+
+  await evaluate("document.querySelector('#tasks button').click()");
+  const prompt = await evaluate("document.getElementById('copy-text').value");
+  assert(prompt.includes('a'.repeat(40)) && prompt.includes('fixtures/tool-0.html') && prompt.includes('ONE bounded'));
+  checks++;
+
+  const malformed = structuredClone(fixture);
+  malformed.repository.commit = 'a'.repeat(41);
+  await importThroughInput(malformed);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Import refused:')");
+  assert.equal(await evaluate("document.getElementById('count-canonical').textContent"), '26');
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 1);
+  checks++;
+
+  const invalidMetadata = structuredClone(fixture);
+  invalidMetadata.repository.commit = 'b'.repeat(40);
+  invalidMetadata.repository.full_name = { toString: null };
+  await importThroughInput(invalidMetadata);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Import refused:')");
+  assert.equal(await evaluate("state.catalog.repository.commit"), 'a'.repeat(40));
+  assert((await evaluate("document.getElementById('source-revision').textContent")).includes('a'.repeat(40)));
+  checks++;
+
+  await evaluate("[...document.querySelectorAll('#tools button')].find(b=>b.textContent==='Compare local bytes').click()");
+  const compareFile = async contents => {
+    await evaluate(`{
+      const transfer = new DataTransfer();
+      transfer.items.add(new File([${JSON.stringify(contents)}], 'source.html', {type:'text/html'}));
+      const input = document.getElementById('verify-file');
+      input.files = transfer.files;
+      input.dispatchEvent(new Event('change', {bubbles:true}));
+    }`);
+  };
+  await compareFile(source);
+  await waitFor("document.getElementById('verify-status').textContent.startsWith('Byte match.')");
+  const replacement = structuredClone(fixture);
+  replacement.repository.commit = 'b'.repeat(40);
+  replacement.tools[0].sha256 = 'd'.repeat(64);
+  await importThroughInput(replacement);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  assert.equal(await evaluate("state.expectedFile"), null);
+  assert.equal(await evaluate("document.getElementById('verify-file-panel').hidden"), true);
+  assert.equal(await evaluate("document.getElementById('verify-status').textContent"), '');
+  assert((await evaluate("document.getElementById('source-revision').textContent")).includes('b'.repeat(40)));
+  checks++;
+  await importThroughInput(fixture);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  await evaluate("[...document.querySelectorAll('#tools button')].find(b=>b.textContent==='Compare local bytes').click()");
+  await compareFile(source);
+  await waitFor("document.getElementById('verify-status').textContent.startsWith('Byte match.')");
+  await compareFile(source + 'changed');
+  await waitFor("document.getElementById('verify-status').textContent.startsWith('Mismatch.')");
+  checks++;
+
+  const emptyEvidence = {
+    schema: 'localfirst-autocomplete-evidence/v1',
+    counts: { streams: 0, frames: 0, artifacts: 0 }, events: [], limitations: ['Synthetic empty evidence.']
+  };
+  await importThroughInput(emptyEvidence);
+  await waitFor("document.getElementById('count-frames').textContent==='0'");
+  assert((await evaluate("document.getElementById('events').textContent")).includes('not frame-conformance evidence'));
+  checks++;
+
+  const wrongFrameTime = structuredClone(emptyEvidence);
+  wrongFrameTime.counts.frames = 1;
+  wrongFrameTime.counts.streams = 1;
+  wrongFrameTime.events = [{
+    run_id: 'fixture', worker: 'fixture', phase: 'plan', outcome: 'recorded_unchecked',
+    summary: 'Synthetic shape-only refusal case', utc: '2026-09-05T00:00:00Z',
+    stream_id: 'fixture', path: 'runs/fixture/fixture/frames/0.json',
+    seq: 0, frame_hash: 'a'.repeat(64), payload_hash: 'b'.repeat(64), artifacts: [], checks: []
+  }];
+  await importThroughInput(wrongFrameTime);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Import refused:')");
+  assert.equal(await evaluate("state.evidence.counts.frames"), 0);
+  checks++;
+
+  await importThroughInput({ schema: 'localfirst-autocomplete-bundle/v1', catalog: null, evidence: emptyEvidence });
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  assert.equal(await evaluate("document.getElementById('source-revision').textContent"), 'No source revision loaded.');
+  assert.equal(await evaluate("document.getElementById('count-canonical').textContent"), '--');
+  assert.equal(await evaluate("document.querySelectorAll('#tools article').length"), 0);
+  checks++;
+  await importThroughInput(fixture);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+
+  await evaluate(`{
+    const original = URL.createObjectURL;
+    URL.createObjectURL = blob => { window.exportedBlob = blob; return original(blob); };
+    document.getElementById('export-button').click();
+    URL.createObjectURL = original;
+  }`);
+  const exported = JSON.parse(await evaluate('window.exportedBlob.text()'));
+  assert.equal(exported.schema, 'localfirst-autocomplete-bundle/v1');
+  assert.deepEqual(exported.catalog, fixture);
+  assert.deepEqual(exported.evidence, emptyEvidence);
+  await importThroughInput(exported);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  checks++;
+
+  const racePreserved = await evaluate(`(async () => {
+    const original = window.fetch;
+    const waiting = [];
+    window.fetch = () => new Promise(resolve => waiting.push(resolve));
+    try {
+      const loading = initialize();
+      const fresh = ${JSON.stringify(fixture)};
+      fresh.repository.commit = 'c'.repeat(40);
+      importData(fresh);
+      waiting[0](new Response(JSON.stringify(${JSON.stringify(fixture)}), {status:200}));
+      waiting[1](new Response(JSON.stringify(${JSON.stringify(emptyEvidence)}), {status:200}));
+      await loading;
+      return document.getElementById('source-revision').textContent.includes('c'.repeat(40));
+    } finally { window.fetch = original; }
+  })()`);
+  assert(racePreserved, 'A slow static load must not replace an explicit local import.');
+  checks++;
+  await evaluate(`{
+    const data = ${JSON.stringify(fixture)};
+    const value = JSON.stringify(data);
+    const bytes = new TextEncoder().encode(value);
+    bytes[value.indexOf('A public test fixture')] = 255;
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([bytes], 'invalid-utf8.json', {type:'application/json'}));
+    const input = document.getElementById('import-file');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', {bubbles:true}));
+  }`);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Import refused:')");
+  assert.equal(await evaluate("state.catalog.repository.commit"), 'c'.repeat(40));
+  checks++;
+  await evaluate(`{
+    const large = ${JSON.stringify(fixture)};
+    const limit = 20 * 1024 * 1024;
+    const base = JSON.stringify({schema:'localfirst-autocomplete-bundle/v1',catalog:large,evidence:state.evidence}) + '\\n';
+    large.padding = 'x'.repeat(limit - new TextEncoder().encode(base).byteLength - 1024);
+    window.largePaddingLength = large.padding.length;
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([JSON.stringify(large)], 'near-limit.json', {type:'application/json'}));
+    const input = document.getElementById('import-file');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', {bubbles:true}));
+  }`);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  await evaluate(`{
+    const original = URL.createObjectURL;
+    URL.createObjectURL = blob => { window.exportedBlob = blob; return original(blob); };
+    document.getElementById('export-button').click();
+    URL.createObjectURL = original;
+    const transfer = new DataTransfer();
+    transfer.items.add(new File([window.exportedBlob], 'round-trip.json', {type:'application/json'}));
+    const input = document.getElementById('import-file');
+    input.files = transfer.files;
+    input.dispatchEvent(new Event('change', {bubbles:true}));
+  }`);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  assert(await evaluate("window.exportedBlob.size <= 20*1024*1024 && state.catalog.padding.length === window.largePaddingLength"));
+  checks++;
+  const excessiveCombined = structuredClone(emptyEvidence);
+  excessiveCombined.padding = 'y'.repeat(2048);
+  await importThroughInput(excessiveCombined);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Import refused:')");
+  assert((await evaluate("document.getElementById('load-status').textContent")).includes('Combined snapshot exceeds'));
+  assert(await evaluate("state.evidence.padding === undefined && state.catalog.padding.length === window.largePaddingLength"));
+  checks++;
+  await importThroughInput(fixture);
+  await waitFor("document.getElementById('load-status').textContent.startsWith('Imported')");
+  for (const width of [320, 390, 1280]) {
+    await send('Emulation.setDeviceMetricsOverride', { width, height: 850, deviceScaleFactor: 1, mobile: width < 600 }, sessionId);
+    await evaluate('new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))');
+    const geometry = await evaluate('({viewport:innerWidth,content:document.documentElement.scrollWidth})');
+    assert(geometry.content <= width && geometry.viewport === width,
+      `Horizontal overflow at ${width}px: ${JSON.stringify(geometry)}`);
+    checks++;
+  }
+  assert.deepEqual(exceptions, []);
+  checks++;
+  console.log(JSON.stringify({ status: 'passed', checks, browser: version.Browser, target: pageUrl.href,
+    scope: 'Workbench behavior in the explicitly supplied isolated browser; no live-profile or repository-wide runtime claim.' }));
+} finally {
+  if (targetId && socket.readyState === WebSocket.OPEN) await send('Target.closeTarget', { targetId });
+  socket.close();
+}
