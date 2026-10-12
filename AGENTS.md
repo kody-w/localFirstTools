@@ -23,4 +23,19 @@ Register the dependency-free MCP server, then use `search_tools` / `open_tool` /
 ## Browse (humans)
 Live dashboard → https://kody-w.github.io/localFirstTools/landgrab/hq.html
 
+## Improve or expand the repository
+Before creating another capability, read [`CAPABILITIES.md`](CAPABILITIES.md)
+and search the qualified capability registry. Reuse exact approved revisions,
+inspect failure cases, and make a bounded policy-admitted plan. A future-model
+event should requalify existing assets before generating replacements.
+Never treat a requested model label, an unexecuted plan, or a repeated use in
+the same repository as independent success.
+
+Use the [repository-autocomplete operator](landgrab/autocomplete/operator.html)
+for a bounded, source-grounded improvement cycle. Its [workbench](landgrab/autocomplete/index.html)
+exposes canonical source passports, candidate tasks, and RAPP/1 implementation
+records. Preserve source attribution and distinguish planned, implemented,
+checked, and publicly published work. Do not launch an unbounded job or infer
+publishing permission from a generated task.
+
 _Owned by @kody-w · MIT · zero-server · offline-first._

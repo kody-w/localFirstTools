@@ -1,0 +1,716 @@
+"""Real-reference integration tests; no fabricated protocol implementation.
+
+RAPP_REFERENCE_DIR must name the checkout/export matching rapp-reference.json;
+missing reference coverage is a hard failure, never a successful skipped suite.
+Fixtures live inside this checkout and are removed after each test, never in a
+system temporary directory. Git commits exist only inside disposable fixtures.
+"""
+
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import time
+import unittest
+import uuid
+import warnings
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest.mock import patch
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "autocomplete_frames.py"
+MODULE_SPEC = importlib.util.spec_from_file_location("autocomplete_frames", SCRIPT)
+FRAMES = importlib.util.module_from_spec(MODULE_SPEC)
+MODULE_SPEC.loader.exec_module(FRAMES)
+
+
+class AutocompleteFramesTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = os.environ.get("RAPP_REFERENCE_DIR")
+        if not source:
+            raise RuntimeError("RAPP_REFERENCE_DIR is required; real RAPP/1 coverage cannot be skipped or mocked")
+        cls.reference_dir = Path(source).absolute()
+        cls.reference = FRAMES.Reference(cls.reference_dir)
+
+    def setUp(self):
+        self.fixture = ROOT / (".autocomplete-frames-test-" + uuid.uuid4().hex)
+        self.fixture.mkdir()
+        self.addCleanup(shutil.rmtree, self.fixture)
+        self.repo = self.fixture / "repo"
+        self.repo.mkdir()
+        self.store = self.fixture / "evidence"
+        self.source = self.repo / "public.py"
+        self.source.write_text("print('working source')\n", encoding="utf-8")
+        self.git("init", "--quiet")
+        self.git("add", "public.py")
+        self.git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                 "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture baseline")
+        self.base_commit = self.git("rev-parse", "HEAD").stdout.strip()
+        self.cli("init", "--owner", "test-owner", "--slug", "autocomplete")
+
+    def git(self, *args):
+        return subprocess.run(["git", "-C", str(self.repo), *args], check=True,
+                              capture_output=True, text=True, timeout=10,
+                              env={**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull})
+
+    def command(self, command, *args, store=None, reference=None):
+        return [sys.executable, "-B", str(SCRIPT), command, "--store", str(store or self.store),
+                "--rapp-dir", str(reference or self.reference_dir), *args]
+
+    def cli(self, command, *args, expected=0, store=None, reference=None):
+        result = subprocess.run(self.command(command, *args, store=store, reference=reference),
+                                capture_output=True, text=True, timeout=30, cwd=ROOT)
+        self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+        if expected == 2:
+            self.assertIn("error:", result.stderr)
+            return result
+        return json.loads(result.stdout)
+
+    def record_args(self, *extra, worker="builder", run="test-run", phase="implementation", artifact=True):
+        args = ["--run-id", run, "--worker", worker, "--repo", str(self.repo),
+                "--phase", phase, "--summary", "Record actual selected source"]
+        if artifact:
+            args += ["--artifact", "public.py"]
+        return [*args, *extra]
+
+    def record(self, *extra, expected=0, **options):
+        return self.cli("record", *self.record_args(*extra, **options), expected=expected)
+
+    def direct_record(self, **options):
+        arguments = self.command("record", *self.record_args(**options))[3:]
+        return FRAMES.record(FRAMES.parser().parse_args(arguments), self.reference)
+
+    def frame_path(self, seq=0, worker="builder", run="test-run"):
+        return self.store / "runs" / run / worker / "frames" / (str(seq) + ".json")
+
+    def frame(self, **kwargs):
+        return json.loads(self.frame_path(**kwargs).read_text(encoding="utf-8"))
+
+    def rewrite_frame(self, frame, **kwargs):
+        self.frame_path(**kwargs).write_text(json.dumps(frame), encoding="utf-8")
+
+    def rebuild_frame(self, frame):
+        return self.reference.rapp.build_frame(
+            frame["kind"], frame["stream_id"], frame["seq"], frame["utc"], frame["payload"],
+            frame["prev"], frame["prev_wave"], frame["sig"],
+        )
+
+    def object_path(self, frame=None):
+        frame = frame or self.frame()
+        return self.store / "objects" / "sha256" / frame["payload"]["artifacts"][0]["sha256"]
+
+    def test_missing_reference_is_a_failure_not_a_skip(self):
+        environment = {key: value for key, value in os.environ.items() if key != "RAPP_REFERENCE_DIR"}
+        result = subprocess.run(
+            [sys.executable, "-B", str(Path(__file__)),
+             "AutocompleteFramesTests.test_genesis_append_exact_keys_and_particle_parent"],
+            cwd=ROOT, env=environment, capture_output=True, text=True, timeout=10,
+        )
+        self.assertNotEqual(result.returncode, 0, "missing reference must not produce a green skipped suite")
+        self.assertIn("RAPP_REFERENCE_DIR is required", result.stderr)
+        self.assertNotIn("OK (skipped", result.stderr)
+
+    def test_mint_once_and_reuse_identity_bytes(self):
+        before = (self.store / "rappid.json").read_bytes()
+        reused = self.cli("init", "--owner", "test-owner", "--slug", "autocomplete")
+        self.assertEqual(reused["status"], "reused")
+        self.assertEqual((self.store / "rappid.json").read_bytes(), before)
+        self.assertTrue(self.reference.rapp.rappid_valid(reused["rappid"]))
+        self.assertEqual(reused["identity_kind"], "keyless-uuid")
+        self.assertEqual(reused["reference"]["revision"], "rev-15")
+
+    def test_malformed_identity_is_never_replaced(self):
+        path = self.store / "rappid.json"
+        path.write_text('{"schema":"rapp/1","rappid":"invalid"}', encoding="utf-8")
+        before = path.read_bytes()
+        self.cli("init", "--owner", "test-owner", "--slug", "autocomplete", expected=2)
+        self.assertEqual(path.read_bytes(), before)
+        self.record(expected=2)
+
+    def test_identity_owner_change_is_refused(self):
+        before = (self.store / "rappid.json").read_bytes()
+        self.cli("init", "--owner", "other-owner", "--slug", "autocomplete", expected=2)
+        self.assertEqual((self.store / "rappid.json").read_bytes(), before)
+
+    def test_genesis_append_exact_keys_and_particle_parent(self):
+        first = self.record()
+        original = self.frame_path().read_bytes()
+        genesis = self.frame()
+        second = self.record()
+        appended = self.frame(seq=1)
+        self.assertEqual(set(genesis), self.reference.rapp.FRAME_KEYS)
+        self.assertEqual(len(genesis), 11)
+        self.assertEqual(genesis["kind"], "memory.save")
+        self.assertIsNone(genesis["prev"])
+        self.assertIsNone(genesis["prev_wave"])
+        self.assertIsNone(genesis["sig"])
+        self.assertEqual(appended["seq"], 1)
+        self.assertEqual(appended["prev"], first["payload_hash"])
+        self.assertNotEqual(appended["prev"], first["frame_hash"])
+        self.assertEqual(self.frame_path().read_bytes(), original)
+        self.assertEqual(first["stream_id"], second["stream_id"])
+        self.assertEqual(genesis["payload"]["repository"],
+                         {"base_commit": self.base_commit, "artifact_source": "working-tree"})
+        result = self.cli("verify")
+        self.assertEqual(result["verification"]["canonical_scanned_frames"], 2)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            verdict, findings, evidence = self.reference.checker.check_repo(str(self.store))
+        self.assertEqual(verdict, "COMPLIANT")
+        self.assertFalse(findings)
+        self.assertTrue(any("2 frames conform" in e["ok"] for e in evidence))
+
+    def test_dirty_worktree_snapshots_never_leak_unselected_files_or_claim_baseline_bytes(self):
+        committed = self.git("show", "HEAD:public.py").stdout.encode("utf-8")
+        working = b"print('uncommitted implementation')\n"
+        self.source.write_bytes(working)
+        canary = "unselected-private-canary-" + uuid.uuid4().hex
+        (self.repo / ".env").write_text(canary, encoding="utf-8")
+        (self.repo / "unselected.py").write_text(canary, encoding="utf-8")
+        self.assertTrue(self.git("status", "--porcelain").stdout.strip())
+        self.assertNotEqual(committed, working)
+        self.record()
+        frame = self.frame()
+        self.assertEqual(frame["payload"]["artifacts"], [{
+            "path": "public.py", "sha256": hashlib.sha256(working).hexdigest(), "bytes": len(working),
+        }])
+        self.assertEqual(frame["payload"]["repository"],
+                         {"base_commit": self.base_commit, "artifact_source": "working-tree"})
+        self.assertEqual(self.object_path().read_bytes(), working)
+        self.assertNotEqual(self.object_path().read_bytes(), committed)
+        self.assertEqual(len(list((self.store / "objects" / "sha256").iterdir())), 1)
+        index = self.cli("verify", "--repo", str(self.repo))
+        public = json.dumps(index)
+        self.assertNotIn(canary, public)
+        self.assertNotIn(".env", public)
+        self.assertNotIn("unselected.py", public)
+        self.assertNotIn(str(self.repo), public)
+        for path in self.store.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(canary.encode("utf-8"), path.read_bytes())
+
+    def test_independent_streams_preserve_typed_context_references(self):
+        left = self.record(worker="left")
+        right = self.record("--parent", left["path"], worker="right")
+        left_frame = self.frame(worker="left")
+        right_frame = self.frame(worker="right")
+        self.assertNotEqual(left["stream_id"], right["stream_id"])
+        self.assertEqual(right_frame["seq"], 0)
+        self.assertIsNone(right_frame["prev"])
+        self.assertIsNone(right_frame["prev_wave"])
+        reference = right_frame["payload"]["references"][0]
+        self.assertEqual(reference["type"], "rapp/1-frame-reference")
+        self.assertEqual(reference["relation"], "context")
+        self.assertEqual(reference["frame_hash"], left_frame["frame_hash"])
+        self.record("--parent", left["path"], worker="right")
+        self.assertEqual(self.frame(seq=1, worker="right")["prev"], right_frame["payload_hash"])
+        result = self.cli("verify")
+        self.assertEqual(result["counts"], {"streams": 2, "frames": 3, "artifacts": 1})
+
+    def test_ambiguous_hyphen_labels_do_not_collide(self):
+        one = self.record(run="a-b", worker="c")
+        two = self.record(run="a", worker="b-c")
+        self.assertNotEqual(one["stream_id"], two["stream_id"])
+        for entry in (one, two):
+            instance = entry["stream_id"].rsplit(":", 1)[1]
+            self.assertLessEqual(len(instance), 64)
+            self.assertRegex(instance, r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+        self.assertEqual(self.cli("verify")["counts"]["streams"], 2)
+
+    def test_no_check_does_not_claim_passed(self):
+        result = self.record()
+        self.assertEqual(result["outcome"], "recorded_unchecked")
+        index = self.cli("verify")
+        self.assertEqual(index["events"][0]["checks"], [])
+        self.assertEqual(index["claims"]["checked_implementation_frames"], 0)
+
+    def test_plan_is_explicitly_not_implementation(self):
+        self.record(phase="plan", artifact=False)
+        index = self.cli("verify")
+        self.assertEqual(index["events"][0]["phase"], "plan")
+        self.assertEqual(index["counts"]["artifacts"], 0)
+        self.assertEqual(index["claims"]["checked_implementation_frames"], 0)
+        self.record(artifact=False, expected=2)
+
+    def test_successful_real_check_and_output_digests(self):
+        argv = ["python3", "-c", "import sys; print('tested'); print('diagnostic', file=sys.stderr)"]
+        result = self.record("--check", json.dumps(argv))
+        self.assertEqual(result["outcome"], "checks_passed")
+        check = self.frame()["payload"]["checks"][0]
+        self.assertEqual(check["argv"], argv)
+        self.assertEqual(check["exit_code"], 0)
+        self.assertEqual(check["stdout_sha256"], hashlib.sha256(b"tested\n").hexdigest())
+        self.assertEqual(check["stderr_sha256"], hashlib.sha256(b"diagnostic\n").hexdigest())
+        self.assertEqual(check["stdout_bytes"], 7)
+        self.assertEqual(check["stderr_bytes"], 11)
+        self.assertNotIn("stdout", check)
+        self.assertNotIn("stderr", check)
+        self.assertEqual(self.cli("verify")["claims"]["checked_implementation_frames"], 1)
+
+    def test_private_check_output_is_hashed_but_never_copied_to_public_evidence(self):
+        canary = "private-output-canary-" + uuid.uuid4().hex
+        argv = ["python3", "-c",
+                "import os, sys; print(os.environ['AUTOCOMPLETE_PRIVATE_CANARY']); "
+                "print(os.environ['AUTOCOMPLETE_PRIVATE_CANARY'], file=sys.stderr)"]
+        result = subprocess.run(
+            self.command("record", *self.record_args("--check", json.dumps(argv))),
+            cwd=ROOT, env={**os.environ, "AUTOCOMPLETE_PRIVATE_CANARY": canary},
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn(canary, result.stdout + result.stderr)
+        check = self.frame()["payload"]["checks"][0]
+        expected_hash = hashlib.sha256((canary + "\n").encode("utf-8")).hexdigest()
+        self.assertEqual(check["stdout_sha256"], expected_hash)
+        self.assertEqual(check["stderr_sha256"], expected_hash)
+        self.assertNotIn(canary, json.dumps(self.cli("verify")))
+        for path in self.store.rglob("*"):
+            if path.is_file():
+                self.assertNotIn(canary.encode("utf-8"), path.read_bytes())
+
+    def test_failed_check_is_recorded_and_exits_nonzero(self):
+        result = self.record("--check", json.dumps(["python3", "-c", "import sys; sys.exit(7)"]), expected=1)
+        self.assertEqual(result["outcome"], "checks_failed")
+        self.assertEqual(self.frame()["payload"]["checks"][0]["exit_code"], 7)
+        negative = self.frame_path().read_bytes()
+        self.record("--check", json.dumps(["python3", "-c", "pass"]))
+        self.assertEqual(self.frame_path().read_bytes(), negative)
+        index = self.cli("verify")
+        self.assertEqual(index["verification"]["verdict"], "COMPLIANT")
+        self.assertEqual(index["claims"]["failed_frames"], 1)
+        self.assertEqual(index["counts"]["frames"], 2)
+
+    def test_missing_check_executable_is_negative_evidence(self):
+        result = self.record("--check", '["definitely-unavailable-autocomplete-check-command"]', expected=1)
+        check = self.frame()["payload"]["checks"][0]
+        self.assertEqual(result["outcome"], "checks_failed")
+        self.assertIsNone(check["exit_code"])
+        self.assertEqual(check["launch_error"], "FileNotFoundError")
+        self.cli("verify")
+
+    def test_timeout_is_recorded_without_raw_logs(self):
+        result = self.record("--check-timeout", "1", "--check",
+                             json.dumps(["python3", "-c", "import time; time.sleep(5)"]), expected=1)
+        check = self.frame()["payload"]["checks"][0]
+        self.assertEqual(result["outcome"], "checks_failed")
+        self.assertTrue(check["timed_out"])
+        self.assertEqual(check["exit_code"], -9)
+        self.assertLess(check["duration_ms"], 5000)
+        self.cli("verify")
+
+    def test_descendant_held_output_cannot_bypass_command_timeout(self):
+        argv = ["python3", "-c",
+                "import subprocess; subprocess.Popen(['python3', '-c', 'import time; time.sleep(5)'])"]
+        self.record("--check-timeout", "1", "--check", json.dumps(argv), expected=1)
+        check = self.frame()["payload"]["checks"][0]
+        self.assertEqual(check["exit_code"], 0)
+        self.assertTrue(check["timed_out"])
+        self.assertLess(check["duration_ms"], 5000)
+        self.cli("verify")
+
+    def test_every_check_is_recorded_and_one_failure_prevents_pass(self):
+        self.record("--check", '["python3","-c","import sys; sys.exit(3)"]',
+                    "--check", '["python3","-c","pass"]', expected=1)
+        self.assertEqual([check["exit_code"] for check in self.frame()["payload"]["checks"]], [3, 0])
+        self.assertEqual(self.frame()["payload"]["outcome"], "checks_failed")
+        self.cli("verify")
+
+    def test_command_mutation_preserves_before_bytes_and_negative_evidence(self):
+        before = self.source.read_bytes()
+        argv = ["python3", "-c", "from pathlib import Path; Path('public.py').write_text('changed\\n')"]
+        result = self.record("--check", json.dumps(argv), expected=1)
+        self.assertEqual(result["outcome"], "inputs_changed")
+        frame = self.frame()
+        self.assertEqual(frame["payload"]["changed_artifacts"], ["public.py"])
+        self.assertEqual(self.object_path(frame).read_bytes(), before)
+        self.assertEqual(frame["payload"]["checks"][0]["exit_code"], 0)
+        self.cli("verify")
+        current = self.cli("verify", "--repo", str(self.repo), expected=1)
+        self.assertEqual(current["verification"]["verdict"], "COMPLIANT")
+        self.assertFalse(current["current_artifacts"]["matches"])
+
+    def test_restoring_inputs_in_a_later_check_does_not_erase_a_changed_boundary(self):
+        original = self.source.read_text(encoding="utf-8")
+        first = ["python3", "-c", "from pathlib import Path; Path('public.py').write_text('changed\\n')"]
+        second = ["python3", "-c", "from pathlib import Path; Path('public.py').write_text(" + repr(original) + ")"]
+        self.record("--check", json.dumps(first), "--check", json.dumps(second), expected=1)
+        self.assertEqual(self.source.read_text(encoding="utf-8"), original)
+        self.assertEqual(self.frame()["payload"]["outcome"], "inputs_changed")
+        self.assertEqual(self.frame()["payload"]["changed_artifacts"], ["public.py"])
+        self.cli("verify")
+
+    def test_historical_objects_remain_valid_after_future_improvements(self):
+        self.record()
+        before = self.object_path().read_bytes()
+        self.source.write_text("print('improved source')\n", encoding="utf-8")
+        self.cli("verify")
+        self.cli("verify", "--repo", str(self.repo), expected=1)
+        time.sleep(0.005)
+        self.record()
+        index = self.cli("verify", "--repo", str(self.repo))
+        self.assertTrue(index["current_artifacts"]["matches"])
+        self.assertEqual(index["counts"]["artifacts"], 2)
+        self.assertEqual(self.object_path().read_bytes(), before)
+
+    def test_same_stream_sequence_orders_equal_millisecond_timestamps(self):
+        self.record()
+        self.source.write_text("print('new')\n", encoding="utf-8")
+        self.record()
+        frame = self.frame(seq=1)
+        frame["utc"] = self.frame()["utc"]
+        self.rewrite_frame(self.rebuild_frame(frame), seq=1)
+        index = self.cli("verify", "--repo", str(self.repo))
+        self.assertTrue(index["current_artifacts"]["matches"])
+        self.assertEqual(index["events"], sorted(index["events"], key=FRAMES.presentation_key))
+        reversed_current = FRAMES.compare_current(self.repo, list(reversed(index["events"])))
+        self.assertTrue(reversed_current["matches"])
+
+    def test_presentation_ties_use_wave_hash_not_worker_or_sequence(self):
+        late_wave = {"utc": "2026-09-05T00:00:00.000Z", "frame_hash": "f" * 64,
+                     "worker": "alpha", "seq": 0}
+        early_wave = {"utc": late_wave["utc"], "frame_hash": "0" * 64,
+                      "worker": "zeta", "seq": 9}
+        self.assertEqual(sorted([late_wave, early_wave], key=FRAMES.presentation_key),
+                         [early_wave, late_wave])
+
+    def test_empty_store_is_not_success(self):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ResourceWarning)
+            verdict, findings, _ = self.reference.checker.check_repo(str(self.store))
+        self.assertEqual(verdict, "COMPLIANT")
+        self.assertFalse(findings)
+        refusal = self.cli("verify", expected=2)
+        self.assertIn("zero frames", refusal.stderr)
+        self.cli("index", "--output", str(self.fixture / "index.json"), expected=2)
+        self.assertFalse((self.fixture / "index.json").exists())
+
+    def test_full_stream_refuses_append_without_changing_its_verified_history(self):
+        self.record()
+        before = self.frame_path().read_bytes()
+        with patch.object(FRAMES, "MAX_FRAMES", 1):
+            with self.assertRaisesRegex(FRAMES.EvidenceError, "stream frame limit"):
+                self.direct_record()
+            self.assertEqual(FRAMES.evidence_index(self.store, self.reference)["counts"]["frames"], 1)
+        self.assertEqual(self.frame_path().read_bytes(), before)
+        self.assertFalse(self.frame_path(seq=1).exists())
+
+    def test_full_store_refuses_a_new_worker_without_publishing(self):
+        self.record(worker="existing")
+        with patch.object(FRAMES, "MAX_FRAMES", 1):
+            with self.assertRaisesRegex(FRAMES.EvidenceError, "store frame limit"):
+                self.direct_record(worker="new")
+            self.assertEqual(FRAMES.evidence_index(self.store, self.reference)["counts"]["frames"], 1)
+        self.assertFalse(self.frame_path(worker="new").exists())
+
+    def test_parallel_workers_compete_safely_for_the_final_store_slot(self):
+        self.record(worker="existing")
+        barrier = Barrier(2)
+        validate = FRAMES.validate_payload
+
+        def rendezvous(payload, reference, run_id, worker):
+            validate(payload, reference, run_id, worker)
+            if worker in {"left", "right"}:
+                barrier.wait(timeout=5)
+
+        def append(worker):
+            try:
+                self.direct_record(worker=worker)
+                return "published"
+            except FRAMES.EvidenceError as error:
+                return str(error)
+
+        with patch.object(FRAMES, "MAX_FRAMES", 2):
+            with patch.object(FRAMES, "validate_payload", side_effect=rendezvous):
+                with ThreadPoolExecutor(max_workers=2) as workers:
+                    outcomes = list(workers.map(append, ("left", "right")))
+            self.assertEqual(outcomes.count("published"), 1, outcomes)
+            self.assertEqual(sum("store frame limit" in item for item in outcomes), 1, outcomes)
+            index = FRAMES.evidence_index(self.store, self.reference)
+            self.assertEqual(index["counts"]["frames"], 2)
+            self.assertEqual(index["verification"]["canonical_scanned_frames"], 2)
+
+    def test_missing_escape_absolute_private_and_symlink_artifacts_are_refused(self):
+        (self.repo / "credentials.json").write_text("{}", encoding="utf-8")
+        (self.repo / ".env").write_text("public placeholder", encoding="utf-8")
+        (self.repo / "alias.py").symlink_to(self.source)
+        (self.repo / "outside").symlink_to(self.fixture, target_is_directory=True)
+        for name in ("missing.py", "../repo/public.py", str(self.source), ".git/config",
+                     ".env", "credentials.json", "alias.py", "outside/repo/public.py",
+                     "folder/../public.py", "folder\\public.py"):
+            with self.subTest(path=name):
+                self.record("--artifact", name, artifact=False, expected=2)
+        self.assertFalse(list(self.store.glob("runs/*/*/frames/*.json")))
+
+    def test_bad_path_aliases_are_refused_without_mutating_a_valid_stream(self):
+        self.record()
+        before = self.frame_path().read_bytes()
+        self.cli("verify")
+        (self.repo / "alias.py").symlink_to(self.source)
+        for name in ("./public.py", "folder//public.py", ".GIT/config",
+                     "C:/public.py", "alias.py"):
+            with self.subTest(alias=name):
+                self.record("--artifact", name, artifact=False, expected=2)
+        aliased = self.frame_path().with_name("00.json")
+        self.frame_path().rename(aliased)
+        refusal = self.cli("verify", expected=2)
+        self.assertIn("noncanonical frame filename", refusal.stderr)
+        aliased.rename(self.frame_path())
+        self.assertEqual(self.frame_path().read_bytes(), before)
+        self.assertEqual(self.cli("verify")["counts"]["frames"], 1)
+
+    def test_local_paths_and_secret_oriented_argv_not_public_metadata(self):
+        for argv in ([sys.executable, "-c", "pass"], ["python3", "--" + "token=value"]):
+            with self.subTest(argv=argv):
+                self.record("--check", json.dumps(argv), expected=2)
+        self.record("--summary", str(self.repo), expected=2)
+        self.assertFalse(list(self.store.glob("runs/*/*/frames/*.json")))
+
+    def test_duplicate_artifacts_invalid_argv_and_labels_are_refused(self):
+        self.record("--artifact", "public.py", expected=2)
+        for argv in ("[]", '"passed"', "[0]", '["python3",null]'):
+            self.record("--check", argv, expected=2)
+        for value in ("../escape", "Uppercase", "two--hyphens", "a" * 65):
+            self.record(run=value, expected=2)
+            self.record(worker=value, expected=2)
+        self.record("--check-timeout", "301", expected=2)
+
+    def test_artifact_size_is_bounded(self):
+        with self.source.open("wb") as handle:
+            handle.truncate(FRAMES.MAX_ARTIFACT_BYTES + 1)
+        self.record(expected=2)
+        self.assertFalse(list(self.store.glob("runs/*/*/frames/*.json")))
+
+    def test_pinned_byte_mismatches_are_rejected_before_import(self):
+        exported = self.fixture / "reference-export"
+        exported.mkdir()
+        pin = json.loads(FRAMES.PIN_PATH.read_text(encoding="utf-8"))
+        for name in pin["files"]:
+            shutil.copyfile(self.reference_dir / name, exported / name)
+        for name in pin["files"]:
+            path = exported / name
+            original = path.read_bytes()
+            path.write_bytes(original + b"\n# changed bytes\n")
+            with self.subTest(file=name):
+                self.cli("verify", reference=exported, expected=2)
+            path.write_bytes(original)
+        self.record()
+        self.cli("verify", reference=exported)
+
+    def test_frame_payload_and_envelope_tampering_are_rejected(self):
+        self.record()
+        original = self.frame()
+        changed = json.loads(json.dumps(original))
+        changed["payload"]["summary"] = "tampered"
+        self.rewrite_frame(changed)
+        self.cli("verify", expected=2)
+        changed = json.loads(json.dumps(original))
+        changed["extra"] = True
+        self.rewrite_frame(changed)
+        self.cli("verify", expected=2)
+        self.record(expected=2)
+
+    def test_particle_and_wave_mutations_have_specific_refusal_witnesses(self):
+        self.record()
+        original = self.frame_path().read_bytes()
+        self.cli("verify")
+        for field in ("payload_hash", "frame_hash"):
+            with self.subTest(mutated=field):
+                frame = json.loads(original)
+                frame[field] = "0" * 64
+                self.rewrite_frame(frame)
+                refusal = self.cli("verify", expected=2)
+                self.assertIn(field + " mismatch", refusal.stderr)
+                self.frame_path().write_bytes(original)
+                self.assertEqual(self.cli("verify")["counts"]["frames"], 1)
+
+    def test_frame_hash_as_prev_has_a_specific_particle_parent_refusal(self):
+        self.record()
+        self.record()
+        original = self.frame_path(seq=1).read_bytes()
+        self.cli("verify")
+        frame = json.loads(original)
+        frame["prev"] = self.frame()["frame_hash"]
+        self.rewrite_frame(self.rebuild_frame(frame), seq=1)
+        refusal = self.cli("verify", expected=2)
+        self.assertIn("prev != head payload_hash", refusal.stderr)
+        self.frame_path(seq=1).write_bytes(original)
+        self.assertEqual(self.cli("verify")["counts"]["frames"], 2)
+
+    def test_object_corruption_is_not_repaired_by_record(self):
+        self.record()
+        original_frame = self.frame_path().read_bytes()
+        path = self.object_path()
+        original_object = path.read_bytes()
+        self.cli("verify")
+        path.write_bytes(b"modified object")
+        refusal = self.cli("verify", expected=2)
+        self.assertIn("stored artifact SHA-256 mismatch", refusal.stderr)
+        self.record(expected=2)
+        self.assertEqual(path.read_bytes(), b"modified object")
+        path.write_bytes(original_object)
+        self.cli("verify")
+        frame = json.loads(original_frame)
+        frame["payload"]["artifacts"][0]["bytes"] += 1
+        self.rewrite_frame(self.rebuild_frame(frame))
+        refusal = self.cli("verify", expected=2)
+        self.assertIn("stored artifact size mismatch", refusal.stderr)
+        self.frame_path().write_bytes(original_frame)
+        self.cli("verify")
+
+    def test_object_symlink_is_rejected(self):
+        self.record()
+        path = self.object_path()
+        path.unlink()
+        path.symlink_to(self.source)
+        self.cli("verify", expected=2)
+
+    def test_rehashed_unregistered_kind_and_cross_stream_replay_are_rejected(self):
+        self.record()
+        original = self.frame()
+        for field, value in (("kind", "memory.unregistered"), ("stream_id", "not-a-memory-stream")):
+            changed = json.loads(json.dumps(original))
+            changed[field] = value
+            self.rewrite_frame(self.rebuild_frame(changed))
+            self.cli("verify", expected=2)
+        self.rewrite_frame(original)
+        other = self.store / "runs" / "other-run" / "builder" / "frames"
+        other.mkdir(parents=True)
+        (other / "0.json").write_text(json.dumps(original), encoding="utf-8")
+        self.cli("verify", expected=2)
+
+    def test_rehashed_false_success_claim_is_rejected(self):
+        self.record()
+        frame = self.frame()
+        frame["payload"]["outcome"] = "checks_passed"
+        self.rewrite_frame(self.rebuild_frame(frame))
+        self.cli("verify", expected=2)
+
+    def test_duplicate_json_members_and_floats_are_rejected(self):
+        self.record()
+        original = self.frame_path().read_text(encoding="utf-8")
+        self.frame_path().write_text(original.replace('"seq": 0', '"seq": 0, "seq": 0'), encoding="utf-8")
+        self.cli("verify", expected=2)
+        self.frame_path().write_text(original.replace('"seq": 0', '"seq": 0.0'), encoding="utf-8")
+        self.cli("verify", expected=2)
+
+    def test_reference_target_tampering_and_missing_parent_are_rejected(self):
+        first = self.record(worker="first")
+        self.record("--parent", first["path"], worker="second")
+        frame = self.frame(worker="second")
+        frame["payload"]["references"][0]["frame_hash"] = "0" * 64
+        self.rewrite_frame(self.rebuild_frame(frame), worker="second")
+        self.cli("verify", expected=2)
+        self.record("--parent", "runs/not-present/worker/frames/0.json", worker="third", expected=2)
+        self.record("--parent", "../escape.json", worker="fourth", expected=2)
+
+    def test_noncanonical_filenames_and_missing_genesis_are_rejected(self):
+        self.record()
+        original = self.frame_path()
+        original.rename(original.with_name("01.json"))
+        self.cli("verify", expected=2)
+        original.with_name("01.json").rename(original.with_name("1.json"))
+        self.cli("verify", expected=2)
+
+    def test_stale_locks_are_not_stolen(self):
+        self.record()
+        before = self.frame_path().read_bytes()
+        lock = self.frame_path().parent.parent / ".append.lock"
+        lock.mkdir()
+        self.record(expected=2)
+        self.cli("verify", expected=2)
+        self.assertTrue(lock.is_dir())
+        self.assertEqual(self.frame_path().read_bytes(), before)
+        lock.rmdir()
+        (self.store / ".init.lock").mkdir()
+        self.cli("init", "--owner", "test-owner", "--slug", "autocomplete", expected=2)
+        self.assertTrue((self.store / ".init.lock").is_dir())
+
+    def test_immutable_write_collision_does_not_overwrite(self):
+        path = self.fixture / "immutable.json"
+        FRAMES.immutable_write(path, b"first")
+        with self.assertRaises(FRAMES.EvidenceError):
+            FRAMES.immutable_write(path, b"second")
+        self.assertEqual(path.read_bytes(), b"first")
+        self.assertFalse(list(self.fixture.glob(".pending-*")))
+
+    def test_store_metadata_directory_is_not_a_checker_escape(self):
+        self.record()
+        (self.store / "index.json").mkdir()
+        self.cli("verify", expected=2)
+        self.record(expected=2)
+
+    def test_same_worker_concurrent_append_refuses_fork(self):
+        argv = ["python3", "-c",
+                "from pathlib import Path; import time; Path('started.txt').write_text('ready'); time.sleep(1)"]
+        process = subprocess.Popen(self.command("record", *self.record_args("--check", json.dumps(argv))),
+                                   stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT)
+        try:
+            deadline = time.monotonic() + 10
+            while not (self.repo / "started.txt").exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            self.assertTrue((self.repo / "started.txt").exists())
+            self.record(expected=2)
+            stdout, stderr = process.communicate(timeout=10)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertEqual(json.loads(stdout)["outcome"], "checks_passed")
+        finally:
+            if process.poll() is None:
+                process.kill()
+                process.communicate(timeout=5)
+            process.stdout.close()
+            process.stderr.close()
+        self.assertEqual(self.cli("verify")["counts"]["frames"], 1)
+
+    def test_independent_workers_can_publish_identical_blobs_concurrently(self):
+        processes = [
+            subprocess.Popen(self.command("record", *self.record_args(
+                "--check", json.dumps(["python3", "-c", "import time; time.sleep(0.2)"]), worker=worker)),
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=ROOT)
+            for worker in ("left", "right")
+        ]
+        try:
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=10)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
+        finally:
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+                    process.communicate(timeout=5)
+                process.stdout.close()
+                process.stderr.close()
+        self.assertEqual(self.cli("verify")["counts"], {"streams": 2, "frames": 2, "artifacts": 1})
+
+    def test_index_contract_and_protected_immutable_paths(self):
+        self.record()
+        output = self.fixture / "dashboard-index.json"
+        index = self.cli("index", "--output", str(output))
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8")), index)
+        self.assertEqual(index["schema"], "localfirst-autocomplete-evidence/v1")
+        self.assertEqual(index["reference"]["commit"], "eb50008011447f5e69372ac22a1755f0978d15ed")
+        required_event_keys = {
+            "run_id", "worker", "phase", "utc", "outcome", "summary", "stream_id", "seq",
+            "payload_hash", "frame_hash", "path", "artifacts", "checks",
+        }
+        self.assertTrue(required_event_keys <= index["events"][0].keys())
+        self.assertFalse(index["claims"]["authenticated_authorship"])
+        self.assertFalse(index["claims"]["trusted_timestamp"])
+        self.assertFalse(index["claims"]["novelty_or_legal_priority_proven"])
+        self.assertNotIn(str(self.fixture), json.dumps(index))
+        before = self.frame_path().read_bytes()
+        self.cli("index", "--output", str(self.frame_path()), expected=2)
+        self.cli("index", "--output", str(self.store / "rappid.json"), expected=2)
+        self.assertEqual(self.frame_path().read_bytes(), before)
+        self.cli("index", "--output", str(self.store / "index.json"))
+        self.cli("verify")
+
+
+if __name__ == "__main__":
+    unittest.main()

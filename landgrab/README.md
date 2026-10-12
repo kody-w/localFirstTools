@@ -7,6 +7,19 @@ invoke, and cite. Everything is **static + zero-server** (rides `raw.githubuserc
 
 **▶ Start at the [AI Landgrab HQ](https://kody-w.github.io/localFirstTools/landgrab/hq.html).**
 
+## Repository autocomplete and implementation provenance
+
+The [autocomplete workbench](autocomplete/index.html) builds on this layer:
+canonical discovery instead of counting redirects as inventions, bounded
+source-grounded improvement tasks, portable source passports, and independently
+verifiable implementation records carried by RAPP/1 frames.
+
+The [operator guide](autocomplete/operator.html) documents the repeatable AI
+coding loop, parallel worktree/stream ownership, and publication gates. The
+browser is a local-first inspection surface, not an unattended model service.
+Public records identify specific implementations and their source ancestry;
+they do not establish first invention or exclusive ownership.
+
 ## The 10 flag-plants → what ships them
 | # | Landgrab move | Artifact |
 |---|---|---|
