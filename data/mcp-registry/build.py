@@ -61,12 +61,15 @@ def build():
 
     identity_path = ROOT / "rappid.json"
     if identity_path.exists():
-        stream_id = json.loads(identity_path.read_text())["rappid"]
+        identity = json.loads(identity_path.read_text())
+        stream_id = identity["rappid"]
     else:
         stream_id = rapp.mint_rappid("kody-w", "mcp-registry")
-        write("rappid.json", json_bytes({"schema": "mcp-registry-identity/1.0", "rappid": stream_id}))
+        identity = {"rappid": stream_id}
     if not rapp.rappid_valid(stream_id):
         raise ValueError("Stored registry identity is invalid; refusing to re-mint")
+    identity["schema"] = "rapp/1"
+    write("rappid.json", json_bytes(identity))
 
     frames = []
     head = None

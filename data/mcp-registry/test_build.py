@@ -82,6 +82,25 @@ class RegistryTests(unittest.TestCase):
         self.build()
         self.assertEqual(before, self.snapshot())
 
+    def test_identity_schema_migration_preserves_minted_stream(self):
+        path = self.data / "rappid.json"
+        identity = json.loads(path.read_text())
+        stream_id = identity["rappid"]
+        identity["schema"] = "mcp-registry-identity/1.0"
+        path.write_text(json.dumps(identity) + "\n")
+        self.build()
+        self.assertEqual(
+            {"schema": "rapp/1", "rappid": stream_id},
+            json.loads(path.read_text()),
+        )
+        frames = [
+            json.loads(line) for line in (self.data / "chain.jsonl").read_text().splitlines()
+        ]
+        self.assertTrue(all(frame["stream_id"] == stream_id for frame in frames))
+        before = self.snapshot()
+        self.build()
+        self.assertEqual(before, self.snapshot())
+
     def test_agent_queries_follow_changed_endpoint_without_reinitialization(self):
         sys.path.insert(0, str(ROOT.parents[1] / "agents"))
         self.addCleanup(sys.path.pop, 0)
