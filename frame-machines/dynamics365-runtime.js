@@ -4,6 +4,7 @@
   var simulation = null;
   var liveOverlayState = { status: 'loading', data: null, error: '', sourceLabel: '' };
   var liquidDimensionState = { status: 'loading', data: null, error: '', sourceLabel: '' };
+  var chainHeadState = { status: 'loading', hash: '', error: '' };
   var currentIndex = 0;
   var isPlaying = false;
   var playbackTimer = null;
@@ -99,15 +100,6 @@
     };
   }
 
-  function rawUrlFor(path) {
-    var cleanPath = String(path || '').replace(/^\.?\//, '');
-    var repository = repoMetadata();
-    if (!cleanPath || !repository.owner || !repository.name) {
-      return '';
-    }
-    return 'https://raw.githubusercontent.com/' + repository.owner + '/' + repository.name + '/' + repository.branch + '/' + cleanPath;
-  }
-
   function downloadJson(filename, data) {
     var blob = new window.Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
     var url = window.URL.createObjectURL(blob);
@@ -121,20 +113,12 @@
   }
 
   function loadJson(path, primaryLabel, cacheLabel, onSuccess, onError) {
-    var sources = [];
-    var rawUrl = rawUrlFor(path);
-    if (rawUrl) {
-      sources.push({ url: rawUrl, label: primaryLabel || 'GitHub raw user data from the public repo' });
-    }
-    sources.push({ url: path, label: cacheLabel || 'checked-in cache' });
-
-    function trySource(index, lastError) {
-      if (index >= sources.length) {
-        onError(lastError || 'No sources responded.');
-        return;
+    try {
+      var url = new window.URL(path, window.location.href);
+      if (url.origin !== window.location.origin) {
+        throw new Error('State surfaces must be served from this page\'s origin.');
       }
-
-      window.fetch(sources[index].url, { cache: 'no-store' })
+      window.fetch(url.href)
         .then(function (response) {
           if (!response.ok) {
             throw new Error('HTTP ' + response.status);
@@ -142,14 +126,14 @@
           return response.json();
         })
         .then(function (data) {
-          onSuccess(data, sources[index].label);
+          onSuccess(data, cacheLabel || 'same-origin JSON');
         })
         .catch(function (error) {
-          trySource(index + 1, error && error.message ? error.message : 'Unknown fetch failure');
+          onError(error && error.message ? error.message : 'Unknown fetch failure');
         });
+    } catch (error) {
+      onError(error.message);
     }
-
-    trySource(0, 'Unknown fetch failure');
   }
 
   function overlayCards(frame) {
@@ -260,16 +244,16 @@
 
   function sourceMode(state, cards, fallbackReadyLabel, liveLabel, cacheLabel) {
     if (state.status === 'loading') {
-      return { label: 'Hydrating', className: 'is-loading', detail: 'Trying public-repo GitHub raw first, then the checked-in cache.' };
+      return { label: 'Hydrating', className: 'is-loading', detail: 'Loading the same-origin JSON surface.' };
     }
     if (state.status === 'error') {
       return { label: 'Offline', className: 'is-error', detail: state.error || 'Fetch failed.' };
     }
     if (state.status === 'ready' && state.sourceLabel === cacheLabel && cards.length > 0) {
-      return { label: fallbackReadyLabel, className: 'is-cache', detail: 'Using the checked-in cache preserved in the repo.' };
+      return { label: 'Local JSON', className: 'is-cache', detail: 'Using the checked-in state served from this origin.' };
     }
     if (state.status === 'ready') {
-      return { label: liveLabel, className: 'is-live', detail: 'Using GitHub raw user data from the public repo as the active surface.' };
+      return { label: 'Imported', className: 'is-live', detail: 'Using the imported local bundle.' };
     }
     return { label: 'Disabled', className: 'is-disabled', detail: 'No runtime surface configured for this proof.' };
   }
@@ -280,7 +264,7 @@
     if (state.status === 'ready' && cards.length > 0) {
       note = 'Loaded from ' + state.sourceLabel + ' / ' + escapeHtml((state.data && state.data.lastUpdated) || 'unknown timestamp') + '.';
     } else if (state.status === 'loading') {
-      note = 'Hydrating this surface from raw data in the public repo.';
+      note = 'Hydrating this surface from same-origin JSON.';
     } else if (state.status === 'error') {
       note = state.error;
     }
@@ -295,9 +279,9 @@
     var links = [
       { title: 'Live app URL', url: window.location.href, note: 'The rendered frame machine anyone can open in a browser.' },
       { title: 'Template repository', url: repoMetadata().url, note: 'Fork this public repo and swap the data surfaces while keeping the frame flow.' },
-      { title: 'Machine ledger JSON', url: rawUrlFor(config.machinePath), note: 'Canonical frame-by-frame CRM state published from the public repo.' },
-      { title: 'Active overlay JSON', url: rawUrlFor(config.overlayPath), note: 'Live edge data layered on top of the frame ledger from the public repo.' },
-      { title: 'Liquid dimension JSON', url: rawUrlFor(config.liquidPath), note: 'Fork-aware alternative dimension flowing through the same machine.' }
+      { title: 'Machine ledger JSON', url: config.machinePath, note: 'Canonical frame-by-frame CRM state published from the public repo.' },
+      { title: 'Active overlay JSON', url: config.overlayPath, note: 'Live edge data layered on top of the frame ledger from the public repo.' },
+      { title: 'Liquid dimension JSON', url: config.liquidPath, note: 'Fork-aware alternative dimension flowing through the same machine.' }
     ].concat((simulation.relatedProofs || []).map(function (item) {
       return { title: item.title, url: item.url, note: item.note };
     })).filter(function (item) {
@@ -312,7 +296,7 @@
   function bundleStatusText() {
     return hasImportedBundle()
       ? 'Imported bundle active. Fork edits are being replayed from local storage until you clear them.'
-      : 'Published public-repo raw state is active. Export bundle to back it up or fork it locally.';
+      : 'Published same-origin JSON state is active. Export bundle to back it up or fork it locally.';
   }
 
   function renderBackupCard() {
@@ -423,15 +407,40 @@
     return '<div class="frame-machine-proof-intro"><div class="frame-machine-proof-callout"><strong>Why this matters:</strong> ' + escapeHtml(intro.callout || '') + '</div><ul class="frame-machine-proof-points">' + (intro.points || []).map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul></div>';
   }
 
+  function renderChainHead() {
+    var text = chainHeadState.status === 'ready' ? chainHeadState.hash.slice(0, 8) :
+      (chainHeadState.status === 'error' ? 'Unavailable: ' + chainHeadState.error : 'Loading...');
+    return '<p class="frame-machine-active-note' + (chainHeadState.status === 'error' ? ' is-error' : '') +
+      '">Published RAPP chain head: <code data-frame-machine-head aria-live="polite">' +
+      escapeHtml(text) + '</code></p>';
+  }
+
+  function loadChainHead() {
+    var path = config.orientPath || String(config.machinePath).replace(/machine\.json$/, 'orient.json');
+    loadJson(path, 'RAPP orientation', 'same-origin orientation', function (data) {
+      if (!data.head || !/^[0-9a-f]{64}$/.test(data.head.frame_hash) ||
+          !Number.isInteger(data.head.seq) || data.head.seq < 0) {
+        chainHeadState = { status: 'error', hash: '', error: 'Invalid chain orientation.' };
+      } else {
+        chainHeadState = { status: 'ready', hash: data.head.frame_hash, error: '' };
+      }
+      renderFrame(currentIndex);
+    }, function (error) {
+      chainHeadState = { status: 'error', hash: '', error: error };
+      renderFrame(currentIndex);
+    });
+  }
+
   function renderFrame(index) {
     var frame = simulation.frames[index];
     var overlay = overlayCards(frame);
     var liquid = liquidCards(frame);
-    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading public-repo raw data...' : 'Refresh public-repo raw data') + '</button>';
+    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading local JSON...' : 'Refresh local JSON') + '</button>';
     var refreshLiquid = '<button class="frame-machine-button" data-frame-machine-refresh-liquid ' + (liquidDimensionState.status === 'loading' ? 'disabled' : '') + '>' + (liquidDimensionState.status === 'loading' ? 'Loading liquid dimension...' : 'Refresh liquid dimension') + '</button>';
 
     root.innerHTML = '' +
       '<header class="frame-machine-page-header"><div class="frame-machine-kicker">' + escapeHtml(simulation.kicker || 'Universal frame machine') + '</div><h1 class="frame-machine-page-title">' + escapeHtml(simulation.title || 'Frame machine') + '</h1><p class="frame-machine-page-deck">' + escapeHtml(simulation.deck || '') + '</p></header>' +
+      renderChainHead() +
       renderProofPoints() +
       '<div class="frame-machine-top-grid">' + renderResourceLinks() + renderBackupCard() + '</div>' +
       '<div class="frame-machine-shell">' +
@@ -548,6 +557,7 @@
     renderFrame(currentIndex);
     loadOverlay();
     loadLiquid();
+    loadChainHead();
     if (simulation.runtime && simulation.runtime.autoPlay) {
       startPlayback();
     }
