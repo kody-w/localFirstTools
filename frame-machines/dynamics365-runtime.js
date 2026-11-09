@@ -4,6 +4,7 @@
   var simulation = null;
   var liveOverlayState = { status: 'loading', data: null, error: '', sourceLabel: '' };
   var liquidDimensionState = { status: 'loading', data: null, error: '', sourceLabel: '' };
+  var chainHeadState = { status: 'loading', data: null, error: '' };
   var currentIndex = 0;
   var isPlaying = false;
   var playbackTimer = null;
@@ -100,7 +101,7 @@
   }
 
   function rawUrlFor(path) {
-    var cleanPath = String(path || '').replace(/^\.?\//, '');
+    var cleanPath = String(path || '').replace(/^(?:\.\.?\/)+/, '').replace(/^\/+/, '');
     var repository = repoMetadata();
     if (!cleanPath || !repository.owner || !repository.name) {
       return '';
@@ -121,12 +122,11 @@
   }
 
   function loadJson(path, primaryLabel, cacheLabel, onSuccess, onError) {
-    var sources = [];
+    var sources = [{ url: path, label: cacheLabel || 'same-origin JSON' }];
     var rawUrl = rawUrlFor(path);
     if (rawUrl) {
-      sources.push({ url: rawUrl, label: primaryLabel || 'GitHub raw user data from the public repo' });
+      sources.push({ url: rawUrl, label: primaryLabel || 'GitHub raw fallback' });
     }
-    sources.push({ url: path, label: cacheLabel || 'checked-in cache' });
 
     function trySource(index, lastError) {
       if (index >= sources.length) {
@@ -134,7 +134,7 @@
         return;
       }
 
-      window.fetch(sources[index].url, { cache: 'no-store' })
+      window.fetch(sources[index].url)
         .then(function (response) {
           if (!response.ok) {
             throw new Error('HTTP ' + response.status);
@@ -260,16 +260,16 @@
 
   function sourceMode(state, cards, fallbackReadyLabel, liveLabel, cacheLabel) {
     if (state.status === 'loading') {
-      return { label: 'Hydrating', className: 'is-loading', detail: 'Trying public-repo GitHub raw first, then the checked-in cache.' };
+      return { label: 'Hydrating', className: 'is-loading', detail: 'Loading from this site first, with GitHub raw only as a fallback.' };
     }
     if (state.status === 'error') {
       return { label: 'Offline', className: 'is-error', detail: state.error || 'Fetch failed.' };
     }
     if (state.status === 'ready' && state.sourceLabel === cacheLabel && cards.length > 0) {
-      return { label: fallbackReadyLabel, className: 'is-cache', detail: 'Using the checked-in cache preserved in the repo.' };
+      return { label: fallbackReadyLabel, className: 'is-cache', detail: 'Using the checked-in JSON served by this site.' };
     }
     if (state.status === 'ready') {
-      return { label: liveLabel, className: 'is-live', detail: 'Using GitHub raw user data from the public repo as the active surface.' };
+      return { label: liveLabel, className: 'is-live', detail: 'Using imported data or a GitHub raw fallback.' };
     }
     return { label: 'Disabled', className: 'is-disabled', detail: 'No runtime surface configured for this proof.' };
   }
@@ -278,9 +278,9 @@
     var mode = sourceMode(state, cards, fallbackReadyLabel, liveLabel, cacheLabel);
     var note = emptyNote;
     if (state.status === 'ready' && cards.length > 0) {
-      note = 'Loaded from ' + state.sourceLabel + ' / ' + escapeHtml((state.data && state.data.lastUpdated) || 'unknown timestamp') + '.';
+      note = 'Loaded from ' + state.sourceLabel + ' / ' + ((state.data && state.data.lastUpdated) || 'unknown timestamp') + '.';
     } else if (state.status === 'loading') {
-      note = 'Hydrating this surface from raw data in the public repo.';
+      note = 'Hydrating this surface from the same-origin JSON.';
     } else if (state.status === 'error') {
       note = state.error;
     }
@@ -295,9 +295,10 @@
     var links = [
       { title: 'Live app URL', url: window.location.href, note: 'The rendered frame machine anyone can open in a browser.' },
       { title: 'Template repository', url: repoMetadata().url, note: 'Fork this public repo and swap the data surfaces while keeping the frame flow.' },
-      { title: 'Machine ledger JSON', url: rawUrlFor(config.machinePath), note: 'Canonical frame-by-frame CRM state published from the public repo.' },
-      { title: 'Active overlay JSON', url: rawUrlFor(config.overlayPath), note: 'Live edge data layered on top of the frame ledger from the public repo.' },
-      { title: 'Liquid dimension JSON', url: rawUrlFor(config.liquidPath), note: 'Fork-aware alternative dimension flowing through the same machine.' }
+      { title: 'Machine ledger JSON', url: config.machinePath, note: 'Canonical frame-by-frame CRM state served from this site.' },
+      { title: 'Active overlay JSON', url: config.overlayPath, note: 'Active system data layered on top of the frame ledger.' },
+      { title: 'Liquid dimension JSON', url: config.liquidPath, note: 'Fork-aware alternative dimension flowing through the same machine.' },
+      { title: 'RAPP chain head', url: config.orientPath, note: 'The published beacon selecting the content-addressed RAPP/1 chain.' }
     ].concat((simulation.relatedProofs || []).map(function (item) {
       return { title: item.title, url: item.url, note: item.note };
     })).filter(function (item) {
@@ -312,7 +313,7 @@
   function bundleStatusText() {
     return hasImportedBundle()
       ? 'Imported bundle active. Fork edits are being replayed from local storage until you clear them.'
-      : 'Published public-repo raw state is active. Export bundle to back it up or fork it locally.';
+      : 'Published same-origin state is active. Export bundle to back it up or fork it locally.';
   }
 
   function renderBackupCard() {
@@ -423,21 +424,30 @@
     return '<div class="frame-machine-proof-intro"><div class="frame-machine-proof-callout"><strong>Why this matters:</strong> ' + escapeHtml(intro.callout || '') + '</div><ul class="frame-machine-proof-points">' + (intro.points || []).map(function (item) { return '<li>' + escapeHtml(item) + '</li>'; }).join('') + '</ul></div>';
   }
 
+  function renderChainHead() {
+    var head = chainHeadState.data && chainHeadState.data.head;
+    var text = head ? head.frame_hash.slice(0, 8) : (chainHeadState.status === 'error' ? 'Unavailable' : 'Loading...');
+    return '<p class="frame-machine-chain-note"><strong>Published chain head:</strong> <code data-frame-machine-head title="' + escapeHtml(head ? head.frame_hash : '') + '">' + escapeHtml(text) + '</code>' +
+      (head ? ' / sequence ' + escapeHtml(head.seq) : '') + '</p>' +
+      (chainHeadState.status === 'error' ? '<p class="frame-machine-active-note is-error">' + escapeHtml(chainHeadState.error) + '</p>' : '');
+  }
+
   function renderFrame(index) {
     var frame = simulation.frames[index];
     var overlay = overlayCards(frame);
     var liquid = liquidCards(frame);
-    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading public-repo raw data...' : 'Refresh public-repo raw data') + '</button>';
+    var refreshOverlay = '<button class="frame-machine-button" data-frame-machine-refresh-overlay ' + (liveOverlayState.status === 'loading' ? 'disabled' : '') + '>' + (liveOverlayState.status === 'loading' ? 'Loading active system data...' : 'Refresh active system data') + '</button>';
     var refreshLiquid = '<button class="frame-machine-button" data-frame-machine-refresh-liquid ' + (liquidDimensionState.status === 'loading' ? 'disabled' : '') + '>' + (liquidDimensionState.status === 'loading' ? 'Loading liquid dimension...' : 'Refresh liquid dimension') + '</button>';
 
     root.innerHTML = '' +
       '<header class="frame-machine-page-header"><div class="frame-machine-kicker">' + escapeHtml(simulation.kicker || 'Universal frame machine') + '</div><h1 class="frame-machine-page-title">' + escapeHtml(simulation.title || 'Frame machine') + '</h1><p class="frame-machine-page-deck">' + escapeHtml(simulation.deck || '') + '</p></header>' +
+      renderChainHead() +
       renderProofPoints() +
       '<div class="frame-machine-top-grid">' + renderResourceLinks() + renderBackupCard() + '</div>' +
       '<div class="frame-machine-shell">' +
-        '<section class="frame-machine-hero"><h2>' + escapeHtml(frame.label) + '</h2><p class="frame-machine-summary">' + escapeHtml(frame.summary) + '</p><div class="frame-machine-runtime-row"><div class="frame-machine-runtime-pill ' + (isPlaying ? 'is-running' : 'is-paused') + '">' + escapeHtml(runtimeLabel) + ': ' + (isPlaying ? 'Running' : 'Paused') + '</div><div class="frame-machine-clock-detail">Static clock profile: ' + escapeHtml(formatInterval(frameIntervalMs)) + ' per frame / ' + escapeHtml(endBehavior) + ' at final frame</div></div><div class="frame-machine-controls"><div class="frame-machine-control-cluster"><button class="frame-machine-button" data-frame-machine-prev ' + (index === 0 ? 'disabled' : '') + '>Previous frame</button><button class="frame-machine-button frame-machine-button-primary" data-frame-machine-play aria-pressed="' + (isPlaying ? 'true' : 'false') + '">' + (isPlaying ? 'Pause frame time' : 'Play in frame time') + '</button>' + refreshOverlay + refreshLiquid + '<button class="frame-machine-button" data-frame-machine-next ' + (index === simulation.frames.length - 1 ? 'disabled' : '') + '>Next frame</button></div><input class="frame-machine-range" type="range" min="0" max="' + (simulation.frames.length - 1) + '" value="' + index + '" data-frame-machine-range></div><div class="frame-machine-meta"><span><strong>Clock:</strong> ' + escapeHtml(frame.clock) + '</span><span><strong>Frame:</strong> ' + escapeHtml((index + 1) + ' / ' + simulation.frames.length) + '</span></div><p class="frame-machine-note">' + escapeHtml(frame.note) + '</p></section>' +
+        '<section class="frame-machine-hero"><h2 data-frame-machine-label>' + escapeHtml(frame.label) + '</h2><p class="frame-machine-summary">' + escapeHtml(frame.summary) + '</p><div class="frame-machine-runtime-row"><div class="frame-machine-runtime-pill ' + (isPlaying ? 'is-running' : 'is-paused') + '">' + escapeHtml(runtimeLabel) + ': ' + (isPlaying ? 'Running' : 'Paused') + '</div><div class="frame-machine-clock-detail">Static clock profile: ' + escapeHtml(formatInterval(frameIntervalMs)) + ' per frame / ' + escapeHtml(endBehavior) + ' at final frame</div></div><div class="frame-machine-controls"><div class="frame-machine-control-cluster"><button class="frame-machine-button" data-frame-machine-prev ' + (index === 0 ? 'disabled' : '') + '>Previous frame</button><button class="frame-machine-button frame-machine-button-primary" data-frame-machine-play aria-pressed="' + (isPlaying ? 'true' : 'false') + '">' + (isPlaying ? 'Pause frame time' : 'Play in frame time') + '</button>' + refreshOverlay + refreshLiquid + '<button class="frame-machine-button" data-frame-machine-next ' + (index === simulation.frames.length - 1 ? 'disabled' : '') + '>Next frame</button></div><input class="frame-machine-range" type="range" min="0" max="' + (simulation.frames.length - 1) + '" value="' + index + '" aria-label="Select frame" data-frame-machine-range></div><div class="frame-machine-meta"><span><strong>Clock:</strong> ' + escapeHtml(frame.clock) + '</span><span><strong>Frame:</strong> ' + escapeHtml((index + 1) + ' / ' + simulation.frames.length) + '</span></div><p class="frame-machine-note">' + escapeHtml(frame.note) + '</p></section>' +
         '<section class="frame-machine-stats"><div class="frame-machine-stat"><span>Open pipeline</span><strong>' + formatCurrency(openPipeline(frame)) + '</strong></div><div class="frame-machine-stat"><span>Open cases</span><strong>' + openCases(frame) + '</strong></div><div class="frame-machine-stat"><span>Active tasks</span><strong>' + activeTasks(frame) + '</strong></div><div class="frame-machine-stat"><span>Live automations</span><strong>' + activeAutomations(frame) + '</strong></div><div class="frame-machine-stat"><span>At-risk accounts</span><strong>' + atRiskAccounts(frame) + '</strong></div></section>' +
-        '<div class="frame-machine-grid"><section class="frame-machine-panel"><h3>Machine state</h3><div class="frame-machine-state-grid">' + renderMachineStates(frame.machine) + '</div></section><section class="frame-machine-panel"><h3>Active system data</h3>' + renderSurfaceSummary('Hydration source', liveOverlayState, overlay, 'checked-in cache', 'Live raw', 'Cache fallback', 'The checked-in cache simulates the current running state when external fetches are unavailable.') + '<div class="frame-machine-state-grid">' + renderKeyValueCards(overlay) + '</div></section><section class="frame-machine-panel"><h3>Alternative dimensions</h3>' + renderSurfaceSummary('Dimension source', liquidDimensionState, liquid, 'checked-in liquid dimension', 'Live fork', 'Local fork', 'Forks can replace this file and still flow through the same state machine.') + '<div class="frame-machine-state-grid">' + renderKeyValueCards(liquid) + '</div><p class="frame-machine-dimension-note">' + escapeHtml((liquidDimensionState.data && liquidDimensionState.data.note) || 'Forks can replace the liquid dimension file and still flow through the same machine.') + '</p></section></div>' +
+        '<div class="frame-machine-grid"><section class="frame-machine-panel"><h3>Machine state</h3><div class="frame-machine-state-grid">' + renderMachineStates(frame.machine) + '</div></section><section class="frame-machine-panel"><h3>Active system data</h3>' + renderSurfaceSummary('Hydration source', liveOverlayState, overlay, 'checked-in cache', 'Raw fallback', 'Same-origin', 'The checked-in JSON simulates the current running state.') + '<div class="frame-machine-state-grid">' + renderKeyValueCards(overlay) + '</div></section><section class="frame-machine-panel"><h3>Alternative dimensions</h3>' + renderSurfaceSummary('Dimension source', liquidDimensionState, liquid, 'checked-in liquid dimension', 'Raw fallback', 'Local fork', 'Forks can replace this file and still flow through the same state machine.') + '<div class="frame-machine-state-grid">' + renderKeyValueCards(liquid) + '</div><p class="frame-machine-dimension-note">' + escapeHtml((liquidDimensionState.data && liquidDimensionState.data.note) || 'Forks can replace the liquid dimension file and still flow through the same machine.') + '</p></section></div>' +
         '<div class="frame-machine-grid"><section class="frame-machine-panel"><h3>State transition log</h3>' + renderTransitions(frame.transitions) + '</section><section class="frame-machine-panel"><h3>Automations</h3>' + renderList((frame.automations || []).map(function (item) { return { primary: item.id, secondary: item.trigger, body: item.action, meta: item.status }; })) + '</section><section class="frame-machine-panel"><h3>State lineage</h3>' + renderLineage(frame.lineage) + '</section></div>' +
         '<div class="frame-machine-grid">' + renderTable('Accounts', frame.entities.accounts || [], [{ key: 'id', label: 'ID' }, { key: 'name', label: 'Name' }, { key: 'lifecycle', label: 'Lifecycle' }, { key: 'owner', label: 'Owner' }, { key: 'health', label: 'Health' }]) + renderTable('Leads', frame.entities.leads || [], [{ key: 'id', label: 'ID' }, { key: 'company', label: 'Company' }, { key: 'stage', label: 'Stage' }, { key: 'score', label: 'Score' }, { key: 'owner', label: 'Owner' }]) + '</div>' +
         '<div class="frame-machine-grid">' + renderTable('Opportunities', frame.entities.opportunities || [], [{ key: 'id', label: 'ID' }, { key: 'name', label: 'Name' }, { key: 'stage', label: 'Stage' }, { key: 'amount', label: 'Amount' }, { key: 'next', label: 'Next step' }]) + renderTable('Cases', frame.entities.cases || [], [{ key: 'id', label: 'ID' }, { key: 'title', label: 'Title' }, { key: 'severity', label: 'Severity' }, { key: 'status', label: 'Status' }, { key: 'owner', label: 'Owner' }]) + '</div>' +
@@ -479,6 +489,20 @@
       renderFrame(currentIndex);
     }, function (error) {
       liquidDimensionState = { status: 'error', data: null, error: error, sourceLabel: '' };
+      renderFrame(currentIndex);
+    });
+  }
+
+  function loadChainHead() {
+    loadJson(config.orientPath, 'GitHub raw chain beacon', 'same-origin chain beacon', function (data) {
+      if (!data.head || !/^[0-9a-f]{64}$/.test(data.head.frame_hash) ||
+          typeof data.head.seq !== 'number' || data.head.seq < 0 || Math.floor(data.head.seq) !== data.head.seq) {
+        throw new Error('The chain beacon has no valid head.frame_hash and head.seq.');
+      }
+      chainHeadState = { status: 'ready', data: data, error: '' };
+      renderFrame(currentIndex);
+    }, function (error) {
+      chainHeadState = { status: 'error', data: null, error: error };
       renderFrame(currentIndex);
     });
   }
@@ -548,6 +572,7 @@
     renderFrame(currentIndex);
     loadOverlay();
     loadLiquid();
+    loadChainHead();
     if (simulation.runtime && simulation.runtime.autoPlay) {
       startPlayback();
     }
