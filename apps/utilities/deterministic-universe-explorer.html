@@ -16,6 +16,9 @@
         body { overflow: hidden; background: #000005; font-family: 'Segoe UI', monospace; color: #fff; }
         #canvas-container { position: fixed; inset: 0; }
         canvas { display: block; width: 100%; height: 100%; }
+        canvas.arrive { animation: arrive 0.35s ease-out; }
+        @keyframes arrive { from { opacity: 0.25; } to { opacity: 1; } }
+        @media (prefers-reduced-motion: reduce) { canvas.arrive { animation: none; } }
         #ui { position: fixed; top: 20px; left: 20px; width: 300px; pointer-events: none; }
         .panel {
             background: rgba(0, 10, 20, 0.88); border: 1px solid #00ffff;
@@ -194,6 +197,12 @@
                     })
                 };
             });
+            // Display colour follows temperature: cool stars orange, sun-like stars warm white, hot stars blue-white.
+            stars.forEach(star => {
+                const t = star.temperature;
+                star.hue = t < 5200 ? 22 + (t - 3500) / 1700 * 18 : t < 7600 ? 40 + (t - 5200) / 2400 * 12 : 205 + (t - 7600) / 4900 * 15;
+                star.sat = t < 5200 ? 92 : t < 7600 ? 70 : 60;
+            });
 
             function parseRoute(fragment) {
                 if (!fragment || fragment === '#galaxy') return { level: 'galaxy', star: 0, planet: 0 };
@@ -305,11 +314,11 @@
                 ctx.arc(x, y, radius, 0, TAU);
                 ctx.fill();
             }
-            function halo(x, y, radius, hue, opacity = 0.5) {
+            function halo(x, y, radius, hue, opacity = 0.5, sat = 90) {
                 const gradient = ctx.createRadialGradient(x, y, 0, x, y, radius);
-                gradient.addColorStop(0, 'hsla(' + hue + ',90%,70%,' + opacity + ')');
-                gradient.addColorStop(0.25, 'hsla(' + hue + ',85%,55%,' + opacity * 0.4 + ')');
-                gradient.addColorStop(1, 'hsla(' + hue + ',90%,40%,0)');
+                gradient.addColorStop(0, 'hsla(' + hue + ',' + sat + '%,70%,' + opacity + ')');
+                gradient.addColorStop(0.25, 'hsla(' + hue + ',' + sat * 0.95 + '%,55%,' + opacity * 0.4 + ')');
+                gradient.addColorStop(1, 'hsla(' + hue + ',' + sat + '%,40%,0)');
                 ctx.fillStyle = gradient;
                 ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2);
             }
@@ -334,6 +343,16 @@
                     if (r > 0.99) halo(x, y, 7, 195, 0.25);
                 }
             }
+            function drawLabel(text, x, y, fill) {
+                ctx.save();
+                ctx.lineJoin = 'round';
+                ctx.lineWidth = 3;
+                ctx.strokeStyle = 'rgba(0,4,10,0.85)';
+                ctx.strokeText(text, x, y);
+                ctx.fillStyle = fill;
+                ctx.fillText(text, x, y);
+                ctx.restore();
+            }
             function marker(x, y, radius, label, selected, index) {
                 ctx.save();
                 ctx.strokeStyle = selected ? '#65ffff' : '#9eb6c5';
@@ -345,8 +364,7 @@
                 ctx.setLineDash([]);
                 ctx.font = '11px monospace';
                 ctx.textAlign = 'center';
-                ctx.fillStyle = selected ? '#9affff' : '#c9dbe5';
-                ctx.fillText(label, clamp(x, 65, width - 65), y + radius + 24);
+                drawLabel(label, clamp(x, 65, width - 65), y + radius + 24, selected ? '#9affff' : '#c9dbe5');
                 ctx.restore();
                 hitTargets.push({ x, y, radius: Math.max(22, radius + 8), index });
             }
@@ -360,12 +378,18 @@
                 ctx.scale(1, 0.53);
                 halo(0, 0, radius * 0.9, 225, 0.2);
                 ctx.globalCompositeOperation = 'screen';
+                for (let i = 0; i < 90; i++) {
+                    const distance = (0.12 + i / 90 * 0.88) * radius;
+                    const angle = (i % 4) * TAU / 4 + distance / radius * 6;
+                    halo(Math.cos(angle) * distance, Math.sin(angle) * distance, radius * 0.11, 222, 0.07);
+                }
                 for (let i = 0; i < 10000; i++) {
                     const distance = Math.pow(rng(), 0.65) * radius;
                     const angle = (i % 4) * TAU / 4 + distance / radius * 6 + (rng() - 0.5) * 0.65;
-                    const spread = rng() * radius * 0.045;
-                    const x = Math.cos(angle) * distance + (rng() - 0.5) * spread;
-                    const y = Math.sin(angle) * distance + (rng() - 0.5) * spread;
+                    const spread = radius * (0.05 + 0.07 * distance / radius);
+                    const gauss = () => (rng() + rng() + rng() - 1.5) / 1.5;
+                    const x = Math.cos(angle) * distance + gauss() * spread;
+                    const y = Math.sin(angle) * distance + gauss() * spread;
                     disc(x, y, 0.35 + rng() * 1.25, 'hsla(' + (195 + rng() * 70) + ',65%,' + (65 + rng() * 30) + '%,' + (0.25 + rng() * 0.65) + ')');
                 }
                 halo(0, 0, radius * 0.3, 42, 0.9);
@@ -377,21 +401,24 @@
                     const y = Math.sin(a) * radius * (0.5 + i * 0.2) * 0.53;
                     const sx = f.cx + x * Math.cos(rotation) - y * Math.sin(rotation);
                     const sy = f.cy + x * Math.sin(rotation) + y * Math.cos(rotation);
-                    halo(sx, sy, 25, star.hue, 0.75);
+                    halo(sx, sy, 25, star.hue, 0.75, star.sat);
                     disc(sx, sy, 3.2, '#fff');
                     marker(sx, sy, 6, star.name, state.star === i, i);
                 });
             }
-            function planetTexture(planet) {
-                if (textures.has(planet.key)) return textures.get(planet.key);
+            function planetTexture(planet, drawn) {
+                const size = drawn > 200 ? 768 : drawn > 80 ? 320 : 128;
+                const cacheKey = planet.key + '@' + size;
+                if (textures.has(cacheKey)) return textures.get(cacheKey);
                 const image = document.createElement('canvas');
-                image.width = image.height = 320;
+                image.width = image.height = size;
                 const context = image.getContext('2d');
-                const pixels = context.createImageData(320, 320);
+                const pixels = context.createImageData(size, size);
                 const biome = planet.biome;
-                for (let y = 0; y < 320; y++) {
-                    for (let x = 0; x < 320; x++) {
-                        const nx = (x + 0.5) / 160 - 1, ny = (y + 0.5) / 160 - 1;
+                const half = size / 2;
+                for (let y = 0; y < size; y++) {
+                    for (let x = 0; x < size; x++) {
+                        const nx = (x + 0.5) / half - 1, ny = (y + 0.5) / half - 1;
                         const r2 = nx * nx + ny * ny;
                         if (r2 > 1) continue;
                         const nz = Math.sqrt(1 - r2);
@@ -400,7 +427,7 @@
                         const wx = Math.cos(latitude) * Math.cos(longitude) * 3.5 + 10;
                         const wy = ny * 3.5 + 10;
                         const wz = Math.cos(latitude) * Math.sin(longitude) * 3.5 + 10;
-                        const n = terrainNoise(wx, wy, wz, planet.salt);
+                        const n = terrainNoise(wx, wy, wz, planet.salt) + (noise(wx * 9, wy * 9, wz * 9, planet.salt + 5) - 0.5) * 0.06;
                         let color = mix(biome.low, biome.high, clamp((n - 0.25) * 2));
                         if (biome.type === 'Oceanic') {
                             color = n < 0.51 ? mix([7, 28, 72], biome.low, clamp(n * 1.8)) :
@@ -416,7 +443,7 @@
                         }
                         const light = clamp(-nx * 0.47 - ny * 0.3 + nz * 0.8, 0.07, 1);
                         const edge = Math.pow(1 - nz, 3) * 0.18;
-                        const offset = (y * 320 + x) * 4;
+                        const offset = (y * size + x) * 4;
                         for (let c = 0; c < 3; c++) pixels.data[offset + c] = clamp(color[c] * light + [35, 110, 150][c] * edge, 0, 255);
                         pixels.data[offset + 3] = 255;
                     }
@@ -427,7 +454,13 @@
             }
             function globe(planet, x, y, radius) {
                 halo(x, y, radius * 1.2, planet.biome.hue, 0.25);
-                ctx.drawImage(planetTexture(planet), x - radius, y - radius, radius * 2, radius * 2);
+                ctx.save();
+                ctx.beginPath();
+                ctx.arc(x, y, radius, 0, TAU);
+                ctx.clip();
+                ctx.imageSmoothingQuality = 'high';
+                ctx.drawImage(planetTexture(planet, radius * 2 * Math.min(window.devicePixelRatio || 1, 2)), x - radius, y - radius, radius * 2, radius * 2);
+                ctx.restore();
                 ctx.strokeStyle = 'rgba(126,218,255,0.3)';
                 ctx.lineWidth = 0.8;
                 ctx.beginPath();
@@ -455,11 +488,11 @@
                     marker(x, y, size, planet.name, state.planet === i, i);
                 });
                 const size = Math.max(15, radius * 0.09);
-                halo(f.cx, f.cy, size * 5, star.hue, 0.85);
+                halo(f.cx, f.cy, size * 5, star.hue, 0.85, star.sat);
                 const gradient = ctx.createRadialGradient(f.cx - size * 0.3, f.cy - size * 0.3, 0, f.cx, f.cy, size);
                 gradient.addColorStop(0, '#fffef3');
-                gradient.addColorStop(0.55, 'hsl(' + star.hue + ',95%,82%)');
-                gradient.addColorStop(1, 'hsl(' + star.hue + ',85%,50%)');
+                gradient.addColorStop(0.55, 'hsl(' + star.hue + ',' + star.sat + '%,84%)');
+                gradient.addColorStop(1, 'hsl(' + star.hue + ',' + star.sat + '%,58%)');
                 disc(f.cx, f.cy, size, gradient);
                 for (let i = 0; i < 350; i++) {
                     const a = rng() * TAU, r = Math.sqrt(rng()) * size;
@@ -485,7 +518,7 @@
                 if (planet.rings) rings(f.cx, f.cy, radius, planet, false);
                 globe(planet, f.cx, f.cy, radius);
                 if (planet.rings) rings(f.cx, f.cy, radius, planet, true);
-                const moonX = f.cx + radius * 1.35, moonY = f.cy - radius * 1.05;
+                const moonX = Math.min(f.cx + radius * 1.35, f.x + f.w - radius * 0.2), moonY = Math.max(f.cy - radius * 1.05, f.y + radius * 0.2);
                 halo(moonX, moonY, radius * 0.19, 210, 0.15);
                 const moon = ctx.createRadialGradient(moonX - 4, moonY - 5, 0, moonX, moonY, radius * 0.1);
                 moon.addColorStop(0, '#bccbd3');
@@ -500,9 +533,8 @@
                 ctx.stroke();
                 disc(f.cx + radius * 0.3, f.cy + radius * 0.25, 3, '#9fffff');
                 ctx.font = '10px monospace';
-                ctx.fillStyle = '#9bffff';
                 ctx.textAlign = 'center';
-                ctx.fillText('LANDING VECTOR', f.cx, f.cy + radius + 28);
+                drawLabel('LANDING VECTOR', f.cx, f.cy + radius + 28, '#9bffff');
             }
             function drawSurface(f, planet) {
                 const biome = planet.biome;
@@ -516,7 +548,7 @@
                 ctx.fillRect(0, 0, width, height);
                 const sunX = f.x + f.w * 0.77, sunY = f.y + f.h * 0.19;
                 const sunR = Math.min(f.w, f.h) * 0.043;
-                halo(sunX, sunY, sunR * 6, stars[state.star].hue, 0.65);
+                halo(sunX, sunY, sunR * 6, stars[state.star].hue, 0.65, stars[state.star].sat);
                 disc(sunX, sunY, sunR, '#fff1c8');
                 disc(f.x + f.w * 0.2, f.y + f.h * 0.12, sunR * 1.5, '#98b7d155');
                 for (let layer = 0; layer < 4; layer++) {
@@ -537,12 +569,18 @@
                 for (let row = 40; row > 0; row--) {
                     const zFar = 1 + Math.pow(row / 40, 1.8) * 65;
                     const zNear = 1 + Math.pow((row - 1) / 40, 1.8) * 65;
-                    for (let col = 0; col < 64; col++) {
-                        const x = (col - 32) * 2.5;
-                        const a = project(x, zFar), b = project(x + 2.5, zFar);
-                        const c = project(x + 2.5, zNear), d = project(x, zNear);
+                    // Finer tiles near the camera, so close ground has no giant flat facets or seams.
+                    ctx.lineWidth = 0.6;
+                    const step = zFar < 6 ? 0.625 : zFar < 15 ? 1.25 : 2.5;
+                    for (let x = -80; x < 80; x += step) {
+                        const a = project(x, zFar), b = project(x + step, zFar);
+                        const c = project(x + step, zNear), d = project(x, zNear);
+                        if (Math.max(a.x, d.x) < 0 || Math.min(b.x, c.x) > width) continue;
                         const n = noise(x * 0.17 + 20, zFar * 0.17, 0, planet.salt + 20);
-                        let color = biome.ground.map(channel => channel * (0.45 + n * 0.8));
+                        const slopeX = (elevation(x + step, zFar) - elevation(x, zFar)) * 2.5 / step;
+                        const slopeZ = elevation(x, zFar) - elevation(x, zNear);
+                        const lit = clamp(0.62 + slopeX * 0.22 + slopeZ * 0.16 + n * 0.45, 0.35, 1.25);
+                        let color = biome.ground.map(channel => channel * lit);
                         if (biome.type === 'Oceanic' && elevation(x, zFar) < 0) color = [18, 83 + n * 28, 115 + n * 25];
                         if (biome.type === 'Lava' && Math.abs(n - 0.5) < 0.055) color = [235, 65 + n * 95, 18];
                         if (biome.type === 'Ice' && n > 0.6) color = [193, 225, 235];
@@ -550,11 +588,11 @@
                         ctx.fillStyle = rgb(color);
                         ctx.beginPath();
                         ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.lineTo(c.x, c.y);
-                        ctx.closePath(); ctx.fill();
+                        ctx.closePath(); ctx.fill(); ctx.strokeStyle = ctx.fillStyle; ctx.stroke();
                         ctx.fillStyle = rgb(color.map(channel => channel * 0.94));
                         ctx.beginPath();
                         ctx.moveTo(a.x, a.y); ctx.lineTo(c.x, c.y); ctx.lineTo(d.x, d.y);
-                        ctx.closePath(); ctx.fill();
+                        ctx.closePath(); ctx.fill(); ctx.strokeStyle = ctx.fillStyle; ctx.stroke();
                     }
                 }
                 const details = Array.from({ length: 110 }, () => ({ x: (rng() - 0.5) * 65, z: 3 + rng() * 42, size: 0.15 + rng() * 0.65 })).sort((a, b) => b.z - a.z);
@@ -590,6 +628,7 @@
                 ctx.fillRect(f.cx - 5, beaconY + 2, 3, 7);
                 ctx.fillRect(f.cx + 2, beaconY + 2, 3, 7);
             }
+            let lastKey = null;
             function draw() {
                 if (!state) return;
                 const rect = canvas.getBoundingClientRect();
@@ -604,6 +643,11 @@
                 const f = frame();
                 const star = stars[state.star], planet = star.planets[state.planet];
                 const key = state.level === 'galaxy' ? 'galaxy' : state.level + ':' + star.id + (state.level === 'system' ? '' : ':' + planet.id);
+                if (key !== lastKey) {
+                    canvas.classList.remove('arrive');
+                    if (lastKey !== null) { void canvas.offsetWidth; canvas.classList.add('arrive'); }
+                    lastKey = key;
+                }
                 drawBackground(key);
                 if (state.level === 'galaxy') drawGalaxy(f);
                 else if (state.level === 'system') drawSystem(f, star);
@@ -617,8 +661,7 @@
                 ctx.stroke();
                 ctx.font = '10px monospace';
                 ctx.textAlign = 'left';
-                ctx.fillStyle = '#91cbd6';
-                ctx.fillText('SEED LOCKED / ' + state.level.toUpperCase(), f.x + 8, f.y + f.h - 7);
+                drawLabel('SEED LOCKED / ' + state.level.toUpperCase(), f.x + 8, f.y + f.h - 7, '#91cbd6');
             }
 
             $('action-btn').addEventListener('click', () => {
