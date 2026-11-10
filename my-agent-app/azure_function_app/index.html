@@ -6,7 +6,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>LocalInsightBot - AI Assistant</title>
-    <meta name="description" content="Privacy-first AI assistant powered by Ollama. Runs 100% locally with no cloud dependencies.">
+    <meta name="description" content="Privacy-first assistant with an offline task guide and optional Ollama-powered AI. Runs locally with no cloud dependencies.">
     <style>
         * {
             margin: 0;
@@ -268,6 +268,8 @@
             border-radius: 18px;
             line-height: 1.6;
             font-size: 0.95em;
+            white-space: pre-wrap;
+            overflow-wrap: anywhere;
         }
 
         .message.user .message-bubble {
@@ -467,14 +469,22 @@
             color: var(--text-secondary);
         }
 
-        .settings-bar input[type="text"] {
+        .settings-bar input[type="text"],
+        .settings-bar select {
             padding: 8px 12px;
             background: rgba(255, 255, 255, 0.05);
             border: 1px solid var(--border);
             border-radius: 8px;
             color: var(--text-primary);
             font-size: 0.9em;
+        }
+
+        .settings-bar input[type="text"] {
             width: 280px;
+        }
+
+        .settings-bar select option {
+            background: var(--bg-secondary);
         }
 
         .settings-bar button {
@@ -532,7 +542,16 @@
             }
 
             .settings-bar {
-                display: none;
+                padding: 12px 16px;
+                gap: 12px;
+            }
+
+            .settings-bar label {
+                flex-wrap: wrap;
+            }
+
+            .settings-bar input[type="text"] {
+                width: min(280px, 100%);
             }
 
             .welcome-features {
@@ -567,11 +586,11 @@
             <div class="header-icon">🤖</div>
             <div class="header-info">
                 <div class="header-title">LocalInsightBot</div>
-                <div class="header-subtitle">Privacy-first AI powered by Ollama</div>
+                <div class="header-subtitle">Offline guide with optional Ollama-powered AI</div>
             </div>
             <div class="header-status">
                 <span class="status-dot" id="statusDot"></span>
-                <span id="statusText">Connecting...</span>
+                <span id="statusText" role="status">Offline guide</span>
             </div>
         </div>
 
@@ -580,8 +599,9 @@
                 <div class="welcome-icon">🌟</div>
                 <h1 class="welcome-title">Welcome to LocalInsightBot</h1>
                 <p class="welcome-description">
-                    Your privacy-first AI assistant running 100% locally.
-                    No cloud, no tracking, just intelligent conversations powered by Ollama.
+                    Your privacy-first assistant running 100% locally.
+                    Use the offline guide for task checklists and chat recaps, or select Ollama API below
+                    to connect your running AI backend. No cloud, no tracking.
                 </p>
                 <div class="welcome-features">
                     <div class="feature-badge">
@@ -594,7 +614,7 @@
                         <span>🛡️</span> Privacy First
                     </div>
                     <div class="feature-badge">
-                        <span>🧠</span> AI Powered
+                        <span>🧠</span> Ollama Ready
                     </div>
                 </div>
             </div>
@@ -625,8 +645,16 @@
 
         <div class="settings-bar">
             <label>
+                Assistant:
+                <select id="responseMode">
+                    <option value="local">Offline guide (no model)</option>
+                    <option value="api">Ollama API (AI)</option>
+                </select>
+            </label>
+            <label>
                 API Endpoint:
-                <input type="text" id="apiEndpoint" value="/api/businessinsightbot_function">
+                <input type="text" id="apiEndpoint" value="/api/businessinsightbot_function" disabled
+                    title="Select Ollama API and enter the endpoint of your running backend.">
             </label>
             <button onclick="clearChat()">Clear Chat</button>
             <button onclick="testConnection()">Test Connection</button>
@@ -639,11 +667,14 @@
         let conversationHistory = [];
         let isLoading = false;
         let userGuid = localStorage.getItem('userGuid') || generateGuid();
+        let conversationVersion = 0;
+        let activeRequestController = null;
 
         // DOM Elements
         const chatContainer = document.getElementById('chatContainer');
         const userInput = document.getElementById('userInput');
         const sendButton = document.getElementById('sendButton');
+        const responseMode = document.getElementById('responseMode');
         const apiEndpoint = document.getElementById('apiEndpoint');
         const statusDot = document.getElementById('statusDot');
         const statusText = document.getElementById('statusText');
@@ -668,17 +699,100 @@
             }
         });
 
+        responseMode.addEventListener('change', () => {
+            apiEndpoint.disabled = responseMode.value === 'local';
+            setStatus(responseMode.value === 'local' ? 'connected' : 'connecting',
+                responseMode.value === 'local' ? 'Offline guide' : 'API not tested');
+        });
+
         // Focus input on load
         userInput.focus();
 
         // Get API URL
         function getApiUrl() {
-            const endpoint = apiEndpoint.value;
-            // If endpoint starts with /, use current origin
-            if (endpoint.startsWith('/')) {
-                return window.location.origin + endpoint;
+            const endpoint = apiEndpoint.value.trim();
+            if (!endpoint) {
+                throw new Error('Enter your running API endpoint, or select Offline guide.');
             }
-            return endpoint;
+            const url = new URL(endpoint, window.location.href);
+            if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+                throw new Error('The API endpoint must be an HTTP or HTTPS URL.');
+            }
+            return url.href;
+        }
+
+        function getLocalResponse(message, history) {
+            const input = message.toLowerCase().trim().replace(/[.!?]+$/, '');
+            let reply;
+
+            if (input === 'ping') {
+                reply = 'The offline guide is ready. No server or model is required.';
+            } else if (input === 'what can you help me with' || input === 'what can you do') {
+                reply = 'I am the built-in offline guide, not an AI model. I can help you:\n' +
+                    '- Create a practical task checklist: describe your goal.\n' +
+                    '- Review this conversation: type "recap".\n' +
+                    '- Save your conversation: select Export Chat.\n' +
+                    '- Connect a local AI model: ask how to connect Ollama.\n\n' +
+                    'For open-ended AI answers, select Ollama API and enter your running backend endpoint.';
+            } else if (input === 'tell me about yourself' || input === 'who are you') {
+                reply = 'I am LocalInsightBot. In Offline guide mode, I use built-in checklists and chat history, ' +
+                    'not a language model. Your messages stay in this browser and no requests are sent.\n\n' +
+                    'Ollama API mode keeps the original AI chat and agent logs available through your configured backend.';
+            } else if (['recap', 'summary', 'summarize', 'summarise', 'summarize our chat'].includes(input)) {
+                const messages = history.filter(entry => entry.role === 'user').slice(0, -1).slice(-5);
+                reply = messages.length
+                    ? 'Your recent messages (local recap):\n' +
+                        messages.map((entry, index) => `${index + 1}. ${entry.content}`).join('\n')
+                    : 'There are no earlier messages to recap yet. Describe a task to get started.';
+            } else if (input === 'help me with a task') {
+                reply = 'Tell me the task, your desired result, deadline, and any constraints. ' +
+                    'I can give you a practical checklist without sending your message anywhere.';
+            } else if (/\b(ollama|api|connect|setup)\b/.test(input)) {
+                reply = 'To use AI chat:\n1. Start your local Ollama-backed Function App.\n' +
+                    '2. Select Ollama API below.\n3. Enter its chat endpoint, for example ' +
+                    'http://localhost:7071/api/businessinsightbot_function.\n' +
+                    '4. Select Test Connection, then send a message.\n\n' +
+                    'Only API mode sends messages to that endpoint. Choose Offline guide to work without a server.';
+            } else {
+                reply = `Offline task checklist for: ${message}\n\n` +
+                    '1. Define the desired result and deadline.\n' +
+                    '2. List the information, tools, and constraints you need.\n' +
+                    '3. Break the work into small actions and start with the smallest useful step.\n' +
+                    '4. Check the result against your goal and adjust.\n\n' +
+                    'This is a built-in planning guide, not an AI-generated answer. Type "recap" to review your chat, ' +
+                    'or select Ollama API for AI assistance.';
+            }
+
+            return { assistant_response: reply };
+        }
+
+        async function requestAssistant(message, history, signal) {
+            if (responseMode.value === 'local') {
+                return getLocalResponse(message, history);
+            }
+
+            const response = await fetch(getApiUrl(), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                signal,
+                body: JSON.stringify({
+                    user_input: message,
+                    conversation_history: history,
+                    user_guid: userGuid
+                })
+            });
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            if (data && data.error) {
+                throw new Error(String(data.error));
+            }
+            if (!data || typeof data.assistant_response !== 'string' || !data.assistant_response.trim()) {
+                throw new Error('The API returned no assistant response. Check your endpoint.');
+            }
+            return data;
         }
 
         // Add message to chat
@@ -698,7 +812,7 @@
                 <div class="message-time">${time}</div>
             `;
 
-            if (logs && logs.trim()) {
+            if (typeof logs === 'string' && logs.trim()) {
                 const logsDiv = document.createElement('div');
                 logsDiv.className = 'agent-logs';
                 logsDiv.textContent = logs;
@@ -752,7 +866,11 @@
 
             isLoading = true;
             sendButton.disabled = true;
+            responseMode.disabled = true;
             userInput.value = '';
+            const version = conversationVersion;
+            const controller = new AbortController();
+            activeRequestController = controller;
 
             addMessage(message, 'user');
             conversationHistory.push({ role: 'user', content: message });
@@ -761,44 +879,26 @@
             setStatus('connecting', 'Thinking...');
 
             try {
-                const response = await fetch(getApiUrl(), {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({
-                        user_input: message,
-                        conversation_history: conversationHistory,
-                        user_guid: userGuid
-                    })
-                });
+                const data = await requestAssistant(message, conversationHistory, controller.signal);
+                if (version !== conversationVersion) return;
 
-                hideTypingIndicator();
-
-                if (!response.ok) {
-                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-                }
-
-                const data = await response.json();
-
-                if (data.error) {
-                    addMessage(`Error: ${data.error}`, 'error');
-                    setStatus('error', 'Error');
-                } else {
-                    const assistantResponse = data.assistant_response || 'No response received.';
-                    addMessage(assistantResponse, 'assistant', data.agent_logs);
-                    conversationHistory.push({ role: 'assistant', content: assistantResponse });
-                    setStatus('connected', 'Connected');
-                }
+                addMessage(data.assistant_response, 'assistant', data.agent_logs);
+                conversationHistory.push({ role: 'assistant', content: data.assistant_response });
+                setStatus('connected', responseMode.value === 'local' ? 'Offline guide' : 'Connected');
             } catch (error) {
-                hideTypingIndicator();
+                if (version !== conversationVersion) return;
                 addMessage(`Failed to connect: ${error.message}`, 'error');
                 setStatus('error', 'Disconnected');
+            } finally {
+                if (version === conversationVersion) {
+                    hideTypingIndicator();
+                    isLoading = false;
+                    sendButton.disabled = false;
+                    responseMode.disabled = false;
+                    activeRequestController = null;
+                    userInput.focus();
+                }
             }
-
-            isLoading = false;
-            sendButton.disabled = false;
-            userInput.focus();
         }
 
         // Send quick message
@@ -809,58 +909,37 @@
 
         // Clear chat
         function clearChat() {
+            conversationVersion++;
+            if (activeRequestController) activeRequestController.abort();
+            activeRequestController = null;
             conversationHistory = [];
-            chatContainer.innerHTML = '';
-
-            // Show welcome message again
-            const welcomeHtml = `
-                <div class="welcome-container" id="welcomeMessage">
-                    <div class="welcome-icon">🌟</div>
-                    <h1 class="welcome-title">Welcome to LocalInsightBot</h1>
-                    <p class="welcome-description">
-                        Your privacy-first AI assistant running 100% locally.
-                        No cloud, no tracking, just intelligent conversations powered by Ollama.
-                    </p>
-                    <div class="welcome-features">
-                        <div class="feature-badge">
-                            <span>🔒</span> 100% Local
-                        </div>
-                        <div class="feature-badge">
-                            <span>⚡</span> Fast Responses
-                        </div>
-                        <div class="feature-badge">
-                            <span>🛡️</span> Privacy First
-                        </div>
-                        <div class="feature-badge">
-                            <span>🧠</span> AI Powered
-                        </div>
-                    </div>
-                </div>
-            `;
-            chatContainer.innerHTML = welcomeHtml;
+            chatContainer.replaceChildren(welcomeMessage);
+            welcomeMessage.style.display = '';
+            isLoading = false;
+            sendButton.disabled = false;
+            responseMode.disabled = false;
+            setStatus(responseMode.value === 'local' ? 'connected' : 'connecting',
+                responseMode.value === 'local' ? 'Offline guide' : 'API not tested');
+            userInput.focus();
         }
 
         // Test connection
-        async function testConnection() {
+        async function testConnection(announce = true) {
+            const version = conversationVersion;
+            const mode = responseMode.value;
             setStatus('connecting', 'Testing...');
             try {
-                const response = await fetch(getApiUrl(), {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        user_input: 'ping',
-                        conversation_history: [],
-                        user_guid: userGuid
-                    })
-                });
+                await requestAssistant('ping', []);
+                if (version !== conversationVersion || mode !== responseMode.value) return;
 
-                if (response.ok) {
-                    setStatus('connected', 'Connected');
-                    addMessage('Connection test successful! The bot is ready.', 'system');
-                } else {
-                    throw new Error(`HTTP ${response.status}`);
+                setStatus('connected', mode === 'local' ? 'Offline guide' : 'Connected');
+                if (announce) {
+                    addMessage(mode === 'local'
+                        ? 'Offline guide ready. No server or model is required. Select Ollama API for AI chat.'
+                        : 'Connection test successful! The bot is ready.', 'system');
                 }
             } catch (error) {
+                if (version !== conversationVersion || mode !== responseMode.value) return;
                 setStatus('error', 'Disconnected');
                 addMessage(`Connection test failed: ${error.message}`, 'error');
             }
@@ -883,8 +962,8 @@
             URL.revokeObjectURL(url);
         }
 
-        // Test connection on load
-        setTimeout(testConnection, 1000);
+        // Check the default offline mode without probing an unavailable server.
+        testConnection(false);
     </script>
 </body>
 </html>
