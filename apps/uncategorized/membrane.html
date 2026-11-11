@@ -761,6 +761,7 @@
             initialized: false,
             llm: null,
             llmReady: false,
+            llmUnavailableReason: '',
             vectorDB: null,
             memories: [],
             apps: new Map(),
@@ -835,10 +836,22 @@ Current context will be provided with each message. Be helpful and insightful.`,
             // ========================================
 
             async initLLM() {
-                this.updateStatus('llm', 'loading', 'LLM: Loading...');
-                document.getElementById('downloadProgress').classList.remove('hidden');
+                this.updateStatus('llm', 'loading', 'LLM: Checking GPU...');
 
                 try {
+                    const adapter = navigator.gpu && await navigator.gpu.requestAdapter();
+                    if (!adapter) {
+                        this.setLLMUnavailable('Local AI chat requires WebGPU and a compatible GPU. Use a WebGPU-enabled browser with hardware acceleration enabled.');
+                        return;
+                    }
+                    if (!adapter.features.has('shader-f16')) {
+                        this.setLLMUnavailable('The selected AI model requires a GPU with shader-f16 support.');
+                        return;
+                    }
+
+                    this.updateStatus('llm', 'loading', 'LLM: Loading...');
+                    document.getElementById('downloadProgress').classList.remove('hidden');
+
                     // Dynamic import of WebLLM
                     const webllm = await import('https://esm.run/@mlc-ai/web-llm');
 
@@ -871,21 +884,23 @@ Current context will be provided with each message. Be helpful and insightful.`,
                     console.log('[Membrane] LLM initialized successfully');
                 } catch (error) {
                     console.error('[Membrane] LLM initialization failed:', error);
-                    this.updateStatus('llm', 'error', 'LLM: Failed');
-                    document.getElementById('downloadProgress').classList.add('hidden');
-
-                    // Fallback message
-                    this.addMessage('system', `LLM failed to load: ${error.message}. The Membrane will continue without AI chat, but still track patterns and memories.`);
-
-                    // Enable limited functionality
-                    document.getElementById('chatInput').disabled = false;
-                    document.getElementById('sendBtn').disabled = false;
+                    this.setLLMUnavailable(`The local AI model could not be loaded: ${error.message}.`);
                 }
+            },
+
+            setLLMUnavailable(reason) {
+                this.llmUnavailableReason = reason;
+                this.updateStatus('llm', 'unavailable', 'LLM: Unavailable');
+                document.getElementById('downloadProgress').classList.add('hidden');
+                document.getElementById('modelName').textContent = 'AI chat unavailable';
+                document.getElementById('chatInput').disabled = false;
+                document.getElementById('sendBtn').disabled = false;
+                this.addMessage('system', `${reason} App discovery, memories, pattern detection and the semantic clipboard remain available.`);
             },
 
             async chat(userMessage) {
                 if (!this.llmReady) {
-                    return "I'm still loading. Please wait a moment...";
+                    return this.llmUnavailableReason || "I'm still loading. Please wait a moment...";
                 }
 
                 // Build context from recent memories
