@@ -399,6 +399,7 @@
                 <video id="recordedVideo" controls style="display: none;"></video>
                 
                 <div class="timer" id="timer">00:00</div>
+                <p id="recordingStatus" role="status" aria-live="polite">Ready to record. Camera and microphone access is requested when you start.</p>
                 
                 <div class="controls">
                     <button id="startBtn" class="btn-primary">Start Recording</button>
@@ -522,50 +523,68 @@
         const importVideo = document.getElementById('importVideo');
         const exportBtn = document.getElementById('exportBtn');
         const videoGrid = document.getElementById('videoGrid');
+        const recordingStatus = document.getElementById('recordingStatus');
 
         // Initialize the app
-        async function init() {
-            try {
-                videoStream = await navigator.mediaDevices.getUserMedia({ 
-                    video: true, 
-                    audio: true 
-                });
-                videoElement.srcObject = videoStream;
-            } catch (err) {
-                console.error('Error accessing media devices:', err);
-                alert('Please allow camera and microphone access to use this app.');
-            }
-
+        function init() {
             loadVideosFromStorage();
         }
 
         // Start recording
-        startBtn.addEventListener('click', () => {
-            recordedBlobs = [];
-            
-            const options = { mimeType: 'video/webm' };
-            try {
-                mediaRecorder = new MediaRecorder(videoStream, options);
-            } catch (e) {
-                console.error('Error creating MediaRecorder:', e);
+        startBtn.addEventListener('click', async () => {
+            if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+                recordingStatus.textContent = 'Recording is unavailable in this browser. Use HTTPS or localhost with a supported browser, or import a video to review.';
                 return;
             }
 
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data && event.data.size > 0) {
-                    recordedBlobs.push(event.data);
+            startBtn.disabled = true;
+            recordingStatus.textContent = 'Waiting for camera and microphone access...';
+
+            try {
+                if (!videoStream || !videoStream.active) {
+                    videoStream = await navigator.mediaDevices.getUserMedia({
+                        video: true,
+                        audio: true
+                    });
+                    videoElement.srcObject = videoStream;
                 }
-            };
+            } catch (err) {
+                recordingStatus.textContent = `Camera and microphone access failed: ${err.message} Allow access and check your devices, then try again, or import a video.`;
+                startBtn.disabled = false;
+                return;
+            }
 
-            mediaRecorder.onstop = handleStop;
+            recordedBlobs = [];
+            
+            try {
+                mediaRecorder = new MediaRecorder(videoStream);
 
-            mediaRecorder.start();
+                mediaRecorder.ondataavailable = (event) => {
+                    if (event.data && event.data.size > 0) {
+                        recordedBlobs.push(event.data);
+                    }
+                };
+
+                mediaRecorder.onstop = handleStop;
+                mediaRecorder.start();
+            } catch (e) {
+                recordingStatus.textContent = `Unable to start recording: ${e.message} You can still import a video to review.`;
+                startBtn.disabled = false;
+                return;
+            }
+
             startTime = Date.now();
             startTimer();
 
-            startBtn.disabled = true;
             stopBtn.disabled = false;
+            recordedVideo.pause();
+            recordedVideo.style.display = 'none';
+            videoElement.style.display = 'block';
+            resetBtn.style.display = 'none';
+            analyzeBtn.style.display = 'none';
+            exportBtn.style.display = 'none';
             videoElement.classList.add('recording');
+            recordingStatus.textContent = 'Recording. Use Stop Recording when you are ready to review.';
         });
 
         // Stop recording
@@ -580,7 +599,8 @@
 
         // Handle stop
         function handleStop() {
-            const blob = new Blob(recordedBlobs, { type: 'video/webm' });
+            // Codec-list commas must not become delimiters in stored data URLs.
+            const blob = new Blob(recordedBlobs, { type: mediaRecorder.mimeType.split(';')[0] });
             currentVideoBlob = blob;
             const url = URL.createObjectURL(blob);
             
@@ -591,6 +611,7 @@
             resetBtn.style.display = 'inline-block';
             analyzeBtn.style.display = 'inline-block';
             exportBtn.style.display = 'inline-block';
+            recordingStatus.textContent = 'Recording ready. Play, analyze, or export your video.';
             
             // Save to local storage
             saveVideoToStorage(blob);
@@ -598,6 +619,7 @@
 
         // Reset recording
         resetBtn.addEventListener('click', () => {
+            recordedVideo.pause();
             recordedVideo.style.display = 'none';
             videoElement.style.display = 'block';
             
@@ -605,8 +627,10 @@
             stopBtn.disabled = true;
             resetBtn.style.display = 'none';
             analyzeBtn.style.display = 'none';
+            exportBtn.style.display = 'none';
             
             timer.textContent = '00:00';
+            recordingStatus.textContent = 'Ready to record.';
             analysisSection.classList.remove('active');
         });
 
@@ -773,7 +797,8 @@
                 const url = URL.createObjectURL(currentVideoBlob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `recording_${new Date().toISOString()}.webm`;
+                const extension = currentVideoBlob.type.includes('mp4') ? 'mp4' : 'webm';
+                a.download = `recording_${new Date().toISOString()}.${extension}`;
                 a.click();
                 URL.revokeObjectURL(url);
             }
