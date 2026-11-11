@@ -5,7 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Linux WebAssembly VM - Real OS in Browser</title>
     <meta name="description" content="Run real Linux operating systems in your browser using WebAssembly and v86 emulator">
-    <script src="../../v86/build/libv86.js"></script>
+    <meta name="referrer" content="no-referrer">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%231a1a2e'/%3E%3Cpath d='m7 9 7 7-7 7m10 0h8' fill='none' stroke='%234a9eff' stroke-width='3'/%3E%3C/svg%3E">
+    <script src="../../../v86/build/libv86.js"></script>
     <style>
         * {
             margin: 0;
@@ -635,6 +637,7 @@
         class LinuxWASMVM {
             constructor() {
                 this.emulator = null;
+                this.isStarting = false;
                 this.isRunning = false;
                 this.isPaused = false;
                 this.startTime = null;
@@ -698,7 +701,7 @@
                         size: '1 MB',
                         type: 'Floppy',
                         tags: ['CLI', 'DOS', '16-bit'],
-                        fda: { url: 'https://i.copy.sh/freedos722.img' },
+                        fda: { url: '../../../v86/images/freedos722.img' },
                         memory_size: 32 * 1024 * 1024,
                         vga_memory_size: 2 * 1024 * 1024,
                     },
@@ -708,7 +711,7 @@
                         size: '1.4 MB',
                         type: 'Floppy',
                         tags: ['GUI', 'KolibriOS', '32-bit', 'Fast'],
-                        fda: { url: 'https://i.copy.sh/kolibri.img' },
+                        fda: { url: '../../../v86/images/kolibri.img' },
                         memory_size: 128 * 1024 * 1024,
                         vga_memory_size: 8 * 1024 * 1024,
                     },
@@ -735,7 +738,7 @@
 
             checkV86() {
                 const bootScreen = document.getElementById('boot-screen');
-                if (typeof V86Starter !== 'undefined') {
+                if (typeof V86 !== 'undefined') {
                     bootScreen.innerHTML = `
                         <h2>Linux WebAssembly VM</h2>
                         <p style="color: #4caf50; margin-bottom: 20px;">v86 Emulator Ready</p>
@@ -893,25 +896,32 @@
             }
 
             async startOS(config) {
-                if (typeof V86Starter === 'undefined') {
+                if (this.isStarting) {
+                    this.log('The VM is still starting. Please wait.');
+                    return;
+                }
+
+                if (typeof V86 === 'undefined') {
                     alert('v86 emulator not loaded');
                     return;
                 }
 
-                if (this.isRunning) {
-                    this.stop();
+                this.isStarting = true;
+                if (this.emulator) {
+                    await this.stop();
                 }
 
                 this.log(`Starting ${config.name || 'OS'}...`);
-                document.getElementById('boot-screen')?.remove();
-                this.updateStatus('Running');
+                const screenContainer = document.getElementById('screen_container');
+                screenContainer.innerHTML = '<div></div><canvas style="display: none;"></canvas>';
+                this.updateStatus('Starting');
 
                 try {
                     const emulatorConfig = {
-                        wasm_path: 'v86/build/v86.wasm',
-                        screen_container: document.getElementById('screen_container'),
-                        bios: { url: 'v86/bios/seabios.bin' },
-                        vga_bios: { url: 'v86/bios/vgabios.bin' },
+                        wasm_path: '../../../v86/build/v86.wasm',
+                        screen_container: screenContainer,
+                        bios: { url: '../../../v86/bios/seabios.bin' },
+                        vga_bios: { url: '../../../v86/bios/vgabios.bin' },
                         memory_size: config.memory_size || 256 * 1024 * 1024,
                         vga_memory_size: config.vga_memory_size || 8 * 1024 * 1024,
                         autostart: true,
@@ -926,12 +936,17 @@
                         if (config.cmdline) emulatorConfig.cmdline = config.cmdline;
                     }
 
-                    this.emulator = new V86Starter(emulatorConfig);
+                    this.emulator = new V86(emulatorConfig);
 
                     this.emulator.add_listener('emulator-ready', () => {
                         this.log('Emulator ready');
+                        this.isStarting = false;
                         this.isRunning = true;
                         this.startTime = Date.now();
+                        this.totalInstructions = 0;
+                        this.lastInstructionCount = 0;
+                        this.lastStatsTime = 0;
+                        this.updateStatus('Running');
                         this.enableControls(true);
                         this.startStatsUpdater();
                     });
@@ -944,15 +959,8 @@
                         this.appendSerial(String.fromCharCode(byte));
                     });
 
-                    this.emulator.add_listener('screen-set-mode', (is_graphical) => {
-                        document.getElementById('stat-vga-mode').textContent = is_graphical ? 'Graphical' : 'Text';
-                    });
-
-                    this.emulator.add_listener('screen-set-size-graphical', (width, height) => {
-                        document.getElementById('stat-vga-res').textContent = `${width}x${height}`;
-                    });
-
                 } catch (error) {
+                    this.isStarting = false;
                     this.log(`ERROR: ${error.message}`);
                     console.error(error);
                     this.updateStatus('Error');
@@ -983,17 +991,18 @@
                 this.log('System reset');
             }
 
-            stop() {
+            async stop() {
                 if (!this.emulator) return;
 
-                this.emulator.stop();
-                this.emulator.destroy();
+                const emulator = this.emulator;
                 this.emulator = null;
                 this.isRunning = false;
                 this.isPaused = false;
 
                 this.stopStatsUpdater();
                 this.enableControls(false);
+                document.getElementById('btn-pause').textContent = 'Pause';
+                await emulator.destroy();
                 this.updateStatus('Idle');
 
                 document.getElementById('screen_container').innerHTML = `
@@ -1008,14 +1017,16 @@
 
             sendKeys(keyCodes) {
                 if (!this.emulator) return;
+                const emulator = this.emulator;
 
                 keyCodes.forEach(code => {
-                    this.emulator.bus.send('keyboard-code', code);
+                    emulator.bus.send('keyboard-code', code);
                 });
 
                 setTimeout(() => {
-                    keyCodes.reverse().forEach(code => {
-                        this.emulator.bus.send('keyboard-code', code | 0x80);
+                    if (this.emulator !== emulator) return;
+                    [...keyCodes].reverse().forEach(code => {
+                        emulator.bus.send('keyboard-code', code | 0x80);
                     });
                 }, 100);
             }
@@ -1227,6 +1238,12 @@
             updateStats() {
                 if (!this.emulator || !this.isRunning) return;
 
+                const vga = this.emulator.v86.cpu.devices.vga;
+                document.getElementById('stat-vga-mode').textContent = vga.graphical_mode ? 'Graphical' : 'Text';
+                document.getElementById('stat-vga-res').textContent = vga.graphical_mode
+                    ? `${vga.screen_width}x${vga.screen_height}`
+                    : `${vga.max_cols}x${vga.max_rows}`;
+
                 // Uptime
                 if (this.startTime) {
                     const elapsed = Math.floor((Date.now() - this.startTime) / 1000);
@@ -1241,10 +1258,10 @@
 
                     // Speed (mIPS)
                     const now = Date.now();
-                    const instructions = stats.instructions || 0;
+                    const instructions = this.emulator.get_instruction_counter();
                     if (this.lastStatsTime > 0) {
                         const timeDelta = (now - this.lastStatsTime) / 1000;
-                        const instructionDelta = instructions - this.lastInstructionCount;
+                        const instructionDelta = (instructions - this.lastInstructionCount) >>> 0;
                         const mips = (instructionDelta / timeDelta / 1000000).toFixed(1);
                         document.getElementById('stat-speed').textContent = `${mips} mIPS`;
 
