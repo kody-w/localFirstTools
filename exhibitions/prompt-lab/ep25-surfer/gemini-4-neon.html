@@ -1,0 +1,1623 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Emerald Reef — Tropical Surf Scene</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #0b2a33;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      cursor: grab;
+    }
+    canvas:active { cursor: grabbing; }
+    #hud {
+      position: fixed;
+      left: 20px;
+      bottom: 18px;
+      color: rgba(255, 255, 255, 0.86);
+      pointer-events: none;
+      text-shadow: 0 1px 10px rgba(0, 20, 28, 0.55);
+      transition: opacity 0.6s ease;
+    }
+    #hud .title {
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      opacity: 0.92;
+    }
+    #hud .hint {
+      margin-top: 4px;
+      font-size: 11.5px;
+      letter-spacing: 0.04em;
+      opacity: 0.68;
+    }
+    #cam-badge {
+      position: fixed;
+      right: 20px;
+      bottom: 18px;
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.78);
+      background: rgba(6, 32, 38, 0.34);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      padding: 6px 11px;
+      border-radius: 999px;
+      pointer-events: none;
+      transition: opacity 0.4s ease;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div class="title">Emerald Reef</div>
+    <div class="hint">Drag to orbit &middot; Scroll to zoom &middot; Auto-drone resumes after 3s idle</div>
+  </div>
+  <div id="cam-badge">Drone Follow</div>
+
+  <script type="module">
+    import * as THREE from 'three';
+
+    // =========================================================================
+    // 1. RENDERER, SCENE, CAMERA & LIGHTING
+    // =========================================================================
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance',
+      alpha: false
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0xcde7ea, 0.00145);
+
+    const camera = new THREE.PerspectiveCamera(
+      46,
+      window.innerWidth / window.innerHeight,
+      0.25,
+      1400
+    );
+
+    // Sun direction: warm tropical afternoon sun ahead-left so it backlights
+    // the translucent emerald barrel and casts shimmering glints across the water.
+    const SUN_DIR = new THREE.Vector3(-0.42, 0.34, -0.84).normalize();
+
+    const sunLight = new THREE.DirectionalLight(0xfff4dd, 2.7);
+    sunLight.position.copy(SUN_DIR).multiplyScalar(200);
+    scene.add(sunLight);
+
+    const hemiLight = new THREE.HemisphereLight(0xaee6f7, 0x166b64, 1.05);
+    scene.add(hemiLight);
+
+    const fillLight = new THREE.DirectionalLight(0x6fe3d0, 0.55);
+    fillLight.position.set(40, 25, 60);
+    scene.add(fillLight);
+
+    // =========================================================================
+    // 2. SOFT HAZY TROPICAL SKY DOME WITH CLOUDS & SUN HALO
+    // =========================================================================
+    const skyGeo = new THREE.SphereGeometry(900, 40, 24);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {
+        uSunDir: { value: SUN_DIR },
+        uTime: { value: 0 }
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldDir;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldDir = normalize(position);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uSunDir;
+        uniform float uTime;
+        varying vec3 vWorldDir;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(123.34, 456.21));
+          p += dot(p, p + 45.32);
+          return fract(p.x * p.y);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          float a = hash21(i);
+          float b = hash21(i + vec2(1.0, 0.0));
+          float c = hash21(i + vec2(0.0, 1.0));
+          float d = hash21(i + vec2(1.0, 1.0));
+          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.5;
+          mat2 rot = mat2(0.8, 0.6, -0.6, 0.8);
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p = rot * p * 2.04;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          vec3 dir = normalize(vWorldDir);
+          float elev = max(dir.y, 0.0);
+
+          // Soft tropical sky gradient
+          vec3 zenith = vec3(0.20, 0.54, 0.78);
+          vec3 midSky = vec3(0.50, 0.79, 0.89);
+          vec3 horizon = vec3(0.84, 0.93, 0.92);
+          vec3 warmHaze = vec3(0.98, 0.93, 0.82);
+
+          vec3 col = mix(horizon, midSky, pow(elev, 0.45));
+          col = mix(col, zenith, pow(elev, 1.25));
+
+          // Sun Mie glow and disc
+          float sunCos = max(dot(dir, normalize(uSunDir)), 0.0);
+          col += warmHaze * pow(sunCos, 5.0) * 0.36;
+          col += vec3(1.0, 0.96, 0.86) * pow(sunCos, 42.0) * 0.65;
+          col += vec3(1.0, 0.99, 0.94) * smoothstep(0.9982, 0.9994, sunCos) * 2.2;
+
+          // Soft hazy horizon band
+          float hazeBand = exp(-abs(dir.y) * 9.5);
+          col = mix(col, mix(horizon, warmHaze, pow(sunCos, 2.0) * 0.45), hazeBand * 0.65);
+
+          // Procedural wispy tropical trade-wind clouds
+          if (dir.y > 0.015) {
+            vec2 cloudUV = dir.xz / (dir.y + 0.18) * 1.15;
+            cloudUV.x += uTime * 0.008;
+            cloudUV.y -= uTime * 0.004;
+            float c1 = fbm(cloudUV * 1.6);
+            float c2 = fbm(cloudUV * 3.4 + vec2(3.1, -1.7));
+            float cloud = smoothstep(0.47, 0.78, c1 * 0.72 + c2 * 0.32);
+            cloud *= smoothstep(0.015, 0.16, dir.y) * smoothstep(0.92, 0.25, dir.y);
+            vec3 cloudCol = mix(vec3(0.92, 0.96, 0.97), vec3(1.0, 0.97, 0.90), pow(sunCos, 2.0));
+            col = mix(col, cloudCol, cloud * 0.55);
+          }
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const skyMesh = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(skyMesh);
+
+    // =========================================================================
+    // 3. SHARED PARAMETRIC PEELING WAVE KINEMATICS (JS + GLSL)
+    // =========================================================================
+    // Coordinate convention:
+    //   +X : down the line (peel & surfer direction)
+    //   +Z : toward foreground shallow reef lagoon (wave breaks toward +Z)
+    //   -Z : toward open bay & volcanic island in background
+    //   +Y : up
+
+    const WAVE_SCROLL_SPEED = 4.6; // apparent speed of peel over the reef
+
+    function smoothstepJS(edge0, edge1, x) {
+      const t = Math.max(0, Math.min(1, (x - edge0) / (edge1 - edge0)));
+      return t * t * (3 - 2 * t);
+    }
+
+    // Evaluates exact 3D wave surface position & barrel parameters for (x, s, t)
+    function evalWaveSurface(x, s, t, outPos = null) {
+      const peelX = Math.sin(t * 0.38) * 1.1;
+      const d = peelX - x; // >0 behind curl (broken), <0 ahead of curl (unbroken wall)
+
+      // Wall height peaks in the pocket & surfer zone, tapers far down the line
+      const pocketBoost = 1.0 - 0.52 * smoothstepJS(10.0, 52.0, x - peelX);
+      const boreCollapse = 1.0 - 0.56 * smoothstepJS(7.0, 20.0, d);
+      const wallH = (4.85 * pocketBoost * boreCollapse) + 0.35 * Math.sin(x * 0.06 - t * 0.9);
+
+      // Barrel curl peaks right behind peelX (d in [-1.5, 9.5]) then collapses into whitewater
+      const curlRise = smoothstepJS(-4.5, 1.8, d);
+      const curlDecay = 1.0 - smoothstepJS(7.5, 16.0, d);
+      const curlAmt = curlRise * curlDecay;
+
+      // Collapsed whitewater bore behind the barrel
+      const boreAmt = smoothstepJS(6.0, 15.0, d);
+
+      // Asymmetric shoaling profile: gentler back (s < 0), steeper concave front (s > 0)
+      const backWidth = 11.5;
+      const frontWidth = 4.6 + 1.8 * smoothstepJS(6.0, 34.0, x - peelX);
+      const w = s < 0.0 ? backWidth : frontWidth;
+      let y = wallH * Math.exp(-(s * s) / (w * w));
+
+      // Draw-down trough just in front of the breaking face
+      const trough = -0.52 * pocketBoost * Math.exp(-Math.pow((s - 8.2) / 4.4, 2.0));
+      y += trough;
+
+      // 3D overhanging curling lip displacement (creates real hollow tube)
+      const lipForward = curlAmt * (
+        4.35 * Math.exp(-Math.pow((s - 0.45) / 2.25, 2.0)) +
+        1.75 * Math.exp(-Math.pow((s - 2.05) / 1.65, 2.0))
+      );
+      const lipArch = curlAmt * 0.78 * Math.exp(-Math.pow((s + 0.45) / 2.1, 2.0));
+      const lipHook = -curlAmt * 2.15 * Math.exp(-Math.pow((s - 2.35) / 1.35, 2.0));
+
+      // Turbulent whitewater bore shelf pushing forward behind the break
+      const borePush = boreAmt * 3.2 * Math.exp(-Math.pow((s - 2.5) / 4.2, 2.0));
+      const boreRumble = boreAmt * 0.32 * Math.sin(x * 0.9 + s * 1.4 - t * 4.5)
+        * Math.exp(-Math.pow((s - 2.8) / 4.5, 2.0));
+
+      let z = s + lipForward + borePush;
+      y += lipArch + lipHook + boreRumble;
+
+      // Secondary traveling ocean swell & fine surface undulation (calm on glassy face)
+      const faceCalm = 1.0 - 0.65 * Math.exp(-Math.pow((s - 2.2) / 4.5, 2.0)) * (1.0 - boreAmt);
+      const swell =
+        0.16 * Math.sin(x * 0.14 + s * 0.22 + t * 1.35) +
+        0.09 * Math.sin(x * 0.31 - s * 0.19 + t * 2.05) +
+        0.05 * Math.cos(x * 0.52 + s * 0.44 - t * 2.65);
+      y += swell * faceCalm;
+
+      // Gentle lagoon swell fade far from the wave
+      const pos = outPos || new THREE.Vector3();
+      pos.set(x, y, z);
+      return { pos, curlAmt, boreAmt, wallH, peelX };
+    }
+
+    // Seabed height function (shallow coral reef shelf under the wave & foreground lagoon)
+    function evalSeabedY(x, z) {
+      const lagoonShallow = -2.35 + 0.55 * smoothstepJS(6.0, 45.0, z);
+      const deepDrop = -4.2 * smoothstepJS(-6.0, -55.0, z);
+      const reefBump = 0.35 * Math.sin(x * 0.09) * Math.cos(z * 0.11);
+      return lagoonShallow + deepDrop + reefBump;
+    }
+
+    // =========================================================================
+    // 4. SHALLOW REEF LAGOON SEABED WITH ANIMATED CAUSTICS
+    // =========================================================================
+    const seabedGeo = new THREE.PlaneGeometry(340, 320, 110, 110);
+    seabedGeo.rotateX(-Math.PI / 2);
+    {
+      const pos = seabedGeo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const vx = pos.getX(i);
+        const vz = pos.getZ(i);
+        pos.setY(i, evalSeabedY(vx, vz));
+      }
+      seabedGeo.computeVertexNormals();
+    }
+
+    const seabedMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uTime: { value: 0 },
+        uSunDir: { value: SUN_DIR },
+        uScrollSpeed: { value: WAVE_SCROLL_SPEED }
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          vNormal = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform vec3 uSunDir;
+        uniform float uScrollSpeed;
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(234.34, 435.345));
+          p += dot(p, p + 34.23);
+          return fract(p.x * p.y);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+            mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0, a = 0.5;
+          mat2 r = mat2(0.8, 0.6, -0.6, 0.8);
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p = r * p * 2.03;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        // Animated interference caustics
+        float caustics(vec2 uv, float t) {
+          vec2 p = uv * 0.42;
+          float c1 = sin(p.x * 3.1 + t * 1.6 + sin(p.y * 2.7 - t * 1.1));
+          float c2 = sin(p.y * 3.5 - t * 1.4 + sin(p.x * 2.9 + t * 1.3));
+          float c3 = sin((p.x + p.y) * 2.6 + t * 1.9 + cos((p.x - p.y) * 2.2 - t * 1.2));
+          float v = abs(c1 + c2 + c3) / 3.0;
+          return pow(1.0 - clamp(v, 0.0, 1.0), 4.2);
+        }
+
+        void main() {
+          // Scroll seabed coordinates smoothly to match the wave gliding along the reef
+          vec2 uv = vWorldPos.xz + vec2(uTime * uScrollSpeed, -uTime * 1.15);
+
+          float nReef = fbm(uv * 0.065);
+          float nDetail = fbm(uv * 0.28);
+          float sandRipples = 0.5 + 0.5 * sin(uv.y * 2.4 + nDetail * 3.5);
+
+          // Warm tropical coral sand vs. dark mossy/purple-brown coral reef heads
+          vec3 sandCol = mix(vec3(0.84, 0.78, 0.62), vec3(0.95, 0.90, 0.76), sandRipples * 0.6 + 0.2);
+          vec3 reefDark = vec3(0.11, 0.20, 0.19);
+          vec3 reefMoss = vec3(0.22, 0.34, 0.24);
+          vec3 reefCoral = vec3(0.36, 0.27, 0.23);
+          vec3 reefCol = mix(reefDark, reefMoss, nDetail);
+          reefCol = mix(reefCol, reefCoral, smoothstep(0.55, 0.85, fbm(uv * 0.42 + 4.1)) * 0.55);
+
+          // Concentrate coral reef heads near the wave break zone, sandier in the lagoon
+          float reefMask = smoothstep(0.42, 0.66, nReef + 0.12 * exp(-abs(vWorldPos.z - 6.0) * 0.06));
+          vec3 col = mix(sandCol, reefCol, reefMask);
+
+          // Animated sunlight caustics strongest in shallow lagoon
+          float depth = max(0.2, -vWorldPos.y);
+          float causticFade = exp(-depth * 0.34);
+          float c = caustics(uv, uTime) * 0.65 + caustics(uv * 1.45 + 7.3, uTime * 1.2) * 0.45;
+          col += vec3(0.75, 0.98, 0.92) * c * causticFade * (1.0 - reefMask * 0.45) * 0.95;
+
+          // Subtle underwater attenuation toward deep water
+          float sunLit = 0.55 + 0.45 * max(dot(vNormal, normalize(uSunDir)), 0.0);
+          col *= sunLit;
+          col = mix(col, vec3(0.02, 0.20, 0.26), smoothstep(2.0, 7.5, depth));
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const seabedMesh = new THREE.Mesh(seabedGeo, seabedMat);
+    scene.add(seabedMesh);
+
+    // =========================================================================
+    // 5. HIGH-RES NON-UNIFORM PARAMETRIC OCEAN WAVE MESH & TRANSLUCENT SHADER
+    // =========================================================================
+    function createOceanWaveGeometry() {
+      const segX = 210;
+      const segS = 136;
+      const positions = new Float32Array((segX + 1) * (segS + 1) * 3);
+      const uvs = new Float32Array((segX + 1) * (segS + 1) * 2);
+      const indices = [];
+
+      // Non-linear clustering concentrates high vertex density around the barrel & surfer
+      function mapX(u) {
+        // u in [-1, 1] -> [-145, 145], dense in [-35, 35]
+        return 42.0 * u + 103.0 * u * u * u;
+      }
+      function mapS(v) {
+        // v in [-1, 1] -> [-140, 125], very dense around s in [-8, 12]
+        const s = 18.0 * v + 115.0 * v * v * v;
+        return s;
+      }
+
+      let ptr = 0;
+      let uvPtr = 0;
+      for (let j = 0; j <= segS; j++) {
+        const v = (j / segS) * 2.0 - 1.0;
+        const sVal = mapS(v);
+        for (let i = 0; i <= segX; i++) {
+          const u = (i / segX) * 2.0 - 1.0;
+          const xVal = mapX(u);
+          positions[ptr++] = xVal;
+          positions[ptr++] = 0.0;
+          positions[ptr++] = sVal; // store parameter s in position.z
+          uvs[uvPtr++] = i / segX;
+          uvs[uvPtr++] = j / segS;
+        }
+      }
+
+      for (let j = 0; j < segS; j++) {
+        for (let i = 0; i < segX; i++) {
+          const a = j * (segX + 1) + i;
+          const b = a + 1;
+          const c = a + (segX + 1);
+          const d = c + 1;
+          indices.push(a, c, b);
+          indices.push(b, c, d);
+        }
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+      geo.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
+      geo.setIndex(indices);
+      // Expand bounding sphere so frustum culling never clips displaced wave
+      geo.boundingSphere = new THREE.Sphere(new THREE.Vector3(0, 0, 0), 320);
+      return geo;
+    }
+
+    const oceanGeo = createOceanWaveGeometry();
+    const oceanMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: true,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime: { value: 0 },
+        uSunDir: { value: SUN_DIR },
+        uScrollSpeed: { value: WAVE_SCROLL_SPEED },
+        uSurferPos: { value: new THREE.Vector3(5, 2, 2) },
+        uFogColor: { value: new THREE.Color(0xcde7ea) },
+        uFogDensity: { value: 0.00145 }
+      },
+      vertexShader: /* glsl */ `
+        uniform float uTime;
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+        varying float vCurl;
+        varying float vBore;
+        varying float vParamS;
+        varying float vParamX;
+        varying float vThinness;
+
+        float sq(float v) { return v * v; }
+
+        vec4 evalWave(float x, float s, float t) {
+          float peelX = sin(t * 0.38) * 1.1;
+          float d = peelX - x;
+
+          float pocketBoost = 1.0 - 0.52 * smoothstep(10.0, 52.0, x - peelX);
+          float boreCollapse = 1.0 - 0.56 * smoothstep(7.0, 20.0, d);
+          float wallH = (4.85 * pocketBoost * boreCollapse) + 0.35 * sin(x * 0.06 - t * 0.9);
+
+          float curlRise = smoothstep(-4.5, 1.8, d);
+          float curlDecay = 1.0 - smoothstep(7.5, 16.0, d);
+          float curlAmt = curlRise * curlDecay;
+          float boreAmt = smoothstep(6.0, 15.0, d);
+
+          float frontWidth = 4.6 + 1.8 * smoothstep(6.0, 34.0, x - peelX);
+          float w = s < 0.0 ? 11.5 : frontWidth;
+          float y = wallH * exp(-(s * s) / (w * w));
+
+          float trough = -0.52 * pocketBoost * exp(-sq((s - 8.2) / 4.4));
+          y += trough;
+
+          float lipForward = curlAmt * (
+            4.35 * exp(-sq((s - 0.45) / 2.25)) +
+            1.75 * exp(-sq((s - 2.05) / 1.65))
+          );
+          float lipArch = curlAmt * 0.78 * exp(-sq((s + 0.45) / 2.1));
+          float lipHook = -curlAmt * 2.15 * exp(-sq((s - 2.35) / 1.35));
+
+          float borePush = boreAmt * 3.2 * exp(-sq((s - 2.5) / 4.2));
+          float boreRumble = boreAmt * 0.32 * sin(x * 0.9 + s * 1.4 - t * 4.5)
+            * exp(-sq((s - 2.8) / 4.5));
+
+          float z = s + lipForward + borePush;
+          y += lipArch + lipHook + boreRumble;
+
+          float faceCalm = 1.0 - 0.65 * exp(-sq((s - 2.2) / 4.5)) * (1.0 - boreAmt);
+          float swell =
+            0.16 * sin(x * 0.14 + s * 0.22 + t * 1.35) +
+            0.09 * sin(x * 0.31 - s * 0.19 + t * 2.05) +
+            0.05 * cos(x * 0.52 + s * 0.44 - t * 2.65);
+          y += swell * faceCalm;
+
+          return vec4(x, y, z, curlAmt);
+        }
+
+        void main() {
+          float x = position.x;
+          float s = position.z;
+
+          vec4 p0 = evalWave(x, s, uTime);
+          float eps = 0.18;
+          vec4 px = evalWave(x + eps, s, uTime);
+          vec4 ps = evalWave(x, s + eps, uTime);
+
+          vec3 tX = px.xyz - p0.xyz;
+          vec3 tS = ps.xyz - p0.xyz;
+          // Cross(tS, tX) points upward (+Y) on flat water where tX=(1,0,0), tS=(0,0,1)
+          vec3 n = normalize(cross(tS, tX));
+
+          float peelX = sin(uTime * 0.38) * 1.1;
+          float d = peelX - x;
+          vCurl = p0.w;
+          vBore = smoothstep(6.0, 15.0, d);
+          vParamS = s;
+          vParamX = x;
+
+          // Thinness is highest near the upper wave crest & curling barrel lip
+          float crestBand = exp(-sq((s - 0.8) / 2.9));
+          vThinness = clamp(crestBand * (0.45 + 0.55 * smoothstep(1.2, 4.8, p0.y)), 0.0, 1.0);
+
+          vec4 wp = modelMatrix * vec4(p0.xyz, 1.0);
+          vWorldPos = wp.xyz;
+          vNormal = normalize(mat3(modelMatrix) * n);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform float uTime;
+        uniform vec3 uSunDir;
+        uniform float uScrollSpeed;
+        uniform vec3 uSurferPos;
+        uniform vec3 uFogColor;
+        uniform float uFogDensity;
+
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+        varying float vCurl;
+        varying float vBore;
+        varying float vParamS;
+        varying float vParamX;
+        varying float vThinness;
+
+        float sq(float v) { return v * v; }
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(127.1, 311.7));
+          p += dot(p, p + 19.19);
+          return fract(p.x * p.y);
+        }
+
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+            mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        float fbm(vec2 p) {
+          float v = 0.0, a = 0.5;
+          mat2 r = mat2(0.8, 0.6, -0.6, 0.8);
+          for (int i = 0; i < 4; i++) {
+            v += a * noise(p);
+            p = r * p * 2.05;
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        float evalSeabedY(vec2 xz) {
+          float lagoonShallow = -2.35 + 0.55 * smoothstep(6.0, 45.0, xz.y);
+          float deepDrop = -4.2 * smoothstep(-6.0, -55.0, xz.y);
+          float reefBump = 0.35 * sin(xz.x * 0.09) * cos(xz.y * 0.11);
+          return lagoonShallow + deepDrop + reefBump;
+        }
+
+        void main() {
+          vec3 V = normalize(cameraPosition - vWorldPos);
+          vec3 L = normalize(uSunDir);
+
+          // Flip normal if viewing underside of the curling barrel roof
+          vec3 N = normalize(vNormal);
+          float isUnderside = 0.0;
+          if (!gl_FrontFacing) {
+            N = -N;
+            isUnderside = 1.0;
+          }
+
+          // Animated micro-normal ripples scrolling up the wave face & across the lagoon
+          vec2 flowUV = vec2(vParamX + uTime * uScrollSpeed * 0.85, vParamS - uTime * 3.1);
+          float faceSmooth = 1.0 - 0.55 * exp(-sq((vParamS - 2.0) / 4.2)) * (1.0 - vBore);
+          float n1 = noise(flowUV * 0.65 + vec2(0.0, uTime * 0.7));
+          float n2 = noise(flowUV * 1.85 - vec2(uTime * 0.9, uTime * 1.4));
+          float n3 = noise(flowUV * 4.4 + vec2(uTime * 1.3, -uTime * 1.9));
+          vec3 rippleN = normalize(vec3(
+            (n1 - 0.5) * 0.24 + (n2 - 0.5) * 0.18 + (n3 - 0.5) * 0.11,
+            1.0,
+            (n2 - 0.5) * 0.22 + (n3 - 0.5) * 0.14
+          ));
+          N = normalize(mix(N, normalize(N + (rippleN - vec3(0.0, 1.0, 0.0)) * (0.65 * faceSmooth + 0.22)), 0.75));
+
+          // Water optical depth over the reef lagoon
+          float bedY = evalSeabedY(vWorldPos.xz);
+          float waterDepth = max(0.15, vWorldPos.y - bedY);
+
+          // Tropical emerald-turquoise palette by depth
+          vec3 shallowAqua = vec3(0.10, 0.74, 0.70);
+          vec3 emeraldMid  = vec3(0.02, 0.44, 0.44);
+          vec3 deepTeal    = vec3(0.01, 0.18, 0.29);
+          vec3 waterCol = mix(shallowAqua, emeraldMid, smoothstep(1.2, 4.2, waterDepth));
+          waterCol = mix(waterCol, deepTeal, smoothstep(4.0, 8.5, waterDepth));
+
+          // Subsurface Scattering (SSS): glowing translucent emerald-jade barrel!
+          vec3 sssDir = normalize(L + N * 0.42);
+          float backLight = pow(clamp(dot(V, -sssDir), 0.0, 1.0), 2.6);
+          float wrapLight = max(0.0, (dot(N, L) + 0.55) / 1.55);
+          float barrelGlow = vThinness * (0.42 + 0.88 * backLight + 0.35 * isUnderside);
+          vec3 sssColor = mix(vec3(0.04, 0.78, 0.58), vec3(0.38, 0.95, 0.72), vThinness);
+          waterCol += sssColor * barrelGlow * (0.55 + 0.75 * vCurl + 0.35 * wrapLight);
+
+          // Sky reflection via Schlick Fresnel
+          float NoV = max(dot(N, V), 0.001);
+          float fresnel = 0.03 + 0.97 * pow(1.0 - NoV, 4.2);
+          vec3 R = reflect(-V, N);
+          vec3 skyRefl = mix(vec3(0.76, 0.91, 0.92), vec3(0.28, 0.66, 0.85), clamp(R.y * 1.4, 0.0, 1.0));
+          float sunReflCos = max(dot(R, L), 0.0);
+          skyRefl += vec3(1.0, 0.95, 0.82) * pow(sunReflCos, 24.0) * 0.55;
+
+          vec3 col = mix(waterCol, skyRefl, fresnel * 0.82);
+
+          // Dual-lobe sun glints / specular sparkles
+          vec3 H = normalize(L + V);
+          float NoH = max(dot(N, H), 0.0);
+          float specBroad = pow(NoH, 90.0) * 0.55;
+          float specSharp = pow(NoH, 520.0) * 2.8;
+          // Glittering micro-sparkles on sunlit water
+          float sparkle = smoothstep(0.72, 0.94, n3) * pow(NoH, 48.0) * 1.4;
+          col += vec3(1.0, 0.97, 0.88) * (specBroad + specSharp + sparkle);
+
+          // ===============================================================
+          // PROCEDURAL FOAM: curling lip, churning bore trail & lacy web
+          // ===============================================================
+          vec2 foamUV = vec2(vParamX * 0.35 + uTime * 1.45, vParamS * 0.45 - uTime * 2.35);
+          float fNoise = fbm(foamUV * 1.4);
+          float fWeb = fbm(foamUV * 3.8 + vec2(fNoise * 2.1, -fNoise * 1.6));
+
+          // 1. Curling lip edge white froth
+          float lipEdge = vCurl * exp(-sq((vParamS - 2.25) / 0.85));
+          float lipFoam = smoothstep(0.22, 0.68, lipEdge * (0.75 + 0.7 * fWeb));
+
+          // 2. Churning whitewater trailing behind the break (vBore > 0)
+          float boreZone = vBore * exp(-sq((vParamS - 3.0) / 5.2));
+          float boreFoam = smoothstep(0.18, 0.62, boreZone * (0.65 + 0.85 * fNoise) + boreZone * fWeb * 0.5);
+
+          // 3. Lacy trailing foam streaks spreading into the foreground lagoon behind the break
+          float trailZone = smoothstep(-2.0, 14.0, -vParamX) * smoothstep(2.0, 18.0, vParamS) * smoothstep(42.0, 14.0, vParamS);
+          float lacyFoam = smoothstep(0.56, 0.76, fWeb * 0.7 + fNoise * 0.45) * trailZone * 0.75;
+
+          // 4. Subtle foam wake right around the surfer's board tail
+          float surferDist = length(vWorldPos.xz - uSurferPos.xz);
+          float wakeTrail = exp(-surferDist * 0.55) * smoothstep(0.35, 0.75, fWeb);
+
+          float totalFoam = clamp(lipFoam + boreFoam + lacyFoam + wakeTrail * 0.65, 0.0, 1.0);
+
+          // Shaded foam color (warm sunlit white with soft aqua ambient shadows)
+          float foamLit = 0.74 + 0.26 * max(dot(N, L), 0.0);
+          vec3 foamCol = mix(vec3(0.76, 0.91, 0.92), vec3(0.99, 0.99, 0.98), foamLit);
+          col = mix(col, foamCol, totalFoam);
+
+          // Transparency: crystal-clear over shallow foreground lagoon, opaque in deep water, barrel & foam
+          float shallowAlpha = mix(0.46, 0.93, smoothstep(1.4, 5.0, waterDepth));
+          float alpha = clamp(max(shallowAlpha, max(fresnel * 0.88, max(totalFoam, vCurl * 0.85))), 0.42, 0.98);
+
+          // Exponential atmospheric horizon haze
+          float camDist = length(cameraPosition - vWorldPos);
+          float fogFactor = 1.0 - exp(-pow(camDist * uFogDensity, 2.0));
+          col = mix(col, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+          gl_FragColor = vec4(col, alpha);
+        }
+      `
+    });
+    const oceanMesh = new THREE.Mesh(oceanGeo, oceanMat);
+    scene.add(oceanMesh);
+
+    // =========================================================================
+    // 6. JUNGLE-COVERED VOLCANIC ISLAND, SANDY BEACH & INSTANCED PALM TREES
+    // =========================================================================
+    const islandGroup = new THREE.Group();
+    islandGroup.position.set(18, -1.2, -235);
+    scene.add(islandGroup);
+
+    // Deterministic 2D value noise for island terrain generation
+    function hash2(x, y) {
+      const s = Math.sin(x * 127.1 + y * 311.7) * 43758.5453123;
+      return s - Math.floor(s);
+    }
+    function noise2(x, y) {
+      const ix = Math.floor(x), iy = Math.floor(y);
+      const fx = x - ix, fy = y - iy;
+      const ux = fx * fx * (3 - 2 * fx);
+      const uy = fy * fy * (3 - 2 * fy);
+      const a = hash2(ix, iy);
+      const b = hash2(ix + 1, iy);
+      const c = hash2(ix, iy + 1);
+      const d = hash2(ix + 1, iy + 1);
+      return a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy;
+    }
+    function fbm2(x, y, oct = 4) {
+      let v = 0, a = 0.5;
+      for (let i = 0; i < oct; i++) {
+        v += a * noise2(x, y);
+        const nx = 0.8 * x - 0.6 * y;
+        const ny = 0.6 * x + 0.8 * y;
+        x = nx * 2.05;
+        y = ny * 2.05;
+        a *= 0.5;
+      }
+      return v;
+    }
+
+    function evalIslandHeight(x, z) {
+      // Wide dramatic island footprint with a gentle crescent bay facing the wave (+Z)
+      const bayIndent = 26.0 * Math.exp(-Math.pow((x - 10.0) / 52.0, 2.0));
+      const rz = (z + bayIndent * 0.55) / 72.0;
+      const rx = x / 145.0;
+      const r2 = rx * rx + rz * rz;
+      if (r2 > 1.35) return -6.0;
+
+      const baseMask = Math.max(0.0, 1.0 - r2);
+      const islandBody = Math.pow(baseMask, 1.45);
+
+      // Dramatic volcanic spire + secondary peak + coastal headland
+      const peak1 = 68.0 * Math.exp(-(Math.pow((x + 26) / 36, 2) + Math.pow((z + 18) / 30, 2)));
+      const peak2 = 48.0 * Math.exp(-(Math.pow((x - 42) / 34, 2) + Math.pow((z + 24) / 28, 2)));
+      const peak3 = 29.0 * Math.exp(-(Math.pow((x + 88) / 32, 2) + Math.pow((z - 2) / 26, 2)));
+
+      // Fluted volcanic ridges (radial erosion gullies like Moorea / Kauai)
+      const angle1 = Math.atan2(z + 18, x + 26);
+      const flutes1 = Math.abs(Math.sin(angle1 * 7.0 + fbm2(x * 0.03, z * 0.03, 3) * 2.2));
+      const angle2 = Math.atan2(z + 24, x - 42);
+      const flutes2 = Math.abs(Math.sin(angle2 * 6.0 + fbm2(x * 0.035 + 4, z * 0.035, 3) * 2.0));
+
+      const detail = (fbm2(x * 0.032, z * 0.032, 4) - 0.45) * 14.0;
+      const h = -3.8
+        + islandBody * 14.0
+        + peak1 * (0.76 + 0.34 * flutes1)
+        + peak2 * (0.78 + 0.30 * flutes2)
+        + peak3 * 0.9
+        + detail * islandBody;
+
+      // Flatten a golden sandy beach shelf along the front bay
+      const beachBand = smoothstepJS(-2.0, 4.5, h) * (1.0 - smoothstepJS(4.5, 11.0, h));
+      return h - beachBand * 1.1;
+    }
+
+    const islandGeo = new THREE.PlaneGeometry(340, 200, 130, 88);
+    islandGeo.rotateX(-Math.PI / 2);
+    {
+      const pos = islandGeo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const vx = pos.getX(i);
+        const vz = pos.getZ(i);
+        pos.setY(i, evalIslandHeight(vx, vz));
+      }
+      islandGeo.computeVertexNormals();
+    }
+
+    const islandMat = new THREE.ShaderMaterial({
+      uniforms: {
+        uSunDir: { value: SUN_DIR },
+        uFogColor: { value: new THREE.Color(0xcde7ea) },
+        uFogDensity: { value: 0.00165 }
+      },
+      vertexShader: /* glsl */ `
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+        varying float vLocalY;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          vLocalY = position.y;
+          vNormal = normalize(mat3(modelMatrix) * normal);
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uSunDir;
+        uniform vec3 uFogColor;
+        uniform float uFogDensity;
+        varying vec3 vWorldPos;
+        varying vec3 vNormal;
+        varying float vLocalY;
+
+        float hash21(vec2 p) {
+          p = fract(p * vec2(127.1, 311.7));
+          p += dot(p, p + 19.19);
+          return fract(p.x * p.y);
+        }
+        float noise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(hash21(i), hash21(i + vec2(1.0, 0.0)), f.x),
+            mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        void main() {
+          vec3 N = normalize(vNormal);
+          vec3 L = normalize(uSunDir);
+          float slope = 1.0 - clamp(N.y, 0.0, 1.0);
+          float h = vLocalY;
+
+          float n1 = noise(vWorldPos.xz * 0.12);
+          float n2 = noise(vWorldPos.xz * 0.45);
+          float canopy = n1 * 0.65 + n2 * 0.35;
+
+          // Golden-white tropical beach sand
+          vec3 wetSand = vec3(0.68, 0.61, 0.46);
+          vec3 drySand = vec3(0.92, 0.86, 0.70);
+          vec3 beachCol = mix(wetSand, drySand, smoothstep(0.6, 2.8, h));
+
+          // Lush layered tropical jungle canopy
+          vec3 jungleDeep = vec3(0.06, 0.24, 0.11);
+          vec3 jungleMid  = vec3(0.14, 0.39, 0.16);
+          vec3 jungleSun  = vec3(0.28, 0.52, 0.19);
+          vec3 jungleCol = mix(jungleDeep, jungleMid, canopy);
+          jungleCol = mix(jungleCol, jungleSun, smoothstep(0.45, 0.85, canopy) * clamp(N.y, 0.0, 1.0));
+
+          // Exposed dark volcanic basalt rock on steep cliffs
+          vec3 basalt = mix(vec3(0.18, 0.19, 0.20), vec3(0.30, 0.29, 0.27), n2);
+
+          // Blend beach -> jungle -> basalt cliffs
+          float jungleMask = smoothstep(2.4, 5.2, h + (n1 - 0.5) * 1.4);
+          vec3 albedo = mix(beachCol, jungleCol, jungleMask);
+          float cliffMask = smoothstep(0.36, 0.62, slope + (n2 - 0.5) * 0.12) * smoothstep(5.0, 14.0, h);
+          albedo = mix(albedo, basalt, cliffMask);
+
+          // Soft white shoreline surf rim right at sea level
+          float shoreFoam = smoothstep(1.8, 0.8, h) * smoothstep(0.1, 0.9, h);
+          albedo = mix(albedo, vec3(0.95, 0.98, 0.98), shoreFoam * 0.55);
+
+          // Warm tropical daylight + sky ambient fill
+          float ndl = max(dot(N, L), 0.0);
+          float skyAmb = 0.42 + 0.58 * clamp(N.y * 0.5 + 0.5, 0.0, 1.0);
+          vec3 col = albedo * (vec3(1.05, 0.98, 0.86) * ndl * 0.92 + vec3(0.44, 0.62, 0.68) * skyAmb * 0.65);
+
+          // Soft aerial perspective haze softening distant volcanic peaks into the tropical sky
+          float dist = length(cameraPosition - vWorldPos);
+          float fogF = 1.0 - exp(-pow(dist * uFogDensity, 1.85));
+          vec3 hazeCol = mix(uFogColor, vec3(0.76, 0.89, 0.91), 0.35);
+          col = mix(col, hazeCol, clamp(fogF * 0.78, 0.0, 0.84));
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const islandMesh = new THREE.Mesh(islandGeo, islandMat);
+    islandGroup.add(islandMesh);
+
+    // Instanced tropical palm trees along the sandy beach cove
+    (function populatePalms() {
+      const palmSpots = [];
+      for (let i = 0; i < 160 && palmSpots.length < 44; i++) {
+        const px = (hash2(i * 1.7, 3.1) - 0.5) * 210;
+        const pz = 18 + hash2(i * 2.3, 9.7) * 55;
+        const py = evalIslandHeight(px, pz);
+        if (py > 2.2 && py < 8.5) {
+          palmSpots.push({ x: px, y: py, z: pz, s: 0.75 + hash2(i, 5.5) * 0.65, rot: hash2(i, 8.2) * Math.PI * 2 });
+        }
+      }
+      if (palmSpots.length === 0) return;
+
+      const trunkGeo = new THREE.CylinderGeometry(0.18, 0.36, 6.2, 5, 4);
+      trunkGeo.translate(0, 3.1, 0);
+      // Slight natural coastal lean
+      const tPos = trunkGeo.attributes.position;
+      for (let i = 0; i < tPos.count; i++) {
+        const y = tPos.getY(i);
+        tPos.setX(i, tPos.getX(i) + Math.pow(y / 6.2, 2.0) * 1.25);
+      }
+      trunkGeo.computeVertexNormals();
+      const trunkMat = new THREE.MeshLambertMaterial({ color: 0x6b533b });
+
+      const crownGeo = new THREE.ConeGeometry(2.6, 1.8, 7);
+      crownGeo.scale(1.0, 0.75, 1.0);
+      const crownMat = new THREE.MeshLambertMaterial({ color: 0x266327 });
+
+      const trunks = new THREE.InstancedMesh(trunkGeo, trunkMat, palmSpots.length);
+      const crowns = new THREE.InstancedMesh(crownGeo, crownMat, palmSpots.length);
+      const dummy = new THREE.Object3D();
+
+      palmSpots.forEach((p, idx) => {
+        dummy.position.set(p.x, p.y - 0.3, p.z);
+        dummy.rotation.set(0, p.rot, 0);
+        dummy.scale.setScalar(p.s);
+        dummy.updateMatrix();
+        trunks.setMatrixAt(idx, dummy.matrix);
+
+        dummy.position.set(
+          p.x + Math.cos(p.rot) * 1.25 * p.s,
+          p.y + 5.9 * p.s,
+          p.z - Math.sin(p.rot) * 1.25 * p.s
+        );
+        dummy.rotation.set(0.1, p.rot, 0.08);
+        dummy.scale.setScalar(p.s);
+        dummy.updateMatrix();
+        crowns.setMatrixAt(idx, dummy.matrix);
+      });
+      islandGroup.add(trunks, crowns);
+    })();
+
+    // =========================================================================
+    // 7. PROCEDURAL SURFER & SURFBOARD WITH SMOOTH CARVING TURNS
+    // =========================================================================
+    function createSurferRig() {
+      const root = new THREE.Group();
+      const boardTiltGroup = new THREE.Group();
+      root.add(boardTiltGroup);
+
+      // --- Shortboard thruster geometry (length ~2.05m along +X) ---
+      const boardShape = new THREE.Shape();
+      boardShape.moveTo(1.12, 0.0); // pointed nose
+      boardShape.bezierCurveTo(0.88, 0.24, 0.25, 0.30, -0.35, 0.27);
+      boardShape.bezierCurveTo(-0.75, 0.24, -0.96, 0.16, -1.02, 0.09);
+      boardShape.lineTo(-0.98, 0.0); // slight swallow tail notch
+      boardShape.lineTo(-1.02, -0.09);
+      boardShape.bezierCurveTo(-0.96, -0.16, -0.75, -0.24, -0.35, -0.27);
+      boardShape.bezierCurveTo(0.25, -0.30, 0.88, -0.24, 1.12, 0.0);
+
+      const boardGeo = new THREE.ExtrudeGeometry(boardShape, {
+        depth: 0.065,
+        bevelEnabled: true,
+        bevelThickness: 0.025,
+        bevelSize: 0.028,
+        bevelSegments: 2
+      });
+      boardGeo.rotateX(Math.PI / 2);
+      // Add realistic nose/tail rocker curve
+      const bPos = boardGeo.attributes.position;
+      for (let i = 0; i < bPos.count; i++) {
+        const bx = bPos.getX(i);
+        const rocker = bx > 0 ? Math.pow(bx / 1.12, 2.2) * 0.13 : Math.pow(-bx / 1.02, 2.0) * 0.04;
+        bPos.setY(i, bPos.getY(i) + rocker + 0.05);
+      }
+      boardGeo.computeVertexNormals();
+
+      const boardMat = new THREE.MeshStandardMaterial({
+        color: 0xfaf7f0,
+        roughness: 0.22,
+        metalness: 0.05
+      });
+      const boardMesh = new THREE.Mesh(boardGeo, boardMat);
+      boardTiltGroup.add(boardMesh);
+
+      // Coral-orange racing stripe & dark traction pad on deck
+      const stripeMat = new THREE.MeshStandardMaterial({ color: 0xff5e3a, roughness: 0.28 });
+      const stripe = new THREE.Mesh(new THREE.BoxGeometry(1.45, 0.015, 0.11), stripeMat);
+      stripe.position.set(0.12, 0.085, 0);
+      boardTiltGroup.add(stripe);
+
+      const padMat = new THREE.MeshStandardMaterial({ color: 0x1e252b, roughness: 0.85 });
+      const pad = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.018, 0.28), padMat);
+      pad.position.set(-0.62, 0.088, 0);
+      boardTiltGroup.add(pad);
+
+      // Thruster fins underneath
+      const finMat = new THREE.MeshStandardMaterial({ color: 0x152229, roughness: 0.4 });
+      const finGeo = new THREE.BoxGeometry(0.14, 0.14, 0.015);
+      const centerFin = new THREE.Mesh(finGeo, finMat);
+      centerFin.position.set(-0.82, -0.05, 0);
+      centerFin.rotation.z = 0.25;
+      boardTiltGroup.add(centerFin);
+
+      // --- Articulated Surfer Figure (regular-foot surf stance) ---
+      const surferBody = new THREE.Group();
+      surferBody.position.set(-0.08, 0.09, 0);
+      boardTiltGroup.add(surferBody);
+
+      const skinMat = new THREE.MeshStandardMaterial({ color: 0xc98b5b, roughness: 0.65 });
+      const rashMat = new THREE.MeshStandardMaterial({ color: 0x12232e, roughness: 0.55 });
+      const shortMat = new THREE.MeshStandardMaterial({ color: 0xff5733, roughness: 0.6 });
+      const hairMat = new THREE.MeshStandardMaterial({ color: 0x241911, roughness: 0.85 });
+
+      // Legs (wide athletic crouched surf stance)
+      function makeLeg(xOff, zOff, kneeBend) {
+        const legG = new THREE.Group();
+        legG.position.set(xOff, 0.0, zOff);
+        const shin = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.30, 4, 8), skinMat);
+        shin.position.set(0.03, 0.20, 0);
+        shin.rotation.z = -0.22 * kneeBend;
+        const thigh = new THREE.Mesh(new THREE.CapsuleGeometry(0.072, 0.28, 4, 8), shortMat);
+        thigh.position.set(-0.04, 0.48, 0);
+        thigh.rotation.z = 0.34 * kneeBend;
+        legG.add(shin, thigh);
+        return legG;
+      }
+      const frontLeg = makeLeg(0.28, -0.02, 1.0);
+      const backLeg = makeLeg(-0.32, 0.03, -0.85);
+      surferBody.add(frontLeg, backLeg);
+
+      // Hips & Torso (pivots dynamically during carves)
+      const torsoGroup = new THREE.Group();
+      torsoGroup.position.set(-0.02, 0.64, 0.0);
+      surferBody.add(torsoGroup);
+
+      const hips = new THREE.Mesh(new THREE.BoxGeometry(0.28, 0.16, 0.24), shortMat);
+      torsoGroup.add(hips);
+
+      const chest = new THREE.Mesh(new THREE.CapsuleGeometry(0.135, 0.32, 5, 10), rashMat);
+      chest.position.set(0.03, 0.28, 0);
+      chest.rotation.z = -0.18;
+      torsoGroup.add(chest);
+
+      const head = new THREE.Mesh(new THREE.SphereGeometry(0.115, 10, 10), skinMat);
+      head.position.set(0.11, 0.56, 0);
+      torsoGroup.add(head);
+
+      const hair = new THREE.Mesh(new THREE.SphereGeometry(0.12, 10, 8, 0, Math.PI * 2, 0, Math.PI * 0.58), hairMat);
+      hair.position.set(0.09, 0.58, 0);
+      torsoGroup.add(hair);
+
+      // Outstretched arms for balance
+      const leadArm = new THREE.Group();
+      leadArm.position.set(0.10, 0.42, -0.14);
+      const leadUpper = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.24, 4, 8), rashMat);
+      leadUpper.position.set(0.14, -0.02, -0.08);
+      leadUpper.rotation.z = 1.25;
+      leadUpper.rotation.y = 0.45;
+      const leadFore = new THREE.Mesh(new THREE.CapsuleGeometry(0.038, 0.22, 4, 8), skinMat);
+      leadFore.position.set(0.32, 0.02, -0.16);
+      leadFore.rotation.z = 1.45;
+      leadArm.add(leadUpper, leadFore);
+      torsoGroup.add(leadArm);
+
+      const trailArm = new THREE.Group();
+      trailArm.position.set(-0.04, 0.40, 0.14);
+      const trailUpper = new THREE.Mesh(new THREE.CapsuleGeometry(0.044, 0.24, 4, 8), rashMat);
+      trailUpper.position.set(-0.15, -0.04, 0.09);
+      trailUpper.rotation.z = -1.15;
+      trailUpper.rotation.y = -0.35;
+      const trailFore = new THREE.Mesh(new THREE.CapsuleGeometry(0.038, 0.22, 4, 8), skinMat);
+      trailFore.position.set(-0.31, -0.02, 0.19);
+      trailFore.rotation.z = -1.35;
+      trailArm.add(trailUpper, trailFore);
+      torsoGroup.add(trailArm);
+
+      return { root, boardTiltGroup, torsoGroup, leadArm, trailArm };
+    }
+
+    const surfer = createSurferRig();
+    scene.add(surfer.root);
+
+    // Dynamic carving wake ribbon trailing across the wave face behind the surfboard
+    const WAKE_SEGMENTS = 38;
+    const wakeGeo = new THREE.BufferGeometry();
+    const wakePositions = new Float32Array(WAKE_SEGMENTS * 2 * 3);
+    const wakeAlphas = new Float32Array(WAKE_SEGMENTS * 2);
+    const wakeIndices = [];
+    for (let i = 0; i < WAKE_SEGMENTS - 1; i++) {
+      const a = i * 2, b = a + 1, c = a + 2, d = a + 3;
+      wakeIndices.push(a, c, b, b, c, d);
+    }
+    wakeGeo.setAttribute('position', new THREE.BufferAttribute(wakePositions, 3));
+    wakeGeo.setAttribute('aAlpha', new THREE.BufferAttribute(wakeAlphas, 1));
+    wakeGeo.setIndex(wakeIndices);
+
+    const wakeMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      vertexShader: /* glsl */ `
+        attribute float aAlpha;
+        varying float vAlpha;
+        void main() {
+          vAlpha = aAlpha;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying float vAlpha;
+        void main() {
+          vec3 col = mix(vec3(0.75, 0.96, 0.94), vec3(1.0, 1.0, 1.0), vAlpha);
+          gl_FragColor = vec4(col, vAlpha * 0.72);
+        }
+      `
+    });
+    const wakeMesh = new THREE.Mesh(wakeGeo, wakeMat);
+    wakeMesh.frustumCulled = false;
+    scene.add(wakeMesh);
+
+    const wakeHistory = [];
+    for (let i = 0; i < WAKE_SEGMENTS; i++) {
+      wakeHistory.push({ x: 6, s: 3.5, age: i * 0.05 });
+    }
+
+    // State object updated each frame for camera tracking & carving spray
+    const surferState = {
+      x: 6.2,
+      s: 3.4,
+      pos: new THREE.Vector3(6.2, 2.0, 3.4),
+      normal: new THREE.Vector3(0, 1, 0),
+      carveRate: 0,
+      tailPos: new THREE.Vector3()
+    };
+
+    const _p0 = new THREE.Vector3();
+    const _px = new THREE.Vector3();
+    const _ps = new THREE.Vector3();
+    const _tX = new THREE.Vector3();
+    const _tS = new THREE.Vector3();
+    const _n = new THREE.Vector3();
+    const _fwd = new THREE.Vector3();
+    const _side = new THREE.Vector3();
+    const _mat4 = new THREE.Matrix4();
+
+    function updateSurfer(t, dt) {
+      // Surfer rides down the line just ahead of the curling pocket (x in ~3.6..9.4)
+      // with smooth rhythmic bottom turns & high-line carves up the glassy face.
+      const peelX = Math.sin(t * 0.38) * 1.1;
+      const x = peelX + 6.3 + 2.55 * Math.sin(t * 0.55) + 0.85 * Math.sin(t * 1.1 + 0.7);
+      const s = 3.55 + 2.05 * Math.sin(t * 1.18) + 0.45 * Math.cos(t * 2.36);
+
+      // Analytical derivatives for smooth carving heading & banking
+      const dx = 2.55 * 0.55 * Math.cos(t * 0.55) + 0.85 * 1.1 * Math.cos(t * 1.1 + 0.7);
+      const ds = 2.05 * 1.18 * Math.cos(t * 1.18) - 0.45 * 2.36 * Math.sin(t * 2.36);
+      const dds = -2.05 * 1.18 * 1.18 * Math.sin(t * 1.18) - 0.45 * 2.36 * 2.36 * Math.cos(t * 2.36);
+
+      const eps = 0.12;
+      evalWaveSurface(x, s, t, _p0);
+      evalWaveSurface(x + eps, s, t, _px);
+      evalWaveSurface(x, s + eps, t, _ps);
+
+      _tX.subVectors(_px, _p0).normalize();
+      _tS.subVectors(_ps, _p0).normalize();
+      _n.crossVectors(_tS, _tX).normalize();
+
+      // Forward direction along the wave face: forward speed + carving velocity in s
+      const apparentSpeedX = WAVE_SCROLL_SPEED * 0.88 + dx;
+      _fwd.copy(_tX).multiplyScalar(apparentSpeedX).addScaledVector(_tS, ds).normalize();
+      _side.crossVectors(_n, _fwd).normalize();
+      _fwd.crossVectors(_side, _n).normalize();
+
+      // Lock surfer root onto the wave surface
+      surfer.root.position.copy(_p0).addScaledVector(_n, 0.04);
+      _mat4.makeBasis(_fwd, _n, _side);
+      surfer.root.quaternion.setFromRotationMatrix(_mat4);
+
+      // Dynamic rail-edge banking and crouch into carving turns
+      const carveBank = THREE.MathUtils.clamp(-ds * 0.17 - dds * 0.045, -0.52, 0.52);
+      surfer.boardTiltGroup.rotation.x = carveBank;
+      surfer.torsoGroup.rotation.x = carveBank * 0.72;
+      surfer.torsoGroup.rotation.y = THREE.MathUtils.clamp(-ds * 0.12, -0.35, 0.35);
+      surfer.torsoGroup.position.y = 0.62 - Math.abs(carveBank) * 0.14;
+      surfer.leadArm.rotation.z = -carveBank * 0.55;
+      surfer.trailArm.rotation.z = carveBank * 0.65;
+
+      surferState.x = x;
+      surferState.s = s;
+      surferState.pos.copy(_p0);
+      surferState.normal.copy(_n);
+      surferState.carveRate = Math.abs(ds) + Math.abs(dds) * 0.35;
+      surferState.tailPos.copy(_p0).addScaledVector(_fwd, -0.85).addScaledVector(_n, 0.08);
+      oceanMat.uniforms.uSurferPos.value.copy(_p0);
+
+      // Shift wake history backward in x (since water moves -X relative to peeling frame)
+      for (let i = WAKE_SEGMENTS - 1; i > 0; i--) {
+        wakeHistory[i].x = wakeHistory[i - 1].x - WAVE_SCROLL_SPEED * 0.85 * dt;
+        wakeHistory[i].s = wakeHistory[i - 1].s;
+      }
+      wakeHistory[0].x = x - 0.65;
+      wakeHistory[0].s = s;
+
+      const wPosAttr = wakeGeo.attributes.position;
+      const wAlpAttr = wakeGeo.attributes.aAlpha;
+      for (let i = 0; i < WAKE_SEGMENTS; i++) {
+        const frac = i / (WAKE_SEGMENTS - 1);
+        const hw = wakeHistory[i];
+        evalWaveSurface(hw.x, hw.s, t, _px);
+        const halfWidth = 0.14 + frac * 0.52;
+        const alpha = Math.pow(1.0 - frac, 1.5);
+
+        wPosAttr.setXYZ(i * 2,     _px.x, _px.y + 0.07, _px.z - halfWidth);
+        wPosAttr.setXYZ(i * 2 + 1, _px.x, _px.y + 0.07, _px.z + halfWidth);
+        wAlpAttr.setX(i * 2, alpha);
+        wAlpAttr.setX(i * 2 + 1, alpha);
+      }
+      wPosAttr.needsUpdate = true;
+      wAlpAttr.needsUpdate = true;
+    }
+
+    // =========================================================================
+    // 8. PROCEDURAL FOAM, LIP SPRAY & SURFER CARVING SPRAY PARTICLES
+    // =========================================================================
+    function createSoftParticleMaterial(baseOpacity, warmTint) {
+      return new THREE.ShaderMaterial({
+        transparent: true,
+        depthWrite: false,
+        uniforms: {
+          uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
+          uOpacity: { value: baseOpacity },
+          uWarmTint: { value: warmTint }
+        },
+        vertexShader: /* glsl */ `
+          attribute float aSize;
+          attribute float aAlpha;
+          varying float vAlpha;
+          uniform float uPixelRatio;
+          void main() {
+            vAlpha = aAlpha;
+            vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+            gl_PointSize = aSize * uPixelRatio * (190.0 / max(1.0, -mvPosition.z));
+            gl_Position = projectionMatrix * mvPosition;
+          }
+        `,
+        fragmentShader: /* glsl */ `
+          varying float vAlpha;
+          uniform float uOpacity;
+          uniform float uWarmTint;
+          void main() {
+            vec2 c = gl_PointCoord - vec2(0.5);
+            float r2 = dot(c, c);
+            if (r2 > 0.25) discard;
+            float soft = pow(1.0 - r2 * 4.0, 1.85);
+            vec3 col = mix(vec3(0.88, 0.97, 0.97), vec3(1.0, 0.99, 0.94), uWarmTint);
+            gl_FragColor = vec4(col, soft * vAlpha * uOpacity);
+          }
+        `
+      });
+    }
+
+    // --- 8A. Curling Lip Spray & Barrel Mist ---
+    const LIP_COUNT = 950;
+    const lipPos = new Float32Array(LIP_COUNT * 3);
+    const lipVel = new Float32Array(LIP_COUNT * 3);
+    const lipLife = new Float32Array(LIP_COUNT);
+    const lipMaxLife = new Float32Array(LIP_COUNT);
+    const lipSize = new Float32Array(LIP_COUNT);
+    const lipAlpha = new Float32Array(LIP_COUNT);
+
+    const _emitP = new THREE.Vector3();
+    function respawnLipParticle(i, t, prewarm = false) {
+      const peelX = Math.sin(t * 0.38) * 1.1;
+      // Spawn along the curling lip crest & inside the pitching barrel
+      const rx = peelX + 1.8 - Math.pow(Math.random(), 0.72) * 14.5;
+      const rs = 0.6 + Math.random() * 2.1;
+      evalWaveSurface(rx, rs, t, _emitP);
+
+      lipPos[i * 3]     = _emitP.x + (Math.random() - 0.5) * 0.6;
+      lipPos[i * 3 + 1] = _emitP.y + 0.1 + Math.random() * 0.35;
+      lipPos[i * 3 + 2] = _emitP.z + (Math.random() - 0.5) * 0.5;
+
+      // Tangential throw off the lip + light offshore mist lift
+      lipVel[i * 3]     = -WAVE_SCROLL_SPEED * 0.45 + (Math.random() - 0.5) * 2.6;
+      lipVel[i * 3 + 1] = 1.6 + Math.random() * 3.4;
+      lipVel[i * 3 + 2] = 1.2 + Math.random() * 3.6;
+
+      lipMaxLife[i] = 0.75 + Math.random() * 1.15;
+      lipLife[i] = prewarm ? Math.random() * lipMaxLife[i] : 0.0;
+      lipSize[i] = 0.65 + Math.random() * 1.35;
+      lipAlpha[i] = 0.0;
+    }
+
+    const lipGeo = new THREE.BufferGeometry();
+    lipGeo.setAttribute('position', new THREE.BufferAttribute(lipPos, 3));
+    lipGeo.setAttribute('aSize', new THREE.BufferAttribute(lipSize, 1));
+    lipGeo.setAttribute('aAlpha', new THREE.BufferAttribute(lipAlpha, 1));
+    const lipPoints = new THREE.Points(lipGeo, createSoftParticleMaterial(0.72, 0.75));
+    lipPoints.frustumCulled = false;
+    scene.add(lipPoints);
+
+    // --- 8B. Churning Whitewater Foam Billows Behind the Break ---
+    const FOAM_COUNT = 820;
+    const foamPos = new Float32Array(FOAM_COUNT * 3);
+    const foamVel = new Float32Array(FOAM_COUNT * 3);
+    const foamLife = new Float32Array(FOAM_COUNT);
+    const foamMaxLife = new Float32Array(FOAM_COUNT);
+    const foamSize = new Float32Array(FOAM_COUNT);
+    const foamAlpha = new Float32Array(FOAM_COUNT);
+
+    function respawnFoamParticle(i, t, prewarm = false) {
+      const peelX = Math.sin(t * 0.38) * 1.1;
+      const rx = peelX - 1.5 - Math.random() * 36.0;
+      const rs = 1.6 + Math.random() * 6.5;
+      evalWaveSurface(rx, rs, t, _emitP);
+
+      foamPos[i * 3]     = _emitP.x + (Math.random() - 0.5) * 1.2;
+      foamPos[i * 3 + 1] = Math.max(0.05, _emitP.y + (Math.random() - 0.25) * 0.65);
+      foamPos[i * 3 + 2] = _emitP.z + (Math.random() - 0.5) * 1.2;
+
+      foamVel[i * 3]     = -WAVE_SCROLL_SPEED * 0.62 + (Math.random() - 0.5) * 1.4;
+      foamVel[i * 3 + 1] = 0.4 + Math.random() * 1.45;
+      foamVel[i * 3 + 2] = 1.6 + Math.random() * 2.4;
+
+      foamMaxLife[i] = 1.1 + Math.random() * 1.6;
+      foamLife[i] = prewarm ? Math.random() * foamMaxLife[i] : 0.0;
+      foamSize[i] = 1.35 + Math.random() * 2.1;
+      foamAlpha[i] = 0.0;
+    }
+
+    const foamGeo = new THREE.BufferGeometry();
+    foamGeo.setAttribute('position', new THREE.BufferAttribute(foamPos, 3));
+    foamGeo.setAttribute('aSize', new THREE.BufferAttribute(foamSize, 1));
+    foamGeo.setAttribute('aAlpha', new THREE.BufferAttribute(foamAlpha, 1));
+    const foamPoints = new THREE.Points(foamGeo, createSoftParticleMaterial(0.56, 0.35));
+    foamPoints.frustumCulled = false;
+    scene.add(foamPoints);
+
+    // --- 8C. Surfer Carving Rooster-Tail Spray ---
+    const CARVE_COUNT = 260;
+    const carvePos = new Float32Array(CARVE_COUNT * 3);
+    const carveVel = new Float32Array(CARVE_COUNT * 3);
+    const carveLife = new Float32Array(CARVE_COUNT);
+    const carveMaxLife = new Float32Array(CARVE_COUNT);
+    const carveSize = new Float32Array(CARVE_COUNT);
+    const carveAlpha = new Float32Array(CARVE_COUNT);
+
+    function respawnCarveParticle(i, prewarm = false) {
+      const intensity = Math.min(2.2, 0.55 + surferState.carveRate * 0.42);
+      carvePos[i * 3]     = surferState.tailPos.x + (Math.random() - 0.5) * 0.25;
+      carvePos[i * 3 + 1] = surferState.tailPos.y + Math.random() * 0.15;
+      carvePos[i * 3 + 2] = surferState.tailPos.z + (Math.random() - 0.5) * 0.25;
+
+      carveVel[i * 3]     = -WAVE_SCROLL_SPEED * 0.55 + (Math.random() - 0.5) * 1.8;
+      carveVel[i * 3 + 1] = (1.1 + Math.random() * 2.1) * intensity;
+      carveVel[i * 3 + 2] = (0.4 + Math.random() * 1.8) * intensity;
+
+      carveMaxLife[i] = 0.45 + Math.random() * 0.65;
+      carveLife[i] = prewarm ? Math.random() * carveMaxLife[i] : 0.0;
+      carveSize[i] = (0.42 + Math.random() * 0.72) * Math.min(1.5, intensity);
+      carveAlpha[i] = 0.0;
+    }
+
+    const carveGeo = new THREE.BufferGeometry();
+    carveGeo.setAttribute('position', new THREE.BufferAttribute(carvePos, 3));
+    carveGeo.setAttribute('aSize', new THREE.BufferAttribute(carveSize, 1));
+    carveGeo.setAttribute('aAlpha', new THREE.BufferAttribute(carveAlpha, 1));
+    const carvePoints = new THREE.Points(carveGeo, createSoftParticleMaterial(0.84, 0.65));
+    carvePoints.frustumCulled = false;
+    scene.add(carvePoints);
+
+    // Pre-warm all particle systems so the very first frame is lush and full
+    updateSurfer(0, 0.016);
+    for (let i = 0; i < LIP_COUNT; i++) respawnLipParticle(i, 0, true);
+    for (let i = 0; i < FOAM_COUNT; i++) respawnFoamParticle(i, 0, true);
+    for (let i = 0; i < CARVE_COUNT; i++) respawnCarveParticle(i, true);
+
+    function updateParticles(t, dt) {
+      // Update lip spray
+      for (let i = 0; i < LIP_COUNT; i++) {
+        lipLife[i] += dt;
+        if (lipLife[i] >= lipMaxLife[i] || lipPos[i * 3 + 1] < -0.5) {
+          respawnLipParticle(i, t, false);
+        } else {
+          const p = lipLife[i] / lipMaxLife[i];
+          lipVel[i * 3 + 1] -= 5.8 * dt; // gravity
+          lipVel[i * 3 + 2] -= 1.2 * dt; // subtle offshore breeze
+          lipPos[i * 3]     += lipVel[i * 3] * dt;
+          lipPos[i * 3 + 1] += lipVel[i * 3 + 1] * dt;
+          lipPos[i * 3 + 2] += lipVel[i * 3 + 2] * dt;
+          lipAlpha[i] = Math.sin(p * Math.PI);
+        }
+      }
+      lipGeo.attributes.position.needsUpdate = true;
+      lipGeo.attributes.aAlpha.needsUpdate = true;
+
+      // Update churning foam billows
+      for (let i = 0; i < FOAM_COUNT; i++) {
+        foamLife[i] += dt;
+        if (foamLife[i] >= foamMaxLife[i]) {
+          respawnFoamParticle(i, t, false);
+        } else {
+          const p = foamLife[i] / foamMaxLife[i];
+          foamVel[i * 3 + 1] -= 2.4 * dt;
+          foamPos[i * 3]     += foamVel[i * 3] * dt;
+          foamPos[i * 3 + 1] = Math.max(0.08, foamPos[i * 3 + 1] + foamVel[i * 3 + 1] * dt);
+          foamPos[i * 3 + 2] += foamVel[i * 3 + 2] * dt;
+          foamAlpha[i] = Math.sin(p * Math.PI) * 0.92;
+        }
+      }
+      foamGeo.attributes.position.needsUpdate = true;
+      foamGeo.attributes.aAlpha.needsUpdate = true;
+
+      // Update surfer carving rooster tail
+      for (let i = 0; i < CARVE_COUNT; i++) {
+        carveLife[i] += dt;
+        if (carveLife[i] >= carveMaxLife[i]) {
+          respawnCarveParticle(i, false);
+        } else {
+          const p = carveLife[i] / carveMaxLife[i];
+          carveVel[i * 3 + 1] -= 6.5 * dt;
+          carvePos[i * 3]     += carveVel[i * 3] * dt;
+          carvePos[i * 3 + 1] += carveVel[i * 3 + 1] * dt;
+          carvePos[i * 3 + 2] += carveVel[i * 3 + 2] * dt;
+          carveAlpha[i] = Math.pow(1.0 - p, 1.25);
+        }
+      }
+      carveGeo.attributes.position.needsUpdate = true;
+      carveGeo.attributes.aAlpha.needsUpdate = true;
+    }
+
+    // =========================================================================
+    // 9. DRONE FOLLOW CAMERA + CLICK-DRAG ORBIT + ZOOM + 3s AUTO-RESUME
+    // =========================================================================
+    const camBadge = document.getElementById('cam-badge');
+    const IDLE_RESUME_SECONDS = 3.0;
+
+    // Spherical coordinates around the active surf pocket / surfer target
+    // theta = angle in XZ plane around target (0 = +Z front-lagoon, negative = behind-left)
+    // phi   = elevation angle above horizon (radians)
+    const camState = {
+      theta: -0.58,
+      phi: 0.34,
+      radius: 26.5,
+      targetTheta: -0.58,
+      targetPhi: 0.34,
+      targetRadius: 26.5,
+      lookTarget: new THREE.Vector3(3.2, 2.2, 1.5),
+      isDragging: false,
+      lastX: 0,
+      lastY: 0,
+      lastUserInputTime: -999,
+      userControlled: false
+    };
+
+    const domEl = renderer.domElement;
+
+    function markUserInput() {
+      camState.lastUserInputTime = performance.now() * 0.001;
+      camState.userControlled = true;
+      camBadge.textContent = 'Orbit Mode';
+    }
+
+    domEl.addEventListener('pointerdown', (e) => {
+      camState.isDragging = true;
+      camState.lastX = e.clientX;
+      camState.lastY = e.clientY;
+      domEl.setPointerCapture(e.pointerId);
+      markUserInput();
+    });
+
+    domEl.addEventListener('pointermove', (e) => {
+      if (!camState.isDragging) return;
+      const dx = e.clientX - camState.lastX;
+      const dy = e.clientY - camState.lastY;
+      camState.lastX = e.clientX;
+      camState.lastY = e.clientY;
+
+      camState.targetTheta -= dx * 0.0062;
+      camState.targetPhi = THREE.MathUtils.clamp(
+        camState.targetPhi + dy * 0.0048,
+        0.09,
+        1.28
+      );
+      markUserInput();
+    });
+
+    function endDrag(e) {
+      if (!camState.isDragging) return;
+      camState.isDragging = false;
+      try { domEl.releasePointerCapture(e.pointerId); } catch (_) {}
+      camState.lastUserInputTime = performance.now() * 0.001;
+    }
+    domEl.addEventListener('pointerup', endDrag);
+    domEl.addEventListener('pointercancel', endDrag);
+
+    domEl.addEventListener('wheel', (e) => {
+      e.preventDefault();
+      camState.targetRadius = THREE.MathUtils.clamp(
+        camState.targetRadius * (1.0 + Math.sign(e.deltaY) * 0.08),
+        10.0,
+        62.0
+      );
+      markUserInput();
+    }, { passive: false });
+
+    const _desiredLook = new THREE.Vector3();
+    function updateCamera(t, dt) {
+      const nowSec = performance.now() * 0.001;
+      const idleSec = nowSec - camState.lastUserInputTime;
+
+      // Smooth drone-style follow target: tracks the wave pocket & carving surfer
+      _desiredLook.set(
+        surferState.pos.x * 0.48 + 0.6,
+        2.15 + surferState.pos.y * 0.14,
+        1.6
+      );
+      camState.lookTarget.lerp(_desiredLook, 1.0 - Math.exp(-dt * 2.8));
+
+      // Slow cinematic drone trajectory from behind-and-above the breaking wave
+      const droneTheta = -0.54 + 0.24 * Math.sin(t * 0.14) + 0.08 * Math.cos(t * 0.07);
+      const dronePhi = 0.31 + 0.065 * Math.sin(t * 0.18 + 0.8);
+      const droneRadius = 25.5 + 3.2 * Math.sin(t * 0.11 + 1.4);
+
+      if (camState.userControlled && !camState.isDragging && idleSec >= IDLE_RESUME_SECONDS) {
+        // Smoothly auto-resume into drone follow after 3 seconds idle
+        const resumeRate = 1.0 - Math.exp(-dt * 1.65);
+        // Normalize angle delta so it takes the shortest path back
+        let dTheta = droneTheta - camState.targetTheta;
+        while (dTheta > Math.PI) dTheta -= Math.PI * 2;
+        while (dTheta < -Math.PI) dTheta += Math.PI * 2;
+        camState.targetTheta += dTheta * resumeRate;
+        camState.targetPhi += (dronePhi - camState.targetPhi) * resumeRate;
+        camState.targetRadius += (droneRadius - camState.targetRadius) * resumeRate;
+
+        if (
+          Math.abs(dTheta) < 0.025 &&
+          Math.abs(dronePhi - camState.targetPhi) < 0.015 &&
+          Math.abs(droneRadius - camState.targetRadius) < 0.35
+        ) {
+          camState.userControlled = false;
+          camBadge.textContent = 'Drone Follow';
+        } else {
+          camBadge.textContent = 'Resuming Drone';
+        }
+      } else if (!camState.userControlled) {
+        camState.targetTheta = droneTheta;
+        camState.targetPhi = dronePhi;
+        camState.targetRadius = droneRadius;
+      }
+
+      // Critically damped smoothing of camera spherical coordinates
+      const smooth = 1.0 - Math.exp(-dt * (camState.isDragging ? 14.0 : 5.5));
+      camState.theta += (camState.targetTheta - camState.theta) * smooth;
+      camState.phi += (camState.targetPhi - camState.phi) * smooth;
+      camState.radius += (camState.targetRadius - camState.radius) * smooth;
+
+      const cosPhi = Math.cos(camState.phi);
+      const cx = camState.lookTarget.x + camState.radius * cosPhi * Math.sin(camState.theta);
+      const cy = Math.max(1.8, camState.lookTarget.y + camState.radius * Math.sin(camState.phi));
+      const cz = camState.lookTarget.z + camState.radius * cosPhi * Math.cos(camState.theta);
+
+      camera.position.set(cx, cy, cz);
+      camera.lookAt(camState.lookTarget);
+    }
+
+    // =========================================================================
+    // 10. ANIMATION LOOP & RESIZE
+    // =========================================================================
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    const clock = new THREE.Clock();
+    let elapsed = 0;
+
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.05);
+      elapsed += dt;
+
+      skyMat.uniforms.uTime.value = elapsed;
+      seabedMat.uniforms.uTime.value = elapsed;
+      oceanMat.uniforms.uTime.value = elapsed;
+
+      // Subtle coastline parallax drift of the volcanic island in the background
+      islandGroup.position.x = 18 - Math.sin(elapsed * 0.035) * 14.0;
+
+      updateSurfer(elapsed, dt);
+      updateParticles(elapsed, dt);
+      updateCamera(elapsed, dt);
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>

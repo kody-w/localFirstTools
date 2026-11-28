@@ -1,0 +1,937 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Ferrofluid — Rosensweig Chamber Study</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #cfd3d6; -webkit-user-select: none; user-select: none; }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; touch-action: none; cursor: grab; }
+  canvas.drag { cursor: grabbing; }
+  .hud { position: fixed; pointer-events: none; font-size: 10.5px; letter-spacing: .14em; text-transform: uppercase; opacity: .78; text-shadow: 0 0 6px #000; }
+  #tl { left: max(22px, env(safe-area-inset-left)); top: max(20px, env(safe-area-inset-top)); line-height: 1.75; }
+  #tl b { display: block; font-weight: 500; font-size: 12px; letter-spacing: .32em; color: #eef1f3; margin-bottom: 4px; }
+  #br { right: max(22px, env(safe-area-inset-right)); bottom: max(20px, env(safe-area-inset-bottom)); text-align: right; line-height: 1.75; }
+  #bl { left: max(22px, env(safe-area-inset-left)); bottom: max(20px, env(safe-area-inset-bottom)); line-height: 1.75; opacity: .55; }
+  #phase { color: #fff; }
+  .bar { display: inline-block; width: 90px; height: 2px; background: rgba(255,255,255,.15); vertical-align: middle; margin-left: 8px; position: relative; }
+  .bar i { position: absolute; left: 0; top: 0; bottom: 0; background: #e9ecef; }
+  #err { position: fixed; inset: 0; display: none; align-items: center; justify-content: center; text-align: center; padding: 30px; font-size: 13px; letter-spacing: .08em; }
+  @media (max-width: 600px) {
+    .hud { font-size: 8.5px; letter-spacing: .1em; } #tl b { font-size: 10px; letter-spacing: .24em; } .bar { width: 50px; }
+    #br { right: auto; left: max(16px, env(safe-area-inset-left)); bottom: max(40px, calc(env(safe-area-inset-bottom) + 24px)); text-align: left; }
+    #bl { left: max(16px, env(safe-area-inset-left)); bottom: max(16px, env(safe-area-inset-bottom)); }
+    #tl { left: max(16px, env(safe-area-inset-left)); top: max(16px, env(safe-area-inset-top)); }
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="hud" id="tl"><b>Ferrofluid · Chamber 03</b>Rosensweig instability study<br>Magnetite / hydrocarbon carrier · 10 nm</div>
+<div class="hud" id="br"><span id="phase">—</span><br>B<sub>z</sub> <span id="field">0</span> mT<span class="bar"><i id="fbar"></i></span><br>Volume <span id="vol">1.000</span> V₀</div>
+<div class="hud" id="bl">Drag to orbit · Scroll / pinch to zoom</div>
+<div id="err"></div>
+
+<script id="vs" type="x-shader/x-vertex">#version 300 es
+in vec2 aPos;
+void main(){ gl_Position = vec4(aPos, 0.0, 1.0); }
+</script>
+
+<script id="fsScene" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+uniform vec2  uRes;
+uniform float uTime;
+uniform vec3  uCamPos;
+uniform mat3  uCamRot;
+uniform float uFl;        // focal length (screen units)
+uniform float uPix;       // world size of one pixel at distance 1
+uniform vec4  uShapeA;    // spike, wave, lobe, ridge
+uniform vec4  uShapeB;    // stretch, polar, wobble, tier
+uniform float uR0;        // volume-conserving base radius
+uniform float uBound;     // bounding radius of fluid
+uniform float uLatRot;    // lattice rotation (rotating field)
+uniform float uWavePh;    // travelling wave phase
+uniform vec4  uDrops[5];  // droplet xyz (local), radius
+out vec4 outColor;
+
+#define PI  3.14159265359
+#define PHI 1.61803398875
+#define NSPIKE 104.0
+#define NLOBE 13.0
+const vec3 FC = vec3(0.0, 1.96, 0.0);   // fluid centre, midway between pole tips
+const float GLASS_R = 1.32;
+
+float hash11(float p){ p = fract(p*0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
+float hash31(vec3 p){ p = fract(p*0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y)*p.z); }
+float vnoise(vec3 x){
+  vec3 i = floor(x), f = fract(x); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(mix(hash31(i), hash31(i+vec3(1,0,0)), f.x), mix(hash31(i+vec3(0,1,0)), hash31(i+vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash31(i+vec3(0,0,1)), hash31(i+vec3(1,0,1)), f.x), mix(hash31(i+vec3(0,1,1)), hash31(i+vec3(1,1,1)), f.x), f.y), f.z);
+}
+float smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0)/k; return min(a, b) - h*h*k*0.25; }
+vec3 rotY(vec3 p, float a){ float c = cos(a), s = sin(a); return vec3(c*p.x + s*p.z, p.y, -s*p.x + c*p.z); }
+
+// Spherical Fibonacci lattice: nearest lattice point to unit vector p (z-up). Keinert et al. 2015.
+float inverseSF2(vec3 p, float n, out vec3 qo, out float id, out vec3 qo2, out float id2){
+  float m = 1.0 - 1.0/n;
+  float phi = min(atan(p.y, p.x), PI), cosTheta = p.z;
+  float k  = max(2.0, floor(log(n*PI*sqrt(5.0)*(1.0 - cosTheta*cosTheta))/log(PHI*PHI)));
+  float Fk = pow(PHI, k)/sqrt(5.0);
+  vec2  F  = vec2(round(Fk), round(Fk*PHI));
+  vec2 ka = 2.0*F/n;
+  vec2 kb = 2.0*PI*(fract((F + 1.0)*PHI) - (PHI - 1.0));
+  mat2 iB = mat2(ka.y, -ka.x, kb.y, -kb.x)/(ka.y*kb.x - ka.x*kb.y);
+  vec2 c = floor(iB*vec2(phi, cosTheta - m));
+  float d = 8.0, d2 = 8.0; id = 0.0; qo = vec3(0, 0, 1); id2 = 0.0; qo2 = vec3(0, 0, 1);
+  for (int s = 0; s < 4; s++){
+    vec2 uv = vec2(float(s - 2*(s/2)), float(s/2));
+    float i = clamp(dot(F, uv + c), 0.0, n - 1.0);
+    float ph = 2.0*PI*fract(i*PHI);
+    float ct = m - 2.0*i/n;
+    float st = sqrt(max(0.0, 1.0 - ct*ct));
+    vec3 q = vec3(cos(ph)*st, sin(ph)*st, ct);
+    float sd = dot(q - p, q - p);
+    if (sd < d){ d2 = d; id2 = id; qo2 = qo; d = sd; id = i; qo = q; }
+    else if (sd < d2 && i != id){ d2 = sd; id2 = i; qo2 = q; }
+  }
+  return sqrt(d);
+}
+float inverseSF(vec3 p, float n, out vec3 qo, out float id){ vec3 q2; float i2; return inverseSF2(p, n, qo, id, q2, i2); }
+
+// Large-scale body shape: radius multiplier along direction n.
+// lobe / ridge return the local field-concentration masks used to grow spikes.
+float shapeS(vec3 n, out float lobe, out float ridge){
+  float t = uTime;
+  float S = uShapeB.x*(n.y*n.y - 0.3333);                       // elongation along applied field
+  S += uShapeB.z*0.09*(0.55*sin(3.1*n.x + 1.3*t)*sin(2.7*n.y + 0.9*t + 1.0)*sin(3.3*n.z - 1.1*t + 2.0)
+                + 0.30*sin(4.0*n.y - 1.7*t + 2.0*n.x) + 0.15*sin(5.0*n.z + 2.3*t));  // capillary-gravity sloshing
+  lobe = 0.0;
+  if (uShapeA.z > 0.002){
+    vec3 q; float id;
+    float d = inverseSF(rotY(n, -0.35*uLatRot).xzy, NLOBE, q, id);
+    lobe = smoothstep(0.62, 0.0, d);
+    lobe *= lobe*(3.0 - 2.0*lobe);
+    S += uShapeA.z*0.36*lobe*(0.8 + 0.4*hash11(id + 7.0));
+  }
+  ridge = 0.0;
+  if (uShapeA.w > 0.002){
+    float ex = n.x*n.x, ez = n.z*n.z;
+    ridge = smoothstep(0.35, 0.9, abs(n.x));
+    S += uShapeA.w*(0.24*ex - 0.21*ez);
+  }
+  if (uShapeB.w > 0.002){
+    float tier = 0.5 + 0.5*cos(n.y*9.0 - 0.5*t);
+    S += uShapeB.w*0.30*(tier - 0.5)*(1.0 - n.y*n.y);
+    ridge = max(ridge, uShapeB.w*smoothstep(0.45, 1.0, tier));
+  }
+  return S;
+}
+
+float spikeH(vec3 q, float id, float lobe, float ridge){
+  float t = uTime, hs = hash11(id);
+  float h = uShapeA.x*(0.84 + 0.28*hs + 0.07*sin(1.4*t + hs*40.0));
+  h *= mix(1.0, 0.28 + 0.72*pow(abs(q.y), 1.3), uShapeB.y);       // field is strongest toward the pole pieces
+  vec3 wd = normalize(vec3(cos(uWavePh*0.11), 0.45, sin(uWavePh*0.11)));
+  float w = sin(dot(q, wd)*4.2 - uWavePh) + 0.35*sin(dot(q, wd.zyx)*7.0 + uWavePh*1.3);
+  h *= max(0.0, 1.0 + uShapeA.y*0.85*w);                           // travelling field-modulation wave
+  h *= 1.0 + uShapeA.z*(2.1*lobe - 0.55);                           // branching: spikes concentrate on lobes
+  h *= mix(1.0, 2.0*ridge, max(uShapeA.w, uShapeB.w));
+  return max(h, 0.0);
+}
+
+// round cone in 2D (radial, axial) — base sphere r1, tip sphere r2, height h
+float sdRC(vec2 q, float r1, float r2, float h){
+  float b = clamp((r1 - r2)/h, -0.98, 0.98);
+  float a = sqrt(1.0 - b*b);
+  float k = dot(q, vec2(-b, a));
+  if (k < 0.0) return length(q) - r1;
+  if (k > a*h) return length(q - vec2(0.0, h)) - r2;
+  return dot(q, vec2(a, b)) - r1;
+}
+
+float fluidSDF(vec3 pw){
+  vec3 p = pw - FC;
+  float r = length(p);
+  if (r > uBound) return r - uBound + 0.05;
+  // helical coil drive twists the body about the field axis (volume-preserving domain warp)
+  float tw = uShapeA.w*1.5, lip = 1.0;
+  if (tw > 0.001){
+    float a = tw*p.y + 0.35*uTime;
+    float c = cos(a), s = sin(a);
+    p.xz = mat2(c, -s, s, c)*p.xz;
+    lip = 1.0/sqrt(1.0 + tw*tw*dot(p.xz, p.xz));
+  }
+  vec3 n = p/max(r, 1e-5);
+  float lobe, ridge;
+  float Rn = uR0*(1.0 + shapeS(n, lobe, ridge));
+  float d = (r - Rn)*0.8*lip;
+  if (uShapeA.x > 0.002){
+    vec3 qa, qb; float ia, ib;
+    inverseSF2(rotY(n, -uLatRot).xzy, NSPIKE, qa, ia, qb, ib);
+    for (int k = 0; k < 2; k++){
+      vec3 q = rotY((k == 0 ? qa : qb).xzy, uLatRot);
+      float id = k == 0 ? ia : ib;
+      float lq, rq;
+      float Rq = uR0*(1.0 + shapeS(q, lq, rq));
+      float H = spikeH(q, id, lq, rq)*uR0;
+      if (H > 0.003){
+        float rb = min(0.105*uR0/0.62, 0.016 + 0.62*H);
+        float tip = mix(rb*0.7, 0.0065, smoothstep(0.015, 0.11, H));   // surface tension rounds young peaks
+        float ax = dot(p, q);
+        float rad = length(p - q*ax);
+        float base = Rq - rb*0.75;
+        float dc = sdRC(vec2(rad, ax - base), rb, tip, max(H + rb*0.75, rb - tip + 0.004));
+        d = smin(d, dc*lip, 0.10*uR0/0.62);
+      }
+    }
+  }
+  for (int i = 0; i < 5; i++){
+    vec4 dr = uDrops[i];
+    if (dr.w > 0.001){
+      float dd = length(p - dr.xyz) - dr.w;
+      d = smin(d, dd, 0.16*dr.w/0.15 + 0.02);
+    }
+  }
+  return d;
+}
+
+// ---------------------------------------------------------------- laboratory
+float sdBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r; }
+float sdCyl(vec3 p, float r, float y0, float y1, float rr){
+  vec2 d = vec2(length(p.xz) - r + rr, abs(p.y - 0.5*(y0 + y1)) - 0.5*(y1 - y0) + rr);
+  return min(max(d.x, d.y), 0.0) + length(max(d, 0.0)) - rr;
+}
+float sdFrustum(vec3 p, float y0, float y1, float r0, float r1){
+  float h = 0.5*(y1 - y0); p.y -= y0 + h;
+  vec2 q = vec2(length(p.xz), p.y);
+  vec2 k1 = vec2(r1, h), k2 = vec2(r1 - r0, 2.0*h);
+  vec2 ca = vec2(q.x - min(q.x, (q.y < 0.0) ? r0 : r1), abs(q.y) - h);
+  vec2 cb = q - k1 + k2*clamp(dot(k1 - q, k2)/dot(k2, k2), 0.0, 1.0);
+  float s = (cb.x < 0.0 && ca.y < 0.0) ? -1.0 : 1.0;
+  return s*sqrt(min(dot(ca, ca), dot(cb, cb)));
+}
+// materials: 1 floor, 2 anodised plate, 3 steel housing, 4 copper coil, 5 polished pole, 6 brushed pillar, 7 bolt / dark steel
+void opU(inout vec2 a, float d, float m){ if (d < a.x) a = vec2(d, m); }
+
+vec2 magnet(vec3 p){             // p.y measured upward from top of a plate (0.12)
+  vec2 r = vec2(1e5, 0.0);
+  opU(r, sdCyl(p, 0.98, 0.12, 0.27, 0.012), 3.0);
+  opU(r, sdCyl(p, 0.865, 0.27, 0.70, 0.02), 4.0);
+  opU(r, sdCyl(p, 0.94, 0.70, 0.765, 0.01), 3.0);
+  opU(r, sdFrustum(p, 0.765, 0.985, 0.42, 0.115) - 0.004, 5.0);
+  // housing cap screws around the flange
+  float a = atan(p.z, p.x), seg = 2.0*PI/12.0;
+  float ai = (floor(a/seg) + 0.5)*seg;
+  vec3 sp = vec3(cos(ai)*0.90, 0.0, sin(ai)*0.90);
+  vec3 lp = p - vec3(sp.x, 0.0, sp.z);
+  opU(r, sdCyl(lp, 0.028, 0.765, 0.79, 0.006), 7.0);
+  return r;
+}
+
+vec2 labSDF(vec3 p){
+  vec2 r = vec2(p.y, 1.0);                                       // studio floor
+  float far = length(p.xz) - 3.0;
+  if (far > 0.3) return vec2(min(p.y, far), 1.0);                 // cheap reject far from rig
+  opU(r, sdBox(p - vec3(0, 0.06, 0), vec3(2.1, 0.06, 2.1), 0.012), 2.0);
+  opU(r, sdBox(p - vec3(0, 3.86, 0), vec3(2.1, 0.06, 2.1), 0.012), 2.0);
+  vec2 mb = magnet(p);  if (mb.x < r.x) r = mb;
+  vec2 mt = magnet(vec3(p.x, 3.92 - p.y, p.z)); if (mt.x < r.x) r = mt;
+  vec3 q = vec3(abs(p.x) - 1.8, p.y, abs(p.z) - 1.8);
+  opU(r, sdCyl(q, 0.065, 0.12, 3.8, 0.004), 6.0);
+  opU(r, min(sdCyl(q, 0.11, 0.12, 0.22, 0.01), sdCyl(q, 0.11, 3.70, 3.80, 0.01)), 7.0);
+  // glass retaining rings (the glass wall itself is analytic, see glassLayer)
+  opU(r, max(min(sdCyl(p, GLASS_R + 0.035, 0.12, 0.17, 0.006), sdCyl(p, GLASS_R + 0.035, 3.75, 3.80, 0.006)), GLASS_R - 0.03 - length(p.xz)), 7.0);
+  return r;
+}
+
+vec2 mapAll(vec3 p){
+  float f = fluidSDF(p);
+  vec2 l = labSDF(p);
+  return f < l.x ? vec2(f, 0.0) : l;
+}
+
+// ---------------------------------------------------------------- studio lights (area softboxes)
+struct Rect { vec3 c; vec3 n; vec3 u; vec3 v; vec2 hs; vec3 col; };
+Rect getLight(int i){
+  Rect L;
+  if (i == 0){ L.c = vec3(-2.6, 5.4, 2.7);  L.hs = vec2(2.1, 1.25); L.col = vec3(1.0, 0.965, 0.92)*11.0; }
+  else if (i == 1){ L.c = vec3(4.3, 2.3, -1.4); L.hs = vec2(0.38, 2.6); L.col = vec3(0.86, 0.93, 1.0)*9.0; }
+  else if (i == 2){ L.c = vec3(-4.1, 2.2, -2.2); L.hs = vec2(0.38, 2.6); L.col = vec3(1.0, 0.9, 0.8)*6.5; }
+  else if (i == 3){ L.c = vec3(0.4, 7.2, -0.6); L.hs = vec2(3.0, 2.4); L.col = vec3(0.95, 0.97, 1.0)*3.0; }
+  else { L.c = vec3(3.6, 3.2, 4.6); L.hs = vec2(1.4, 0.9); L.col = vec3(1.0, 0.98, 0.96)*0.9; }
+  L.n = normalize(FC + vec3(0, 0.3, 0) - L.c);
+  vec3 up = abs(L.n.y) > 0.9 ? vec3(0, 0, 1) : vec3(0, 1, 0);
+  L.u = normalize(cross(up, L.n));
+  L.v = cross(L.n, L.u);
+  return L;
+}
+
+// radiance seen along a ray from the softboxes; blur widens edges for rough reflections
+vec3 rectRad(Rect L, vec3 ro, vec3 rd, float blur){
+  float dn = dot(rd, L.n);
+  if (dn > -1e-3) return vec3(0);
+  float t = dot(L.c - ro, L.n)/dn;
+  if (t < 0.0) return vec3(0);
+  vec3 h = ro + rd*t - L.c;
+  vec2 uv = vec2(dot(h, L.u), dot(h, L.v))/L.hs;
+  float w = 0.025 + blur*t*0.9/min(L.hs.x, L.hs.y);
+  float m = smoothstep(1.0 + w, 1.0 - w, abs(uv.x))*smoothstep(1.0 + w, 1.0 - w, abs(uv.y));
+  float hot = 1.0 - 0.35*dot(uv, uv)*(1.0 - blur);                 // diffusion fabric hot-spot
+  return L.col*m*hot/(1.0 + blur*6.0);
+}
+
+vec3 envBG(vec3 rd){
+  float y = rd.y;
+  vec3 c = mix(vec3(0.004, 0.0043, 0.0047), vec3(0.014, 0.015, 0.016), smoothstep(-0.2, 0.7, y));
+  c += vec3(0.010)*smoothstep(0.3, 1.0, y);
+  float back = pow(max(0.0, dot(rd, normalize(vec3(0.2, 0.15, -1.0)))), 6.0);   // light falloff on far backdrop
+  c += vec3(0.032, 0.030, 0.028)*back;
+  return c;
+}
+
+vec3 env(vec3 ro, vec3 rd, float blur){
+  vec3 c = envBG(rd);
+  for (int i = 0; i < 5; i++) c += rectRad(getLight(i), ro, rd, blur);
+  return c;
+}
+
+// ---------------------------------------------------------------- tracing
+vec2 trace(vec3 ro, vec3 rd, float tmax, int steps){
+  float t = 0.005, m = -1.0;
+  vec2 h = vec2(1.0, -1.0);
+  for (int i = 0; i < 220; i++){
+    if (i >= steps) break;
+    h = mapAll(ro + rd*t);
+    if (abs(h.x) < 0.00035*t + 0.0002){ m = h.y; break; }
+    t += h.x*0.82;
+    if (t > tmax) break;
+  }
+  // grazing rays that exhaust the step budget right at a silhouette count as hits
+  if (m < -0.5 && t < tmax && h.x < 0.004*t + 0.002) m = h.y;
+  return vec2(t, m);
+}
+vec3 nFluid(vec3 p, float e){
+  const vec2 k = vec2(1, -1);
+  return normalize(k.xyy*fluidSDF(p + k.xyy*e) + k.yyx*fluidSDF(p + k.yyx*e) + k.yxy*fluidSDF(p + k.yxy*e) + k.xxx*fluidSDF(p + k.xxx*e));
+}
+vec3 nLab(vec3 p, float e){
+  const vec2 k = vec2(1, -1);
+  return normalize(k.xyy*labSDF(p + k.xyy*e).x + k.yyx*labSDF(p + k.yyx*e).x + k.yxy*labSDF(p + k.yxy*e).x + k.xxx*labSDF(p + k.xxx*e).x);
+}
+float softShadow(vec3 ro, vec3 rd, float tmax){
+  float res = 1.0, t = 0.02;
+  for (int i = 0; i < 40; i++){
+    float h = mapAll(ro + rd*t).x;
+    res = min(res, 3.5*h/t);
+    t += clamp(h, 0.02, 0.25);
+    if (res < 0.002 || t > tmax) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+float calcAO(vec3 p, vec3 n){
+  float o = 0.0, s = 1.0;
+  for (int i = 1; i <= 5; i++){
+    float h = 0.015 + 0.06*float(i);
+    o += (h - mapAll(p + n*h).x)*s; s *= 0.72;
+  }
+  return clamp(1.0 - 2.2*o, 0.0, 1.0);
+}
+
+struct Mat { vec3 alb; vec3 f0; float rough; vec3 n; };
+
+Mat getMat(vec3 p, vec3 n, float m, float t){
+  Mat M; M.n = n; M.alb = vec3(0.02); M.f0 = vec3(0.04); M.rough = 0.4;
+  float fp = t*uPix;                                    // pixel footprint for texture filtering
+  if (m < 0.5){                                         // ferrofluid: black, glossy colloid in oil
+    M.alb = vec3(0.006, 0.0055, 0.005);
+    M.f0 = vec3(0.085, 0.083, 0.08);
+    M.rough = 0.012;
+  } else if (m < 1.5){                                  // black lacquered studio floor
+    float nz = vnoise(p*vec3(0.8, 0.0, 0.8)*3.0)*0.5 + vnoise(p*9.0)*0.5;
+    M.alb = vec3(0.006 + 0.003*nz);
+    M.f0 = vec3(0.03);
+    M.rough = 0.34 + 0.12*nz;
+  } else if (m < 2.5){                                  // black hard-anodised aluminium plate, fly-cut pattern
+    float rr = length(p.xz);
+    float fly = sin(rr*260.0)*clamp(1.0 - fp*260.0*0.3, 0.0, 1.0);
+    M.alb = vec3(0.018);
+    M.f0 = vec3(0.05);
+    M.rough = 0.28 + 0.05*fly;
+    vec3 tng = normalize(vec3(p.x, 0.0, p.z) + 1e-4);
+    M.n = normalize(n + tng*0.04*fly*step(0.9, abs(n.y)));
+  } else if (m < 3.5){                                  // turned steel coil housing (dark blued)
+    float a = atan(p.z, p.x);
+    float brush = vnoise(vec3(a*40.0, p.y*600.0, 0.0));
+    M.alb = vec3(0.03);
+    M.f0 = vec3(0.30, 0.31, 0.33);
+    M.rough = 0.22 + 0.10*brush;
+    float lathe = sin(p.y*900.0)*clamp(1.0 - fp*900.0*0.3, 0.0, 1.0);
+    M.n = normalize(n + vec3(0, 0.08*lathe, 0)*(1.0 - abs(n.y)));
+  } else if (m < 4.5){                                  // enamelled copper windings
+    float yy = p.y > 1.96 ? 3.92 - p.y : p.y;
+    float ph = yy*2.0*PI*95.0;
+    float fade = clamp(1.0 - fp*95.0*2.0, 0.0, 1.0);
+    float a = atan(p.z, p.x);
+    M.alb = vec3(0.0);
+    float tone = 0.8 + 0.2*vnoise(vec3(a*6.0, yy*30.0, 1.0));
+    M.f0 = vec3(0.95, 0.56, 0.36)*tone*vec3(1.0, 0.92, 0.85);
+    M.rough = 0.2 + 0.03*vnoise(vec3(a*8.0, yy*12.0, 3.0));
+    vec3 ny = vec3(0, sin(ph), 0)*0.55*fade;
+    M.n = normalize(n + ny*(1.0 - abs(n.y)));
+  } else if (m < 5.5){                                  // polished soft-iron pole piece
+    M.alb = vec3(0.0);
+    M.f0 = vec3(0.56, 0.57, 0.58);
+    M.rough = 0.035;
+  } else if (m < 6.5){                                  // brushed aluminium pillars
+    float st = vnoise(vec3(atan(p.z - sign(p.z)*1.8, p.x - sign(p.x)*1.8)*40.0, p.y*0.15, 5.0));
+    M.alb = vec3(0.016);
+    M.f0 = vec3(0.10, 0.10, 0.105)*(0.9 + 0.1*st);
+    M.rough = 0.30 + 0.06*st;
+  } else {                                              // black oxide steel fittings
+    M.alb = vec3(0.012);
+    M.f0 = vec3(0.12);
+    M.rough = 0.3;
+  }
+  return M;
+}
+
+vec3 fresnel(vec3 f0, float c){ return f0 + (1.0 - f0)*pow(1.0 - clamp(c, 0.0, 1.0), 5.0); }
+
+vec3 directDiffuse(vec3 p, vec3 n, bool shadows){
+  vec3 acc = vec3(0);
+  for (int i = 0; i < 5; i++){
+    Rect L = getLight(i);
+    vec3 dl = L.c - p; float d2 = dot(dl, dl); vec3 l = dl*inversesqrt(d2);
+    float area = 4.0*L.hs.x*L.hs.y;
+    float cg = max(dot(-l, L.n), 0.0);
+    float e = max(dot(n, l), 0.0)*cg*cg*cg*area/(d2 + area*0.5);     // honeycomb grid limits spill
+    if (shadows && i < 3 && e > 0.0) e *= softShadow(p + n*0.01, l, sqrt(d2));
+    acc += L.col*e/PI;
+  }
+  return acc;
+}
+
+// shading used for reflected hits (no further tracing)
+vec3 shadeSimple(vec3 p, vec3 rd, float m, float t){
+  vec3 n = m < 0.5 ? nFluid(p, 0.0015) : nLab(p, 0.0015);
+  Mat M = getMat(p, n, m, t);
+  float c = max(dot(M.n, -rd), 0.0);
+  vec3 F = fresnel(M.f0, c);
+  vec3 r = reflect(rd, M.n);
+  return M.alb*directDiffuse(p, M.n, false) + F*env(p, r, M.rough);
+}
+
+// borosilicate chamber wall: thin cylindrical shell, reflection + slight tint (refraction offset negligible for thin wall)
+vec3 glassLayer(vec3 ro, vec3 rd, float tHit, vec3 col){
+  float a = dot(rd.xz, rd.xz);
+  if (a < 1e-6) return col;
+  float b = dot(ro.xz, rd.xz), c = dot(ro.xz, ro.xz) - GLASS_R*GLASS_R;
+  float h = b*b - a*c;
+  if (h < 0.0) return col;
+  h = sqrt(h);
+  for (int i = 1; i >= 0; i--){
+    float t = (-b + (i == 1 ? h : -h))/a;
+    if (t < 0.0 || t > tHit) continue;
+    vec3 p = ro + rd*t;
+    if (p.y < 0.17 || p.y > 3.75) continue;
+    vec3 n = normalize(vec3(p.x, 0.0, p.z));
+    if (dot(n, rd) > 0.0) n = -n;
+    float cs = max(dot(n, -rd), 0.0);
+    float F = 0.4*(0.04 + 0.96*pow(1.0 - cs, 5.0));   // AR-coated optical borosilicate
+    float smudge = vnoise(p*vec3(2.5, 1.2, 2.5))*vnoise(p*11.0 + 4.0);
+    vec3 refl = env(p, reflect(rd, n), 0.003 + 0.08*smudge);
+    col = col*(1.0 - F)*vec3(0.965, 0.98, 0.975) + F*refl*(1.0 + 1.5*smudge);
+    // edge seen at grazing angles: borosilicate looks greenish-bright through its thickness
+    col += vec3(0.010, 0.016, 0.014)*smoothstep(0.25, 0.0, cs);
+  }
+  return col;
+}
+
+vec4 render(vec3 ro, vec3 rd){
+  vec2 h = trace(ro, rd, 40.0, 190);
+  if (h.y < -0.5) return vec4(glassLayer(ro, rd, 40.0, envBG(rd)), 40.0);
+  float t = h.x; vec3 p = ro + rd*t;
+  float m = h.y;
+  float e = max(0.0004, 0.0008*t*uPix*300.0);
+  vec3 n = m < 0.5 ? nFluid(p, e) : nLab(p, e*1.5);
+  Mat M = getMat(p, n, m, t);
+  n = M.n;
+  float c = max(dot(n, -rd), 0.0);
+  vec3 F = fresnel(M.f0, c);
+  vec3 r = reflect(rd, n);
+  float ao = calcAO(p, n);
+  vec3 col = M.alb*directDiffuse(p, n, true)*ao;
+
+  vec3 refl;
+  if (M.rough < 0.2){
+    vec2 h2 = trace(p + n*0.004, r, 25.0, m < 0.5 ? 110 : 80);
+    if (h2.y > -0.5) refl = shadeSimple(p + n*0.004 + r*h2.x, r, h2.y, t + h2.x);
+    else refl = env(p, r, M.rough);
+    if (m > 0.5 && m < 1.5) refl = mix(refl, env(p, r, M.rough), 0.3);
+  } else {
+    refl = env(p, r, M.rough)*mix(0.3, 1.0, ao);
+  }
+  col += F*refl*mix(0.6, 1.0, ao);
+  col = glassLayer(ro, rd, t, col);
+  // atmospheric depth haze of the studio
+  col = mix(col, envBG(rd), 1.0 - exp(-max(t - 6.0, 0.0)*0.06));
+  return vec4(col, t);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  vec3 rd = normalize(uCamRot*vec3(uv, uFl));
+  vec4 c = render(uCamPos, rd);
+#ifdef LDR
+  c = vec4(c.rgb*0.25, c.a/40.0);
+#endif
+  outColor = c;
+}
+</script>
+
+<script id="fsPost" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+uniform sampler2D uTex;
+uniform vec2  uRes;       // output resolution
+uniform float uFocus;     // focus distance
+uniform float uAperture;  // CoC scale (pixels of output at full defocus)
+uniform float uTime;
+uniform float uScale;     // render-scale (scene res / output res)
+out vec4 outColor;
+
+vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
+vec4 tx(vec2 uv){ vec4 c = texture(uTex, uv);
+#ifdef LDR
+  c = vec4(c.rgb*4.0, c.a*40.0);
+#endif
+  return c; }
+vec3 txl(vec2 uv, float l){ vec3 c = textureLod(uTex, uv, l).rgb;
+#ifdef LDR
+  c *= 4.0;
+#endif
+  return c; }
+vec4 txb(vec2 uv, float l){ vec4 c = textureLod(uTex, uv, l); c.a = textureLod(uTex, uv, 0.0).a;
+#ifdef LDR
+  c = vec4(c.rgb*4.0, c.a*40.0);
+#endif
+  return c; }
+float coc(float d){ return clamp(abs(d - uFocus)/max(d, 0.1)*uAperture, 0.0, 14.0); }
+
+void main(){
+  vec2 uv = gl_FragCoord.xy/uRes;
+  vec2 px = 1.0/uRes;
+  vec4 c0 = tx(uv);
+  float cc = coc(c0.a);
+  float jit = 6.2831*fract(52.9829189*fract(dot(gl_FragCoord.xy, vec2(0.06711056, 0.00583715))));
+  vec3 acc = c0.rgb; float wsum = 1.0;
+  // golden-angle disk gather depth of field
+  for (int i = 1; i < 24; i++){
+    float fi = float(i);
+    float rr = sqrt(fi/24.0)*max(cc, 0.0);
+    float a = fi*2.39996 + jit;
+    vec2 o = vec2(cos(a), sin(a))*rr*px;
+    vec4 s = txb(uv + o, log2(max(1.0, cc*0.75*uScale)));
+    float sc = coc(s.a);
+    float w = smoothstep(rr - 1.0, rr + 0.5, max(sc, s.a > c0.a ? 0.0 : cc)) + 0.002;
+    acc += s.rgb*w; wsum += w;
+  }
+  vec3 col = acc/wsum;
+  // bloom / lens halation from the mip pyramid
+  vec3 b = vec3(0);
+  b += txl(uv, 2.0)*0.35;
+  b += txl(uv, 3.5)*0.30;
+  b += txl(uv, 5.0)*0.22;
+  b += txl(uv, 6.5)*0.13;
+  col += max(b - 0.35, 0.0)*0.18;
+  // lens: vignette + mild chromatic edge shift
+  vec2 q = uv - 0.5;
+  float vig = 1.0 - 0.55*dot(q*vec2(1.0, 1.2), q*vec2(1.0, 1.2))*1.8;
+  col *= vig;
+  col = aces(col*1.25);
+  col = pow(col, vec3(1.0/2.2));
+  // film grain
+  float g = fract(sin(dot(gl_FragCoord.xy + fract(uTime*7.13)*97.0, vec2(12.9898, 78.233)))*43758.5453);
+  col += (g - 0.5)*0.022;
+  outColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+(() => {
+'use strict';
+const canvas = document.getElementById('c');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+const errBox = document.getElementById('err');
+function fail(msg){ errBox.style.display = 'flex'; errBox.textContent = msg; throw new Error(msg); }
+if (!gl) fail('WebGL2 is required to render this scene.');
+const hasFloat = !!gl.getExtension('EXT_color_buffer_float') || !!gl.getExtension('EXT_color_buffer_half_float');
+
+// ---------------------------------------------------------------- GL setup
+function compile(type, src){
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) fail('Shader error:\n' + gl.getShaderInfoLog(s));
+  return s;
+}
+function program(fsId, defs){
+  const p = gl.createProgram();
+  let fs = document.getElementById(fsId).textContent.trim();
+  if (defs) fs = fs.replace('precision highp float;', 'precision highp float;\n' + defs);
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, document.getElementById('vs').textContent.trim()));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.bindAttribLocation(p, 0, 'aPos');
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) fail('Link error:\n' + gl.getProgramInfoLog(p));
+  const u = {}, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){ const info = gl.getActiveUniform(p, i); const nm = info.name.replace('[0]', ''); u[nm] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+const scene = program('fsScene', hasFloat ? '' : '#define LDR 1');
+const post = program('fsPost', hasFloat ? '' : '#define LDR 1');
+const vbo = gl.createBuffer();
+gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+gl.enableVertexAttribArray(0);
+gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+
+let tex = null, fbo = null, fbW = 0, fbH = 0;
+function ensureFBO(w, h){
+  if (w === fbW && h === fbH) return;
+  if (tex) { gl.deleteTexture(tex); gl.deleteFramebuffer(fbo); }
+  tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  const levels = Math.floor(Math.log2(Math.max(w, h))) + 1;
+  gl.texStorage2D(gl.TEXTURE_2D, levels, hasFloat ? gl.RGBA16F : gl.RGBA8, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  fbo = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  fbW = w; fbH = h;
+}
+
+// ---------------------------------------------------------------- query params (for stills / verification)
+const Q = new URLSearchParams(location.search);
+const fixedT = Q.has('t') ? parseFloat(Q.get('t')) : null;
+const camQ = Q.has('cam') ? Q.get('cam').split(',').map(Number) : null;
+let renderScale = Q.has('scale') ? parseFloat(Q.get('scale')) : 0.62;
+const adaptive = !Q.has('scale');
+
+// ---------------------------------------------------------------- choreography
+// params: spike, wave, lobe, ridge, stretch, polar, wobble, tier, drops
+const KEYS = [
+  { t:  0, name: 'Quiescent droplet · H = 0',             p: [0.00, 0.0, 0.0, 0.0, 0.03, 0.3, 0.60, 0.0, 0.0] },
+  { t:  7, name: 'Field onset · surface softening',       p: [0.07, 0.0, 0.0, 0.0, 0.10, 0.5, 0.18, 0.0, 0.0] },
+  { t: 12, name: 'Rosensweig instability · hex lattice',  p: [0.34, 0.0, 0.0, 0.0, 0.12, 0.62, 0.04, 0.0, 0.0] },
+  { t: 22, name: 'Rotating field · peak waves',           p: [0.30, 1.0, 0.0, 0.0, 0.08, 0.35, 0.08, 0.0, 0.0] },
+  { t: 32, name: 'Field gradient · branching crowns',     p: [0.24, 0.2, 1.0, 0.0, 0.05, 0.25, 0.04, 0.0, 0.0] },
+  { t: 42, name: 'Pulsed field · droplet ejection',       p: [0.035, 0.25, 0.0, 0.0, 0.02, 0.3, 0.55, 0.0, 1.0] },
+  { t: 52, name: 'Helical coil drive · spiral sculpture', p: [0.26, 0.0, 0.0, 1.0, 0.55, 0.3, 0.02, 0.0, 0.0] },
+  { t: 62, name: 'Stacked gradient · tiered form',        p: [0.26, 0.0, 0.0, 0.0, 0.22, 0.45, 0.02, 1.0, 0.0] },
+  { t: 71, name: 'Field release · relaxation',            p: [0.00, 0.0, 0.0, 0.0, 0.03, 0.3, 0.60, 0.0, 0.0] },
+];
+const CYCLE = 80;
+const RAMP = 3.2;  // seconds for coil current ramps
+const NP = 9;
+function ss(x){ x = Math.min(1, Math.max(0, x)); return x*x*x*(x*(x*6 - 15) + 10); }
+function targetAt(time){
+  const tc = ((time % CYCLE) + CYCLE) % CYCLE;
+  let k = KEYS.length - 1;
+  for (let i = 0; i < KEYS.length; i++) if (tc >= KEYS[i].t) k = i;
+  const prev = KEYS[(k - 1 + KEYS.length) % KEYS.length].p, cur = KEYS[k].p;
+  const a = ss((tc - KEYS[k].t)/RAMP);
+  return { p: cur.map((v, i) => prev[i] + (v - prev[i])*a), key: k };
+}
+
+// viscous response: each shape mode is an under-damped spring (surface tension restoring, viscous damping)
+const STIFF = [7.0, 4.0, 3.0, 2.6, 3.4, 5.0, 3.0, 2.6, 2.0];
+const ZETA  = [0.62, 0.9, 0.75, 0.8, 0.55, 0.9, 0.9, 0.8, 1.0];
+const state = targetAt(0).p.slice(), vel = new Array(NP).fill(0);
+function stepPhysics(time, dt){
+  const tg = targetAt(time).p;
+  const sub = Math.max(1, Math.ceil(dt/0.008)), h = dt/sub;
+  for (let s = 0; s < sub; s++) for (let i = 0; i < NP; i++){
+    const k = STIFF[i], c = 2*ZETA[i]*Math.sqrt(k);
+    vel[i] += (k*(tg[i] - state[i]) - c*vel[i])*h;
+    state[i] += vel[i]*h;
+  }
+}
+function settle(time){ // jump straight to the settled state at a given time (used for stills)
+  for (let i = 0; i < NP; i++){ state[i] = targetAt(time - 6).p[i]; vel[i] = 0; }
+  const t0 = time - 6; for (let t = 0; t < 6; t += 1/60) stepPhysics(t0 + t, 1/60);
+}
+
+// ---------------------------------------------------------------- shape mirror (for volume conservation)
+const PHI = 1.61803398875;
+function sfDir(i, n){ const m = 1 - 1/n, ph = 2*Math.PI*((i*PHI) % 1), ct = m - 2*i/n, st = Math.sqrt(Math.max(0, 1 - ct*ct)); return [Math.cos(ph)*st, Math.sin(ph)*st, ct]; }
+function rotY(v, a){ const c = Math.cos(a), s = Math.sin(a); return [c*v[0] + s*v[2], v[1], -s*v[0] + c*v[2]]; }
+const LOBES = []; for (let i = 0; i < 13; i++){ const d = sfDir(i, 13); LOBES.push([d[0], d[2], d[1]]); }
+const SAMPLES = []; for (let i = 0; i < 160; i++){ const d = sfDir(i, 160); SAMPLES.push([d[0], d[2], d[1]]); }
+function sstep(a, b, x){ const t = Math.min(1, Math.max(0, (x - a)/(b - a))); return t*t*(3 - 2*t); }
+function shapeJS(n, P, t, latRot, out){
+  let S = P[4]*(n[1]*n[1] - 0.3333);
+  S += P[6]*0.09*(0.55*Math.sin(3.1*n[0] + 1.3*t)*Math.sin(2.7*n[1] + 0.9*t + 1.0)*Math.sin(3.3*n[2] - 1.1*t + 2.0)
+           + 0.30*Math.sin(4.0*n[1] - 1.7*t + 2.0*n[0]) + 0.15*Math.sin(5.0*n[2] + 2.3*t));
+  let lobe = 0, ridge = 0;
+  if (P[2] > 0.002){
+    const nr = rotY(n, -0.35*latRot); let best = 9;
+    for (const L of LOBES){ const dx = L[0] - nr[0], dy = L[1] - nr[1], dz = L[2] - nr[2]; best = Math.min(best, dx*dx + dy*dy + dz*dz); }
+    lobe = sstep(0.62, 0, Math.sqrt(best)); lobe = lobe*lobe*(3 - 2*lobe);
+    S += P[2]*0.36*lobe;
+  }
+  if (P[3] > 0.002){
+    const ph = Math.atan2(n[2], n[0]);
+    const ex = n[0]*n[0], ez = n[2]*n[2];
+    ridge = sstep(0.35, 0.9, Math.abs(n[0]));
+    S += P[3]*(0.24*ex - 0.21*ez);
+  }
+  if (P[7] > 0.002){
+    const tier = 0.5 + 0.5*Math.cos(n[1]*9 - 0.5*t);
+    S += P[7]*0.30*(tier - 0.5)*(1 - n[1]*n[1]);
+    ridge = Math.max(ridge, P[7]*sstep(0.55, 1, tier));
+  }
+  out.lobe = lobe; out.ridge = ridge;
+  return S;
+}
+const R_REF = 0.62, V0 = 4/3*Math.PI*R_REF**3;
+const drops = new Float32Array(20);
+let R0 = R_REF, bound = 1.5, volRatio = 1;
+function updateShape(t, latRot, wavePh){
+  const P = state, o = {};
+  let F = 0, Smax = 0, Hsum = 0, Hmax = 0;
+  const wd = (() => { const v = [Math.cos(wavePh*0.11), 0.45, Math.sin(wavePh*0.11)], l = Math.hypot(...v); return v.map(x => x/l); })();
+  for (const n of SAMPLES){
+    const S = shapeJS(n, P, t, latRot, o);
+    F += (1 + S)**3; Smax = Math.max(Smax, S);
+    let h = Math.max(0, P[0])*0.98;
+    h *= 1 + P[5]*((0.28 + 0.72*Math.abs(n[1])**1.3) - 1);
+    const w = Math.sin((n[0]*wd[0] + n[1]*wd[1] + n[2]*wd[2])*4.2 - wavePh);
+    h *= Math.max(0, 1 + P[1]*0.85*w);
+    h *= 1 + P[2]*(2.1*o.lobe - 0.55);
+    h *= 1 + Math.max(P[3], P[7])*((2.0*o.ridge) - 1);
+    h = Math.max(0, h);
+    Hsum += h; Hmax = Math.max(Hmax, h);
+  }
+  F /= SAMPLES.length;
+  const Hm = Hsum/SAMPLES.length;
+  // cone volume above the body surface (base radius tied to height as in shader)
+  const rb = Math.min(0.105*R0/0.62, 0.016 + 0.62*Hm*R0);
+  const Vs = 104*Math.PI*rb*rb*(Hm*R0)/3*0.9;
+  // droplets: choreographed ejection, orbit and coalescence
+  const A = Math.max(0, Math.min(1, P[8]));
+  let Vd = 0;
+  for (let i = 0; i < 5; i++){
+    const per = 6.5, off = i*1.37;
+    const ph = ((t + off) % per)/per;
+    let e = Math.sin(Math.PI*Math.min(1, ph/0.8)); e = Math.pow(Math.max(0, e), 0.8)*A;
+    const r = (0.125 + 0.05*((i*7) % 3)/2)*Math.cbrt(Math.max(A, 0.001));
+    let az = i*2.513 + t*0.25 + 0.6*Math.sin(t*0.3 + i);
+    if (i >= 3){ const meet = Math.sin(t*0.5)*0.5 + 0.5; az = 1.2 + t*0.25 + (i === 3 ? 1 : -1)*0.55*(1 - meet*e); }
+    const el = (i % 2 ? 0.35 : -0.25) + 0.2*Math.sin(t*0.4 + i*2);
+    const dir = [Math.cos(az)*Math.cos(el), Math.sin(el), Math.sin(az)*Math.cos(el)];
+    const dist = R0*(0.45 + 1.15*e) + r*e*0.6;
+    drops[i*4] = dir[0]*dist; drops[i*4 + 1] = dir[1]*dist; drops[i*4 + 2] = dir[2]*dist; drops[i*4 + 3] = A > 0.01 ? r : 0;
+    const sep = sstep(R0*0.75, R0 + r*1.4, dist);
+    Vd += 4/3*Math.PI*r**3*sep;
+  }
+  const Vbody = Math.max(V0*0.45, V0 - Vs - Vd);
+  R0 = Math.cbrt(Vbody/(4/3*Math.PI*F));
+  volRatio = (4/3*Math.PI*R0**3*F + Vs + Vd)/V0;
+  let db = 0; for (let i = 0; i < 5; i++) db = Math.max(db, Math.hypot(drops[i*4], drops[i*4 + 1], drops[i*4 + 2]) + drops[i*4 + 3]);
+  bound = Math.max(R0*(1 + Math.max(0, Smax)*1.15) + Hmax*R0*1.25 + 0.08, db + 0.1);
+  return { Hm };
+}
+
+// ---------------------------------------------------------------- camera & interaction
+const TARGET = [0, 1.96, 0];
+const cam = { az: 0.6, el: 0.2, dist: 4.6, vaz: 0, vel: 0 };
+const DMIN = 1.45, DMAX = 9.5;
+let lastInput = -1e9, zoomTarget = null;
+const pointers = new Map();
+let pinchD = 0;
+function now(){ return performance.now()/1000; }
+function clampCam(){ cam.el = Math.max(-0.12, Math.min(1.35, cam.el)); cam.dist = Math.max(DMIN, Math.min(DMAX, cam.dist)); }
+canvas.addEventListener('pointerdown', e => {
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) {}
+  pointers.set(e.pointerId, { x: e.clientX, y: e.clientY, t: e.timeStamp });
+  canvas.classList.add('drag'); lastInput = now(); cam.vaz = cam.vel = 0;
+  if (pointers.size === 2){ const [a, b] = [...pointers.values()]; pinchD = Math.hypot(a.x - b.x, a.y - b.y); }
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pointers.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y;
+  const dte = Math.max(0.004, (e.timeStamp - p.t)/1000);
+  p.x = e.clientX; p.y = e.clientY; p.t = e.timeStamp; lastInput = now();
+  if (pointers.size === 1){
+    const s = 4.2/Math.max(innerHeight, 300);
+    cam.az -= dx*s; cam.el += dy*s;
+    const cl = v => Math.max(-2.5, Math.min(2.5, v));
+    cam.vaz = cam.vaz*0.6 + cl(-dx*s/dte)*0.4; cam.vel = cam.vel*0.6 + cl(dy*s/dte)*0.4;
+  } else if (pointers.size === 2){
+    const [a, b] = [...pointers.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinchD > 0){ cam.dist *= pinchD/d; zoomTarget = null; }
+    pinchD = d;
+  }
+  clampCam();
+});
+function endPointer(e){
+  const p = pointers.get(e.pointerId);
+  if (p && e.timeStamp - p.t > 80){ cam.vaz = 0; cam.vel = 0; }   // held still before release: no fling
+  if (pointers.size > 1){ cam.vaz = 0; cam.vel = 0; }
+  pointers.delete(e.pointerId); lastInput = now(); pinchD = 0;
+  if (pointers.size === 2){ const [a, b] = [...pointers.values()]; pinchD = Math.hypot(a.x - b.x, a.y - b.y); }
+  if (pointers.size === 0) canvas.classList.remove('drag');
+}
+canvas.addEventListener('pointerup', endPointer);
+canvas.addEventListener('pointercancel', endPointer);
+canvas.addEventListener('wheel', e => {
+  e.preventDefault(); lastInput = now();
+  const k = Math.exp(e.deltaY*(e.deltaMode === 1 ? 0.05 : 0.0016));
+  zoomTarget = Math.max(DMIN, Math.min(DMAX, (zoomTarget ?? cam.dist)*k));
+}, { passive: false });
+canvas.addEventListener('contextmenu', e => e.preventDefault());
+
+// slow cinematic glide: orbit + breathing dolly with periodic macro push-ins
+function autoPath(t){
+  const push = ss((Math.sin(t*0.052 - 1.2)*0.5 + 0.5 - 0.55)/0.4);
+  return { el: 0.16 + 0.16*Math.sin(t*0.043 + 0.7) + 0.12*push, dist: 4.7 + 0.7*Math.sin(t*0.031) - 2.2*push };
+}
+function updateCamera(t, dt){
+  const idle = now() - lastInput;
+  const w = ss((idle - 3.0)/2.5);                // resume glide 3 s after input, blend over 2.5 s
+  if (pointers.size === 0){
+    cam.az += cam.vaz*dt; cam.el += cam.vel*dt;
+    const damp = Math.exp(-dt*3.5); cam.vaz *= damp; cam.vel *= damp;
+  }
+  if (zoomTarget !== null){
+    cam.dist += (zoomTarget - cam.dist)*(1 - Math.exp(-dt*8));
+    if (Math.abs(zoomTarget - cam.dist) < 1e-3) zoomTarget = null;
+  }
+  if (w > 0 && pointers.size === 0){
+    const a = autoPath(t);
+    cam.az += 0.075*dt*w;
+    const r = 1 - Math.exp(-dt*0.55*w);
+    cam.el += (a.el - cam.el)*r;
+    if (zoomTarget === null) cam.dist += (a.dist - cam.dist)*r;
+  }
+  clampCam();
+}
+// keep the subject framed on portrait screens: widen lens a little, pull back a little
+function portraitK(){
+  const asp = innerWidth/Math.max(1, innerHeight);
+  if (asp >= 1.25) return { fl: 1, dist: 1 };
+  const k = 1.25/asp;
+  return { fl: Math.pow(k, -0.45), dist: Math.pow(k, 0.4) };
+}
+function camBasis(){
+  const ce = Math.cos(cam.el);
+  const dist = cam.dist*portraitK().dist;
+  const pos = [TARGET[0] + Math.sin(cam.az)*ce*dist, TARGET[1] + Math.sin(cam.el)*dist, TARGET[2] + Math.cos(cam.az)*ce*dist];
+  pos[1] = Math.max(0.18, pos[1]);
+  const tgt = [TARGET[0], TARGET[1] - 0.05, TARGET[2]];
+  let f = tgt.map((v, i) => v - pos[i]); const fl = Math.hypot(...f); f = f.map(v => v/fl);
+  let r = [f[1]*0 - f[2]*1, f[2]*0 - f[0]*0, f[0]*1 - f[1]*0]; // cross(f, up)
+  const rl = Math.hypot(...r); r = r.map(v => v/rl);
+  const u = [r[1]*f[2] - r[2]*f[1], r[2]*f[0] - r[0]*f[2], r[0]*f[1] - r[1]*f[0]];
+  return { pos, m: new Float32Array([...r, ...u, ...f]), fdist: fl };
+}
+
+// ---------------------------------------------------------------- render loop
+const phaseEl = document.getElementById('phase'), fieldEl = document.getElementById('field'), fbar = document.getElementById('fbar'), volEl = document.getElementById('vol');
+let W = 0, H = 0, outScale = 1;
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.75);
+  outScale = dpr;
+  W = Math.max(2, Math.round(innerWidth*dpr)); H = Math.max(2, Math.round(innerHeight*dpr));
+  if (canvas.width !== W || canvas.height !== H){ canvas.width = W; canvas.height = H; }
+}
+addEventListener('resize', resize); resize();
+
+let simT = fixedT !== null ? fixedT : 0, latRot = 0, wavePh = 0, last = now(), avgMs = 16, frame = 0, lastHud = 0;
+if (fixedT !== null){
+  settle(fixedT);
+  for (let t = 0; t < fixedT; t += 1/30){ latRot += (0.05 + 0.25*targetAt(t).p[1] + 0.1*targetAt(t).p[3])/30; wavePh += (0.6 + 1.6*targetAt(t).p[1])/30; }
+}
+if (camQ){ cam.az = camQ[0]; cam.el = camQ[1]; cam.dist = camQ[2]; lastInput = 1e12; }
+const FOV = 34*Math.PI/180;
+
+function frameLoop(){
+  const tn = now(); let dt = Math.min(0.05, tn - last); last = tn;
+  if (fixedT === null){
+    simT += dt;
+    stepPhysics(simT, dt);
+    latRot += dt*(0.05 + 0.25*state[1] + 0.1*state[3]);
+    wavePh += dt*(0.6 + 1.6*state[1]);
+  }
+  if (!camQ) updateCamera(simT, dt);
+  updateShape(simT, latRot, wavePh);
+  const cb = camBasis();
+
+  // adaptive resolution keeps the glide smooth on any device
+  if (adaptive && frame > 10){
+    avgMs = avgMs*0.93 + dt*1000*0.07;
+    if (frame % 20 === 0){
+      if (avgMs > 24 && renderScale > 0.3) renderScale = Math.max(0.3, renderScale*0.88);
+      else if (avgMs < 15 && renderScale < 0.85) renderScale = Math.min(0.85, renderScale*1.06);
+    }
+  }
+  const sw = Math.max(2, Math.round(W*renderScale/4)*4), sh = Math.max(2, Math.round(H*renderScale/4)*4);
+  ensureFBO(sw, sh);
+
+  const fl = 0.5/Math.tan(FOV/2)*portraitK().fl;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+  gl.viewport(0, 0, sw, sh);
+  gl.useProgram(scene.p);
+  const U = scene.u;
+  gl.uniform2f(U.uRes, sw, sh);
+  gl.uniform1f(U.uTime, simT);
+  gl.uniform3fv(U.uCamPos, cb.pos);
+  gl.uniformMatrix3fv(U.uCamRot, false, cb.m);
+  gl.uniform1f(U.uFl, fl);
+  gl.uniform1f(U.uPix, 1/(fl*sh));
+  gl.uniform4f(U.uShapeA, state[0], state[1], state[2], state[3]);
+  gl.uniform4f(U.uShapeB, state[4], state[5], state[6], state[7]);
+  gl.uniform1f(U.uR0, R0);
+  gl.uniform1f(U.uBound, bound);
+  gl.uniform1f(U.uLatRot, latRot);
+  gl.uniform1f(U.uWavePh, wavePh);
+  gl.uniform4fv(U.uDrops, drops);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  gl.generateMipmap(gl.TEXTURE_2D);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, W, H);
+  gl.useProgram(post.p);
+  const P = post.u;
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1i(P.uTex, 0);
+  gl.uniform2f(P.uRes, W, H);
+  const focus = Math.max(0.5, cb.fdist - R0*0.85);
+  gl.uniform1f(P.uFocus, focus);
+  gl.uniform1f(P.uAperture, Q.has('nodof') ? 0 : H*0.0065*(4.6/Math.max(cam.dist, 1.2)));
+  gl.uniform1f(P.uTime, simT);
+  gl.uniform1f(P.uScale, renderScale);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  if (tn - lastHud > 0.25){
+    lastHud = tn;
+    const k = targetAt(simT).key;
+    phaseEl.textContent = String(k + 1).padStart(2, '0') + ' · ' + KEYS[k].name;
+    const B = 4 + 120*Math.max(0, state[0]) + 40*Math.max(0, state[4]) + 30*state[2] + 20*state[3] + 25*state[8];
+    fieldEl.textContent = B.toFixed(1);
+    fbar.style.width = Math.min(100, B/80*100).toFixed(0) + '%';
+    volEl.textContent = volRatio.toFixed(3);
+  }
+  frame++;
+  window.__ff = { frame, renderScale, avgMs, cam, simT, R0, bound, volRatio };
+  requestAnimationFrame(frameLoop);
+}
+requestAnimationFrame(frameLoop);
+})();
+</script>
+</body>
+</html>

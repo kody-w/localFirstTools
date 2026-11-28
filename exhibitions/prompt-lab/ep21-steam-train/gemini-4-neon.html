@@ -1,0 +1,2064 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Winter Viaduct — Steam Locomotive</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #141a24;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      user-select: none;
+    }
+    canvas { display: block; width: 100%; height: 100%; }
+    #hud {
+      position: fixed;
+      left: 24px;
+      bottom: 20px;
+      color: rgba(255, 246, 232, 0.78);
+      font-size: 12px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      pointer-events: none;
+      text-shadow: 0 1px 6px rgba(0, 0, 0, 0.55);
+      transition: opacity 0.8s ease;
+    }
+    #hud .title {
+      font-size: 13px;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      color: rgba(255, 236, 204, 0.92);
+      margin-bottom: 4px;
+    }
+    #hud .hint {
+      font-size: 11px;
+      opacity: 0.72;
+    }
+    #mode-badge {
+      position: fixed;
+      right: 24px;
+      bottom: 20px;
+      color: rgba(255, 244, 224, 0.72);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      padding: 6px 11px;
+      border-radius: 999px;
+      background: rgba(16, 22, 34, 0.38);
+      border: 1px solid rgba(255, 224, 180, 0.18);
+      backdrop-filter: blur(6px);
+      pointer-events: none;
+      transition: opacity 0.5s ease;
+    }
+  </style>
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="hud">
+    <div class="title">Highland Winter Viaduct</div>
+    <div class="hint">Drag to orbit &middot; Scroll to zoom &middot; Auto-resumes when idle</div>
+  </div>
+  <div id="mode-badge">Cinematic Tracking</div>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+    // =========================================================================
+    // 1. RENDERER, SCENE, CONSTANTS & DETERMINISTIC RNG
+    // =========================================================================
+    const TRACK_RADIUS = 128;          // Sweeping circular viaduct radius (units)
+    const TRACK_Y = 26.0;              // Rail bed elevation above valley floor
+    const LOOP_DURATION = 60.0;        // Seconds per seamless full loop
+    const ANGULAR_SPEED = (Math.PI * 2) / LOOP_DURATION;
+    const LINEAR_SPEED = TRACK_RADIUS * ANGULAR_SPEED; // ~13.4 units/sec
+
+    function mulberry32(seed) {
+      let a = seed >>> 0;
+      return function () {
+        a |= 0; a = (a + 0x6D2B79F5) | 0;
+        let t = Math.imul(a ^ (a >>> 15), 1 | a);
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+      };
+    }
+
+    const renderer = new THREE.WebGLRenderer({
+      antialias: true,
+      powerPreference: 'high-performance'
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 1.08;
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0xc7c6cc, 0.0034);
+
+    const camera = new THREE.PerspectiveCamera(
+      46,
+      window.innerWidth / window.innerHeight,
+      0.5,
+      1400
+    );
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.06;
+    controls.enablePan = false;
+    controls.minDistance = 12;
+    controls.maxDistance = 115;
+    controls.maxPolarAngle = Math.PI * 0.56;
+    controls.minPolarAngle = 0.18;
+
+    // =========================================================================
+    // 2. GOLDEN WINTER SUN SKY DOME & LIGHTING
+    // =========================================================================
+    const SUN_DIR = new THREE.Vector3(-0.78, 0.21, -0.59).normalize();
+
+    const skyGeo = new THREE.SphereGeometry(900, 48, 32);
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {
+        uSunDir: { value: SUN_DIR.clone() },
+        uZenithColor: { value: new THREE.Color(0x233859) },
+        uMidColor: { value: new THREE.Color(0x7d95b2) },
+        uHorizonColor: { value: new THREE.Color(0xe6c3a1) },
+        uSunGlowColor: { value: new THREE.Color(0xffb45a) },
+        uSunCoreColor: { value: new THREE.Color(0xfff6dd) }
+      },
+      vertexShader: `
+        varying vec3 vWorldPos;
+        void main() {
+          vec4 wp = modelMatrix * vec4(position, 1.0);
+          vWorldPos = wp.xyz;
+          gl_Position = projectionMatrix * viewMatrix * wp;
+        }
+      `,
+      fragmentShader: `
+        uniform vec3 uSunDir;
+        uniform vec3 uZenithColor;
+        uniform vec3 uMidColor;
+        uniform vec3 uHorizonColor;
+        uniform vec3 uSunGlowColor;
+        uniform vec3 uSunCoreColor;
+        varying vec3 vWorldPos;
+
+        void main() {
+          vec3 dir = normalize(vWorldPos);
+          float h = clamp(dir.y, -0.15, 1.0);
+          float t1 = smoothstep(-0.05, 0.24, h);
+          float t2 = smoothstep(0.18, 0.85, h);
+          vec3 col = mix(uHorizonColor, uMidColor, t1);
+          col = mix(col, uZenithColor, t2);
+
+          // Low winter sun atmospheric scatter + glowing disc
+          float sunDot = max(dot(dir, normalize(uSunDir)), 0.0);
+          float warmHaze = pow(sunDot, 3.0) * smoothstep(0.55, -0.05, dir.y);
+          float mieHalo = pow(sunDot, 18.0);
+          float sunDisc = smoothstep(0.9982, 0.9994, sunDot);
+
+          col += uSunGlowColor * warmHaze * 0.55;
+          col += uSunGlowColor * mieHalo * 0.85;
+          col = mix(col, uSunCoreColor * 1.4, sunDisc);
+
+          // Soft misty horizon veil
+          float mistBand = exp(-abs(dir.y) * 9.0);
+          col = mix(col, mix(vec3(0.84, 0.82, 0.83), uSunGlowColor, warmHaze * 0.5), mistBand * 0.38);
+
+          gl_FragColor = vec4(col, 1.0);
+        }
+      `
+    });
+    const skyDome = new THREE.Mesh(skyGeo, skyMat);
+    scene.add(skyDome);
+
+    // Primary low golden winter sun
+    const sunLight = new THREE.DirectionalLight(0xffcb8c, 2.9);
+    sunLight.position.copy(SUN_DIR).multiplyScalar(220);
+    sunLight.castShadow = true;
+    sunLight.shadow.mapSize.set(2048, 2048);
+    sunLight.shadow.camera.near = 20;
+    sunLight.shadow.camera.far = 420;
+    const sBounds = 90;
+    sunLight.shadow.camera.left = -sBounds;
+    sunLight.shadow.camera.right = sBounds;
+    sunLight.shadow.camera.top = sBounds;
+    sunLight.shadow.camera.bottom = -sBounds;
+    sunLight.shadow.bias = -0.0005;
+    sunLight.shadow.normalBias = 0.03;
+    scene.add(sunLight);
+    scene.add(sunLight.target);
+
+    // Cool snowy sky / frost bounce fill
+    const hemiLight = new THREE.HemisphereLight(0x9bb8d8, 0x5c6b7c, 1.05);
+    scene.add(hemiLight);
+
+    // Subtle warm golden rim back-fill for misty atmosphere
+    const rimLight = new THREE.DirectionalLight(0xffb56b, 0.75);
+    rimLight.position.copy(SUN_DIR).multiplyScalar(-160);
+    rimLight.position.y = 45;
+    scene.add(rimLight);
+
+    // =========================================================================
+    // 3. PROCEDURAL TEXTURES
+    // =========================================================================
+    function makeCanvas(w, h) {
+      const c = document.createElement('canvas');
+      c.width = w;
+      c.height = h;
+      return c;
+    }
+
+    // 3a. Stone Masonry Texture (diffuse + bump) for viaduct
+    function createStoneTextures() {
+      const w = 512, h = 512;
+      const diffC = makeCanvas(w, h);
+      const bumpC = makeCanvas(w, h);
+      const dCtx = diffC.getContext('2d');
+      const bCtx = bumpC.getContext('2d');
+      const rng = mulberry32(4201);
+
+      // Mortar base
+      dCtx.fillStyle = '#4c4b49';
+      dCtx.fillRect(0, 0, w, h);
+      bCtx.fillStyle = '#202020';
+      bCtx.fillRect(0, 0, w, h);
+
+      const rows = 12;
+      const rowH = h / rows;
+      for (let r = 0; r < rows; r++) {
+        const y = r * rowH;
+        const cols = 6 + (r % 2);
+        const offset = (r % 2) * (w / cols * 0.5);
+        for (let c = -1; c <= cols; c++) {
+          const bw = w / cols;
+          const x = c * bw + offset;
+          const v = 96 + Math.floor(rng() * 44);
+          const warm = Math.floor(rng() * 14 - 5);
+          const cr = Math.min(255, Math.max(0, v + warm + 4));
+          const cg = Math.min(255, Math.max(0, v + warm));
+          const cb = Math.min(255, Math.max(0, v - 4));
+
+          dCtx.fillStyle = `rgb(${cr},${cg},${cb})`;
+          dCtx.fillRect(x + 2, y + 2, bw - 4, rowH - 4);
+
+          // Weathering / lichen / frost speckles
+          for (let s = 0; s < 18; s++) {
+            const sx = x + 3 + rng() * (bw - 6);
+            const sy = y + 3 + rng() * (rowH - 6);
+            const sr = 1 + rng() * 3.5;
+            dCtx.fillStyle = rng() > 0.65
+              ? `rgba(225,232,240,${0.08 + rng() * 0.12})`
+              : `rgba(38,36,34,${0.08 + rng() * 0.14})`;
+            dCtx.fillRect(sx, sy, sr, sr);
+          }
+
+          // Top frost edge on some blocks
+          if (rng() > 0.55) {
+            dCtx.fillStyle = `rgba(235,242,250,${0.12 + rng() * 0.18})`;
+            dCtx.fillRect(x + 2, y + 2, bw - 4, 3);
+          }
+
+          const bv = 155 + Math.floor(rng() * 75);
+          bCtx.fillStyle = `rgb(${bv},${bv},${bv})`;
+          bCtx.fillRect(x + 2, y + 2, bw - 4, rowH - 4);
+        }
+      }
+
+      const map = new THREE.CanvasTexture(diffC);
+      map.wrapS = map.wrapT = THREE.RepeatWrapping;
+      map.colorSpace = THREE.SRGBColorSpace;
+      const bumpMap = new THREE.CanvasTexture(bumpC);
+      bumpMap.wrapS = bumpMap.wrapT = THREE.RepeatWrapping;
+      return { map, bumpMap };
+    }
+
+    // 3b. Wooden Coach Paneling Texture
+    function createWoodCoachTexture() {
+      const w = 512, h = 256;
+      const c = makeCanvas(w, h);
+      const ctx = c.getContext('2d');
+      const rng = mulberry32(911);
+
+      // Rich vintage burgundy-mahogany base
+      const grad = ctx.createLinearGradient(0, 0, 0, h);
+      grad.addColorStop(0, '#4f1d18');
+      grad.addColorStop(0.5, '#66261d');
+      grad.addColorStop(1, '#3c1411');
+      ctx.fillStyle = grad;
+      ctx.fillRect(0, 0, w, h);
+
+      // Vertical wood planks & subtle grain
+      const planks = 32;
+      const pw = w / planks;
+      for (let i = 0; i < planks; i++) {
+        ctx.fillStyle = `rgba(0,0,0,${0.06 + rng() * 0.08})`;
+        ctx.fillRect(i * pw, 0, 1.5, h);
+        ctx.fillStyle = `rgba(255,190,140,${rng() * 0.04})`;
+        ctx.fillRect(i * pw + 2, 0, pw - 3, h);
+      }
+
+      // Gold & cream Victorian coach pinstriping
+      ctx.fillStyle = '#d4a657';
+      ctx.fillRect(0, 16, w, 4);
+      ctx.fillRect(0, h - 22, w, 4);
+      ctx.fillStyle = '#e7c98b';
+      ctx.fillRect(0, h - 30, w, 2);
+
+      // Lower wainscot trim shadow
+      ctx.fillStyle = 'rgba(20, 6, 4, 0.35)';
+      ctx.fillRect(0, h * 0.56, w, 5);
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    // 3c. Riveted Black Iron Boiler Texture
+    function createIronTexture() {
+      const w = 256, h = 256;
+      const c = makeCanvas(w, h);
+      const ctx = c.getContext('2d');
+      const rng = mulberry32(777);
+
+      ctx.fillStyle = '#1b1d21';
+      ctx.fillRect(0, 0, w, h);
+
+      // Subtle brushed soot & oil sheen
+      for (let i = 0; i < 600; i++) {
+        const x = rng() * w, y = rng() * h;
+        const v = 22 + Math.floor(rng() * 24);
+        ctx.fillStyle = `rgba(${v},${v},${v + 3},0.18)`;
+        ctx.fillRect(x, y, 8 + rng() * 18, 2);
+      }
+
+      // Seam lines and rivets
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = 2;
+      for (let y = 64; y < h; y += 64) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(w, y); ctx.stroke();
+        for (let x = 8; x < w; x += 16) {
+          ctx.fillStyle = '#363b42';
+          ctx.beginPath(); ctx.arc(x, y - 5, 2.1, 0, Math.PI * 2); ctx.fill();
+          ctx.beginPath(); ctx.arc(x, y + 5, 2.1, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    // 3d. Snow Surface Sparkle & Drift Bump Texture
+    function createSnowBumpTexture() {
+      const w = 256, h = 256;
+      const c = makeCanvas(w, h);
+      const ctx = c.getContext('2d');
+      const rng = mulberry32(303);
+      ctx.fillStyle = '#808080';
+      ctx.fillRect(0, 0, w, h);
+
+      for (let i = 0; i < 420; i++) {
+        const x = rng() * w, y = rng() * h;
+        const r = 8 + rng() * 26;
+        const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+        const v = rng() > 0.5 ? 215 : 45;
+        g.addColorStop(0, `rgba(${v},${v},${v},0.16)`);
+        g.addColorStop(1, 'rgba(128,128,128,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
+      }
+      // Fine crystalline sparkle
+      for (let i = 0; i < 1200; i++) {
+        const v = Math.floor(110 + rng() * 145);
+        ctx.fillStyle = `rgb(${v},${v},${v})`;
+        ctx.fillRect(rng() * w, rng() * h, 1.5, 1.5);
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+      tex.repeat.set(28, 28);
+      return tex;
+    }
+
+    // 3e. Warm Glowing Coach Window Texture
+    function createWindowGlowTexture() {
+      const w = 128, h = 128;
+      const c = makeCanvas(w, h);
+      const ctx = c.getContext('2d');
+
+      const g = ctx.createRadialGradient(w * 0.5, h * 0.42, 6, w * 0.5, h * 0.5, w * 0.65);
+      g.addColorStop(0, '#fff7d6');
+      g.addColorStop(0.45, '#ffca6b');
+      g.addColorStop(0.85, '#d97a28');
+      g.addColorStop(1, '#7a3512');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+
+      // Subtle curtains & wooden sash bars
+      ctx.fillStyle = 'rgba(72, 24, 14, 0.55)';
+      ctx.beginPath();
+      ctx.moveTo(0, 0); ctx.lineTo(24, 0); ctx.quadraticCurveTo(18, h * 0.5, 8, h); ctx.lineTo(0, h); ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(w, 0); ctx.lineTo(w - 24, 0); ctx.quadraticCurveTo(w - 18, h * 0.5, w - 8, h); ctx.lineTo(w, h); ctx.fill();
+
+      // Top transom bar & frame
+      ctx.fillStyle = '#2d140e';
+      ctx.fillRect(0, 0, w, 8);
+      ctx.fillRect(0, h - 8, w, 8);
+      ctx.fillRect(0, 0, 7, h);
+      ctx.fillRect(w - 7, 0, 7, h);
+      ctx.fillRect(0, h * 0.28, w, 5);
+
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    // 3f. Soft Billowing Steam Puff Texture (multi-lobe cloudy sprite)
+    function createSteamTexture() {
+      const s = 256;
+      const c = makeCanvas(s, s);
+      const ctx = c.getContext('2d');
+      const rng = mulberry32(808);
+      ctx.clearRect(0, 0, s, s);
+
+      const lobes = [
+        [0.50, 0.50, 0.38, 0.55],
+        [0.36, 0.46, 0.28, 0.42],
+        [0.64, 0.48, 0.28, 0.40],
+        [0.48, 0.35, 0.26, 0.38],
+        [0.52, 0.63, 0.27, 0.36],
+        [0.38, 0.58, 0.22, 0.30],
+        [0.62, 0.38, 0.22, 0.30]
+      ];
+      for (const [lx, ly, lr, la] of lobes) {
+        const cx = lx * s + (rng() - 0.5) * 12;
+        const cy = ly * s + (rng() - 0.5) * 12;
+        const r = lr * s;
+        const g = ctx.createRadialGradient(cx, cy, r * 0.08, cx, cy, r);
+        g.addColorStop(0, `rgba(255,255,255,${la})`);
+        g.addColorStop(0.5, `rgba(248,248,252,${la * 0.55})`);
+        g.addColorStop(1, 'rgba(240,242,248,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    // 3g. Soft Snowflake Texture
+    function createSnowflakeTexture() {
+      const s = 64;
+      const c = makeCanvas(s, s);
+      const ctx = c.getContext('2d');
+      const g = ctx.createRadialGradient(s / 2, s / 2, 1, s / 2, s / 2, s / 2);
+      g.addColorStop(0, 'rgba(255,255,255,1)');
+      g.addColorStop(0.35, 'rgba(245,250,255,0.85)');
+      g.addColorStop(0.7, 'rgba(220,235,255,0.28)');
+      g.addColorStop(1, 'rgba(220,235,255,0)');
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, s, s);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+
+    const stoneTex = createStoneTextures();
+    const woodCoachTex = createWoodCoachTexture();
+    const ironTex = createIronTexture();
+    const snowBumpTex = createSnowBumpTexture();
+    const windowGlowTex = createWindowGlowTexture();
+    const steamTex = createSteamTexture();
+    const snowflakeTex = createSnowflakeTexture();
+
+    // =========================================================================
+    // 4. ALPINE VALLEY TERRAIN, FROZEN RIVER & DISTANT PEAKS
+    // =========================================================================
+    function getTerrainHeight(x, z) {
+      const r = Math.hypot(x, z);
+      const angle = Math.atan2(z, x);
+
+      // Gentle multi-frequency hills
+      let h =
+        Math.sin(x * 0.017) * Math.cos(z * 0.015) * 9.5 +
+        Math.sin(x * 0.041 + 1.2) * Math.sin(z * 0.037 - 0.7) * 4.2 +
+        Math.cos((x + z) * 0.011) * 6.0;
+
+      // Carve a scenic valley/gorge beneath the viaduct ring (r ~ 128)
+      const distFromTrack = Math.abs(r - TRACK_RADIUS);
+      const gorgeFactor = Math.exp(-(distFromTrack * distFromTrack) / (38 * 38));
+      h = h * (1 - gorgeFactor * 0.65) - gorgeFactor * 9.5;
+
+      // Central snowy knoll inside the loop
+      const innerHill = Math.max(0, 1 - r / 85);
+      h += innerHill * innerHill * 18.0;
+
+      // Rising alpine slopes and dramatic mountain ring beyond r > 175
+      if (r > 165) {
+        const t = (r - 165) / 220;
+        const ridge =
+          (Math.abs(Math.sin(angle * 5.0 + 0.6)) * 0.55 +
+           Math.abs(Math.cos(angle * 8.0 - 1.1)) * 0.35 +
+           Math.sin(angle * 13.0) * 0.15 + 0.45);
+        h += Math.pow(t, 1.55) * 165.0 * ridge;
+      }
+
+      // Winding river channel cutting across the valley floor
+      const riverCenterX = Math.sin(z * 0.014) * 34.0 + Math.cos(z * 0.006) * 22.0;
+      const riverDist = Math.abs(x - riverCenterX);
+      if (r < 210) {
+        const riverCut = Math.exp(-(riverDist * riverDist) / (15 * 15));
+        h = THREE.MathUtils.lerp(h, -9.8, riverCut * 0.88);
+      }
+
+      return h;
+    }
+
+    // Main snowy terrain mesh
+    {
+      const size = 960;
+      const segs = 210;
+      const terrainGeo = new THREE.PlaneGeometry(size, size, segs, segs);
+      terrainGeo.rotateX(-Math.PI / 2);
+
+      const pos = terrainGeo.attributes.position;
+      const colors = new Float32Array(pos.count * 3);
+      const cSnowBright = new THREE.Color(0xedf2f8);
+      const cSnowShadow = new THREE.Color(0xc2cfe0);
+      const cRock = new THREE.Color(0x525a66);
+      const tmpC = new THREE.Color();
+
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        const z = pos.getZ(i);
+        const y = getTerrainHeight(x, z);
+        pos.setY(i, y);
+      }
+      terrainGeo.computeVertexNormals();
+
+      const norm = terrainGeo.attributes.normal;
+      for (let i = 0; i < pos.count; i++) {
+        const ny = norm.getY(i);
+        const y = pos.getY(i);
+        // Steep mountain cliffs expose dark alpine granite; gentler slopes hold snow
+        const rockMix = THREE.MathUtils.smoothstep(0.76 - ny, 0.0, 0.28);
+        const elevTint = THREE.MathUtils.clamp((y + 10) / 90, 0, 1);
+        tmpC.copy(cSnowShadow).lerp(cSnowBright, 0.35 + elevTint * 0.65);
+        tmpC.lerp(cRock, rockMix * 0.85);
+        colors[i * 3] = tmpC.r;
+        colors[i * 3 + 1] = tmpC.g;
+        colors[i * 3 + 2] = tmpC.b;
+      }
+      terrainGeo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      const terrainMat = new THREE.MeshStandardMaterial({
+        vertexColors: true,
+        roughness: 0.86,
+        metalness: 0.02,
+        bumpMap: snowBumpTex,
+        bumpScale: 0.25
+      });
+      const terrain = new THREE.Mesh(terrainGeo, terrainMat);
+      terrain.receiveShadow = true;
+      scene.add(terrain);
+    }
+
+    // Partially frozen winter river catching golden sun glints
+    {
+      const riverGeo = new THREE.PlaneGeometry(460, 460, 1, 1);
+      riverGeo.rotateX(-Math.PI / 2);
+      const riverMat = new THREE.MeshStandardMaterial({
+        color: 0x3b5870,
+        roughness: 0.16,
+        metalness: 0.35,
+        envMapIntensity: 1.0
+      });
+      const river = new THREE.Mesh(riverGeo, riverMat);
+      river.position.y = -7.6;
+      river.receiveShadow = true;
+      scene.add(river);
+    }
+
+    // =========================================================================
+    // 5. GRAND CURVED STONE-ARCH VIADUCT
+    // =========================================================================
+    const viaductGroup = new THREE.Group();
+    scene.add(viaductGroup);
+
+    const NUM_ARCHES = 36;
+    const BAY_ANGLE = (Math.PI * 2) / NUM_ARCHES;
+    const BAY_SPAN = 2 * TRACK_RADIUS * Math.sin(BAY_ANGLE * 0.5); // ~22.31
+    const VIADUCT_WIDTH = 5.4;
+
+    const stoneMat = new THREE.MeshStandardMaterial({
+      map: stoneTex.map,
+      bumpMap: stoneTex.bumpMap,
+      bumpScale: 0.22,
+      roughness: 0.9,
+      metalness: 0.04,
+      color: 0xc8c3bc
+    });
+    stoneTex.map.repeat.set(0.14, 0.14);
+    stoneTex.bumpMap.repeat.set(0.14, 0.14);
+
+    const darkStoneMat = new THREE.MeshStandardMaterial({
+      map: stoneTex.map,
+      bumpMap: stoneTex.bumpMap,
+      bumpScale: 0.18,
+      roughness: 0.92,
+      color: 0x9b958e
+    });
+
+    const snowCapMat = new THREE.MeshStandardMaterial({
+      color: 0xf1f5fa,
+      roughness: 0.82,
+      metalness: 0.02,
+      bumpMap: snowBumpTex,
+      bumpScale: 0.12
+    });
+
+    // Build reusable stone arch bay geometry (spandrel + semicircular vault)
+    function createArchBayGeometry() {
+      const halfSpan = BAY_SPAN * 0.5 + 0.25;
+      const archRadius = BAY_SPAN * 0.39;     // ~8.70
+      const springY = -10.4;                  // Below deck top (deck top = 0)
+      const topY = 0.0;
+
+      const shape = new THREE.Shape();
+      shape.moveTo(-halfSpan, springY);
+      shape.lineTo(-archRadius, springY);
+      shape.absarc(0, springY, archRadius, Math.PI, 0, true);
+      shape.lineTo(halfSpan, springY);
+      shape.lineTo(halfSpan, topY);
+      shape.lineTo(-halfSpan, topY);
+      shape.closePath();
+
+      const geo = new THREE.ExtrudeGeometry(shape, {
+        depth: VIADUCT_WIDTH,
+        bevelEnabled: false,
+        curveSegments: 22
+      });
+      geo.translate(0, 0, -VIADUCT_WIDTH * 0.5);
+      geo.computeVertexNormals();
+      return geo;
+    }
+
+    const archBayGeo = createArchBayGeometry();
+
+    // Voussoir arch trim ring (slightly proud of the stone face)
+    const archTrimGeo = (() => {
+      const rIn = BAY_SPAN * 0.39;
+      const rOut = rIn + 0.72;
+      const shape = new THREE.Shape();
+      shape.absarc(0, -10.4, rOut, Math.PI, 0, true);
+      shape.lineTo(rIn, -10.4);
+      shape.absarc(0, -10.4, rIn, 0, Math.PI, false);
+      shape.closePath();
+      const geo = new THREE.ExtrudeGeometry(shape, {
+        depth: VIADUCT_WIDTH + 0.32,
+        bevelEnabled: false,
+        curveSegments: 22
+      });
+      geo.translate(0, 0, -(VIADUCT_WIDTH + 0.32) * 0.5);
+      return geo;
+    })();
+
+    // Tall tapered stone pier geometry
+    const PIER_H = 38.0;
+    const pierGeo = new THREE.BoxGeometry(3.5, PIER_H, VIADUCT_WIDTH + 0.55);
+    const pierPlinthGeo = new THREE.BoxGeometry(4.6, 5.5, VIADUCT_WIDTH + 1.6);
+    const pierCapGeo = new THREE.BoxGeometry(4.1, 1.0, VIADUCT_WIDTH + 1.15);
+    const buttressGeo = new THREE.BoxGeometry(1.15, PIER_H - 4.0, VIADUCT_WIDTH + 1.15);
+    const parapetGeo = new THREE.BoxGeometry(BAY_SPAN + 0.45, 1.05, 0.46);
+    const parapetSnowGeo = new THREE.BoxGeometry(BAY_SPAN + 0.48, 0.24, 0.52);
+    const corniceGeo = new THREE.BoxGeometry(BAY_SPAN + 0.5, 0.45, VIADUCT_WIDTH + 0.75);
+    const ballastGeo = new THREE.BoxGeometry(BAY_SPAN + 0.5, 0.38, VIADUCT_WIDTH - 0.8);
+
+    const ballastMat = new THREE.MeshStandardMaterial({
+      color: 0x625e59,
+      roughness: 0.95
+    });
+
+    const archInst = new THREE.InstancedMesh(archBayGeo, stoneMat, NUM_ARCHES);
+    const trimInst = new THREE.InstancedMesh(archTrimGeo, darkStoneMat, NUM_ARCHES);
+    const pierInst = new THREE.InstancedMesh(pierGeo, stoneMat, NUM_ARCHES);
+    const plinthInst = new THREE.InstancedMesh(pierPlinthGeo, darkStoneMat, NUM_ARCHES);
+    const capInst = new THREE.InstancedMesh(pierCapGeo, darkStoneMat, NUM_ARCHES);
+    const buttressInst = new THREE.InstancedMesh(buttressGeo, darkStoneMat, NUM_ARCHES);
+    const corniceInst = new THREE.InstancedMesh(corniceGeo, darkStoneMat, NUM_ARCHES);
+    const ballastInst = new THREE.InstancedMesh(ballastGeo, ballastMat, NUM_ARCHES);
+    const parapetInst = new THREE.InstancedMesh(parapetGeo, stoneMat, NUM_ARCHES * 2);
+    const parapetSnowInst = new THREE.InstancedMesh(parapetSnowGeo, snowCapMat, NUM_ARCHES * 2);
+
+    [archInst, pierInst, plinthInst, capInst, buttressInst, corniceInst, parapetInst].forEach((m) => {
+      m.castShadow = true;
+      m.receiveShadow = true;
+      viaductGroup.add(m);
+    });
+    [trimInst, ballastInst, parapetSnowInst].forEach((m) => {
+      m.receiveShadow = true;
+      viaductGroup.add(m);
+    });
+
+    const dummy = new THREE.Object3D();
+    for (let i = 0; i < NUM_ARCHES; i++) {
+      // Mid-bay angle for arch, cornice, ballast, parapets
+      const midA = (i + 0.5) * BAY_ANGLE;
+      const mx = Math.cos(midA) * TRACK_RADIUS;
+      const mz = Math.sin(midA) * TRACK_RADIUS;
+      const tangentYaw = -midA + Math.PI * 0.5;
+
+      dummy.position.set(mx, TRACK_Y - 0.35, mz);
+      dummy.rotation.set(0, tangentYaw, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      archInst.setMatrixAt(i, dummy.matrix);
+      trimInst.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(mx, TRACK_Y - 0.12, mz);
+      dummy.updateMatrix();
+      corniceInst.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(mx, TRACK_Y + 0.08, mz);
+      dummy.updateMatrix();
+      ballastInst.setMatrixAt(i, dummy.matrix);
+
+      // Inner and outer parapets with snow caps
+      const paraOffset = VIADUCT_WIDTH * 0.5 - 0.22;
+      for (let side = 0; side < 2; side++) {
+        const s = side === 0 ? -1 : 1;
+        const rSide = TRACK_RADIUS + s * paraOffset;
+        const px = Math.cos(midA) * rSide;
+        const pz = Math.sin(midA) * rSide;
+
+        dummy.position.set(px, TRACK_Y + 0.58, pz);
+        dummy.rotation.set(0, tangentYaw, 0);
+        dummy.updateMatrix();
+        parapetInst.setMatrixAt(i * 2 + side, dummy.matrix);
+
+        dummy.position.set(px, TRACK_Y + 1.18, pz);
+        dummy.updateMatrix();
+        parapetSnowInst.setMatrixAt(i * 2 + side, dummy.matrix);
+      }
+
+      // Pier at bay boundary angle
+      const pierA = i * BAY_ANGLE;
+      const px = Math.cos(pierA) * TRACK_RADIUS;
+      const pz = Math.sin(pierA) * TRACK_RADIUS;
+      const pierYaw = -pierA + Math.PI * 0.5;
+      const groundY = getTerrainHeight(px, pz);
+
+      dummy.position.set(px, TRACK_Y - 10.4 - PIER_H * 0.5, pz);
+      dummy.rotation.set(0, pierYaw, 0);
+      dummy.updateMatrix();
+      pierInst.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(px, TRACK_Y - 10.4 - (PIER_H - 4.0) * 0.5, pz);
+      dummy.updateMatrix();
+      buttressInst.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(px, TRACK_Y - 10.4, pz);
+      dummy.updateMatrix();
+      capInst.setMatrixAt(i, dummy.matrix);
+
+      dummy.position.set(px, Math.min(groundY + 1.4, TRACK_Y - 18.0), pz);
+      dummy.updateMatrix();
+      plinthInst.setMatrixAt(i, dummy.matrix);
+    }
+
+    // Wooden railway sleepers (ties) & continuous steel rails
+    const RAIL_GAUGE = 1.65;
+    const NUM_TIES = 540;
+    const tieGeo = new THREE.BoxGeometry(0.28, 0.16, 2.75);
+    const tieMat = new THREE.MeshStandardMaterial({ color: 0x3b2a1f, roughness: 0.92 });
+    const tieInst = new THREE.InstancedMesh(tieGeo, tieMat, NUM_TIES);
+    tieInst.receiveShadow = true;
+    for (let i = 0; i < NUM_TIES; i++) {
+      const a = (i / NUM_TIES) * Math.PI * 2;
+      dummy.position.set(Math.cos(a) * TRACK_RADIUS, TRACK_Y + 0.29, Math.sin(a) * TRACK_RADIUS);
+      dummy.rotation.set(0, -a + Math.PI * 0.5, 0);
+      dummy.scale.set(1, 1, 1);
+      dummy.updateMatrix();
+      tieInst.setMatrixAt(i, dummy.matrix);
+    }
+    viaductGroup.add(tieInst);
+
+    // Two smooth steel rails
+    const railMat = new THREE.MeshStandardMaterial({
+      color: 0x8b939e,
+      metalness: 0.82,
+      roughness: 0.28
+    });
+    for (const s of [-1, 1]) {
+      const rRail = TRACK_RADIUS + s * (RAIL_GAUGE * 0.5);
+      const railGeo = new THREE.TorusGeometry(rRail, 0.065, 8, 220);
+      railGeo.rotateX(Math.PI / 2);
+      const railMesh = new THREE.Mesh(railGeo, railMat);
+      railMesh.position.y = TRACK_Y + 0.42;
+      viaductGroup.add(railMesh);
+    }
+
+    // =========================================================================
+    // 6. INSTANCED FROSTED PINE FOREST
+    // =========================================================================
+    {
+      const rng = mulberry32(2026);
+      const treeTransforms = [];
+      const MAX_TREES = 980;
+
+      for (let attempt = 0; attempt < 4200 && treeTransforms.length < MAX_TREES; attempt++) {
+        // Distribute across inner valley, outer slopes, and foothills
+        const angle = rng() * Math.PI * 2;
+        const radius = 14 + Math.pow(rng(), 0.72) * 285;
+        const x = Math.cos(angle) * radius;
+        const z = Math.sin(angle) * radius;
+
+        // Keep clear of viaduct piers & deck
+        if (Math.abs(radius - TRACK_RADIUS) < 9.5) continue;
+
+        // Keep clear of frozen river
+        const riverCenterX = Math.sin(z * 0.014) * 34.0 + Math.cos(z * 0.006) * 22.0;
+        if (Math.abs(x - riverCenterX) < 12.5 && radius < 210) continue;
+
+        const y = getTerrainHeight(x, z);
+        // Avoid submerged river or high barren rocky peaks
+        if (y < -6.8 || y > 72) continue;
+
+        const scale = 0.72 + rng() * 0.95;
+        const rotY = rng() * Math.PI * 2;
+        const leanX = (rng() - 0.5) * 0.06;
+        const leanZ = (rng() - 0.5) * 0.06;
+        treeTransforms.push({ x, y, z, scale, rotY, leanX, leanZ });
+      }
+
+      const count = treeTransforms.length;
+      const trunkGeo = new THREE.CylinderGeometry(0.18, 0.34, 3.2, 6);
+      trunkGeo.translate(0, 1.6, 0);
+      const trunkMat = new THREE.MeshStandardMaterial({ color: 0x3b2a20, roughness: 0.95 });
+
+      const foliageMat = new THREE.MeshStandardMaterial({
+        color: 0x1d342a,
+        roughness: 0.9,
+        flatShading: true
+      });
+      const frostMat = new THREE.MeshStandardMaterial({
+        color: 0xe9f0f7,
+        roughness: 0.78,
+        flatShading: true
+      });
+
+      // 4 tiered conifer layers: dark evergreen underside + frosted snow cap on top
+      const tiers = [
+        { y: 2.3, r: 2.45, h: 3.4, frostY: 2.68, frostR: 2.25, frostH: 2.95 },
+        { y: 4.5, r: 1.98, h: 3.1, frostY: 4.86, frostR: 1.82, frostH: 2.68 },
+        { y: 6.5, r: 1.48, h: 2.7, frostY: 6.82, frostR: 1.36, frostH: 2.35 },
+        { y: 8.2, r: 0.95, h: 2.3, frostY: 8.48, frostR: 0.88, frostH: 2.02 }
+      ];
+
+      const trunkInst = new THREE.InstancedMesh(trunkGeo, trunkMat, count);
+      trunkInst.castShadow = true;
+      trunkInst.receiveShadow = true;
+      scene.add(trunkInst);
+
+      const foliageInsts = tiers.map((t) => {
+        const g = new THREE.ConeGeometry(t.r, t.h, 7);
+        g.translate(0, t.y + t.h * 0.5, 0);
+        const m = new THREE.InstancedMesh(g, foliageMat, count);
+        m.castShadow = true;
+        m.receiveShadow = true;
+        scene.add(m);
+        return m;
+      });
+
+      const frostInsts = tiers.map((t) => {
+        const g = new THREE.ConeGeometry(t.frostR, t.frostH, 7);
+        g.translate(0, t.frostY + t.frostH * 0.5, 0);
+        const m = new THREE.InstancedMesh(g, frostMat, count);
+        m.receiveShadow = true;
+        scene.add(m);
+        return m;
+      });
+
+      const tintColor = new THREE.Color();
+      for (let i = 0; i < count; i++) {
+        const tr = treeTransforms[i];
+        dummy.position.set(tr.x, tr.y - 0.35, tr.z);
+        dummy.rotation.set(tr.leanX, tr.rotY, tr.leanZ);
+        dummy.scale.set(tr.scale, tr.scale * (0.9 + (i % 5) * 0.06), tr.scale);
+        dummy.updateMatrix();
+
+        trunkInst.setMatrixAt(i, dummy.matrix);
+        const shade = 0.82 + (i % 7) * 0.05;
+        tintColor.setRGB(shade * 0.9, shade, shade * 0.95);
+        for (let k = 0; k < tiers.length; k++) {
+          foliageInsts[k].setMatrixAt(i, dummy.matrix);
+          foliageInsts[k].setColorAt(i, tintColor);
+          frostInsts[k].setMatrixAt(i, dummy.matrix);
+        }
+      }
+      foliageInsts.forEach((m) => { if (m.instanceColor) m.instanceColor.needsUpdate = true; });
+    }
+
+    // =========================================================================
+    // 7. VINTAGE STEAM LOCOMOTIVE (BLACK + RED TRIM) & WOODEN PASSENGER COACHES
+    // =========================================================================
+    const RAIL_TOP_Y = TRACK_Y + 0.48;
+
+    // Shared train materials
+    const blackIronMat = new THREE.MeshStandardMaterial({
+      map: ironTex,
+      color: 0x22252b,
+      roughness: 0.44,
+      metalness: 0.68
+    });
+    const darkMatteIronMat = new THREE.MeshStandardMaterial({
+      color: 0x15171b,
+      roughness: 0.65,
+      metalness: 0.5
+    });
+    const redTrimMat = new THREE.MeshStandardMaterial({
+      color: 0x9e1b1b,
+      roughness: 0.36,
+      metalness: 0.25
+    });
+    const brassMat = new THREE.MeshStandardMaterial({
+      color: 0xd9a84e,
+      roughness: 0.26,
+      metalness: 0.88
+    });
+    const steelRodMat = new THREE.MeshStandardMaterial({
+      color: 0xbec6d0,
+      roughness: 0.25,
+      metalness: 0.9
+    });
+    const woodCoachMat = new THREE.MeshStandardMaterial({
+      map: woodCoachTex,
+      roughness: 0.56,
+      metalness: 0.08
+    });
+    const coachRoofMat = new THREE.MeshStandardMaterial({
+      color: 0x3b3d42,
+      roughness: 0.82,
+      metalness: 0.12
+    });
+    const windowGlowMat = new THREE.MeshStandardMaterial({
+      map: windowGlowTex,
+      emissive: new THREE.Color(0xffa942),
+      emissiveMap: windowGlowTex,
+      emissiveIntensity: 2.1,
+      roughness: 0.2,
+      metalness: 0.05
+    });
+    const fireboxMat = new THREE.MeshStandardMaterial({
+      color: 0xff6e1a,
+      emissive: new THREE.Color(0xff5a12),
+      emissiveIntensity: 2.8,
+      roughness: 0.4
+    });
+
+    // Helper: create a spoked locomotive wheel (axis along X, rolls around X)
+    function createSpokedWheel(radius, thickness, spokeCount, hasCounterweight, rimColorMat) {
+      const grp = new THREE.Group();
+
+      // Steel tire (outer rim)
+      const tireGeo = new THREE.CylinderGeometry(radius, radius, thickness, 24);
+      tireGeo.rotateZ(Math.PI / 2);
+      const tire = new THREE.Mesh(tireGeo, steelRodMat);
+      tire.castShadow = true;
+      grp.add(tire);
+
+      // Inner flange
+      const flangeGeo = new THREE.CylinderGeometry(radius + 0.07, radius + 0.07, thickness * 0.26, 24);
+      flangeGeo.rotateZ(Math.PI / 2);
+      const flange = new THREE.Mesh(flangeGeo, steelRodMat);
+      grp.add(flange);
+
+      // Painted inner ring (red for driving wheels)
+      const innerRimGeo = new THREE.TorusGeometry(radius * 0.86, radius * 0.09, 8, 22);
+      innerRimGeo.rotateY(Math.PI / 2);
+      const innerRim = new THREE.Mesh(innerRimGeo, rimColorMat);
+      grp.add(innerRim);
+
+      // Hub
+      const hubGeo = new THREE.CylinderGeometry(radius * 0.24, radius * 0.24, thickness * 1.12, 14);
+      hubGeo.rotateZ(Math.PI / 2);
+      const hub = new THREE.Mesh(hubGeo, rimColorMat);
+      grp.add(hub);
+
+      // Spokes
+      const spokeGeo = new THREE.BoxGeometry(thickness * 0.55, radius * 1.66, radius * 0.085);
+      for (let i = 0; i < spokeCount; i++) {
+        const sp = new THREE.Mesh(spokeGeo, rimColorMat);
+        sp.rotation.x = (i / spokeCount) * Math.PI;
+        grp.add(sp);
+      }
+
+      // Counterweight crescent & brass crank pin on driving wheels
+      if (hasCounterweight) {
+        const cwGeo = new THREE.CylinderGeometry(radius * 0.82, radius * 0.82, thickness * 0.68, 12, 1, false, -0.55, 1.1);
+        cwGeo.rotateZ(Math.PI / 2);
+        cwGeo.rotateX(Math.PI); // opposite crank pin
+        const cw = new THREE.Mesh(cwGeo, rimColorMat);
+        grp.add(cw);
+
+        const pinGeo = new THREE.CylinderGeometry(0.085, 0.085, thickness * 1.7, 10);
+        pinGeo.rotateZ(Math.PI / 2);
+        const pin = new THREE.Mesh(pinGeo, steelRodMat);
+        pin.position.set(0, 0, radius * 0.45);
+        grp.add(pin);
+      }
+
+      return grp;
+    }
+
+    // Build Locomotive (Length ~12.8 units, +Z forward)
+    const DRIVE_WHEEL_R = 0.96;
+    const CRANK_R = DRIVE_WHEEL_R * 0.45;
+    const PILOT_WHEEL_R = 0.48;
+    const TRAILING_WHEEL_R = 0.62;
+    const WHEEL_X = RAIL_GAUGE * 0.5;
+    const DRIVE_ZS = [-1.45, 0.65, 2.75];
+    const CYL_Z = 4.95;
+    const ROD_LEN = 3.25;
+
+    const locoAnim = {
+      driveWheelsLeft: [],
+      driveWheelsRight: [],
+      smallWheels: [],
+      couplingRods: [],
+      mainRods: [],
+      crossheads: [],
+      chimneyAnchor: new THREE.Object3D(),
+      cylAnchors: [new THREE.Object3D(), new THREE.Object3D()]
+    };
+
+    function createLocomotive() {
+      const loco = new THREE.Group();
+
+      // Chassis frame (black with red side skirts)
+      const frame = new THREE.Mesh(new THREE.BoxGeometry(1.9, 0.72, 11.4), darkMatteIronMat);
+      frame.position.set(0, 1.15, 0.6);
+      frame.castShadow = true;
+      loco.add(frame);
+
+      // Running boards along both sides with red trim stripe
+      for (const s of [-1, 1]) {
+        const board = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.14, 9.6), blackIronMat);
+        board.position.set(s * 1.18, 1.98, 0.9);
+        board.castShadow = true;
+        loco.add(board);
+
+        const trim = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.12, 9.65), redTrimMat);
+        trim.position.set(s * 1.41, 1.98, 0.9);
+        loco.add(trim);
+      }
+
+      // Main cylindrical boiler
+      const boilerLen = 6.9;
+      const boilerGeo = new THREE.CylinderGeometry(1.06, 1.06, boilerLen, 28);
+      boilerGeo.rotateX(Math.PI / 2);
+      const boiler = new THREE.Mesh(boilerGeo, blackIronMat);
+      boiler.position.set(0, 2.75, 1.15);
+      boiler.castShadow = true;
+      boiler.receiveShadow = true;
+      loco.add(boiler);
+
+      // Smokebox (front slightly matte section)
+      const smokeboxGeo = new THREE.CylinderGeometry(1.09, 1.09, 1.9, 28);
+      smokeboxGeo.rotateX(Math.PI / 2);
+      const smokebox = new THREE.Mesh(smokeboxGeo, darkMatteIronMat);
+      smokebox.position.set(0, 2.75, 4.7);
+      smokebox.castShadow = true;
+      loco.add(smokebox);
+
+      // Smokebox front dish door + locking dart + brass number plate
+      const frontDoorGeo = new THREE.SphereGeometry(1.07, 24, 14, 0, Math.PI * 2, 0, Math.PI * 0.35);
+      frontDoorGeo.rotateX(Math.PI / 2);
+      const frontDoor = new THREE.Mesh(frontDoorGeo, darkMatteIronMat);
+      frontDoor.position.set(0, 2.75, 5.22);
+      loco.add(frontDoor);
+
+      const numPlate = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.28, 0.08), redTrimMat);
+      numPlate.position.set(0, 2.75, 6.26);
+      loco.add(numPlate);
+      const numBorder = new THREE.Mesh(new THREE.BoxGeometry(0.82, 0.34, 0.05), brassMat);
+      numBorder.position.set(0, 2.75, 6.24);
+      loco.add(numBorder);
+
+      // Brass & red boiler bands
+      for (const bz of [-1.2, 0.3, 1.8, 3.3, 3.8]) {
+        const bandGeo = new THREE.TorusGeometry(1.075, 0.032, 8, 28);
+        const band = new THREE.Mesh(bandGeo, bz === 3.8 ? brassMat : redTrimMat);
+        band.position.set(0, 2.75, bz);
+        loco.add(band);
+      }
+
+      // Tall vintage chimney (smokestack) with flared crown
+      const stackBase = new THREE.Mesh(new THREE.CylinderGeometry(0.32, 0.42, 1.45, 18), darkMatteIronMat);
+      stackBase.position.set(0, 4.25, 4.85);
+      stackBase.castShadow = true;
+      loco.add(stackBase);
+
+      const stackRim = new THREE.Mesh(new THREE.TorusGeometry(0.36, 0.08, 10, 20), brassMat);
+      stackRim.rotation.x = Math.PI / 2;
+      stackRim.position.set(0, 4.95, 4.85);
+      loco.add(stackRim);
+
+      locoAnim.chimneyAnchor.position.set(0, 5.05, 4.85);
+      loco.add(locoAnim.chimneyAnchor);
+
+      // Steam dome & sand dome
+      const steamDome = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.52, 0.85, 20), blackIronMat);
+      steamDome.position.set(0, 3.92, 1.85);
+      steamDome.castShadow = true;
+      loco.add(steamDome);
+      const steamDomeCap = new THREE.Mesh(new THREE.SphereGeometry(0.46, 20, 12, 0, Math.PI * 2, 0, Math.PI / 2), brassMat);
+      steamDomeCap.position.set(0, 4.34, 1.85);
+      loco.add(steamDomeCap);
+
+      const sandDome = new THREE.Mesh(new THREE.CylinderGeometry(0.38, 0.44, 0.62, 18), blackIronMat);
+      sandDome.position.set(0, 3.84, 3.15);
+      loco.add(sandDome);
+      const sandCap = new THREE.Mesh(new THREE.SphereGeometry(0.38, 16, 10, 0, Math.PI * 2, 0, Math.PI / 2), blackIronMat);
+      sandCap.position.set(0, 4.15, 3.15);
+      loco.add(sandCap);
+
+      // Brass whistle & safety valves
+      for (const wx of [-0.16, 0.16]) {
+        const valve = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.07, 0.52, 10), brassMat);
+        valve.position.set(wx, 3.96, -0.45);
+        loco.add(valve);
+      }
+
+      // Handrails along boiler sides
+      for (const s of [-1, 1]) {
+        const rail = new THREE.Mesh(new THREE.CylinderGeometry(0.028, 0.028, 7.6, 8), brassMat);
+        rail.rotation.x = Math.PI / 2;
+        rail.position.set(s * 1.15, 3.05, 1.5);
+        loco.add(rail);
+      }
+
+      // Headlamp + warm glowing lens + volumetric light cone
+      const lampHousing = new THREE.Mesh(new THREE.CylinderGeometry(0.28, 0.3, 0.48, 16), darkMatteIronMat);
+      lampHousing.rotation.x = Math.PI / 2;
+      lampHousing.position.set(0, 3.92, 5.72);
+      loco.add(lampHousing);
+
+      const lampRim = new THREE.Mesh(new THREE.TorusGeometry(0.29, 0.04, 8, 18), brassMat);
+      lampRim.position.set(0, 3.92, 5.96);
+      loco.add(lampRim);
+
+      const lampLens = new THREE.Mesh(
+        new THREE.CircleGeometry(0.26, 16),
+        new THREE.MeshBasicMaterial({ color: 0xfff3c4 })
+      );
+      lampLens.position.set(0, 3.92, 5.97);
+      loco.add(lampLens);
+
+      // Soft additive volumetric headlamp beam
+      const beamGeo = new THREE.ConeGeometry(4.2, 26, 20, 1, true);
+      beamGeo.translate(0, -13, 0);
+      beamGeo.rotateX(-Math.PI / 2);
+      const beamMat = new THREE.MeshBasicMaterial({
+        color: 0xffdf9e,
+        transparent: true,
+        opacity: 0.11,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      const beam = new THREE.Mesh(beamGeo, beamMat);
+      beam.position.set(0, 3.92, 6.0);
+      loco.add(beam);
+
+      // Headlamp point light
+      const headLight = new THREE.PointLight(0xffd280, 18, 34, 1.6);
+      headLight.position.set(0, 3.85, 7.2);
+      loco.add(headLight);
+
+      // Red buffer beam, twin buffers & cowcatcher (pilot)
+      const bufferBeam = new THREE.Mesh(new THREE.BoxGeometry(2.65, 0.56, 0.34), redTrimMat);
+      bufferBeam.position.set(0, 1.25, 6.32);
+      bufferBeam.castShadow = true;
+      loco.add(bufferBeam);
+
+      for (const s of [-1, 1]) {
+        const bufStem = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.14, 0.45, 12), darkMatteIronMat);
+        bufStem.rotation.x = Math.PI / 2;
+        bufStem.position.set(s * 0.86, 1.25, 6.6);
+        loco.add(bufStem);
+        const bufPad = new THREE.Mesh(new THREE.CylinderGeometry(0.22, 0.22, 0.08, 16), steelRodMat);
+        bufPad.rotation.x = Math.PI / 2;
+        bufPad.position.set(s * 0.86, 1.25, 6.84);
+        loco.add(bufPad);
+      }
+
+      // Cowcatcher wedge + red angled bars
+      const pilotGeo = new THREE.ConeGeometry(1.3, 1.6, 3);
+      pilotGeo.rotateX(Math.PI / 2);
+      pilotGeo.rotateZ(Math.PI);
+      const pilot = new THREE.Mesh(pilotGeo, darkMatteIronMat);
+      pilot.scale.set(1.0, 0.65, 1.0);
+      pilot.position.set(0, 0.62, 6.72);
+      loco.add(pilot);
+
+      // Engineer's Cab (black exterior with red accent panels & glowing warm interior)
+      const cabW = 2.72, cabH = 2.65, cabL = 2.95;
+      const cabZ = -3.72;
+      const cabBody = new THREE.Mesh(new THREE.BoxGeometry(cabW, cabH, cabL), blackIronMat);
+      cabBody.position.set(0, 3.22, cabZ);
+      cabBody.castShadow = true;
+      loco.add(cabBody);
+
+      // Red trim side bands on cab
+      for (const s of [-1, 1]) {
+        const cabStripe = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.55, cabL - 0.15), redTrimMat);
+        cabStripe.position.set(s * (cabW * 0.5 + 0.01), 2.52, cabZ);
+        loco.add(cabStripe);
+
+        // Glowing cab side windows
+        const cabWin = new THREE.Mesh(new THREE.PlaneGeometry(1.15, 0.92), windowGlowMat);
+        cabWin.position.set(s * (cabW * 0.5 + 0.03), 3.62, cabZ + 0.1);
+        cabWin.rotation.y = s * Math.PI * 0.5;
+        loco.add(cabWin);
+      }
+
+      // Glowing firebox core visible at rear of cab
+      const firebox = new THREE.Mesh(new THREE.PlaneGeometry(1.4, 1.1), fireboxMat);
+      firebox.position.set(0, 2.75, cabZ - cabL * 0.5 - 0.02);
+      firebox.rotation.y = Math.PI;
+      loco.add(firebox);
+
+      const cabLight = new THREE.PointLight(0xff7d2c, 10, 14, 1.8);
+      cabLight.position.set(0, 3.2, cabZ - 0.6);
+      loco.add(cabLight);
+
+      // Arched cab roof with snow dusting
+      const cabRoofGeo = new THREE.CylinderGeometry(1.75, 1.75, cabL + 0.7, 18, 1, false, -0.75, 1.5);
+      cabRoofGeo.rotateX(-Math.PI / 2);
+      cabRoofGeo.scale(1.0, 0.46, 1.0);
+      const cabRoof = new THREE.Mesh(cabRoofGeo, darkMatteIronMat);
+      cabRoof.position.set(0, 3.92, cabZ - 0.15);
+      cabRoof.castShadow = true;
+      loco.add(cabRoof);
+
+      const cabSnowGeo = new THREE.CylinderGeometry(1.78, 1.78, cabL + 0.55, 14, 1, false, -0.58, 1.16);
+      cabSnowGeo.rotateX(-Math.PI / 2);
+      cabSnowGeo.scale(1.0, 0.47, 1.0);
+      const cabSnow = new THREE.Mesh(cabSnowGeo, snowCapMat);
+      cabSnow.position.set(0, 3.96, cabZ - 0.15);
+      loco.add(cabSnow);
+
+      // Steam cylinders (left & right) + steam hiss anchors
+      for (let sideIdx = 0; sideIdx < 2; sideIdx++) {
+        const s = sideIdx === 0 ? 1 : -1;
+        const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.46, 0.46, 1.55, 18), blackIronMat);
+        cyl.rotation.x = Math.PI / 2;
+        cyl.position.set(s * 1.18, DRIVE_WHEEL_R, CYL_Z);
+        cyl.castShadow = true;
+        loco.add(cyl);
+
+        const cylBand = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.04, 8, 18), brassMat);
+        cylBand.position.set(s * 1.18, DRIVE_WHEEL_R, CYL_Z + 0.72);
+        loco.add(cylBand);
+
+        const cylTrim = new THREE.Mesh(new THREE.TorusGeometry(0.47, 0.04, 8, 18), redTrimMat);
+        cylTrim.position.set(s * 1.18, DRIVE_WHEEL_R, CYL_Z - 0.72);
+        loco.add(cylTrim);
+
+        // Slidebars (guide rails for crosshead)
+        const slideBar = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.08, 1.85), steelRodMat);
+        slideBar.position.set(s * 1.18, DRIVE_WHEEL_R + 0.22, CYL_Z - 1.55);
+        loco.add(slideBar);
+        const slideBar2 = slideBar.clone();
+        slideBar2.position.y = DRIVE_WHEEL_R - 0.22;
+        loco.add(slideBar2);
+
+        locoAnim.cylAnchors[sideIdx].position.set(s * 1.48, DRIVE_WHEEL_R - 0.25, CYL_Z - 0.15);
+        loco.add(locoAnim.cylAnchors[sideIdx]);
+      }
+
+      // Driving wheels (3 pairs, red spoked)
+      for (const wz of DRIVE_ZS) {
+        const wl = createSpokedWheel(DRIVE_WHEEL_R, 0.18, 12, true, redTrimMat);
+        wl.position.set(WHEEL_X, DRIVE_WHEEL_R, wz);
+        loco.add(wl);
+        locoAnim.driveWheelsLeft.push(wl);
+
+        const wr = createSpokedWheel(DRIVE_WHEEL_R, 0.18, 12, true, redTrimMat);
+        wr.position.set(-WHEEL_X, DRIVE_WHEEL_R, wz);
+        loco.add(wr);
+        locoAnim.driveWheelsRight.push(wr);
+
+        // Axle
+        const axle = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, RAIL_GAUGE, 10), darkMatteIronMat);
+        axle.rotation.z = Math.PI / 2;
+        axle.position.set(0, DRIVE_WHEEL_R, wz);
+        loco.add(axle);
+      }
+
+      // Front pilot bogie wheels (2 pairs) & trailing wheel (1 pair)
+      const smallSpecs = [
+        { z: 4.55, r: PILOT_WHEEL_R },
+        { z: 5.75, r: PILOT_WHEEL_R },
+        { z: -3.55, r: TRAILING_WHEEL_R }
+      ];
+      for (const sp of smallSpecs) {
+        for (const s of [-1, 1]) {
+          const w = createSpokedWheel(sp.r, 0.15, 8, false, redTrimMat);
+          w.position.set(s * WHEEL_X, sp.r, sp.z);
+          loco.add(w);
+          locoAnim.smallWheels.push({ mesh: w, radius: sp.r });
+        }
+      }
+
+      // Coupling rods, crossheads & main connecting rods (both sides)
+      const couplingLen = DRIVE_ZS[2] - DRIVE_ZS[0] + 0.35;
+      for (let sideIdx = 0; sideIdx < 2; sideIdx++) {
+        const s = sideIdx === 0 ? 1 : -1;
+        const rodX = s * (WHEEL_X + 0.16);
+
+        // Horizontal coupling rod linking all 3 driving wheel crank pins
+        const couplingRod = new THREE.Mesh(
+          new THREE.BoxGeometry(0.07, 0.13, couplingLen),
+          steelRodMat
+        );
+        // Add red fluted inset stripe on rod
+        const rodFlute = new THREE.Mesh(
+          new THREE.BoxGeometry(0.08, 0.05, couplingLen - 0.3),
+          redTrimMat
+        );
+        couplingRod.add(rodFlute);
+        couplingRod.position.set(rodX, DRIVE_WHEEL_R, DRIVE_ZS[1]);
+        loco.add(couplingRod);
+        locoAnim.couplingRods.push({ mesh: couplingRod, side: s, baseZ: DRIVE_ZS[1] });
+
+        // Crosshead + piston rod sliding into cylinder
+        const crosshead = new THREE.Group();
+        const chBlock = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.36, 0.42), steelRodMat);
+        crosshead.add(chBlock);
+        const pistonRod = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.055, 2.2, 10), steelRodMat);
+        pistonRod.rotation.x = Math.PI / 2;
+        pistonRod.position.set(0, 0, 1.1);
+        crosshead.add(pistonRod);
+        crosshead.position.set(s * 1.18, DRIVE_WHEEL_R, CYL_Z - 1.5);
+        loco.add(crosshead);
+        locoAnim.crossheads.push({ mesh: crosshead, side: s });
+
+        // Main connecting rod (origin at crank pin, extends +Z to crosshead)
+        const mainRodGrp = new THREE.Group();
+        const mainRodMesh = new THREE.Mesh(
+          new THREE.BoxGeometry(0.075, 0.15, ROD_LEN),
+          steelRodMat
+        );
+        mainRodMesh.position.set(0, 0, ROD_LEN * 0.5);
+        mainRodGrp.add(mainRodMesh);
+        mainRodGrp.position.set(s * (WHEEL_X + 0.25), DRIVE_WHEEL_R, DRIVE_ZS[1]);
+        loco.add(mainRodGrp);
+        locoAnim.mainRods.push({ mesh: mainRodGrp, side: s });
+      }
+
+      return loco;
+    }
+
+    // Build Coal Tender (Length ~6.4 units)
+    const tenderWheels = [];
+    function createTender() {
+      const grp = new THREE.Group();
+      const len = 6.2;
+
+      const chassis = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.55, len), darkMatteIronMat);
+      chassis.position.set(0, 0.92, 0);
+      chassis.castShadow = true;
+      grp.add(chassis);
+
+      const body = new THREE.Mesh(new THREE.BoxGeometry(2.58, 1.88, len - 0.25), blackIronMat);
+      body.position.set(0, 2.08, 0);
+      body.castShadow = true;
+      body.receiveShadow = true;
+      grp.add(body);
+
+      // Red trim panel & gold lining on tender sides
+      for (const s of [-1, 1]) {
+        const panel = new THREE.Mesh(new THREE.BoxGeometry(0.06, 0.72, len - 0.75), redTrimMat);
+        panel.position.set(s * 1.31, 2.1, 0);
+        grp.add(panel);
+        const line = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.06, len - 0.65), brassMat);
+        line.position.set(s * 1.31, 2.52, 0);
+        grp.add(line);
+      }
+
+      // Heaped coal pile
+      const coalGeo = new THREE.DodecahedronGeometry(1.1, 1);
+      coalGeo.scale(0.95, 0.55, 2.15);
+      const coalMat = new THREE.MeshStandardMaterial({ color: 0x121316, roughness: 0.95, flatShading: true });
+      const coal = new THREE.Mesh(coalGeo, coalMat);
+      coal.position.set(0, 3.02, 0.1);
+      grp.add(coal);
+
+      // 3 pairs of tender wheels
+      const wr = 0.52;
+      for (const wz of [-1.95, 0, 1.95]) {
+        for (const s of [-1, 1]) {
+          const w = createSpokedWheel(wr, 0.14, 8, false, redTrimMat);
+          w.position.set(s * WHEEL_X, wr, wz);
+          grp.add(w);
+          tenderWheels.push({ mesh: w, radius: wr });
+        }
+      }
+
+      return grp;
+    }
+
+    // Build Wooden Passenger Coach (Length ~10.8 units) with warm glowing windows
+    const coachWheels = [];
+    const coachGlowLights = [];
+    function createPassengerCoach(coachIndex) {
+      const grp = new THREE.Group();
+      const len = 10.6;
+      const width = 2.68;
+      const bodyH = 2.38;
+
+      // Underframe
+      const under = new THREE.Mesh(new THREE.BoxGeometry(2.25, 0.46, len), darkMatteIronMat);
+      under.position.set(0, 0.98, 0);
+      under.castShadow = true;
+      grp.add(under);
+
+      // Wooden coach body
+      const body = new THREE.Mesh(new THREE.BoxGeometry(width, bodyH, len - 0.3), woodCoachMat);
+      body.position.set(0, 2.36, 0);
+      body.castShadow = true;
+      body.receiveShadow = true;
+      grp.add(body);
+
+      // Warm glowing windows along both sides (7 windows per side)
+      const numWin = 7;
+      const winW = 0.96;
+      const winH = 0.94;
+      const winSpacing = (len - 1.8) / numWin;
+      const winGeo = new THREE.PlaneGeometry(winW, winH);
+      const frameGeo = new THREE.BoxGeometry(0.06, winH + 0.14, winW + 0.14);
+
+      for (const s of [-1, 1]) {
+        for (let i = 0; i < numWin; i++) {
+          const wz = -((numWin - 1) * 0.5) * winSpacing + i * winSpacing;
+          const win = new THREE.Mesh(winGeo, windowGlowMat);
+          win.position.set(s * (width * 0.5 + 0.02), 2.66, wz);
+          win.rotation.y = s * Math.PI * 0.5;
+          grp.add(win);
+
+          const fr = new THREE.Mesh(frameGeo, darkMatteIronMat);
+          fr.position.set(s * (width * 0.5 - 0.01), 2.66, wz);
+          grp.add(fr);
+        }
+      }
+
+      // Arched clerestory roof + snow dusting along top
+      const roofGeo = new THREE.CylinderGeometry(1.68, 1.68, len + 0.15, 16, 1, false, -0.78, 1.56);
+      roofGeo.rotateX(-Math.PI / 2);
+      roofGeo.scale(1.0, 0.42, 1.0);
+      const roof = new THREE.Mesh(roofGeo, coachRoofMat);
+      roof.position.set(0, 3.02, 0);
+      roof.castShadow = true;
+      grp.add(roof);
+
+      const clerestory = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.34, len - 1.2), coachRoofMat);
+      clerestory.position.set(0, 3.74, 0);
+      grp.add(clerestory);
+
+      const roofSnow = new THREE.Mesh(new THREE.BoxGeometry(1.42, 0.14, len - 1.15), snowCapMat);
+      roofSnow.position.set(0, 3.94, 0);
+      grp.add(roofSnow);
+
+      // Gangway bellows at ends
+      for (const ez of [-1, 1]) {
+        const gangway = new THREE.Mesh(new THREE.BoxGeometry(1.32, 2.05, 0.55), darkMatteIronMat);
+        gangway.position.set(0, 2.25, ez * (len * 0.5 + 0.1));
+        grp.add(gangway);
+      }
+
+      // Two 4-wheel bogie trucks
+      const wr = 0.46;
+      for (const bogieZ of [-3.45, 3.45]) {
+        const bogieFrame = new THREE.Mesh(new THREE.BoxGeometry(2.05, 0.32, 2.1), darkMatteIronMat);
+        bogieFrame.position.set(0, 0.62, bogieZ);
+        grp.add(bogieFrame);
+        for (const dz of [-0.68, 0.68]) {
+          for (const s of [-1, 1]) {
+            const w = createSpokedWheel(wr, 0.13, 6, false, darkMatteIronMat);
+            w.position.set(s * WHEEL_X, wr, bogieZ + dz);
+            grp.add(w);
+            coachWheels.push({ mesh: w, radius: wr });
+          }
+        }
+      }
+
+      // Warm window spill point lights on alternating coaches for performance + rich snow bounce
+      if (coachIndex % 2 === 0) {
+        const glowL = new THREE.PointLight(0xffa43c, 9.5, 22, 1.7);
+        glowL.position.set(0, 2.6, 0);
+        grp.add(glowL);
+        coachGlowLights.push(glowL);
+      }
+
+      return grp;
+    }
+
+    // Assemble the full train consist
+    const locomotive = createLocomotive();
+    scene.add(locomotive);
+
+    const tender = createTender();
+    scene.add(tender);
+
+    const NUM_COACHES = 5;
+    const coaches = [];
+    for (let i = 0; i < NUM_COACHES; i++) {
+      const c = createPassengerCoach(i);
+      scene.add(c);
+      coaches.push(c);
+    }
+
+    // Vehicle arc-distance offsets behind locomotive center
+    const trainVehicles = [
+      { mesh: locomotive, offset: 0, halfBase: 4.4 },
+      { mesh: tender, offset: -9.3, halfBase: 2.3 },
+      ...coaches.map((c, i) => ({
+        mesh: c,
+        offset: -18.2 - i * 11.4,
+        halfBase: 3.6
+      }))
+    ];
+
+    const _pFront = new THREE.Vector3();
+    const _pBack = new THREE.Vector3();
+
+    function getTrackPos(arcDist, out) {
+      const a = arcDist / TRACK_RADIUS;
+      out.set(Math.cos(a) * TRACK_RADIUS, RAIL_TOP_Y, Math.sin(a) * TRACK_RADIUS);
+      return out;
+    }
+
+    function updateTrainPose(leadArcDist) {
+      // Position each vehicle accurately along the curved viaduct
+      for (const v of trainVehicles) {
+        const s = leadArcDist + v.offset;
+        getTrackPos(s + v.halfBase, _pFront);
+        getTrackPos(s - v.halfBase, _pBack);
+        v.mesh.position.set(
+          (_pFront.x + _pBack.x) * 0.5,
+          RAIL_TOP_Y,
+          (_pFront.z + _pBack.z) * 0.5
+        );
+        v.mesh.lookAt(_pFront);
+      }
+
+      // Sync all wheels & connecting rods mathematically to distance traveled
+      const thetaLeft = leadArcDist / DRIVE_WHEEL_R;
+      const thetaRight = thetaLeft + Math.PI * 0.5; // 90-degree quartering
+
+      for (const w of locoAnim.driveWheelsLeft) w.rotation.x = thetaLeft;
+      for (const w of locoAnim.driveWheelsRight) w.rotation.x = thetaRight;
+
+      for (const sw of locoAnim.smallWheels) sw.mesh.rotation.x = leadArcDist / sw.radius;
+      for (const tw of tenderWheels) tw.mesh.rotation.x = leadArcDist / tw.radius;
+      for (const cw of coachWheels) cw.mesh.rotation.x = leadArcDist / cw.radius;
+
+      // Animate coupling rods, crossheads, and main connecting rods on both sides
+      for (let i = 0; i < 2; i++) {
+        const th = i === 0 ? thetaLeft : thetaRight;
+        const pinDY = -CRANK_R * Math.sin(th);
+        const pinDZ = CRANK_R * Math.cos(th);
+
+        // Coupling rod orbits crank pins while staying horizontal
+        const cr = locoAnim.couplingRods[i];
+        cr.mesh.position.y = DRIVE_WHEEL_R + pinDY;
+        cr.mesh.position.z = cr.baseZ + pinDZ;
+
+        // Crosshead slides strictly horizontally along piston axis
+        const pinZ = DRIVE_ZS[1] + pinDZ;
+        const pinY = DRIVE_WHEEL_R + pinDY;
+        const horizSpan = Math.sqrt(Math.max(0.01, ROD_LEN * ROD_LEN - pinDY * pinDY));
+        const crossheadZ = pinZ + horizSpan;
+
+        const ch = locoAnim.crossheads[i];
+        ch.mesh.position.z = crossheadZ;
+
+        // Main connecting rod pivots from middle driving crank pin to crosshead
+        const mr = locoAnim.mainRods[i];
+        mr.mesh.position.y = pinY;
+        mr.mesh.position.z = pinZ;
+        mr.mesh.rotation.x = -Math.atan2(DRIVE_WHEEL_R - pinY, crossheadZ - pinZ);
+      }
+    }
+
+    // =========================================================================
+    // 8. BILLOWING CHIMNEY STEAM / SMOKE & SIDE CYLINDER STEAM
+    // =========================================================================
+    const STEAM_COUNT = 220;
+    const CYL_STEAM_COUNT = 84;
+    const steamRng = mulberry32(5511);
+
+    const steamPool = [];
+    const steamGroup = new THREE.Group();
+    scene.add(steamGroup);
+
+    const cSteamFresh = new THREE.Color(0xd8d2cb);
+    const cSteamSunlit = new THREE.Color(0xffe9c7);
+    const cSteamDissipate = new THREE.Color(0xdbe3ee);
+
+    for (let i = 0; i < STEAM_COUNT; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: steamTex,
+        color: cSteamSunlit.clone(),
+        transparent: true,
+        opacity: 0,
+        depthWrite: false
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.visible = false;
+      steamGroup.add(sprite);
+      steamPool.push({
+        sprite,
+        mat,
+        age: 999,
+        maxAge: 1,
+        vel: new THREE.Vector3(),
+        startScale: 1,
+        endScale: 10,
+        spin: 0,
+        peakOpacity: 0.65,
+        isSmokeCore: false
+      });
+    }
+
+    const cylPool = [];
+    for (let i = 0; i < CYL_STEAM_COUNT; i++) {
+      const mat = new THREE.SpriteMaterial({
+        map: steamTex,
+        color: new THREE.Color(0xf6f9ff),
+        transparent: true,
+        opacity: 0,
+        depthWrite: false
+      });
+      const sprite = new THREE.Sprite(mat);
+      sprite.visible = false;
+      steamGroup.add(sprite);
+      cylPool.push({
+        sprite,
+        mat,
+        age: 999,
+        maxAge: 1,
+        vel: new THREE.Vector3(),
+        startScale: 0.7,
+        endScale: 4.5,
+        spin: 0,
+        peakOpacity: 0.55
+      });
+    }
+
+    let steamCursor = 0;
+    let cylCursor = 0;
+    let steamSpawnAccum = 0;
+    let cylSpawnAccum = 0;
+
+    const _chimneyWorld = new THREE.Vector3();
+    const _cylWorld = new THREE.Vector3();
+    const _locoForward = new THREE.Vector3();
+    const _locoRight = new THREE.Vector3();
+    const _windVec = new THREE.Vector3(2.8, 0.0, -1.9); // Gentle winter cross-breeze
+
+    function spawnChimneyPuff(chuffStrength) {
+      const p = steamPool[steamCursor];
+      steamCursor = (steamCursor + 1) % STEAM_COUNT;
+
+      locoAnim.chimneyAnchor.getWorldPosition(_chimneyWorld);
+      locomotive.getWorldDirection(_locoForward);
+
+      p.sprite.position.copy(_chimneyWorld);
+      p.sprite.position.x += (steamRng() - 0.5) * 0.25;
+      p.sprite.position.z += (steamRng() - 0.5) * 0.25;
+
+      // Upward blast synced to chuff + slight backward slip relative to locomotive
+      const upSpeed = 4.6 + chuffStrength * 4.4 + steamRng() * 1.4;
+      const trailSpeed = 1.6 + steamRng() * 1.4;
+      p.vel.set(
+        -_locoForward.x * trailSpeed + _windVec.x * 0.35 + (steamRng() - 0.5) * 1.2,
+        upSpeed,
+        -_locoForward.z * trailSpeed + _windVec.z * 0.35 + (steamRng() - 0.5) * 1.2
+      );
+
+      p.age = 0;
+      p.maxAge = 5.4 + steamRng() * 3.8;
+      p.startScale = 1.15 + chuffStrength * 0.55;
+      p.endScale = 11.5 + steamRng() * 8.5;
+      p.spin = (steamRng() - 0.5) * 0.65;
+      p.mat.rotation = steamRng() * Math.PI * 2;
+      p.peakOpacity = 0.56 + chuffStrength * 0.22;
+      p.isSmokeCore = steamRng() < 0.32;
+      p.sprite.visible = true;
+    }
+
+    function spawnCylinderHiss(sideIdx) {
+      const p = cylPool[cylCursor];
+      cylCursor = (cylCursor + 1) % CYL_STEAM_COUNT;
+
+      locoAnim.cylAnchors[sideIdx].getWorldPosition(_cylWorld);
+      locomotive.getWorldDirection(_locoForward);
+      _locoRight.set(_locoForward.z, 0, -_locoForward.x).normalize();
+      const sideSign = sideIdx === 0 ? 1 : -1; // Outward away from boiler
+
+      p.sprite.position.copy(_cylWorld);
+      p.vel.set(
+        _locoRight.x * sideSign * (4.2 + steamRng() * 2.2) - _locoForward.x * 2.0,
+        -0.4 + steamRng() * 1.1,
+        _locoRight.z * sideSign * (4.2 + steamRng() * 2.2) - _locoForward.z * 2.0
+      );
+
+      p.age = 0;
+      p.maxAge = 1.45 + steamRng() * 0.9;
+      p.startScale = 0.65 + steamRng() * 0.3;
+      p.endScale = 4.2 + steamRng() * 2.4;
+      p.spin = (steamRng() - 0.5) * 1.1;
+      p.mat.rotation = steamRng() * Math.PI * 2;
+      p.peakOpacity = 0.48 + steamRng() * 0.16;
+      p.sprite.visible = true;
+    }
+
+    function stepSteam(dt, leadArcDist) {
+      const theta = leadArcDist / DRIVE_WHEEL_R;
+      // 4 rhythmic exhaust chuffs per driving-wheel revolution
+      const chuffPulse = Math.pow(Math.abs(Math.sin(theta * 2.0)), 3.0);
+
+      steamSpawnAccum += dt * (22 + chuffPulse * 34);
+      while (steamSpawnAccum >= 1) {
+        steamSpawnAccum -= 1;
+        spawnChimneyPuff(chuffPulse);
+      }
+
+      // Cylinder hiss synced to left/right piston exhaust strokes
+      const leftHiss = Math.max(0, Math.sin(theta));
+      const rightHiss = Math.max(0, Math.sin(theta + Math.PI * 0.5));
+      cylSpawnAccum += dt * (14 + (leftHiss + rightHiss) * 24);
+      while (cylSpawnAccum >= 1) {
+        cylSpawnAccum -= 1;
+        if (leftHiss > 0.35) spawnCylinderHiss(0);
+        if (rightHiss > 0.35) spawnCylinderHiss(1);
+      }
+
+      // Integrate chimney steam clouds
+      for (let i = 0; i < STEAM_COUNT; i++) {
+        const p = steamPool[i];
+        if (p.age >= p.maxAge) {
+          p.sprite.visible = false;
+          continue;
+        }
+        p.age += dt;
+        const u = p.age / p.maxAge;
+        if (u >= 1) {
+          p.sprite.visible = false;
+          continue;
+        }
+
+        // Buoyant rise slows down, cross-breeze carries plume gracefully
+        p.vel.x = THREE.MathUtils.lerp(p.vel.x, _windVec.x, dt * 0.55);
+        p.vel.z = THREE.MathUtils.lerp(p.vel.z, _windVec.z, dt * 0.55);
+        p.vel.y = THREE.MathUtils.lerp(p.vel.y, 1.35, dt * 0.65);
+
+        p.sprite.position.addScaledVector(p.vel, dt);
+        const sc = THREE.MathUtils.lerp(p.startScale, p.endScale, Math.pow(u, 0.72));
+        p.sprite.scale.set(sc, sc * 0.92, 1);
+        p.mat.rotation += p.spin * dt;
+
+        // Smooth fade-in and billowing fade-out
+        const fadeIn = THREE.MathUtils.smoothstep(u, 0.0, 0.08);
+        const fadeOut = 1.0 - THREE.MathUtils.smoothstep(u, 0.32, 1.0);
+        p.mat.opacity = p.peakOpacity * fadeIn * fadeOut;
+
+        // Warm golden sunlit tinting as steam rises above the viaduct
+        if (p.isSmokeCore) {
+          p.mat.color.copy(cSteamFresh).lerp(cSteamSunlit, THREE.MathUtils.smoothstep(u, 0.05, 0.45) * 0.65);
+          p.mat.color.lerp(cSteamDissipate, THREE.MathUtils.smoothstep(u, 0.55, 1.0));
+        } else {
+          p.mat.color.copy(cSteamSunlit).lerp(cSteamDissipate, THREE.MathUtils.smoothstep(u, 0.35, 1.0));
+        }
+      }
+
+      // Integrate cylinder steam hiss
+      for (let i = 0; i < CYL_STEAM_COUNT; i++) {
+        const p = cylPool[i];
+        if (p.age >= p.maxAge) {
+          p.sprite.visible = false;
+          continue;
+        }
+        p.age += dt;
+        const u = p.age / p.maxAge;
+        if (u >= 1) {
+          p.sprite.visible = false;
+          continue;
+        }
+        p.vel.multiplyScalar(Math.max(0, 1 - dt * 1.4));
+        p.vel.y += dt * 1.4;
+        p.sprite.position.addScaledVector(p.vel, dt);
+        const sc = THREE.MathUtils.lerp(p.startScale, p.endScale, Math.pow(u, 0.65));
+        p.sprite.scale.set(sc, sc * 0.85, 1);
+        p.mat.rotation += p.spin * dt;
+        p.mat.opacity = p.peakOpacity * THREE.MathUtils.smoothstep(u, 0, 0.12) * (1 - THREE.MathUtils.smoothstep(u, 0.35, 1));
+      }
+    }
+
+    // =========================================================================
+    // 9. GENTLY FALLING SNOW PARTICLE SYSTEM
+    // =========================================================================
+    const SNOW_COUNT = 2600;
+    const SNOW_BOX = { x: 170, y: 95, z: 170 };
+    const snowPositions = new Float32Array(SNOW_COUNT * 3);
+    const snowSeeds = new Float32Array(SNOW_COUNT * 3);
+    const snowRng = mulberry32(9901);
+
+    for (let i = 0; i < SNOW_COUNT; i++) {
+      snowPositions[i * 3] = (snowRng() - 0.5) * SNOW_BOX.x;
+      snowPositions[i * 3 + 1] = (snowRng() - 0.5) * SNOW_BOX.y;
+      snowPositions[i * 3 + 2] = (snowRng() - 0.5) * SNOW_BOX.z;
+
+      snowSeeds[i * 3] = 2.4 + snowRng() * 2.8;     // fall speed
+      snowSeeds[i * 3 + 1] = snowRng() * Math.PI * 2; // sway phase
+      snowSeeds[i * 3 + 2] = 0.6 + snowRng() * 1.1;   // sway amplitude
+    }
+
+    const snowGeo = new THREE.BufferGeometry();
+    snowGeo.setAttribute('position', new THREE.BufferAttribute(snowPositions, 3));
+    const snowMat = new THREE.PointsMaterial({
+      map: snowflakeTex,
+      color: 0xf4f8ff,
+      size: 0.72,
+      transparent: true,
+      opacity: 0.82,
+      depthWrite: false,
+      sizeAttenuation: true
+    });
+    const snowPoints = new THREE.Points(snowGeo, snowMat);
+    snowPoints.frustumCulled = false;
+    scene.add(snowPoints);
+
+    function updateSnow(dt, elapsed, center) {
+      const arr = snowGeo.attributes.position.array;
+      const hx = SNOW_BOX.x * 0.5;
+      const hy = SNOW_BOX.y * 0.5;
+      const hz = SNOW_BOX.z * 0.5;
+
+      for (let i = 0; i < SNOW_COUNT; i++) {
+        const i3 = i * 3;
+        const speed = snowSeeds[i3];
+        const phase = snowSeeds[i3 + 1];
+        const amp = snowSeeds[i3 + 2];
+
+        let x = arr[i3] + (Math.sin(elapsed * 0.9 + phase) * amp + 1.1) * dt;
+        let y = arr[i3 + 1] - speed * dt;
+        let z = arr[i3 + 2] + (Math.cos(elapsed * 0.75 + phase) * amp - 0.7) * dt;
+
+        // Wrap seamlessly around the moving train/camera center
+        while (x - center.x > hx) x -= SNOW_BOX.x;
+        while (x - center.x < -hx) x += SNOW_BOX.x;
+        while (y - center.y > hy) y -= SNOW_BOX.y;
+        while (y - center.y < -hy) y += SNOW_BOX.y;
+        while (z - center.z > hz) z -= SNOW_BOX.z;
+        while (z - center.z < -hz) z += SNOW_BOX.z;
+
+        arr[i3] = x;
+        arr[i3 + 1] = y;
+        arr[i3 + 2] = z;
+      }
+      snowGeo.attributes.position.needsUpdate = true;
+    }
+
+    // =========================================================================
+    // 10. CINEMATIC CAMERA CHOREOGRAPHY + ORBIT CONTROLS + IDLE AUTO-RESUME
+    // =========================================================================
+    const modeBadge = document.getElementById('mode-badge');
+    const IDLE_RESUME_DELAY = 4.0; // seconds after user stops interacting
+    let isUserControlling = false;
+    let isPointerDown = false;
+    let lastInteractionTime = -999;
+    let autoBlend = 1.0; // 1 = full cinematic, 0 = full manual orbit
+
+    function markUserInteraction() {
+      isUserControlling = true;
+      lastInteractionTime = performance.now() * 0.001;
+      autoBlend = 0.0;
+      modeBadge.textContent = 'Interactive Orbit';
+    }
+
+    controls.addEventListener('start', () => {
+      isPointerDown = true;
+      markUserInteraction();
+    });
+    controls.addEventListener('end', () => {
+      isPointerDown = false;
+      lastInteractionTime = performance.now() * 0.001;
+    });
+    renderer.domElement.addEventListener('wheel', markUserInteraction, { passive: true });
+
+    const _trainFocus = new THREE.Vector3();
+    const _prevFocus = new THREE.Vector3();
+    const _focusDelta = new THREE.Vector3();
+    const _cinematicPos = new THREE.Vector3();
+    const _cinematicTarget = new THREE.Vector3();
+    const _radialOut = new THREE.Vector3();
+    const _trackTangent = new THREE.Vector3();
+
+    function computeCinematicCamera(elapsed, leadArcDist, outPos, outTarget) {
+      // Periodic phase over LOOP_DURATION so the camera loops seamlessly
+      const phase = ((elapsed % LOOP_DURATION) / LOOP_DURATION) * Math.PI * 2;
+
+      // Focus point drifts gently between locomotive nose and glowing mid-coaches
+      const focusOffset = -11.0 - Math.sin(phase) * 7.5;
+      const focusArc = leadArcDist + focusOffset;
+      const focusAngle = focusArc / TRACK_RADIUS;
+
+      _radialOut.set(Math.cos(focusAngle), 0, Math.sin(focusAngle));
+      _trackTangent.set(-Math.sin(focusAngle), 0, Math.cos(focusAngle));
+
+      outTarget.set(
+        _radialOut.x * TRACK_RADIUS,
+        RAIL_TOP_Y + 2.6,
+        _radialOut.z * TRACK_RADIUS
+      );
+
+      // Slow sweeping orbit around the viaduct:
+      // swings from outer low 3/4 hero angle -> alongside coaches -> high over viaduct -> inner gorge
+      const sideSwing = Math.cos(phase) * 34.0 + Math.sin(phase * 2.0) * 8.0;
+      const alongSwing = 16.0 * Math.cos(phase - 0.55) + 9.0 * Math.sin(phase * 2.0);
+      const heightSwing = 6.5 + Math.sin(phase - 0.9) * 11.5 + Math.cos(phase * 2.0) * 2.8;
+
+      // Keep camera safely clear of viaduct stone deck when crossing from outer to inner side
+      const radialDist = Math.abs(sideSwing) < 11.5 ? (sideSwing >= 0 ? 11.5 : -11.5) : sideSwing;
+      const safeHeight = Math.abs(sideSwing) < 15.0 ? Math.max(heightSwing, 9.5) : heightSwing;
+
+      outPos.copy(outTarget)
+        .addScaledVector(_radialOut, radialDist)
+        .addScaledVector(_trackTangent, alongSwing);
+      outPos.y = Math.max(
+        getTerrainHeight(outPos.x, outPos.z) + 5.5,
+        RAIL_TOP_Y + safeHeight
+      );
+    }
+
+    // =========================================================================
+    // 11. INITIALIZE & PRE-WARM STEAM FOR IMMEDIATE CINEMATIC FIRST FRAME
+    // =========================================================================
+    let elapsed = 0;
+    const prewarmSteps = 180; // 9 seconds at 0.05s steps
+    const prewarmDt = 0.05;
+    for (let i = -prewarmSteps; i <= 0; i++) {
+      const t = i * prewarmDt;
+      const arc = t * LINEAR_SPEED;
+      updateTrainPose(arc);
+      locomotive.updateMatrixWorld(true);
+      stepSteam(prewarmDt, arc);
+    }
+
+    computeCinematicCamera(0, 0, _cinematicPos, _cinematicTarget);
+    camera.position.copy(_cinematicPos);
+    controls.target.copy(_cinematicTarget);
+    _prevFocus.copy(_cinematicTarget);
+    controls.update();
+
+    // Position initial snow around camera/train
+    updateSnow(0.016, 0, _cinematicTarget);
+
+    // =========================================================================
+    // 12. SEAMLESS ANIMATION LOOP & RESIZE HANDLING
+    // =========================================================================
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    let lastTime = performance.now() * 0.001;
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const now = performance.now() * 0.001;
+      const dt = Math.min(now - lastTime, 0.05);
+      lastTime = now;
+      elapsed += dt;
+
+      // 1. Advance train along circular viaduct seamlessly
+      const leadArcDist = elapsed * LINEAR_SPEED;
+      updateTrainPose(leadArcDist);
+      locomotive.updateMatrixWorld(true);
+
+      // 2. Step billowing chimney steam & side cylinder steam
+      stepSteam(dt, leadArcDist);
+
+      // 3. Compute cinematic camera target & position
+      computeCinematicCamera(elapsed, leadArcDist, _cinematicPos, _cinematicTarget);
+      _trainFocus.copy(_cinematicTarget);
+      _focusDelta.subVectors(_trainFocus, _prevFocus);
+      _prevFocus.copy(_trainFocus);
+
+      // 4. Keep sun shadow frustum locked onto the train for crisp shadows 360° around
+      sunLight.target.position.copy(_trainFocus);
+      sunLight.position.copy(_trainFocus).addScaledVector(SUN_DIR, 190);
+      sunLight.target.updateMatrixWorld();
+
+      // 5. Subtle warm flicker on coach windows & firebox
+      const flicker = 1.0 + Math.sin(elapsed * 9.5) * 0.04 + Math.cos(elapsed * 15.3) * 0.025;
+      fireboxMat.emissiveIntensity = 2.6 * flicker;
+
+      // 6. Camera control: interactive orbit tracks train, auto-resumes smoothly when idle
+      if (isUserControlling) {
+        // Carry camera & orbit target along with the moving train
+        camera.position.add(_focusDelta);
+        controls.target.add(_focusDelta);
+
+        if (!isPointerDown && (now - lastInteractionTime) > IDLE_RESUME_DELAY) {
+          isUserControlling = false;
+          modeBadge.textContent = 'Cinematic Tracking';
+        }
+      }
+
+      if (!isUserControlling) {
+        autoBlend = Math.min(1.0, autoBlend + dt * 0.45);
+        const lerpAmt = 1.0 - Math.exp(-dt * (1.8 + autoBlend * 3.5));
+        camera.position.lerp(_cinematicPos, lerpAmt);
+        controls.target.lerp(_cinematicTarget, lerpAmt);
+      }
+
+      controls.update();
+
+      // 7. Update gently falling snow around the train/viewer
+      updateSnow(dt, elapsed, _trainFocus);
+
+      renderer.render(scene, camera);
+    }
+
+    animate();
+  </script>
+</body>
+</html>

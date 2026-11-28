@@ -1,0 +1,166 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Emerald Passage | Pelagic</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;width:100%;height:100%;overflow:hidden;background:#5a9e9a;color:#fff9e8;font-family:Helvetica Neue,Arial,sans-serif}canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas:active{cursor:grabbing}
+.overlay{position:fixed;inset:0;pointer-events:none;background:linear-gradient(180deg,#193c3f40,transparent 20%,transparent 62%,#022f38a8);padding:clamp(22px,3.8vw,60px);display:flex;flex-direction:column;justify-content:space-between}
+header,footer,.brand,.controls,.live{display:flex;align-items:center}header,footer{justify-content:space-between}.brand{gap:12px;font-weight:650;font-size:15px;letter-spacing:4px}.mark{width:37px;height:26px;fill:none;stroke:currentColor;stroke-width:1.9}.live,.kicker,.hint{font:10px/1.5 ui-monospace,Menlo,monospace;letter-spacing:1.8px}.live{gap:9px}.live i{width:6px;height:6px;border-radius:50%;background:#ffe5a7}.kicker{display:flex;align-items:center;gap:12px}.kicker:before{content:"";width:31px;height:1px;background:currentColor}
+h1{font:italic 400 clamp(44px,6.1vw,98px)/1.08 Georgia,serif;letter-spacing:-.055em;margin:9px 0 0}.controls{gap:10px;align-self:flex-end}.hint{letter-spacing:.3px;margin-right:10px;font-size:11px}button{pointer-events:auto;background:#103d438c;border:1px solid #fff9e874;width:39px;height:39px;border-radius:50%;color:inherit;cursor:pointer;display:grid;place-items:center}button:hover,button:focus-visible{background:#103d43}button:active{transform:scale(.94)}.pause{border-inline:2px solid;width:8px;height:11px}.paused .pause{border:0;width:0;height:0;border-left:9px solid;border-top:6px solid transparent;border-bottom:6px solid transparent}.expand{width:13px;height:13px;background:linear-gradient(currentColor,currentColor) left top/5px 1.5px,linear-gradient(currentColor,currentColor) left top/1.5px 5px,linear-gradient(currentColor,currentColor) right bottom/5px 1.5px,linear-gradient(currentColor,currentColor) right bottom/1.5px 5px;background-repeat:no-repeat}
+#error{position:fixed;inset:40% 15% auto;text-align:center;background:#174b50;padding:15px} @media(max-width:700px){.hint{display:none}.controls{gap:6px}button{width:33px;height:33px}.brand{font-size:12px}.live,.kicker{font-size:9px}h1{font-size:clamp(32px,8vw,52px)}}
+</style></head><body>
+<canvas id="view" aria-label="Animated emerald reef break with a surfer, a volcanic island and a sunlit lagoon"></canvas>
+<div class="overlay"><header><div class="brand"><svg class="mark" viewBox="0 0 38 26" aria-hidden="true"><path d="M1 18C10 18 10 5 21 5c5 0 8 3 8 7-5-6-12-2-10 2 2 5 12 4 17 2M1 22c9 0 12-4 14-7 2 6 13 9 21 5"/></svg>PELAGIC</div><div class="live"><i></i><span id="status">LIVE RENDER</span></div></header>
+<footer><div><div class="kicker">OCEAN MOTION STUDY</div><h1>Emerald Passage</h1></div><div class="controls"><span class="hint">Drag to orbit &nbsp;/&nbsp; Scroll to zoom</span><button id="play" aria-label="Pause scene" title="Pause scene"><span class="pause"></span></button><button id="full" aria-label="Toggle fullscreen" title="Toggle fullscreen"><span class="expand"></span></button></div></footer></div><p id="error" hidden role="alert"></p>
+<script>
+"use strict";
+try { main(); } catch(e){const box=document.querySelector('#error');box.hidden=false;box.textContent=e.message;console.error(e)}
+function main(){
+const canvas=document.querySelector('#view'),g=canvas.getContext('webgl2',{alpha:false,antialias:true,powerPreference:'high-performance'});
+if(!g)throw Error('This scene needs WebGL 2. Please enable graphics acceleration in your browser.');
+const {sin,cos,exp,pow,abs,sqrt,PI}=Math,TAU=PI*2,clamp=(n,a,b)=>Math.max(a,Math.min(n,b)),mix=(a,b,t)=>a+(b-a)*t,smooth=(a,b,x)=>{x=clamp((x-a)/(b-a),0,1);return x*x*(3-2*x)};
+let seed=891;const rnd=()=>((seed=Math.imul(seed,1664525)+1013904223>>>0)/4294967296);
+const sub=(a,b)=>a.map((v,i)=>v-b[i]),dot=(a,b)=>a.reduce((s,v,i)=>s+v*b[i],0),norm=a=>a.map(v=>v/Math.hypot(...a)),cross=(a,b)=>[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+const common=`precision highp float;
+uniform float t,travel,aspect,lens,pixel;uniform vec3 eye,right,up,fwd;uniform vec2 rider;
+const vec3 sun=normalize(vec3(-.133,.170,-.976));
+float hash(vec2 p){vec3 a=fract(vec3(p.xyx)*.1031);a+=dot(a,a.yzx+33.33);return fract((a.x+a.y)*a.z);}
+float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.),f.x),f.y);}
+float fb(vec2 p){float a=noise(p)*.53;p=mat2(1.7,-1.2,1.2,1.7)*p+13.;a+=noise(p)*.27;p=p*2.08+17.;return a+noise(p)*.14+noise(p*2.13)*.06;}
+vec4 project(vec3 p){vec3 d=p-eye;float z=dot(d,fwd);return vec4(dot(d,right)*lens/aspect,dot(d,up)*lens,1.0002*z-.10001,z);}
+vec3 air(vec3 c,vec3 p){return mix(c,vec3(.81,.845,.77),1.-exp(-length(p-eye)*.004));}
+`;
+function program(v,f){let p=g.createProgram();for(const [kind,src] of [[g.VERTEX_SHADER,v],[g.FRAGMENT_SHADER,f]]){let s=g.createShader(kind);g.shaderSource(s,'#version 300 es\n'+common+src);g.compileShader(s);if(!g.getShaderParameter(s,g.COMPILE_STATUS))throw Error(g.getShaderInfoLog(s));g.attachShader(p,s)}g.linkProgram(p);if(!g.getProgramParameter(p,g.LINK_STATUS))throw Error(g.getProgramInfoLog(p));const u={};for(const k of ['eye','right','up','fwd','t','travel','aspect','lens','pixel','rider','mat','origin'])u[k]=g.getUniformLocation(p,k);return {p,u}}
+function mesh(vertices,indices,stride=3,point=false){const vao=g.createVertexArray();g.bindVertexArray(vao);g.bindBuffer(g.ARRAY_BUFFER,g.createBuffer());g.bufferData(g.ARRAY_BUFFER,new Float32Array(vertices),g.STATIC_DRAW);for(let n=0;n<stride/3;n++){g.enableVertexAttribArray(n);g.vertexAttribPointer(n,3,g.FLOAT,false,stride*4,n*12)}if(indices){g.bindBuffer(g.ELEMENT_ARRAY_BUFFER,g.createBuffer());g.bufferData(g.ELEMENT_ARRAY_BUFFER,new Uint32Array(indices),g.STATIC_DRAW)}return ()=>{g.bindVertexArray(vao);if(indices)g.drawElements(g.TRIANGLES,indices.length,g.UNSIGNED_INT,0);else g.drawArrays(point?g.POINTS:g.TRIANGLES,0,vertices.length/stride)}}
+function grid(nx,ny,fn,stride=3){let v=[],idx=[];for(let j=0;j<=ny;j++)for(let i=0;i<=nx;i++){v.push(...fn(i/nx,j/ny));if(i&&j){let k=j*(nx+1)+i;idx.push(k-nx-2,k-1,k,k-nx-2,k,k-nx-1)}}return mesh(v,idx,stride)}
+const sky=program(`layout(location=0)in vec3 a;out vec2 uv;void main(){uv=a.xy;gl_Position=vec4(uv,.99999,1);}`,`in vec2 uv;out vec4 frag;void main(){vec3 d=normalize(fwd+right*uv.x*aspect/lens+up*uv.y/lens);
+float h=max(d.y,0.),s=max(dot(d,sun),0.);vec3 c=mix(vec3(.94,.865,.718),vec3(.42,.70,.79),smoothstep(-.05,.56,h));c+=vec3(.18,.09,.014)*pow(s,22.);
+vec2 q=d.xz/max(.055,h)*1.5;float cloud=fb(q*vec2(.72,1.7)+vec2(t*.012,7.));c=mix(c,vec3(.99,.949,.838),smoothstep(.47,.72,cloud)*smoothstep(.015,.16,h)*.70);
+c=mix(c,vec3(1.,.959,.799),.6*pow(s,125.)+.4*pow(s,520.));c=mix(c,vec3(1.,.986,.85),smoothstep(.99951,.99968,s));frag=vec4(c,1);}`);
+const skyMesh=mesh([-1,-1,0,3,-1,0,-1,3,0]);
+// The crest is a folded strip, not a height field: three different heights can
+// share the same horizontal position under the lip.
+const profile=[[[-15,0],[-8,.04],[-3.4,4.35],[-.25,4.45]],[[-.25,4.45],[1.45,4.55],[2.65,3.55],[2.32,2.18]],[[2.32,2.18],[1.93,3.92],[-.94,4.23],[-.99,2.18]],[[-.99,2.18],[-.99,.89],[1.25,.25],[4.4,.09]],[[4.4,.09],[7,.01],[10,0],[15,0]]];
+function section(x,u,t){let j=Math.min(4,Math.floor(u*5)),b=u*5-j,a=1-b,c=profile[j],v=k=>a*a*a*c[0][k]+3*a*a*b*c[1][k]+3*a*b*b*c[2][k]+b*b*b*c[3][k],z=v(0),y=v(1),r=x+.65*sin(t*.4);
+let curl=1-smooth(0,8,r),h=(.7+.3*exp(-r*r*.009))*(1-smooth(13,49,r))*(.55+.45*smooth(-49,-14,r)),base=mix(-15,15,u);
+return [x,h*mix(3.35*exp(-pow((base+2)/4.3,2)),y,curl),mix(base,z,curl)+.095*x+.33*sin(x*.21+t*.45)]}
+const waveCode=`
+vec2 bez(vec2 a,vec2 b,vec2 c,vec2 d,float k){return mix(mix(mix(a,b,k),mix(b,c,k),k),mix(mix(b,c,k),mix(c,d,k),k),k);}
+vec2 profile(float u){float k=min(u*5.,4.99999),b=fract(k);
+if(k<1.)return bez(vec2(-15,0),vec2(-8,.04),vec2(-3.4,4.35),vec2(-.25,4.45),b);
+if(k<2.)return bez(vec2(-.25,4.45),vec2(1.45,4.55),vec2(2.65,3.55),vec2(2.32,2.18),b);
+if(k<3.)return bez(vec2(2.32,2.18),vec2(1.93,3.92),vec2(-.94,4.23),vec2(-.99,2.18),b);
+if(k<4.)return bez(vec2(-.99,2.18),vec2(-.99,.89),vec2(1.25,.25),vec2(4.4,.09),b);
+return bez(vec2(4.4,.09),vec2(7,.01),vec2(10,0),vec2(15,0),b);}
+vec3 surface(float x,float u){float r=x+.65*sin(t*.4),curl=1.-smoothstep(0.,8.,r),base=u*30.-15.;
+vec2 c=profile(clamp(u,0.,1.));c=mix(vec2(base,3.35*exp(-pow(abs((base+2.)/4.3),2.))),c,curl);
+c.y*=(.7+.3*exp(-r*r*.009))*(1.-smoothstep(13.,49.,r))*(.55+.45*smoothstep(-49.,-14.,r))*(1.-smoothstep(50.,75.,-r));
+c.x+=min(0.,u)*30.+max(0.,u-1.)*30.+.095*x+.33*sin(x*.21+t*.45);
+float rip=.035*sin(x*.79+c.x*.62+t*1.1)+.022*sin(c.x*1.45-x*.28-t*1.6);
+c.y+=rip;float edge=exp(-abs(u-.398)*17.)*(1.-smoothstep(0.,7.,x));c+=edge*vec2(.07*sin(x*3.1+t*2.)+.032*sin(x*7.9-t),.13*sin(x*2.7+t*2.3)+.055*sin(x*6.7-t));return vec3(x,c.y,c.x);}`;
+// A repeatable, mip-filtered noise tile supplies several scales of reef,
+// capillary ripples and foam without procedural noise loops per fragment.
+const S=256,texData=new Uint8Array(S*S*4),layers=[4,8,16,32,64,128].map(n=>({n,a:Float32Array.from({length:n*n},rnd)}));
+function tile(l,x,y){const {n,a}=layers[l];x=x*n/S;y=y*n/S;let i=Math.floor(x),j=Math.floor(y),k=smooth(0,1,x-i),m=smooth(0,1,y-j);const get=(p,q)=>a[(q&(n-1))*n+(p&(n-1))];return mix(mix(get(i,j),get(i+1,j),k),mix(get(i,j+1),get(i+1,j+1),k),m)}
+for(let y=0;y<S;y++)for(let x=0;x<S;x++){let k=(y*S+x)*4;texData[k]=255*(.44*tile(0,x,y)+.26*tile(1,x,y)+.16*tile(2,x,y)+.09*tile(3,x,y)+.05*tile(4,x,y));texData[k+1]=255*tile(2,x,y);texData[k+2]=255*(.58*tile(3,x,y)+.29*tile(4,x,y)+.13*tile(5,x,y));texData[k+3]=255}
+const tex=g.createTexture();g.bindTexture(g.TEXTURE_2D,tex);g.texImage2D(g.TEXTURE_2D,0,g.RGBA,S,S,0,g.RGBA,g.UNSIGNED_BYTE,texData);g.generateMipmap(g.TEXTURE_2D);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,g.LINEAR_MIPMAP_LINEAR);
+const water=program(waveCode+`layout(location=0)in vec3 a;out vec3 w;out float u;void main(){u=a.y;w=surface(a.x,u);gl_Position=project(w);}`,`uniform sampler2D field;in vec3 w;in float u;out vec4 frag;
+void main(){vec2 p=w.xz+vec2(travel,t*.18);vec2 n0=texture(field,p*.019).rg;
+vec2 cap=texture(field,p*vec2(.045,.15)+.025*n0+t*vec2(.003,-.009)).gb-.5;
+vec3 n=normalize(cross(dFdx(w),dFdy(w)));vec3 v=normalize(eye-w);if(dot(n,v)<0.)n=-n;
+n=normalize(n+vec3(cap.x*.13,0,cap.y*.19));
+vec2 floorP=p+refract(-v,n,.752).xz*2.7+cap*.36;
+float reef=texture(field,floorP*.018).r+.13*(texture(field,floorP*.088).b-.5);
+float shore=smoothstep(.35,.68,reef);vec3 sand=mix(vec3(.045,.408,.41),vec3(.39,.788,.695),shore);
+sand=mix(sand,vec3(.13,.41,.335),smoothstep(.59,.7,reef)*(.4+.55*texture(field,floorP*.12).b));
+vec2 cp=floorP*.112;float ca=texture(field,cp+vec2(t*.012,0)+.03*n0).g-texture(field,cp*.83+vec2(.21,t*.009)).g;
+sand+=vec3(.13,.17,.10)*exp(-20.*abs(ca))*(.25+.75*shore);
+float high=smoothstep(.05,3.9,w.y),fres=pow(1.-clamp(dot(n,v),0.,1.),3.);
+float stream=texture(field,vec2(p.x*.16,u*.46-t*.015)+cap*.003).b;
+vec3 body=mix(vec3(.009,.294,.259),vec3(.073,.728,.504),high);
+body+=vec3(.075,.12,.08)*pow(high,2.)+vec3(.085,.14,.12)*(stream-.5);
+float vein=texture(field,vec2(p.x*.095+u*.16,u*2.8-t*.07)+n0*.019).g;
+body+=vec3(.085,.126,.112)*smoothstep(.57,.84,vein)*high;
+vec3 col=mix(sand,body,smoothstep(.015,1.18,w.y)*.93);
+col=mix(col,vec3(.65,.842,.805),fres*.48);float spec=max(dot(n,normalize(sun+v)),0.);
+col+=vec3(1.,.88,.59)*(.78*pow(spec,180.)+.14*pow(spec,22.));
+float br=(1.-smoothstep(-2.,5.,w.x)) *smoothstep(-64.,-30.,w.x);
+float lip=exp(-abs(u-.398)*82.)*(1.-smoothstep(.5,6.,w.x));
+float turbulence=texture(field,p*vec2(.047,.075)+vec2(-t*.012,t*.008)).r;
+float wash=br*(1.-smoothstep(1.,7.5,abs(w.z-2.8-.095*w.x-(turbulence-.5)*8.)))*smoothstep(.65,.79,u);
+float spray=texture(field,vec2(p.x*.087,u*1.65+t*.024)).r;
+float lace=1.-smoothstep(.015,.14,abs(texture(field,p*.17+cap*.018).g-.51));
+float bubbles=clamp(smoothstep(.37,.69,turbulence+wash*.15)*wash+lace*wash*.55+lip*(.45+spray)+br*smoothstep(.53,.71,spray)*exp(-abs(u-.30)*9.)*.8,0.,1.);
+float tail=rider.x-w.x;float wake=exp(-abs(abs(w.z-rider.y)-tail*.17)*5.)*exp(-max(tail,0.)*.65)*smoothstep(0.,.6,tail);
+col=mix(col,vec3(.89,.963,.9),clamp(bubbles+wake*(.35+.65*lace),0.,1.));float thin=exp(-abs(u-.36)*8.)*(1.-smoothstep(1.,8.,w.x))*high;
+frag=vec4(air(col,w),1.-.24*thin*(1.-bubbles));}`);
+function spread(i,inner,outer){let k=i*2-1;return k*inner+Math.sign(k)*pow(Math.max(0,abs(k)-.72)/.28,3)*outer}
+const ocean=grid(270,148,(i,j)=>[spread(i,52,425),.5+spread(j,.68,15),0]);
+const islandWorld=`vec3 land(vec3 a){return a*vec3(.86,.74,1.)-vec3(40.+10.*sin(t*.038),0,14.);}`;
+const terrain=program(islandWorld+`layout(location=0)in vec3 a;layout(location=1)in vec3 b;out vec3 w;out vec3 col;void main(){w=land(a);col=b;gl_Position=project(w);}`,`in vec3 w;in vec3 col;out vec4 frag;uniform sampler2D field;void main(){vec3 n=normalize(cross(dFdx(w),dFdy(w)));if(n.y<0.)n=-n;
+float grain=texture(field,w.xz*.08+w.y*.036).b;vec3 c=col*(.76+.31*max(0.,dot(n,normalize(vec3(.64,.62,.22))))+.18*grain);frag=vec4(air(c,w),1);}`);
+function height(x,z){
+let coast=-57+4.4*sin(x*.047)+2.5*sin(x*.119+.8),d=coast-z;
+let island=smooth(-133,-111,x)*(1-smooth(-5,25,x));
+let foothill=3.9+1.6*sin(x*.15+z*.14)+.8*sin(x*.46-z*.1);
+let peaks=0;for(const [cx,cz,h,wx,wz] of [[-60,-91,30,27,19],[-37,-99,32,14,24],[-84,-86,21,19,15],[-11,-82,12,17,14],[-104,-89,17,16,19]]){
+let a=x-cx,b=z-cz,theta=Math.atan2(b,a);let r=Math.hypot(a/wx,b/wz)*(1+.095*sin(7*theta)+.072*sin(12*theta+.9));
+peaks+=h*exp(-r*1.35)*(.87+.13*cos(r*2));}
+return -1.6+island*(2.5*smooth(-4,3,d)+smooth(2,22,d)*(foothill+peaks)+smooth(1,7,d)*(.6*tile(2,x*2,z*2)));}
+const island=grid(214,100,(i,j)=>{let x=-145+181*i,z=-131+90*j,y=height(x,z),a=smooth(.98,2.4,y),h=tile(2,x*2,z*2),rock=smooth(15,32,y)*(.4+.6*h);
+return [x,y,z,mix(.92,.10+.13*h,a)+rock*.09,mix(.843,.26+.16*h,a)-rock*.04,mix(.635,.173+.07*h,a)+rock*.035]},6);
+const verts=[];function tri(store,a,b,c,color){for(const p of [a,b,c])store.push(...p,...color)}
+function branch(store,a,b,r1,r2,color,sides=7){let axis=norm(sub(b,a)),q=norm(cross(axis,abs(axis[1])>.9?[1,0,0]:[0,1,0])),s=cross(axis,q);
+let pt=(p,r,j)=>p.map((v,i)=>v+r*(cos(TAU*j/sides)*q[i]+sin(TAU*j/sides)*s[i]));for(let j=0;j<sides;j++){let v=pt(a,r1,j),w=pt(b,r2,j+1);tri(store,v,pt(a,r1,j+1),w,color);tri(store,v,w,pt(b,r2,j),color)}}
+for(let i=0;i<172;i++){let x=-122+rnd()*137,z=-57+4.4*sin(x*.047)+2.5*sin(x*.119+.8)-2-rnd()*8,y=height(x,z);if(y<.49)continue;
+let h=2+rnd()*2.9,lean=(rnd()-.5)*1.6,root=[x,y-.16,z],mid=[x+lean*.24,y+h*.54,z],tip=[x+lean,y+h,z+.21];
+branch(verts,root,mid,.092,.076,[.29,.274,.184],5);branch(verts,mid,tip,.076,.05,[.32,.30,.21],5);
+for(let k=0;k<9;k++){let ang=k*.698+rnd()*.42,len=h*(.41+.27*rnd()),dy=.18+rnd()*.48,c=[.11+rnd()*.055,.23+rnd()*.11,.14];
+let leaf=(v,side)=>[tip[0]+cos(ang)*len*v-side*sin(ang),tip[1]+len*(dy*sin(v*PI)-.29*v)-abs(side)*.43,tip[2]+sin(ang)*len*v+side*cos(ang)];
+for(let j=0;j<7;j++){let v=j/7,w=(j+1)/7,width=.11*len*sin(PI*(v+.065));tri(verts,leaf(v,0),leaf(w,width),leaf(w,0),c);tri(verts,leaf(v,0),leaf(w,0),leaf(w,-width),c)}}}
+const palms=mesh(verts,null,6);
+const trees=[];for(let i=0;i<14200;i++){let x=-128+rnd()*153,z=-122+70*rnd(),y=height(x,z);if(y>1.8)trees.push(x,y+.22,z,.65+rnd()*.9,rnd(),rnd())}
+const grove=mesh(trees,null,6,true),canopy=program(islandWorld+`layout(location=0)in vec3 a;layout(location=1)in vec3 b;out vec3 c;void main(){vec3 w=land(a);gl_Position=project(w);gl_PointSize=clamp(.81*b.x*pixel/gl_Position.w,1.,64.);c=air(mix(vec3(.095,.237,.153),vec3(.217,.356,.187),b.y),w);}`,`in vec3 c;out vec4 frag;void main(){vec2 k=gl_PointCoord*2.-1.;float d=dot(k,k);if(d>1.-.15*sin(k.x*11.)*sin(k.y*13.))discard;frag=vec4(c*(.92+.10*sqrt(max(0.,1.-d))+.055*k.x-.048*k.y),1);}`);
+const model=[],skin=[.68,.365,.209],shade=[.53,.252,.14],trunks=[.79,.245,.114],hair=[.125,.081,.055];
+function ell(p,r,color,shape){let pt=(i,j)=>{let lat=(j/10-.5)*PI,lon=i/20*TAU,q=[cos(lat)*cos(lon),sin(lat),cos(lat)*sin(lon)];if(shape)q=shape(q);return q.map((v,k)=>p[k]+v*r[k])};for(let j=0;j<10;j++)for(let i=0;i<20;i++){let a=pt(i,j),b=pt(i+1,j+1);tri(model,a,pt(i+1,j),b,color);tri(model,a,b,pt(i,j+1),color)}}
+ell([0,.045,0],[1.18,.065,.285],[.995,.906,.677],q=>[q[0],q[1]+1.6*pow(abs(q[0]),4),q[2]*(1-.3*q[0])]);
+ell([.02,.108,0],[.98,.008,.012],[.52,.328,.13],q=>[q[0],q[1]+10*pow(abs(q[0]),4),q[2]]);
+let hip=[-.07,.77,0],chest=[.07,1.14,.083],neck=[.13,1.27,.077];
+const jersey=[.073,.176,.179];ell(hip,[.171,.133,.122],trunks);branch(model,hip,chest,.132,.179,jersey,14);ell(chest,[.18,.105,.128],jersey);branch(model,chest,neck,.09,.07,skin);
+ell([.15,1.376,.077],[.112,.144,.103],skin);ell([.135,1.447,.066],[.12,.093,.113],hair);ell([.238,1.375,.102],[.039,.039,.037],skin);
+for(let s of [-1,1]){let h=[hip[0]+s*.089,.75,s*.025],k=[s*.33+.075,.43,.115],ank=[s*.391,.19,-.022];
+branch(model,h,k,.119,.086,trunks);branch(model,k,ank,.077,.045,shade);ell(k,[.084,.082,.08],skin);ell([ank[0]+.016,.138,.036],[.077,.042,.119],skin);
+let sh=[.071+s*.135,1.16,.09],el=[s*.36+.059,1.04+s*.11,.128],hand=[s*.58+.065,.98+s*.18,.24-s*.09];
+branch(model,sh,el,.065,.049,skin);ell(sh,[.079,.077,.078],skin);branch(model,el,hand,.05,.031,skin);ell(hand,[.065,.038,.045],skin)}
+const board=mesh(model,null,6),person=program(`layout(location=0)in vec3 a;layout(location=1)in vec3 b;uniform mat3 mat;uniform vec3 origin;out vec3 w;out vec3 c;void main(){w=origin+mat*a;c=b;gl_Position=project(w);}`,`in vec3 w;in vec3 c;out vec4 frag;void main(){vec3 n=normalize(cross(dFdx(w),dFdy(w)));frag=vec4(c*(.76+.33*max(dot(n,normalize(vec3(.47,.85,.23))),0.)),1);}`);
+const drops=[];for(let i=0;i<3800;i++)drops.push(rnd(),rnd(),rnd(),rnd(),rnd(),rnd());
+const plume=mesh(drops,null,6,true),spray=program(waveCode+`layout(location=0)in vec3 a;layout(location=1)in vec3 b;out float opacity;out float tint;void main(){
+float age=fract(a.x+t*(.44+.48*b.x)),x=3.1-36.*pow(a.y,1.33)-age*.95;float impact=step(.51,b.z);
+vec3 w=surface(x,mix(.208,.391,a.z));w.y+=age*(1.-age)*(2.2+b.x*3.4)-age*age*(1.4+b.y);w.z+=age*(.5+b.y*1.65);w.x-=age*age*1.8;
+if(impact>.5){w=surface(x,.73+.19*b.y);w.y+=age*(1.-age)*(.5+2.2*b.x);w.z+=age*b.z*.91;}
+gl_Position=project(w);gl_PointSize=clamp(pixel*(.012+.085*b.x*b.x+impact*.09)*(.7+age*.4)/gl_Position.w,1.,38.);
+opacity=sin(age*3.14159)*(.37+.54*b.y)*(1.-smoothstep(-2.,3.1,x));tint=b.x;}`,`in float opacity;in float tint;out vec4 frag;void main(){vec2 k=gl_PointCoord*2.-1.;float d=dot(k,k);if(d>1.)discard;frag=vec4(mix(vec3(.79,.915,.872),vec3(1.,.992,.895),tint),opacity*(1.-smoothstep(.15,1.,d)));}`);
+let time=0,dist=18.4,yaw=.56,pitch=.147,drag=null,lastInput=-1e9,zoom=dist,prev=0,scale=Math.min(devicePixelRatio,1.55),slow=0,clock=0,paused=matchMedia('(prefers-reduced-motion: reduce)').matches;
+const play=document.querySelector('#play'),status=document.querySelector('#status'),full=document.querySelector('#full');
+function state(){play.classList.toggle('paused',paused);play.title=paused?'Play scene':'Pause scene';play.setAttribute('aria-label',play.title);status.textContent=paused?'PAUSED':'LIVE RENDER'}state();play.onclick=()=>{paused=!paused;state()};
+full.onclick=async()=>{try{if(document.fullscreenElement)await document.exitFullscreen();else await document.documentElement.requestFullscreen()}catch(e){full.title=e.message}};if(!document.fullscreenEnabled)full.hidden=true;
+canvas.onpointerdown=e=>{if(drag!==null)return;drag=[e.pointerId,e.clientX,e.clientY];canvas.setPointerCapture(e.pointerId)};
+canvas.onpointermove=e=>{if(!drag||drag[0]!==e.pointerId)return;yaw-=(e.clientX-drag[1])*.005;pitch=clamp(pitch+(e.clientY-drag[2])*.004,.055,1.13);drag=[e.pointerId,e.clientX,e.clientY];lastInput=performance.now()};
+canvas.onlostpointercapture=()=>{drag=null;lastInput=performance.now()};canvas.onwheel=e=>{e.preventDefault();zoom=clamp(zoom*exp(clamp(e.deltaY*(e.deltaMode===1?16:1),-200,200)*.0014),8,42);lastInput=performance.now()};
+let eye,right,up,fwd,lens,aspect,move,rx,rz;
+function use(s){g.useProgram(s.p);let u=s.u;g.uniform3fv(u.eye,eye);g.uniform3fv(u.right,right);g.uniform3fv(u.up,up);g.uniform3fv(u.fwd,fwd);g.uniform1f(u.t,time);g.uniform1f(u.travel,move);g.uniform1f(u.lens,lens);g.uniform1f(u.aspect,aspect);g.uniform1f(u.pixel,canvas.height*lens*.5);g.uniform2f(u.rider,rx,rz)}
+function render(now){
+let elapsed=prev?(now-prev)/1000:1/60,dt=Math.min(.05,elapsed);prev=now;if(!paused)time+=dt;
+if(!document.hidden){slow+=elapsed>.020?1:0;clock++;if(clock>=100){if(slow>34)scale=Math.max(.68,scale*.88);slow=clock=0}}
+let W=Math.round(innerWidth*scale),H=Math.round(innerHeight*scale);if(canvas.width!==W||canvas.height!==H){canvas.width=W;canvas.height=H;g.viewport(0,0,W,H)}
+aspect=W/H;lens=aspect<1?1.86:2.40;let home=.56+.09*sin(time*.096),ease=1-exp(-dt*1.32);
+if(!drag&&now-lastInput>3000){yaw+=Math.atan2(sin(home-yaw),cos(home-yaw))*ease;pitch=mix(pitch,.147+.027*sin(time*.12),ease);zoom=mix(zoom,18.4,ease)}dist=mix(dist,zoom,1-exp(-dt*9));
+const target=[.7+.42*sin(time*.21),2.02,.9];eye=[target[0]+dist*sin(yaw)*cos(pitch),target[1]+dist*sin(pitch),target[2]+dist*cos(yaw)*cos(pitch)];fwd=norm(sub(target,eye));right=norm(cross(fwd,[0,1,0]));up=cross(right,fwd);
+rx=3.15+.66*sin(time*.62);let ru=.652+.035*sin(time*.83),p=section(rx,ru,time),pu=section(rx,ru+.001,time),px=section(rx+.012,ru,time);
+function ripple(v){v[1]+=.035*sin(v[0]*.79+v[2]*.62+time*1.1)+.022*sin(v[2]*1.45-v[0]*.28-time*1.6)}[p,px,pu].forEach(ripple);rz=p[2];
+let normal=norm(cross(sub(pu,p),sub(px,p))),tangent=norm(sub(px,p)),across=norm(cross(tangent,normal)),turn=.14*cos(time*.83),forward=norm(tangent.map((v,i)=>v+turn*across[i])),side=norm(cross(forward,normal));
+move=time*1.64;g.clearColor(.78,.84,.79,1);g.clear(g.COLOR_BUFFER_BIT|g.DEPTH_BUFFER_BIT);g.disable(g.DEPTH_TEST);use(sky);skyMesh();g.enable(g.DEPTH_TEST);use(terrain);island();palms();use(canopy);grove();
+use(person);g.uniformMatrix3fv(person.u.mat,false,[...forward,...normal,...side]);g.uniform3fv(person.u.origin,p);board();
+use(water);g.enable(g.BLEND);g.blendFunc(g.SRC_ALPHA,g.ONE_MINUS_SRC_ALPHA);ocean();use(spray);g.depthMask(false);plume();g.depthMask(true);g.disable(g.BLEND);requestAnimationFrame(render)}
+requestAnimationFrame(render);
+}
+</script></body></html>

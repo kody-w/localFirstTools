@@ -1,0 +1,1793 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+<title>Caldera Gate — Ancient Obsidian Portal</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #07090d;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    -webkit-user-select: none;
+    user-select: none;
+    touch-action: none;
+  }
+  canvas#gl {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: grab;
+    touch-action: none;
+  }
+  canvas#gl.dragging { cursor: grabbing; }
+
+  .hud {
+    position: fixed;
+    left: 24px;
+    bottom: 20px;
+    pointer-events: none;
+    color: rgba(232, 236, 244, 0.72);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-size: 10px;
+    font-weight: 500;
+    text-shadow: 0 1px 10px rgba(0, 0, 0, 0.85);
+    transition: opacity 1.1s ease;
+    opacity: 0.85;
+  }
+  .hud.faded { opacity: 0.18; }
+  .hud .title {
+    font-size: 11px;
+    letter-spacing: 0.24em;
+    color: rgba(244, 224, 192, 0.86);
+    margin-bottom: 5px;
+  }
+  .hud .hint {
+    font-size: 9.5px;
+    color: rgba(205, 214, 228, 0.62);
+  }
+  .fallback {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: #090c11;
+    color: #d6dde8;
+    padding: 24px;
+    text-align: center;
+    font-size: 14px;
+  }
+  @media (max-width: 640px) {
+    .hud { left: 16px; bottom: 16px; }
+    .hud .title { font-size: 10px; }
+    .hud .hint { font-size: 9px; }
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div class="hud" id="hud">
+  <div class="title">Caldera Gate · Basalt Sanctuary</div>
+  <div class="hint" id="hudHint">Drag to orbit 360° · Scroll to zoom</div>
+</div>
+<div class="fallback" id="fallback">WebGL2 is required to render this scene.</div>
+
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('gl');
+  const hud = document.getElementById('hud');
+  const hudHint = document.getElementById('hudHint');
+  const fallback = document.getElementById('fallback');
+
+  if ('ontouchstart' in window || navigator.maxTouchPoints > 0) {
+    hudHint.textContent = 'Drag to orbit 360° · Pinch to zoom';
+  }
+
+  const gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    depth: false,
+    stencil: false,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: true
+  });
+
+  if (!gl) {
+    fallback.style.display = 'flex';
+    return;
+  }
+
+  const extColorFloat = gl.getExtension('EXT_color_buffer_float');
+  const extHalfFloat = gl.getExtension('EXT_color_buffer_half_float');
+  const extLinear = gl.getExtension('OES_texture_float_linear');
+  const useFloatRT = !!(extColorFloat || extHalfFloat);
+  const HDR_INTERNAL = extColorFloat ? gl.RGBA16F : (extHalfFloat ? gl.RGBA16F : gl.RGBA8);
+  const HDR_TYPE = (extColorFloat || extHalfFloat) ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+  const DEPTH_INTERNAL = extColorFloat ? gl.R32F : (extHalfFloat ? gl.R16F : gl.RGBA8);
+  const DEPTH_FORMAT = (extColorFloat || extHalfFloat) ? gl.RED : gl.RGBA;
+  const DEPTH_TYPE = extColorFloat ? gl.FLOAT : (extHalfFloat ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE);
+
+  // =========================================================================
+  // SHADER SOURCES (populated in subsequent steps)
+  // =========================================================================
+  const FULLSCREEN_VS = `#version 300 es
+  precision highp float;
+  out vec2 vUv;
+  void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    vUv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+  }`;
+
+  const SCENE_FS_HEADER = `#version 300 es
+  precision highp float;
+  in vec2 vUv;
+  layout(location = 0) out vec4 outColor;
+  layout(location = 1) out vec4 outDepth;
+
+  uniform vec2 uRes;
+  uniform float uTime;
+  uniform vec3 uCamPos;
+  uniform vec3 uCamTarget;
+  uniform float uFov;
+  uniform float uPortalAct;
+  uniform float uUseFloat;
+  `;
+
+  // /*__GLSL_COMMON__*/
+  const SCENE_FS_COMMON = `
+  const float PI = 3.14159265359;
+  const vec3 PORTAL_C = vec3(0.0, 2.58, 0.0);
+
+  // Material IDs
+  // 1.0 = Carved/weathered architectural basalt
+  // 2.0 = Knapped/polished volcanic obsidian glass
+  // 3.0 = Natural columnar basalt & volcanic bedrock
+  // 4.0 = Shallow rainwater puddle / mirror water
+  // 5.0 = Recessed carved bronze-darkened runes/clamps
+
+  float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+  }
+
+  float hash21(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+
+  vec2 hash22(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973));
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.xx + p3.yz) * p3.zy);
+  }
+
+  float hash31(vec3 p3) {
+    p3 = fract(p3 * 0.1031);
+    p3 += dot(p3, p3.zyx + 31.32);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+
+  float noise2(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(
+      mix(hash21(i + vec2(0.0, 0.0)), hash21(i + vec2(1.0, 0.0)), u.x),
+      mix(hash21(i + vec2(0.0, 1.0)), hash21(i + vec2(1.0, 1.0)), u.x),
+      u.y
+    );
+  }
+
+  float noise3(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    float n000 = hash31(i + vec3(0.0, 0.0, 0.0));
+    float n100 = hash31(i + vec3(1.0, 0.0, 0.0));
+    float n010 = hash31(i + vec3(0.0, 1.0, 0.0));
+    float n110 = hash31(i + vec3(1.0, 1.0, 0.0));
+    float n001 = hash31(i + vec3(0.0, 0.0, 1.0));
+    float n101 = hash31(i + vec3(1.0, 0.0, 1.0));
+    float n011 = hash31(i + vec3(0.0, 1.0, 1.0));
+    float n111 = hash31(i + vec3(1.0, 1.0, 1.0));
+    float nx00 = mix(n000, n100, f.x);
+    float nx10 = mix(n010, n110, f.x);
+    float nx01 = mix(n001, n101, f.x);
+    float nx11 = mix(n011, n111, f.x);
+    float nxy0 = mix(nx00, nx10, f.y);
+    float nxy1 = mix(nx01, nx11, f.y);
+    return mix(nxy0, nxy1, f.z);
+  }
+
+  const mat2 M2 = mat2(0.80, -0.60, 0.60, 0.80);
+
+  float fbm2(vec2 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * noise2(p);
+      p = M2 * p * 2.03 + vec2(17.1, 31.7);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  float fbm3(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 4; i++) {
+      v += a * noise3(p);
+      p = p * 2.02 + vec3(13.3, 27.9, 7.1);
+      a *= 0.5;
+    }
+    return v;
+  }
+
+  // Exact hexagonal grid for geological columnar basalt
+  // Returns vec4(hexLocalX, hexLocalY, edgeDist, cellHash)
+  vec4 hexBasalt(vec2 p) {
+    const vec2 s = vec2(1.0, 1.7320508);
+    vec4 hC = floor(vec4(p, p - vec2(0.5, 1.0)) / s.xyxy) + 0.5;
+    vec4 h = vec4(p - hC.xy * s, p - (hC.zw + 0.5) * s);
+    vec4 res = (dot(h.xy, h.xy) < dot(h.zw, h.zw))
+      ? vec4(h.xy, hC.xy)
+      : vec4(h.zw, hC.zw + 0.5);
+    vec2 a = abs(res.xy);
+    float edgeDist = 0.5 - max(dot(a, s * 0.5), a.x);
+    float id = hash21(res.zw);
+    return vec4(res.xy, edgeDist, id);
+  }
+
+  // SDF primitives & smooth operators
+  float sdBox(vec3 p, vec3 b) {
+    vec3 q = abs(p) - b;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+  }
+
+  float sdRoundBox(vec3 p, vec3 b, float r) {
+    vec3 q = abs(p) - b + r;
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - r;
+  }
+
+  float sdCylinder(vec3 p, float r, float h) {
+    vec2 d = abs(vec2(length(p.xz), p.y)) - vec2(r, h);
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+  }
+
+  float sdHexPrism(vec3 p, vec2 h) {
+    const vec3 k = vec3(-0.8660254, 0.5, 0.57735);
+    p = abs(p);
+    p.xz -= 2.0 * min(dot(k.xy, p.xz), 0.0) * k.xy;
+    vec2 d = vec2(
+      length(p.xz - vec2(clamp(p.x, -k.z * h.x, k.z * h.x), h.x)) * sign(p.z - h.x),
+      p.y - h.y
+    );
+    return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+  }
+
+  float smin(float a, float b, float k) {
+    float h = clamp(0.5 + 0.5 * (b - a) / k, 0.0, 1.0);
+    return mix(b, a, h) - k * h * (1.0 - h);
+  }
+
+  float smax(float a, float b, float k) {
+    return -smin(-a, -b, k);
+  }
+
+  mat2 rot2(float a) {
+    float c = cos(a), s = sin(a);
+    return mat2(c, -s, s, c);
+  }
+
+  vec2 opU(vec2 a, vec2 b) {
+    return (a.x < b.x) ? a : b;
+  }
+
+  // Signed distance to the ancient arched/ovoid portal aperture in the XY plane
+  // Negative = inside open portal aperture, 0 = inner obsidian edge
+  float sdPortalAperture2D(vec2 xy) {
+    vec2 q = xy - PORTAL_C.xy;
+    // Subtle megalithic arch taper (wider near base, gently converging toward crown)
+    q.x *= 1.0 + 0.09 * clamp(q.y / 1.9, -0.5, 1.0);
+    // Slightly flattened threshold at the very bottom
+    vec2 e = vec2(1.48, 1.92);
+    float ell = (length(q / e) - 1.0) * min(e.x, e.y);
+    float sill = -(q.y + 1.82);
+    return smax(ell, sill, 0.16);
+  }
+
+  // Conchoidal volcanic glass fracture heightfield (curved shell ripples)
+  float obsidianConchoidal(vec3 p) {
+    vec3 q = p * 2.4;
+    float r1 = sin(length(q.xy - vec2(0.7, 1.8)) * 11.0 + noise3(q * 1.4) * 2.5);
+    float r2 = sin(length(q.yz - vec2(2.3, 0.2)) * 14.0 + noise3(q * 2.1) * 2.0);
+    float chip = noise3(p * 4.5);
+    float facet = smoothstep(0.35, 0.65, chip) * 0.5 + 0.5;
+    return (r1 * 0.5 + r2 * 0.5) * 0.012 * facet + (noise3(p * 11.0) - 0.5) * 0.004;
+  }
+  `;
+
+  // /*__GLSL_WORLDS__*/
+  const SCENE_FS_WORLDS = `
+  // =========================================================================
+  // WORLD A: ANCIENT OBSIDIAN & WEATHERED BASALT SANCTUARY
+  // =========================================================================
+  float basaltTerrainHeight(vec2 xz) {
+    float r = length(xz);
+    // Low volcanic sanctuary floor opening to dramatic distant caldera ridges (leaves stormy sky wide open!)
+    float nearSlope = smoothstep(5.8, 19.0, r) * 1.45;
+    float farCaldera = smoothstep(22.0, 56.0, r) * 10.5;
+    float ridgeNoise = fbm2(xz * 0.048 + vec2(3.1, 1.7));
+    float ridge = (ridgeNoise * 5.8 + pow(ridgeNoise, 2.0) * 3.5) * smoothstep(16.0, 40.0, r);
+    float mound = (fbm2(xz * 0.20) - 0.35) * 0.48 * smoothstep(4.8, 9.5, r);
+
+    // Authentic stepped hexagonal columnar basalt formations around the sanctuary rim
+    vec4 hx = hexBasalt(xz * 0.88);
+    float colTier = floor(hx.w * 6.0) * 0.24 + hx.w * 0.10;
+    float hexMask = smoothstep(5.0, 8.0, r) * (1.0 - smoothstep(18.0, 32.0, r));
+    float hexBevel = smoothstep(0.0, 0.055, hx.z);
+    float columns = (colTier * hexBevel - (1.0 - hexBevel) * 0.11) * hexMask;
+
+    float h = -0.18 + nearSlope + farCaldera + ridge + mound + columns;
+
+    // Natural worn approach causeway along +Z and -Z
+    float pathMask = exp(-xz.x * xz.x * 0.16) * smoothstep(4.2, 14.0, abs(xz.y));
+    h -= pathMask * 0.42 * smoothstep(5.0, 14.0, r);
+
+    return h;
+  }
+
+  vec2 mapWorldA(vec3 p) {
+    vec2 res = vec2(1e5, 3.0);
+    float rXZ = length(p.xz);
+
+    // 1. NATURAL COLUMNAR BASALT TERRAIN & DISTANT CALDERA
+    float terrH = basaltTerrainHeight(p.xz);
+    float dTerr = (p.y - terrH) * 0.64;
+    res = opU(res, vec2(dTerr, 3.0));
+
+    // 2. SUNKEN STEPPED BASALT SANCTUARY DAIS (r < 6.4)
+    if (rXZ < 6.6 && p.y < 1.6) {
+      float dPlinth1 = sdCylinder(p - vec3(0.0, -0.06, 0.0), 5.45, 0.14);
+      float dPlinth2 = sdCylinder(p - vec3(0.0, 0.06, 0.0), 4.35, 0.11);
+      // Inner court depressed organically in worn stone pockets to hold natural rainwater puddles
+      float pocket = (fbm2(p.xz * 0.62 + vec2(1.3, 2.7)) - 0.5) * 0.12;
+      float dCourt = sdCylinder(p - vec3(0.0, 0.17 + pocket, 0.0), 4.65, 0.12);
+      // Heavy megalithic threshold plinth supporting the portal pylons
+      float dApron = sdRoundBox(p - vec3(0.0, 0.28, 0.0), vec3(3.72, 0.24, 1.36), 0.065);
+
+      float dDais = min(min(dPlinth1, dPlinth2), min(dCourt, dApron));
+
+      // Radial & concentric weathered flagstone joints
+      float ang = atan(p.z, p.x);
+      float radSeam = abs(fract(ang * 14.0 / (2.0 * PI)) - 0.5);
+      float ringSeam = abs(fract(rXZ * 1.12) - 0.5);
+      float seam = min(smoothstep(0.0, 0.022, radSeam), smoothstep(0.0, 0.026, ringSeam));
+      float stoneChip = (fbm2(p.xz * 2.8) - 0.5) * 0.036;
+      dDais += (1.0 - seam) * 0.022 + stoneChip;
+
+      res = opU(res, vec2(dDais, 1.0));
+
+      // Organic rainwater puddles pooling ONLY in the lowest worn depressions of the courtyard (no circular moat!)
+      if (rXZ < 4.55) {
+        float puddleY = 0.248;
+        float dWater = max(p.y - puddleY, rXZ - 4.45);
+        res = opU(res, vec2(dWater, 4.0));
+      }
+    }
+
+    // 3. MONUMENTAL MEGALITHIC PORTAL ARCH & KNAPPED OBSIDIAN FRAME
+    if (length(p - vec3(0.0, 3.0, 0.0)) < 6.5) {
+      float ap = sdPortalAperture2D(p.xy);
+
+      // --- 3A. INNER KNAPPED OBSIDIAN VOLCANIC GLASS ARCH (Mat 2.0) ---
+      float obsRing2D = max(-ap, ap - 0.58);
+      // Stepped beveled volcanic glass profile: thick obsidian slabs tapering sharply to the event horizon
+      float bevelZ = 0.48 - smoothstep(0.32, 0.0, ap) * 0.16;
+      float dObs = max(obsRing2D, abs(p.z) - bevelZ);
+
+      vec2 pq = p.xy - PORTAL_C.xy;
+      float pAng = atan(pq.y, pq.x);
+      // 12 fitted obsidian voussoir monolith blocks with crisp joints
+      float blockJoint = abs(fract(pAng * 12.0 / (2.0 * PI) + 0.04) - 0.5);
+      float jointCut = (1.0 - smoothstep(0.0, 0.015, blockJoint)) * 0.022;
+      // Stepped carved bevel channel on obsidian face
+      float innerGroove = exp(-pow((ap - 0.20) * 20.0, 2.0)) * 0.022;
+      float conch = obsidianConchoidal(p) * 0.85;
+      dObs = dObs + jointCut + innerGroove + conch;
+      dObs = max(dObs, -(p.y - 0.34));
+      res = opU(res, vec2(dObs, 2.0));
+
+      // --- 3B. ANCIENT DARK BRONZE STONE CLAMPS / MORTISES (Mat 5.0) ---
+      float clampAng = mod(pAng + PI / 6.0, PI / 3.0) - PI / 6.0;
+      if (abs(clampAng) < 0.09 && p.y > 0.72) {
+        float dClamp = max(abs(ap - 0.56) - 0.10, abs(p.z) - 0.51);
+        dClamp = max(dClamp, abs(clampAng) * 2.1 - 0.085);
+        res = opU(res, vec2(dClamp, 5.0));
+      }
+
+      // --- 3C. OUTER MONUMENTAL WEATHERED BASALT PYLONS & CORBELLED LINTEL (Mat 1.0) ---
+      vec3 sp = vec3(abs(p.x), p.y, p.z);
+      float taper = clamp(sp.y * 0.075, 0.0, 0.46);
+      vec3 pierP = sp - vec3(2.44 - taper * 0.76, 2.75, 0.0);
+      float dPier = sdRoundBox(pierP, vec3(0.88 - taper * 0.25, 2.65, 0.94 - taper * 0.22), 0.075);
+
+      // Stepped outer buttress flanking each pylon
+      vec3 buttP = sp - vec3(3.52, 1.32, 0.0);
+      float dButt = sdRoundBox(buttP, vec3(0.56, 1.24, 0.74), 0.065);
+
+      // Recessed vertical architectural fluting on front & back pier faces
+      float flute = sdBox(sp - vec3(2.44 - taper * 0.55, 2.75, 0.0), vec3(0.24, 2.05, 1.08));
+      dPier = smax(dPier, -max(flute, -(abs(p.z) - 0.78)), 0.035);
+
+      // Monumental corbelled basalt lintel crowning the portal
+      vec3 lintelP = vec3(p.x, p.y - 5.24, p.z);
+      float dLintelMain = sdRoundBox(lintelP, vec3(3.18, 0.54, 1.00), 0.08);
+      // Weathered asymmetric broken upper cornice
+      float brokenEdge = smoothstep(0.95, 2.65, p.x) * 0.46 + fbm2(p.xz * 1.5) * 0.15;
+      vec3 capP = vec3(p.x + 0.14, p.y - 5.88 + brokenEdge * 0.5, p.z);
+      float dLintelCap = sdRoundBox(capP, vec3(2.58, 0.32, 0.78), 0.065);
+
+      vec3 crownP = vec3(p.x, p.y - 4.78, p.z);
+      float dCrown = sdRoundBox(crownP, vec3(1.16, 0.36, 0.86), 0.055);
+
+      float dArch = smin(min(dPier, dButt), min(dLintelMain, min(dLintelCap, dCrown)), 0.07);
+      float innerCut = -(ap - 0.50);
+      dArch = smax(dArch, innerCut, 0.045);
+
+      // Cyclopean dry-stone masonry courses, erosion & micro-fractures
+      float courseY = abs(fract(p.y * 1.15) - 0.5);
+      float courseSeam = (1.0 - smoothstep(0.0, 0.022, courseY)) * 0.026;
+      float roughStone = (fbm3(p * 1.8) - 0.5) * 0.072 + (noise3(p * 5.8) - 0.5) * 0.020;
+      float erode = smoothstep(3.8, 6.2, p.y) * (fbm3(p * 2.5) - 0.48) * 0.15;
+      dArch += courseSeam + roughStone + erode;
+
+      res = opU(res, vec2(dArch, 1.0));
+    }
+
+    // 4. OUTER BROKEN COLONNADE / STANDING BASALT MONOLITHS & FALLEN BLOCKS
+    if (rXZ > 4.4 && rXZ < 11.5 && p.y < 6.5) {
+      float ang = atan(p.z, p.x);
+      float seg = (2.0 * PI) / 10.0;
+      float idx = floor((ang + PI) / seg);
+      float hId = hash11(idx * 17.3 + 4.1);
+
+      bool isFrontGap = (abs(ang - PI * 0.5) < 0.46) || (abs(ang + PI * 0.5) < 0.40);
+      if (!isFrontGap) {
+        vec3 mp = p;
+        mp.xz = rot2(-((idx + 0.5) * seg - PI)) * mp.xz;
+        float rad = 7.4 + (hId - 0.5) * 1.1;
+        mp.x -= rad;
+        float tilt = (hash11(idx * 9.7) - 0.5) * 0.16;
+        mp.xy = rot2(tilt) * mp.xy;
+        float monoH = 2.0 + hId * 2.8;
+        float topBreak = mp.y - (monoH + mp.z * (hash11(idx * 5.3) - 0.5) * 0.75);
+        float dCol = max(sdHexPrism(mp - vec3(0.0, monoH * 0.5, 0.0), vec2(0.54 + hId * 0.16, monoH)), topBreak);
+        dCol += (fbm3(p * 1.9) - 0.5) * 0.06;
+        res = opU(res, vec2(dCol, 3.0));
+      }
+
+      // Fallen weathered stone blocks & broken basalt drums near the sanctuary steps
+      vec3 fp1 = p - vec3(-4.5, 0.25, 2.4);
+      fp1.xz = rot2(0.55) * fp1.xz;
+      fp1.xy = rot2(0.18) * fp1.xy;
+      float dFall1 = sdRoundBox(fp1, vec3(0.76, 0.34, 0.48), 0.06) + (fbm3(p * 2.6) - 0.5) * 0.045;
+
+      vec3 fp2 = p - vec3(4.3, 0.22, -2.5);
+      fp2.xz = rot2(-0.42) * fp2.xz;
+      float dFall2 = sdRoundBox(fp2, vec3(0.64, 0.28, 0.55), 0.06) + (fbm3(p * 2.6) - 0.5) * 0.045;
+
+      vec3 fp3 = p - vec3(4.8, 0.24, 1.9);
+      fp3.xz = rot2(0.92) * fp3.xz;
+      float dFall3 = sdHexPrism(fp3, vec2(0.42, 0.58)) + (fbm3(p * 2.8) - 0.5) * 0.04;
+
+      res = opU(res, vec2(min(min(dFall1, dFall2), dFall3), 1.0));
+    }
+
+    return res;
+  }
+
+  // =========================================================================
+  // WORLD B: COHERENT ALTERNATE DIMENSION ("SOLIS CANYON & FLOATING MONOLITHS")
+  // High-contrast sunlit ochre sandstone canyon, deep azure-to-amber sky,
+  // winding desert river, and sculpted levitating ancient monoliths.
+  // =========================================================================
+  const vec3 SUN_B_DIR = normalize(vec3(-0.42, 0.28, -0.86));
+
+  float canyonHeightB(vec2 xz) {
+    float meander = sin(xz.y * 0.038) * 2.2;
+    float cx = abs(xz.x - meander);
+
+    // Wide monumental canyon valley opening up so sunlit azure-to-amber sky + cliffs + floating spires all read cleanly
+    float floorSlope = -0.09 * min(abs(xz.y), 42.0);
+    float wall = smoothstep(7.2, 20.5, cx) * 8.5 + smoothstep(18.0, 34.0, cx) * 10.5;
+    float strata = floor(wall * 0.65) * 0.65 + smoothstep(0.0, 0.55, fract(wall * 0.65)) * 0.65;
+    float h = mix(wall, strata * 1.45, 0.48);
+    h += fbm2(xz * 0.085 + vec2(4.2, 9.1)) * 2.1 * smoothstep(5.5, 13.5, cx);
+    h += (fbm2(xz * 0.42) - 0.5) * 0.24 * smoothstep(3.5, 8.0, cx);
+    return h + floorSlope - 0.85;
+  }
+
+  float sdSculptedObeliskB(vec3 p, vec3 size) {
+    float tap = 1.0 - clamp((p.y + size.y) / (size.y * 2.3), 0.0, 0.40);
+    vec3 q = vec3(p.x / tap, p.y, p.z / tap);
+    float d = sdRoundBox(q, size, 0.05) * tap;
+    float band = exp(-pow(sin(p.y * 3.4) * 3.0, 2.0)) * 0.04;
+    return d + band;
+  }
+
+  vec2 mapWorldB(vec3 p) {
+    float ch = canyonHeightB(p.xz);
+    float dCanyon = (p.y - ch) * 0.56;
+    float floorLevel = -0.55 - 0.055 * min(abs(p.z), 35.0);
+    vec2 res = vec2(dCanyon, (ch < floorLevel + 0.14) ? 11.0 : 10.0);
+
+    // Sculpted Levitating Ancient Monoliths framed right in the sunlit canyon vista
+    vec3 m1 = p - vec3(-0.95, 2.45 + sin(uTime * 0.45) * 0.18, -13.5);
+    m1.xz = rot2(0.32 + uTime * 0.035) * m1.xz;
+    float dM1 = sdSculptedObeliskB(m1, vec3(0.68, 2.55, 0.68));
+    vec3 m1Top = m1 - vec3(0.0, 3.05 + sin(uTime * 0.45 + 1.2) * 0.10, 0.0);
+    dM1 = min(dM1, sdRoundBox(m1Top, vec3(0.40, 0.38, 0.40), 0.04));
+
+    vec3 m2 = p - vec3(3.1, 3.6 + sin(uTime * 0.38 + 2.1) * 0.24, -22.5);
+    m2.xz = rot2(-0.35 - uTime * 0.025) * m2.xz;
+    float dM2 = sdSculptedObeliskB(m2, vec3(0.95, 3.7, 0.95));
+
+    vec3 m3 = p - vec3(-3.8, 2.0 + sin(uTime * 0.52 + 4.0) * 0.15, -9.2);
+    m3.xz = rot2(0.55) * m3.xz;
+    float dM3 = sdSculptedObeliskB(m3, vec3(0.34, 1.45, 0.34));
+
+    // Rear 360° vista monumental floating spires (+Z in World B)
+    vec3 m4 = p - vec3(1.2, 2.55 + sin(uTime * 0.41 + 1.1) * 0.18, 14.0);
+    m4.xz = rot2(0.24) * m4.xz;
+    float dM4 = sdSculptedObeliskB(m4, vec3(0.74, 2.65, 0.74));
+
+    vec3 m5 = p - vec3(-2.6, 3.5 + sin(uTime * 0.36 + 3.2) * 0.22, 21.0);
+    m5.xz = rot2(-0.4) * m5.xz;
+    float dM5 = sdSculptedObeliskB(m5, vec3(0.92, 3.3, 0.92));
+
+    float dMonos = min(min(dM1, dM2), min(dM3, min(dM4, dM5)));
+    dMonos += (noise3(p * 1.6) - 0.5) * 0.03;
+    res = opU(res, vec2(dMonos, 12.0));
+
+    return res;
+  }
+
+  vec3 calcNormalB(vec3 p) {
+    vec2 e = vec2(0.015, 0.0);
+    return normalize(vec3(
+      mapWorldB(p + e.xyy).x - mapWorldB(p - e.xyy).x,
+      mapWorldB(p + e.yxy).x - mapWorldB(p - e.yxy).x,
+      mapWorldB(p + e.yyx).x - mapWorldB(p - e.yyx).x
+    ));
+  }
+
+  vec3 skyWorldB(vec3 rd) {
+    float y = clamp(rd.y, 0.0, 1.0);
+    // Rich deep azure zenith to warm burnt-amber horizon (vivid daylight contrast!)
+    vec3 zenith = vec3(0.05, 0.17, 0.44);
+    vec3 midSky = vec3(0.36, 0.38, 0.46);
+    vec3 horiz  = vec3(0.95, 0.56, 0.25);
+    vec3 col = mix(horiz, midSky, smoothstep(0.0, 0.22, y));
+    col = mix(col, zenith, smoothstep(0.16, 0.65, y));
+
+    float sunDot = max(dot(rd, SUN_B_DIR), 0.0);
+    col += vec3(0.85, 0.48, 0.20) * pow(sunDot, 5.0) * 0.48;
+    col += vec3(1.85, 1.32, 0.78) * pow(sunDot, 64.0) * 1.15;
+    col += vec3(3.0, 2.5, 1.7) * smoothstep(0.9985, 0.9996, sunDot);
+
+    if (rd.y > 0.01) {
+      vec2 cuv = rd.xz / (rd.y + 0.14) * 0.42 + vec2(uTime * 0.012, -uTime * 0.008);
+      float cl = fbm2(cuv * 2.4);
+      float cloudMask = smoothstep(0.46, 0.78, cl) * smoothstep(0.01, 0.20, rd.y);
+      vec3 cloudCol = mix(vec3(0.72, 0.42, 0.26), vec3(1.38, 0.96, 0.58), pow(sunDot, 2.0));
+      col = mix(col, cloudCol, cloudMask * 0.52);
+    }
+    return col;
+  }
+
+  vec3 renderWorldB(vec3 ro, vec3 rd) {
+    float t = 0.04;
+    float maxT = 78.0;
+    float mat = -1.0;
+    for (int i = 0; i < 68; i++) {
+      vec3 p = ro + rd * t;
+      vec2 h = mapWorldB(p);
+      if (h.x < 0.0035 * t + 0.0018) {
+        mat = h.y;
+        break;
+      }
+      t += max(h.x, 0.028);
+      if (t > maxT) break;
+    }
+
+    vec3 sky = skyWorldB(rd);
+    if (mat < 0.0) return sky;
+
+    vec3 p = ro + rd * t;
+    vec3 n = calcNormalB(p);
+    float diff = max(dot(n, SUN_B_DIR), 0.0);
+
+    float sh = 1.0;
+    float st = 0.15;
+    for (int j = 0; j < 16; j++) {
+      float sd = mapWorldB(p + n * 0.04 + SUN_B_DIR * st).x;
+      sh = min(sh, clamp(7.0 * sd / st, 0.0, 1.0));
+      st += clamp(sd, 0.22, 2.0);
+      if (sh < 0.05 || st > 20.0) break;
+    }
+
+    vec3 baseCol;
+    float rough = 0.78;
+    if (mat > 11.5) {
+      // Dark sculpted ancient levitating monoliths with warm gold-bronze bands
+      float bands = exp(-pow(sin(p.y * 3.4) * 3.5, 2.0));
+      baseCol = mix(vec3(0.055, 0.050, 0.058), vec3(0.48, 0.28, 0.11), bands * 0.8);
+      rough = 0.28;
+    } else if (mat > 10.5) {
+      // Rich sunlit desert canyon floor with winding reflective water/salt veins
+      float vein = smoothstep(0.45, 0.75, fbm2(p.xz * 0.35));
+      baseCol = mix(vec3(0.26, 0.14, 0.08), vec3(0.18, 0.14, 0.12), vein);
+      rough = mix(0.65, 0.09, vein);
+    } else {
+      // Rich layered red-ochre / terracotta sandstone mesas
+      float strata = fbm2(vec2(p.y * 2.1, p.x * 0.22 + p.z * 0.22));
+      float bandStr = sin(p.y * 4.5 + strata * 3.5) * 0.5 + 0.5;
+      baseCol = mix(vec3(0.28, 0.11, 0.055), vec3(0.58, 0.28, 0.12), bandStr * 0.65 + strata * 0.35);
+      baseCol = mix(baseCol, vec3(0.62, 0.42, 0.24), smoothstep(0.68, 0.94, n.y));
+    }
+
+    vec3 sunCol = vec3(1.65, 1.12, 0.64);
+    vec3 ambCol = mix(vec3(0.12, 0.08, 0.07), vec3(0.16, 0.24, 0.40), n.y * 0.5 + 0.5);
+    vec3 col = baseCol * (sunCol * diff * sh + ambCol * 0.82);
+
+    vec3 rDir = reflect(rd, n);
+    float fres = pow(1.0 - max(dot(n, -rd), 0.0), 4.0);
+    if (mat > 10.5 && mat < 11.5) {
+      col = mix(col, skyWorldB(rDir) * 0.72, (1.0 - rough) * (0.25 + 0.52 * fres));
+    } else {
+      float spec = pow(max(dot(rDir, SUN_B_DIR), 0.0), mix(14.0, 56.0, 1.0 - rough));
+      col += sunCol * spec * (0.09 + 0.42 * fres) * sh;
+    }
+
+    // Light warm aerial perspective so canyon depth & monoliths stay crisp
+    float fog = 1.0 - exp(-t * 0.011);
+    vec3 fogCol = mix(vec3(0.74, 0.46, 0.24), vec3(1.02, 0.68, 0.36), pow(max(dot(rd, SUN_B_DIR), 0.0), 3.0));
+    col = mix(col, fogCol, clamp(fog, 0.0, 0.68));
+    return col;
+  }
+  `;
+
+  // /*__GLSL_RENDER__*/
+  const SCENE_FS_RENDER = `
+  // =========================================================================
+  // WORLD A SKY, NORMALS, SHADOWS, AO, PBR MATERIALS & RAYMARCHING
+  // =========================================================================
+  const vec3 MOON_DIR = normalize(vec3(0.58, 0.36, 0.73));
+
+  vec3 skyWorldA(vec3 rd) {
+    float y = clamp(rd.y, 0.0, 1.0);
+    // Deep dramatic Icelandic blue-hour volcanic twilight sky
+    vec3 zenith = vec3(0.018, 0.036, 0.075);
+    vec3 midSky = vec3(0.052, 0.092, 0.165);
+    vec3 horiz  = vec3(0.145, 0.195, 0.275);
+    vec3 col = mix(horiz, midSky, smoothstep(0.0, 0.24, y));
+    col = mix(col, zenith, smoothstep(0.18, 0.78, y));
+
+    // Cool silver-blue moonlight break in clouds
+    float mDot = max(dot(rd, MOON_DIR), 0.0);
+    col += vec3(0.10, 0.16, 0.26) * pow(mDot, 6.0);
+    col += vec3(0.32, 0.40, 0.52) * pow(mDot, 64.0);
+
+    // Brooding storm clouds catching cool moonlight rims
+    if (rd.y > 0.005) {
+      vec2 cuv = rd.xz / (rd.y + 0.16) * 0.45 + vec2(uTime * 0.008, uTime * 0.004);
+      float c1 = fbm2(cuv * 2.1);
+      float c2 = fbm2(cuv * 4.8 - vec2(uTime * 0.012, 0.0));
+      float cloud = smoothstep(0.34, 0.76, c1 * 0.68 + c2 * 0.38);
+      float fade = smoothstep(0.005, 0.15, rd.y);
+      vec3 cloudDark = vec3(0.016, 0.025, 0.044);
+      vec3 cloudLit  = vec3(0.18, 0.25, 0.36);
+      vec3 cCol = mix(cloudDark, cloudLit, smoothstep(0.35, 0.85, c2) * (0.28 + 0.72 * pow(mDot, 2.0)));
+      col = mix(col, cCol, cloud * fade * 0.78);
+    }
+    return col;
+  }
+
+  vec3 calcNormalA(vec3 p, float t) {
+    float eps = max(0.0020, 0.0007 * t);
+    vec2 e = vec2(eps, 0.0);
+    return normalize(vec3(
+      mapWorldA(p + e.xyy).x - mapWorldA(p - e.xyy).x,
+      mapWorldA(p + e.yxy).x - mapWorldA(p - e.yxy).x,
+      mapWorldA(p + e.yyx).x - mapWorldA(p - e.yyx).x
+    ));
+  }
+
+  vec3 perturbNormal(vec3 p, vec3 n, float mat) {
+    if (mat > 3.5 && mat < 4.5) {
+      // Rainwater puddle: subtle energy-driven concentric ripples + highland breeze
+      float distP = length(p.xz);
+      float ripple = sin(distP * 15.0 - uTime * 2.8) * exp(-distP * 0.42) * 0.006;
+      float wind = (noise2(p.xz * 8.0 + vec2(uTime * 0.35, -uTime * 0.2)) - 0.5) * 0.004;
+      vec2 rad = normalize(p.xz + vec2(1e-4));
+      return normalize(n + vec3(rad.x * ripple * 2.2 + wind, 0.0, rad.y * ripple * 2.2 - wind));
+    }
+    if (mat > 1.5 && mat < 2.5) {
+      // Obsidian volcanic glass: pronounced conchoidal shell-fracture micro-facets
+      float e = 0.010;
+      float c0 = obsidianConchoidal(p);
+      vec3 g = vec3(
+        obsidianConchoidal(p + vec3(e, 0.0, 0.0)) - c0,
+        obsidianConchoidal(p + vec3(0.0, e, 0.0)) - c0,
+        obsidianConchoidal(p + vec3(0.0, 0.0, e)) - c0
+      ) / e;
+      return normalize(n - g * 0.65);
+    }
+    // Weathered basalt sharp fracture grain
+    float e = 0.016;
+    float b0 = fbm3(p * 7.2);
+    vec3 g = vec3(
+      fbm3((p + vec3(e, 0.0, 0.0)) * 7.2) - b0,
+      fbm3((p + vec3(0.0, e, 0.0)) * 7.2) - b0,
+      fbm3((p + vec3(0.0, 0.0, e)) * 7.2) - b0
+    ) / e;
+    return normalize(n - g * 0.085);
+  }
+
+  float calcAO(vec3 p, vec3 n) {
+    float occ = 0.0;
+    float sca = 1.0;
+    for (int i = 0; i < 5; i++) {
+      float h = 0.025 + 0.17 * float(i);
+      float d = mapWorldA(p + h * n).x;
+      occ += (h - d) * sca;
+      sca *= 0.72;
+    }
+    return clamp(1.0 - 2.15 * occ, 0.05, 1.0);
+  }
+
+  float calcSoftShadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
+    float res = 1.0;
+    float t = mint;
+    for (int i = 0; i < 20; i++) {
+      float h = mapWorldA(ro + rd * t).x;
+      if (h < 0.002) return 0.02;
+      res = min(res, k * h / t);
+      t += clamp(h, 0.04, 0.65);
+      if (t > maxt) break;
+    }
+    return clamp(res, 0.02, 1.0);
+  }
+
+  vec3 evalBRDF(vec3 n, vec3 v, vec3 l, vec3 albedo, float rough, float metallic, float f0Scale) {
+    vec3 h = normalize(v + l);
+    float ndl = max(dot(n, l), 0.0);
+    float ndv = max(dot(n, v), 0.001);
+    float ndh = max(dot(n, h), 0.0);
+    float vdh = max(dot(v, h), 0.0);
+
+    float a = max(rough * rough, 0.002);
+    float a2 = a * a;
+    float denom = ndh * ndh * (a2 - 1.0) + 1.0;
+    float D = a2 / (PI * denom * denom + 1e-5);
+
+    float k = (rough + 1.0);
+    k = (k * k) * 0.125;
+    float Gv = ndv / (ndv * (1.0 - k) + k);
+    float Gl = ndl / (ndl * (1.0 - k) + k);
+    float G = Gv * Gl;
+
+    vec3 F0 = mix(vec3(0.04 * f0Scale), albedo, metallic);
+    vec3 F = F0 + (1.0 - F0) * pow(1.0 - vdh, 5.0);
+
+    vec3 spec = (D * G * F) / (4.0 * ndv * ndl + 0.001);
+    vec3 kD = (1.0 - F) * (1.0 - metallic);
+    return (kD * albedo / PI + spec) * ndl;
+  }
+
+  // Secondary reflection trace for glossy obsidian & rainwater puddles
+  vec3 traceReflectionA(vec3 ro, vec3 rd) {
+    float t = 0.04;
+    vec3 prevP = ro;
+    for (int i = 0; i < 34; i++) {
+      vec3 p = ro + rd * t;
+      if (i > 0 && prevP.z * p.z <= 0.0 && abs(prevP.z - p.z) > 1e-5) {
+        float frac = abs(prevP.z) / (abs(prevP.z) + abs(p.z));
+        vec3 hitP = mix(prevP, p, frac);
+        float ap = sdPortalAperture2D(hitP.xy);
+        if (ap < 0.0) {
+          vec3 wB = skyWorldB(rd) * 1.1;
+          float rim = exp(-abs(ap) * 14.0);
+          wB += vec3(2.2, 1.15, 0.45) * rim;
+          return wB;
+        }
+      }
+      prevP = p;
+      vec2 h = mapWorldA(p);
+      if (h.x < 0.008) {
+        vec3 n = calcNormalA(p, t);
+        float rimGlow = exp(-abs(sdPortalAperture2D(p.xy)) * 2.8) * exp(-abs(p.z) * 1.8);
+        vec3 col = vec3(0.022, 0.028, 0.038) * (0.35 + 0.65 * max(n.y, 0.0));
+        col += vec3(1.1, 0.55, 0.22) * rimGlow * 0.65;
+        float fog = 1.0 - exp(-t * 0.022);
+        return mix(col, skyWorldA(rd), fog);
+      }
+      t += max(h.x, 0.06);
+      if (t > 28.0) break;
+    }
+    return skyWorldA(rd);
+  }
+
+  // Restrained, physically razor-thin portal event-horizon corona & Cherenkov shear
+  vec3 portalEdgeEnergy(vec3 hitP, float apHit, vec3 rd) {
+    vec2 q = hitP.xy - PORTAL_C.xy;
+    float ang = atan(q.y, q.x);
+    float rimDist = abs(apHit);
+
+    float swirl1 = fbm2(vec2(ang * 3.0 + uTime * 0.55, rimDist * 16.0 - uTime * 0.9));
+    float swirl2 = fbm2(vec2(ang * 7.0 - uTime * 0.42, rimDist * 26.0 + uTime * 0.6));
+    float filament = smoothstep(0.32, 0.85, swirl1 * 0.62 + swirl2 * 0.38);
+
+    // Ultra-thin incandescent shear line hugging the inner obsidian bevel
+    float core = exp(-rimDist * 48.0);
+    float innerHalo = exp(-rimDist * 16.0) * (0.35 + 0.65 * filament);
+    float shearCyan = exp(-pow((rimDist - 0.055) * 34.0, 2.0)) * (0.3 + 0.7 * swirl2);
+
+    vec3 col = vec3(2.4, 1.55, 0.78) * core * 0.95;
+    col += vec3(1.55, 0.72, 0.24) * innerHalo * 0.55;
+    col += vec3(0.35, 0.82, 1.35) * shearCyan * 0.42;
+    return col * uPortalAct;
+  }
+
+  vec3 shadeWorldA(vec3 p, vec3 rd, float t, float mat) {
+    vec3 nGeom = calcNormalA(p, t);
+    vec3 n = perturbNormal(p, nGeom, mat);
+    vec3 v = -rd;
+    float ao = calcAO(p, nGeom);
+
+    float rXZ = length(p.xz);
+    float ap = sdPortalAperture2D(p.xy);
+    float distToRim = length(vec2(max(ap, 0.0), p.z));
+
+    vec3 albedo = vec3(0.04, 0.045, 0.052);
+    float rough = 0.72;
+    float metallic = 0.0;
+    float f0Scale = 1.0;
+    float wetness = 0.0;
+    float mossMask = 0.0;
+
+    if (mat > 3.5 && mat < 4.5) {
+      // Material 4: Dark rainwater puddle mirror
+      albedo = vec3(0.012, 0.016, 0.022);
+      rough = 0.035;
+      f0Scale = 1.3;
+      wetness = 1.0;
+    } else if (mat > 4.5) {
+      // Material 5: Weathered dark bronze stone clamps
+      albedo = vec3(0.22, 0.16, 0.10);
+      rough = 0.32;
+      metallic = 0.88;
+    } else if (mat > 1.5 && mat < 2.5) {
+      // Material 2: Jet-black volcanic obsidian glass (sharp glassy speculars!)
+      float microVar = fbm3(p * 4.5);
+      albedo = mix(vec3(0.004, 0.005, 0.008), vec3(0.014, 0.016, 0.022), microVar);
+      rough = mix(0.045, 0.16, smoothstep(0.55, 0.90, microVar));
+      f0Scale = 1.65;
+    } else {
+      // Material 1 & 3: Dark volcanic Icelandic basalt (charcoal-slate with fine mineral sparkle)
+      float grain = fbm3(p * 4.2);
+      float macro = fbm3(p * 0.85);
+      float strata = fbm2(vec2(p.y * 2.5, atan(p.z, p.x) * 3.0));
+      vec3 darkBasalt = vec3(0.024, 0.028, 0.035);
+      vec3 midBasalt  = vec3(0.062, 0.068, 0.078);
+      vec3 weathered  = vec3(0.088, 0.086, 0.084);
+      albedo = mix(darkBasalt, midBasalt, grain * 0.72 + macro * 0.28);
+      albedo = mix(albedo, weathered, smoothstep(0.60, 0.90, strata) * 0.30);
+
+      // Deep crevice darkening & contact shadows
+      albedo *= mix(0.45, 1.0, ao);
+      rough = mix(0.54, 0.86, grain);
+
+      // Wet dark basalt collar around rainwater puddles
+      wetness = smoothstep(0.48, 0.21, p.y) * smoothstep(5.5, 3.5, rXZ);
+      albedo *= mix(1.0, 0.42, wetness);
+      rough = mix(rough, 0.14, wetness);
+
+      // Rich emerald-olive highland moss & pale sage lichen on upward-facing weathered ledges
+      float mossNoise = fbm3(p * 1.85 + vec3(2.4, 0.0, 5.1));
+      float upFace = smoothstep(0.52, 0.84, nGeom.y);
+      float awayFromPortal = smoothstep(0.48, 1.45, distToRim);
+      float aboveWater = smoothstep(0.24, 0.40, p.y);
+      mossMask = upFace * awayFromPortal * aboveWater * smoothstep(0.40, 0.65, mossNoise);
+
+      float lichenNoise = fbm3(p * 4.6 + vec3(9.1, 1.3, 3.7));
+      float lichenMask = smoothstep(0.40, 0.72, nGeom.y) * awayFromPortal * aboveWater
+                       * smoothstep(0.65, 0.82, lichenNoise) * (1.0 - mossMask);
+
+      vec3 mossCol = mix(vec3(0.035, 0.075, 0.024), vec3(0.095, 0.145, 0.042), fbm3(p * 8.5));
+      vec3 lichenCol = vec3(0.16, 0.19, 0.15);
+
+      albedo = mix(albedo, mossCol, mossMask * 0.90);
+      albedo = mix(albedo, lichenCol, lichenMask * 0.55);
+      rough = mix(rough, 0.94, mossMask * 0.82);
+    }
+
+    // 1. COOL HIGHLAND TWILIGHT / MOONLIGHT KEY
+    float shMoon = calcSoftShadow(p + nGeom * 0.03, MOON_DIR, 0.08, 18.0, 7.5);
+    vec3 moonCol = vec3(0.42, 0.60, 0.92) * 1.35;
+    vec3 col = evalBRDF(n, v, MOON_DIR, albedo, rough, metallic, f0Scale) * moonCol * shMoon;
+
+    // 2. HEMISPHERE AMBIENT TWILIGHT SKY + GROUND BOUNCE (strong contact AO)
+    vec3 skyAmb = mix(vec3(0.018, 0.025, 0.038), vec3(0.11, 0.17, 0.28), n.y * 0.5 + 0.5);
+    col += albedo * skyAmb * ao * 0.95;
+
+    // 3. FOCUSED WARM GOLDEN-AMBER PORTAL SPILL LIGHT (cast physically from World B!)
+    vec2 pClamped = PORTAL_C.xy + clamp(p.xy - PORTAL_C.xy, vec2(-1.25, -1.62), vec2(1.25, 1.62));
+    vec3 portalSrc = vec3(pClamped, 0.0);
+    vec3 toPortal = portalSrc - p;
+    float pDist = length(toPortal);
+    vec3 lPortal = toPortal / max(pDist, 0.001);
+
+    float axial = 0.25 + 0.75 * abs(lPortal.z);
+    // Tighter quadratic falloff so warm light dramatically kisses inner basalt & wet stone without washing outer piers
+    float atten = 1.0 / (1.0 + 0.28 * pDist + 0.24 * pDist * pDist);
+    float shPortal = (pDist > 0.26)
+      ? calcSoftShadow(p + nGeom * 0.035, lPortal, 0.08, max(0.1, pDist - 0.16), 5.5)
+      : 1.0;
+
+    float pulse = 0.96 + 0.04 * sin(uTime * 1.6 + pDist * 0.45);
+    vec3 portalLightCol = vec3(3.4, 1.72, 0.65) * atten * axial * pulse * uPortalAct;
+    col += evalBRDF(n, v, lPortal, albedo, rough, metallic, f0Scale) * portalLightCol * shPortal;
+
+    // Subtle warm bounced light only very close to the aperture rim
+    float rimProx = exp(-distToRim * 1.45);
+    col += albedo * vec3(0.42, 0.19, 0.06) * rimProx * ao * 0.45;
+
+    // Razor-thin thermal/refraction gleam right on the inner obsidian bevel edge
+    if (mat > 1.5 && mat < 2.5) {
+      float edgeHeat = exp(-max(ap, 0.0) * 28.0);
+      col += vec3(2.2, 1.05, 0.32) * edgeHeat * (0.28 + 0.72 * pow(1.0 - max(dot(n, v), 0.0), 2.5));
+    }
+
+    // 4. TRUE SPECULAR REFLECTIONS (Obsidian glass, Rainwater puddles, Wet basalt)
+    float fres = pow(1.0 - max(dot(n, v), 0.0), 5.0);
+    if ((mat > 1.5 && mat < 2.5) || (mat > 3.5 && mat < 4.5) || wetness > 0.25) {
+      vec3 rDir = reflect(rd, n);
+      vec3 reflCol = traceReflectionA(p + nGeom * 0.03, rDir);
+      float reflStrength = 0.0;
+      if (mat > 3.5 && mat < 4.5) {
+        reflStrength = mix(0.24, 0.95, fres);
+      } else if (mat > 1.5 && mat < 2.5) {
+        // Deep volcanic glass: glossy dark mirror catching sharp twilight sky & warm rim glints
+        reflStrength = mix(0.08, 0.88, fres) * (1.0 - rough * 0.85);
+      } else {
+        reflStrength = wetness * mix(0.05, 0.55, fres) * (1.0 - rough * 0.7);
+      }
+      col = mix(col, reflCol, clamp(reflStrength, 0.0, 0.94));
+    }
+
+    // 5. CRISP ATMOSPHERIC AERIAL PERSPECTIVE (keeps foreground crystal-clear, adds scale to distant caldera!)
+    float fog = 1.0 - exp(-max(t - 4.5, 0.0) * 0.015 - max(t - 10.0, 0.0) * max(t - 10.0, 0.0) * 0.00018);
+    float lowMist = exp(-max(p.y + 0.15, 0.0) * 0.65) * smoothstep(8.5, 24.0, t) * 0.34;
+    vec3 fogCol = mix(vec3(0.055, 0.085, 0.145), vec3(0.14, 0.13, 0.14), exp(-pDist * 0.16) * 0.35);
+    col = mix(col, fogCol, clamp(fog + lowMist, 0.0, 0.88));
+
+    return col;
+  }
+
+  // Restrained volumetric light shafts spilling from the portal aperture into cool highland mist
+  vec3 evalPortalVolumetrics(vec3 ro, vec3 rd, float maxT) {
+    float tEnd = min(maxT, 15.0);
+    if (tEnd < 0.3) return vec3(0.0);
+    vec3 accum = vec3(0.0);
+    const int STEPS = 14;
+    float dt = tEnd / float(STEPS);
+    float jitter = hash21(gl_FragCoord.xy + fract(uTime) * 61.3);
+    float t = dt * (0.2 + 0.8 * jitter);
+
+    for (int i = 0; i < STEPS; i++) {
+      vec3 p = ro + rd * t;
+      // Keep volumetric glow strictly outside the aperture plane so World B stays razor-sharp!
+      float zFade = smoothstep(0.12, 0.75, abs(p.z));
+      vec2 pClamped = PORTAL_C.xy + clamp(p.xy - PORTAL_C.xy, vec2(-1.25, -1.65), vec2(1.25, 1.65));
+      vec3 toP = vec3(pClamped, 0.0) - p;
+      float d = length(toP);
+      if (d < 6.8 && p.y > 0.05 && zFade > 0.01) {
+        vec3 lDir = toP / max(d, 0.001);
+        float beam = (0.18 + 0.82 * pow(abs(lDir.z), 2.2)) / (1.0 + 0.32 * d * d);
+        float cosTheta = dot(rd, lDir);
+        float phase = 0.20 + 0.80 * pow(max(cosTheta, 0.0), 4.0);
+        float mist = 0.45 + 0.55 * noise3(p * 0.65 + vec3(uTime * 0.14, -uTime * 0.06, uTime * 0.08));
+        float occ = smoothstep(-0.15, 0.35, mapWorldA(p + lDir * min(d * 0.5, 1.1)).x);
+        accum += vec3(1.35, 0.72, 0.28) * beam * phase * mist * occ * zFade * dt;
+      }
+      t += dt;
+    }
+    return accum * 0.036 * uPortalAct;
+  }
+
+  void main() {
+    vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+
+    vec3 ww = normalize(uCamTarget - uCamPos);
+    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));
+    vec3 vv = cross(uu, ww);
+    float focal = 0.5 / tan(radians(uFov) * 0.5);
+    vec3 rd = normalize(uu * uv.x + vv * uv.y + ww * focal);
+    vec3 ro = uCamPos;
+
+    float t = 0.0;
+    float maxT = 72.0;
+    float mat = -1.0;
+    vec3 p = ro;
+    vec3 curRd = rd;
+    vec3 prevP = ro;
+
+    bool hitPortal = false;
+    vec3 portalCol = vec3(0.0);
+    float portalT = maxT;
+    float edgeGlowAccum = 0.0;
+
+    for (int i = 0; i < 115; i++) {
+      prevP = p;
+      vec2 h = mapWorldA(p);
+
+      // Proximity to the portal boundary for gravitational lensing & spatial distortion
+      float ap = sdPortalAperture2D(p.xy);
+      float zProx = exp(-p.z * p.z * 1.15);
+      float rimProximity = exp(-abs(ap) * 2.8) * zProx;
+
+      // Gravitational / metric light bending around the portal boundary
+      if (rimProximity > 0.015) {
+        vec2 q = p.xy - PORTAL_C.xy;
+        vec2 radDir = normalize(q + vec2(1e-5));
+        float wave = 0.85 + 0.15 * sin(atan(q.y, q.x) * 5.0 - uTime * 1.8 + abs(p.z) * 4.5);
+        float bendAmt = 0.055 * rimProximity * wave * uPortalAct * smoothstep(0.0, 0.35, h.x);
+        curRd = normalize(curRd + vec3(radDir * (ap > 0.0 ? -bendAmt : bendAmt * 0.35), 0.0));
+        edgeGlowAccum += rimProximity * 0.008 * min(h.x, 0.22);
+      }
+
+      if (h.x < 0.0018 * t + 0.0012) {
+        mat = h.y;
+        break;
+      }
+
+      float stepD = h.x;
+      if (abs(p.z) < 1.25 && ap < 0.70) {
+        stepD = min(stepD, max(abs(p.z) * 0.52, 0.032));
+      } else {
+        stepD = min(stepD, 1.55);
+      }
+      stepD = max(stepD, 0.012);
+
+      p += curRd * stepD;
+      t += stepD;
+
+      // Exact bidirectional crossing of the z = 0 portal threshold plane
+      if (prevP.z * p.z <= 0.0 && abs(prevP.z - p.z) > 1e-5) {
+        float frac = abs(prevP.z) / (abs(prevP.z) + abs(p.z));
+        vec3 hitP = mix(prevP, p, frac);
+        float apHit = sdPortalAperture2D(hitP.xy);
+        if (apHit < 0.0) {
+          portalT = t - stepD * (1.0 - frac);
+          vec2 q = hitP.xy - PORTAL_C.xy;
+          vec2 radDir = normalize(q + vec2(1e-5));
+          float rimDist = abs(apHit);
+          // Einstein-ring edge refraction: razor-sharp center, visibly warped spatial lens at the boundary
+          float edgeRefract = exp(-rimDist * 6.5) * 0.26 * uPortalAct;
+          float ripple = sin(atan(q.y, q.x) * 6.0 + uTime * 1.5 - rimDist * 18.0) * 0.018 * exp(-rimDist * 4.0);
+          vec3 rdB = normalize(curRd - vec3(radDir * (edgeRefract + ripple), 0.0));
+
+          // Smooth continuous chromatic dispersion right at the lensing shear zone
+          vec3 worldB;
+          float disp = exp(-rimDist * 14.0) * 0.018;
+          if (disp > 0.0012) {
+            vec3 rdR = normalize(rdB - vec3(radDir * disp, 0.0));
+            vec3 rdBl = normalize(rdB + vec3(radDir * disp, 0.0));
+            worldB.r = renderWorldB(hitP, rdR).r;
+            worldB.g = renderWorldB(hitP, rdB).g;
+            worldB.b = renderWorldB(hitP, rdBl).b;
+          } else {
+            worldB = renderWorldB(hitP, rdB);
+          }
+
+          vec3 corona = portalEdgeEnergy(hitP, apHit, curRd);
+          // Subtle event-horizon glass bevel shadow right at the obsidian contact seam
+          float seamAO = smoothstep(0.0, 0.075, rimDist);
+          portalCol = worldB * mix(0.55, 1.0, seamAO) + corona;
+          hitPortal = true;
+          break;
+        }
+      }
+
+      if (t > maxT) break;
+    }
+
+    vec3 col;
+    float outT;
+    if (hitPortal) {
+      col = portalCol;
+      outT = portalT;
+    } else if (mat > 0.0) {
+      col = shadeWorldA(p, curRd, t, mat);
+      outT = t;
+    } else {
+      col = skyWorldA(curRd);
+      outT = maxT;
+    }
+
+    col += evalPortalVolumetrics(ro, rd, outT);
+    col += vec3(0.95, 0.52, 0.22) * min(edgeGlowAccum, 0.14) * uPortalAct;
+
+    outColor = vec4(col, 1.0);
+    float normDepth = clamp(outT / 80.0, 0.0, 1.0);
+    outDepth = vec4(normDepth, 0.0, 0.0, 1.0);
+  }
+  `;
+
+  // /*__PARTICLE_SHADERS__*/
+  const PARTICLE_VS = `#version 300 es
+  precision highp float;
+
+  uniform vec2 uRes;
+  uniform float uTime;
+  uniform vec3 uCamPos;
+  uniform vec3 uCamTarget;
+  uniform float uFov;
+
+  out vec2 vQuad;
+  out float vDepth;
+  out float vEnergy;
+  out float vSeed;
+
+  float hash11(float p) {
+    p = fract(p * 0.1031);
+    p *= p + 33.33;
+    p *= p + p;
+    return fract(p);
+  }
+
+  void main() {
+    float id = float(gl_InstanceID);
+    float s1 = hash11(id * 1.13 + 0.17);
+    float s2 = hash11(id * 2.71 + 0.53);
+    float s3 = hash11(id * 4.37 + 0.89);
+    float s4 = hash11(id * 7.19 + 0.31);
+    vSeed = s4;
+
+    // Two populations: 45% swirling near portal energy field, 55% drifting ambient highland dust
+    vec3 pos;
+    float energy = 0.0;
+    if (s1 < 0.45) {
+      // Spiral/orbital dust motes pulled into & around the portal boundary
+      float cycle = fract(s2 + uTime * (0.045 + s3 * 0.065));
+      float radius = mix(3.8, 1.32, pow(cycle, 0.85));
+      float ang = s4 * 6.283185 + uTime * (0.35 + 1.1 / max(radius, 0.8)) * (s3 > 0.5 ? 1.0 : -1.0);
+      float zSpread = (s3 - 0.5) * 4.8 * (1.0 - cycle * 0.72);
+      pos = vec3(
+        cos(ang) * radius * 0.92,
+        2.58 + sin(ang) * radius * 1.15,
+        zSpread
+      );
+      pos.y = max(pos.y, 0.35);
+      energy = smoothstep(3.6, 1.45, radius) * smoothstep(2.6, 0.25, abs(pos.z));
+    } else {
+      // Ambient volcanic dust drifting across the basalt sanctuary
+      float ang = s2 * 6.283185 + uTime * 0.03;
+      float r = 1.6 + sqrt(s3) * 9.5;
+      float y = 0.35 + fract(s4 + uTime * 0.018) * 6.2;
+      pos = vec3(
+        cos(ang) * r + sin(uTime * 0.35 + id) * 0.35,
+        y,
+        sin(ang) * r + cos(uTime * 0.28 + id * 1.7) * 0.35
+      );
+      float dPortal = length(pos - vec3(0.0, 2.58, 0.0));
+      energy = exp(-dPortal * 0.42);
+    }
+
+    vEnergy = energy;
+
+    // Camera basis matching the raymarcher exactly
+    vec3 ww = normalize(uCamTarget - uCamPos);
+    vec3 uu = normalize(cross(ww, vec3(0.0, 1.0, 0.0)));
+    vec3 vv = cross(uu, ww);
+    float focal = 0.5 / tan(radians(uFov) * 0.5);
+
+    vec3 rel = pos - uCamPos;
+    float vz = dot(rel, ww);
+    vDepth = vz;
+
+    if (vz < 0.25 || vz > 32.0) {
+      gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+      vQuad = vec2(0.0);
+      return;
+    }
+
+    float vx = dot(rel, uu);
+    float vy = dot(rel, vv);
+    float aspect = uRes.x / uRes.y;
+
+    vec2 ndcCenter = vec2((vx / vz) * focal * 2.0 / aspect, (vy / vz) * focal * 2.0);
+
+    // Quad corner from gl_VertexID (0..5)
+    vec2 corners[6] = vec2[6](
+      vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0),
+      vec2(-1.0,  1.0), vec2(1.0, -1.0), vec2( 1.0, 1.0)
+    );
+    vec2 q = corners[gl_VertexID];
+    vQuad = q;
+
+    float worldSize = mix(0.007, 0.017, s3) * (1.0 + energy * 0.35);
+    float ndcSizeY = (worldSize / vz) * focal * 2.0;
+    float ndcSizeX = ndcSizeY / aspect;
+
+    // Fine realistic airborne volcanic dust & micro-embers
+    float minPx = 1.4;
+    ndcSizeY = max(ndcSizeY, minPx * 2.0 / uRes.y);
+    ndcSizeX = max(ndcSizeX, minPx * 2.0 / uRes.x);
+
+    gl_Position = vec4(ndcCenter + vec2(q.x * ndcSizeX, q.y * ndcSizeY), 0.0, 1.0);
+  }`;
+
+  const PARTICLE_FS = `#version 300 es
+  precision highp float;
+
+  in vec2 vQuad;
+  in float vDepth;
+  in float vEnergy;
+  in float vSeed;
+
+  uniform vec2 uRes;
+  uniform sampler2D uDepthTex;
+
+  out vec4 outColor;
+
+  void main() {
+    float r2 = dot(vQuad, vQuad);
+    if (r2 > 1.0) discard;
+
+    vec2 uv = gl_FragCoord.xy / uRes;
+    float sceneDepth = texture(uDepthTex, uv).r * 80.0;
+    // Soft depth occlusion against raymarched ruins & portal plane
+    float vis = smoothstep(0.0, 0.25, sceneDepth - vDepth);
+    if (vis < 0.01) discard;
+
+    float soft = exp(-r2 * 6.8);
+    // Restrained volcanic ash drifting in twilight, warming to subtle amber motes near the portal
+    vec3 coolDust = vec3(0.32, 0.40, 0.52);
+    vec3 warmDust = vec3(2.15, 1.15, 0.48);
+    vec3 col = mix(coolDust, warmDust, clamp(vEnergy * 1.25, 0.0, 1.0));
+    float alpha = soft * vis * mix(0.06, 0.34, vEnergy) * (0.55 + 0.45 * vSeed);
+    outColor = vec4(col, alpha);
+  }`;
+
+  // /*__POST_SHADERS__*/
+  const BLOOM_EXTRACT_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUv;
+  out vec4 outColor;
+  uniform sampler2D uTex;
+  void main() {
+    vec3 c = texture(uTex, vUv).rgb;
+    float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+    float w = smoothstep(1.35, 3.2, lum);
+    outColor = vec4(c * w * 0.45, 1.0);
+  }`;
+
+  const BLOOM_BLUR_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUv;
+  out vec4 outColor;
+  uniform sampler2D uTex;
+  uniform vec2 uDir;
+  void main() {
+    vec2 px = uDir / vec2(textureSize(uTex, 0));
+    vec3 sum = texture(uTex, vUv).rgb * 0.227027;
+    sum += texture(uTex, vUv + px * 1.384615).rgb * 0.316216;
+    sum += texture(uTex, vUv - px * 1.384615).rgb * 0.316216;
+    sum += texture(uTex, vUv + px * 3.230769).rgb * 0.070270;
+    sum += texture(uTex, vUv - px * 3.230769).rgb * 0.070270;
+    outColor = vec4(sum, 1.0);
+  }`;
+
+  const COMPOSITE_FS = `#version 300 es
+  precision highp float;
+  in vec2 vUv;
+  out vec4 outColor;
+  uniform sampler2D uScene;
+  uniform sampler2D uBloom;
+  uniform float uTime;
+  uniform vec2 uRes;
+
+  vec3 acesFilm(vec3 x) {
+    const float a = 2.51;
+    const float b = 0.03;
+    const float c = 2.43;
+    const float d = 0.59;
+    const float e = 0.14;
+    return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+  }
+
+  float hash12(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
+  }
+
+  void main() {
+    vec2 centered = vUv - 0.5;
+    float r2 = dot(centered, centered);
+    // Subtle optical chromatic aberration toward frame corners
+    vec2 caOffset = centered * (0.0022 * r2);
+    float r = texture(uScene, vUv + caOffset).r;
+    float g = texture(uScene, vUv).g;
+    float b = texture(uScene, vUv - caOffset).b;
+    vec3 col = vec3(r, g, b);
+
+    vec3 bloom = texture(uBloom, vUv).rgb;
+    col += bloom * 0.34;
+
+    // Crisp cinema contrast & ACES Filmic tonemapping
+    col *= 1.12;
+    col = acesFilm(col);
+
+    // Subtle filmic split-tone: cool deep shadows, warm highlights
+    float luma = dot(col, vec3(0.2126, 0.7152, 0.0722));
+    col = mix(col, col * vec3(0.95, 0.98, 1.05), (1.0 - smoothstep(0.0, 0.35, luma)) * 0.16);
+
+    // Cinematic optical vignette
+    float vig = 1.0 - smoothstep(0.22, 0.98, r2 * 1.45);
+    col *= mix(0.68, 1.0, vig);
+
+    // Fine 35mm film grain
+    float grain = (hash12(gl_FragCoord.xy + fract(uTime) * 173.1) - 0.5) * 0.018;
+    col += grain;
+
+    col = pow(max(col, 0.0), vec3(1.0 / 2.2));
+    outColor = vec4(col, 1.0);
+  }`;
+
+  // =========================================================================
+  // WEBGL HELPERS
+  // =========================================================================
+  function compileShader(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      console.error('Shader compile error:\n', log);
+      throw new Error(log);
+    }
+    return sh;
+  }
+
+  function createProgram(vsSrc, fsSrc) {
+    const prog = gl.createProgram();
+    const vs = compileShader(gl.VERTEX_SHADER, vsSrc);
+    const fs = compileShader(gl.FRAGMENT_SHADER, fsSrc);
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      const log = gl.getProgramInfoLog(prog);
+      console.error('Program link error:\n', log);
+      throw new Error(log);
+    }
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+    return prog;
+  }
+
+  function makeTex(w, h, internalFormat, format, type, linear) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, format, type, null);
+    const filt = linear ? gl.LINEAR : gl.NEAREST;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  // =========================================================================
+  // CAMERA CONTROLLER (360° Orbit + Zoom + Touch Pinch + Auto-Glide Resume)
+  // =========================================================================
+  const cam = {
+    yaw: 0.30,
+    pitch: 0.09,
+    dist: 11.2,
+    targetYaw: 0.30,
+    targetPitch: 0.09,
+    targetDist: 11.2,
+    targetY: 2.72,
+    fov: 43.0,
+    minPitch: 0.02,
+    maxPitch: 0.88,
+    minDist: 3.1,
+    maxDist: 16.5,
+    dragging: false,
+    lastX: 0,
+    lastY: 0,
+    lastInputTime: -999,
+    autoResumeDelay: 3.5,
+    autoBlend: 1.0,
+    autoSpeed: 0.095,
+    glideTime: 0.0,
+    manualLock: false
+  };
+
+  let hudFaded = false;
+  function markUserInput() {
+    cam.lastInputTime = performance.now() * 0.001;
+    cam.autoBlend = 0.0;
+    if (!hudFaded) {
+      hudFaded = true;
+      hud.classList.add('faded');
+    }
+  }
+
+  setTimeout(() => {
+    if (!hudFaded) {
+      hudFaded = true;
+      hud.classList.add('faded');
+    }
+  }, 6000);
+
+  // Pointer / Mouse events
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'touch') return;
+    cam.dragging = true;
+    cam.lastX = e.clientX;
+    cam.lastY = e.clientY;
+    canvas.classList.add('dragging');
+    canvas.setPointerCapture(e.pointerId);
+    markUserInput();
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'touch' || !cam.dragging) return;
+    const dx = e.clientX - cam.lastX;
+    const dy = e.clientY - cam.lastY;
+    cam.lastX = e.clientX;
+    cam.lastY = e.clientY;
+    cam.targetYaw -= dx * 0.0062;
+    cam.targetPitch = Math.max(cam.minPitch, Math.min(cam.maxPitch, cam.targetPitch + dy * 0.0048));
+    markUserInput();
+  });
+
+  function endPointer(e) {
+    if (e.pointerType === 'touch') return;
+    cam.dragging = false;
+    canvas.classList.remove('dragging');
+  }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const delta = Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 120) * 0.011;
+    cam.targetDist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.targetDist * (1.0 + delta * 0.14)));
+    markUserInput();
+  }, { passive: false });
+
+  // Touch events (1-finger orbit, 2-finger pinch zoom)
+  let touchMode = 'none';
+  let lastPinchDist = 0;
+  let lastTouchX = 0;
+  let lastTouchY = 0;
+
+  function getTouchDist(t0, t1) {
+    return Math.hypot(t1.clientX - t0.clientX, t1.clientY - t0.clientY);
+  }
+
+  canvas.addEventListener('touchstart', (e) => {
+    e.preventDefault();
+    if (e.touches.length === 1) {
+      touchMode = 'orbit';
+      lastTouchX = e.touches[0].clientX;
+      lastTouchY = e.touches[0].clientY;
+    } else if (e.touches.length >= 2) {
+      touchMode = 'pinch';
+      lastPinchDist = getTouchDist(e.touches[0], e.touches[1]);
+    }
+    markUserInput();
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    e.preventDefault();
+    if (touchMode === 'orbit' && e.touches.length === 1) {
+      const dx = e.touches[0].clientX - lastTouchX;
+      const dy = e.touches[0].clientY - lastTouchY;
+      lastTouchX = e.touches[0].clientX;
+      lastTouchY = e.touches[0].clientY;
+      cam.targetYaw -= dx * 0.0072;
+      cam.targetPitch = Math.max(cam.minPitch, Math.min(cam.maxPitch, cam.targetPitch + dy * 0.0056));
+      markUserInput();
+    } else if (e.touches.length >= 2) {
+      const d = getTouchDist(e.touches[0], e.touches[1]);
+      if (lastPinchDist > 0) {
+        const scale = lastPinchDist / Math.max(d, 10);
+        cam.targetDist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.targetDist * scale));
+      }
+      lastPinchDist = d;
+      touchMode = 'pinch';
+      markUserInput();
+    }
+  }, { passive: false });
+
+  canvas.addEventListener('touchend', (e) => {
+    if (e.touches.length === 1) {
+      touchMode = 'orbit';
+      lastTouchX = e.touches[0].clientX;
+      lastTouchY = e.touches[0].clientY;
+    } else if (e.touches.length === 0) {
+      touchMode = 'none';
+      lastPinchDist = 0;
+    }
+  });
+
+  // Expose deterministic inspection API for visual verification
+  window.__PORTAL_CAM = {
+    set(opts) {
+      if (opts.yaw !== undefined) { cam.yaw = cam.targetYaw = opts.yaw; }
+      if (opts.pitch !== undefined) { cam.pitch = cam.targetPitch = opts.pitch; }
+      if (opts.dist !== undefined) { cam.dist = cam.targetDist = opts.dist; }
+      if (opts.targetY !== undefined) { cam.targetY = opts.targetY; }
+      if (opts.fov !== undefined) { cam.fov = opts.fov; }
+      if (opts.lock !== undefined) { cam.manualLock = !!opts.lock; }
+    },
+    get() {
+      return {
+        yaw: cam.yaw,
+        pitch: cam.pitch,
+        dist: cam.dist,
+        autoBlend: cam.autoBlend,
+        dragging: cam.dragging
+      };
+    }
+  };
+
+  // Optional URL hash camera override for deterministic multi-angle inspection (#cam=yaw,pitch,dist,targetY)
+  if (location.hash && location.hash.startsWith('#cam=')) {
+    const parts = location.hash.slice(5).split(',').map(Number);
+    if (parts.length >= 3 && parts.every(Number.isFinite)) {
+      window.__PORTAL_CAM.set({
+        yaw: parts[0],
+        pitch: parts[1],
+        dist: parts[2],
+        targetY: parts[3] !== undefined ? parts[3] : 2.35,
+        lock: true
+      });
+    }
+  }
+
+  // =========================================================================
+  // PIPELINE INITIALIZATION
+  // =========================================================================
+  let sceneProg, particleProg, bloomExtractProg, bloomBlurProg, compositeProg;
+  let rtWidth = 1, rtHeight = 1, bloomW = 1, bloomH = 1;
+  let sceneFBO, particleFBO, sceneColorTex, sceneDepthTex;
+  let bloomFBO0, bloomTex0, bloomFBO1, bloomTex1;
+  let emptyVAO;
+  const PARTICLE_COUNT = 420;
+
+  function initPipeline() {
+    const fullSceneFS = SCENE_FS_HEADER + '\n' + SCENE_FS_COMMON + '\n' + SCENE_FS_WORLDS + '\n' + SCENE_FS_RENDER;
+    sceneProg = createProgram(FULLSCREEN_VS, fullSceneFS);
+    particleProg = createProgram(PARTICLE_VS, PARTICLE_FS);
+    bloomExtractProg = createProgram(FULLSCREEN_VS, BLOOM_EXTRACT_FS);
+    bloomBlurProg = createProgram(FULLSCREEN_VS, BLOOM_BLUR_FS);
+    compositeProg = createProgram(FULLSCREEN_VS, COMPOSITE_FS);
+
+    emptyVAO = gl.createVertexArray();
+    resize();
+  }
+
+  function destroyRTs() {
+    [sceneFBO, particleFBO, bloomFBO0, bloomFBO1].forEach(f => f && gl.deleteFramebuffer(f));
+    [sceneColorTex, sceneDepthTex, bloomTex0, bloomTex1].forEach(t => t && gl.deleteTexture(t));
+  }
+
+  function resize() {
+    const isMobile = window.innerWidth <= 768;
+    const dpr = Math.min(window.devicePixelRatio || 1, isMobile ? 1.25 : 1.5);
+    const cssW = window.innerWidth;
+    const cssH = window.innerHeight;
+    const w = Math.max(320, Math.floor(cssW * dpr));
+    const h = Math.max(240, Math.floor(cssH * dpr));
+    if (w === rtWidth && h === rtHeight && sceneFBO) return;
+
+    canvas.width = w;
+    canvas.height = h;
+    rtWidth = w;
+    rtHeight = h;
+    bloomW = Math.max(128, w >> 2);
+    bloomH = Math.max(128, h >> 2);
+
+    destroyRTs();
+
+    const linearFloat = useFloatRT ? !!extLinear : true;
+    sceneColorTex = makeTex(rtWidth, rtHeight, HDR_INTERNAL, gl.RGBA, HDR_TYPE, linearFloat);
+    sceneDepthTex = makeTex(rtWidth, rtHeight, DEPTH_INTERNAL, DEPTH_FORMAT, DEPTH_TYPE, false);
+
+    sceneFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneColorTex, 0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT1, gl.TEXTURE_2D, sceneDepthTex, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+
+    // Dedicated FBO with only sceneColorTex attached so particle pass can safely sample sceneDepthTex
+    particleFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, particleFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, sceneColorTex, 0);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+
+    bloomTex0 = makeTex(bloomW, bloomH, HDR_INTERNAL, gl.RGBA, HDR_TYPE, linearFloat);
+    bloomFBO0 = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBO0);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloomTex0, 0);
+
+    bloomTex1 = makeTex(bloomW, bloomH, HDR_INTERNAL, gl.RGBA, HDR_TYPE, linearFloat);
+    bloomFBO1 = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBO1);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, bloomTex1, 0);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  }
+
+  window.addEventListener('resize', resize);
+
+  // =========================================================================
+  // RENDER LOOP
+  // =========================================================================
+  let startTime = performance.now() * 0.001;
+  let lastFrameTime = startTime;
+
+  function computeCamera(now, dt) {
+    const idleTime = now - cam.lastInputTime;
+    if (!cam.manualLock && !cam.dragging && touchMode === 'none') {
+      if (idleTime > cam.autoResumeDelay) {
+        cam.autoBlend = Math.min(1.0, cam.autoBlend + dt * 0.45);
+      }
+      if (cam.autoBlend > 0.001) {
+        const ease = cam.autoBlend * cam.autoBlend * (3.0 - 2.0 * cam.autoBlend);
+        cam.glideTime += dt * ease;
+        cam.targetYaw += cam.autoSpeed * dt * ease;
+        const gentlePitch = 0.11 + 0.055 * Math.sin(cam.glideTime * 0.27);
+        cam.targetPitch += (gentlePitch - cam.targetPitch) * Math.min(1.0, dt * 0.35 * ease);
+      }
+    }
+
+    const damp = 1.0 - Math.exp(-dt * 8.5);
+    cam.yaw += (cam.targetYaw - cam.yaw) * damp;
+    cam.pitch += (cam.targetPitch - cam.pitch) * damp;
+    cam.dist += (cam.targetDist - cam.dist) * damp;
+
+    const cp = Math.cos(cam.pitch);
+    const sp = Math.sin(cam.pitch);
+    const sy = Math.sin(cam.yaw);
+    const cy = Math.cos(cam.yaw);
+
+    const pos = [
+      sy * cp * cam.dist,
+      Math.max(0.55, cam.targetY + sp * cam.dist),
+      cy * cp * cam.dist
+    ];
+    const target = [0.0, cam.targetY, 0.0];
+    return { pos, target };
+  }
+
+  function render() {
+    const now = performance.now() * 0.001;
+    const dt = Math.min(0.05, Math.max(0.001, now - lastFrameTime));
+    lastFrameTime = now;
+    const t = now - startTime;
+
+    const { pos, target } = computeCamera(now, dt);
+    const portalAct = 1.0;
+    // Responsive vertical FOV for portrait/mobile viewports so the full monument stays framed
+    const aspect = rtWidth / Math.max(rtHeight, 1);
+    const effectiveFov = aspect < 1.0 ? Math.min(72.0, cam.fov / Math.pow(aspect, 0.44)) : cam.fov;
+
+    gl.bindVertexArray(emptyVAO);
+
+    // 1. Main raymarched HDR scene + linear depth
+    gl.bindFramebuffer(gl.FRAMEBUFFER, sceneFBO);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0, gl.COLOR_ATTACHMENT1]);
+    gl.viewport(0, 0, rtWidth, rtHeight);
+    gl.disable(gl.BLEND);
+    gl.useProgram(sceneProg);
+    gl.uniform2f(gl.getUniformLocation(sceneProg, 'uRes'), rtWidth, rtHeight);
+    gl.uniform1f(gl.getUniformLocation(sceneProg, 'uTime'), t);
+    gl.uniform3fv(gl.getUniformLocation(sceneProg, 'uCamPos'), pos);
+    gl.uniform3fv(gl.getUniformLocation(sceneProg, 'uCamTarget'), target);
+    gl.uniform1f(gl.getUniformLocation(sceneProg, 'uFov'), effectiveFov);
+    gl.uniform1f(gl.getUniformLocation(sceneProg, 'uPortalAct'), portalAct);
+    gl.uniform1f(gl.getUniformLocation(sceneProg, 'uUseFloat'), useFloatRT ? 1.0 : 0.0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // 2. 3D energy-reactive dust & ember particles (bound to particleFBO to avoid depth feedback loop)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, particleFBO);
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.SRC_ALPHA, gl.ONE);
+    gl.useProgram(particleProg);
+    gl.uniform2f(gl.getUniformLocation(particleProg, 'uRes'), rtWidth, rtHeight);
+    gl.uniform1f(gl.getUniformLocation(particleProg, 'uTime'), t);
+    gl.uniform3fv(gl.getUniformLocation(particleProg, 'uCamPos'), pos);
+    gl.uniform3fv(gl.getUniformLocation(particleProg, 'uCamTarget'), target);
+    gl.uniform1f(gl.getUniformLocation(particleProg, 'uFov'), effectiveFov);
+    gl.uniform1f(gl.getUniformLocation(particleProg, 'uUseFloat'), useFloatRT ? 1.0 : 0.0);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneDepthTex);
+    gl.uniform1i(gl.getUniformLocation(particleProg, 'uDepthTex'), 0);
+    gl.drawArraysInstanced(gl.TRIANGLES, 0, 6, PARTICLE_COUNT);
+    gl.disable(gl.BLEND);
+
+    // 3. Bloom extract
+    gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBO0);
+    gl.viewport(0, 0, bloomW, bloomH);
+    gl.useProgram(bloomExtractProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneColorTex);
+    gl.uniform1i(gl.getUniformLocation(bloomExtractProg, 'uTex'), 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // 4. Separable Kawase/Gaussian bloom blur (2 passes)
+    gl.useProgram(bloomBlurProg);
+    gl.uniform1i(gl.getUniformLocation(bloomBlurProg, 'uTex'), 0);
+    for (let i = 0; i < 2; i++) {
+      const spread = 1.0 + i * 1.4;
+      gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBO1);
+      gl.bindTexture(gl.TEXTURE_2D, bloomTex0);
+      gl.uniform2f(gl.getUniformLocation(bloomBlurProg, 'uDir'), spread, 0.0);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+      gl.bindFramebuffer(gl.FRAMEBUFFER, bloomFBO0);
+      gl.bindTexture(gl.TEXTURE_2D, bloomTex1);
+      gl.uniform2f(gl.getUniformLocation(bloomBlurProg, 'uDir'), 0.0, spread);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+
+    // 5. Final ACES filmic composite
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, rtWidth, rtHeight);
+    gl.useProgram(compositeProg);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, sceneColorTex);
+    gl.uniform1i(gl.getUniformLocation(compositeProg, 'uScene'), 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, bloomTex0);
+    gl.uniform1i(gl.getUniformLocation(compositeProg, 'uBloom'), 1);
+    gl.uniform1f(gl.getUniformLocation(compositeProg, 'uTime'), t);
+    gl.uniform2f(gl.getUniformLocation(compositeProg, 'uRes'), rtWidth, rtHeight);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    requestAnimationFrame(render);
+  }
+
+  try {
+    initPipeline();
+    requestAnimationFrame(render);
+  } catch (err) {
+    fallback.style.display = 'flex';
+    fallback.textContent = 'WebGL2 initialization failed: ' + err.message;
+  }
+})();
+</script>
+</body>
+</html>

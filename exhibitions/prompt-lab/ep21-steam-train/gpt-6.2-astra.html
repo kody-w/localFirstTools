@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Northlight Express</title>
+<style>
+*{box-sizing:border-box}html,body{margin:0;height:100%;overflow:hidden;background:#29393f;color:ivory;font:14px system-ui}canvas{display:block;width:100%;height:100%;touch-action:none;cursor:grab}canvas:active{cursor:grabbing}#status{position:absolute;inset:45% 1rem auto;text-align:center}#hint{position:absolute;bottom:1.2rem;right:1.4rem;pointer-events:none;color:white;text-shadow:0 1px 5px #18242a;font-size:12px;opacity:0;animation:hint 7s both}@keyframes hint{0%,55%{opacity:.9}100%{opacity:0}} 
+</style></head><body><canvas aria-label="Animated winter steam railway. Drag to orbit, scroll to zoom, space to pause." tabindex="0"></canvas><div id="status" role="status">Preparing the railway...</div><div id="hint">Drag to orbit &nbsp;/&nbsp; Scroll to zoom &nbsp;/&nbsp; Space to pause</div>
+<script type="module">
+const status=document.querySelector('#status');
+try{
+const T=await import('https://cdn.jsdelivr.net/npm/three@0.160.1/build/three.module.js');
+const canvas=document.querySelector('canvas'),renderer=new T.WebGLRenderer({canvas,antialias:true,powerPreference:'high-performance'});
+renderer.setPixelRatio(Math.min(devicePixelRatio,1.7));renderer.toneMapping=T.ACESFilmicToneMapping;renderer.toneMappingExposure=1.1;
+const scene=new T.Scene(),camera=new T.PerspectiveCamera(36,1,.12,520),tau=2*Math.PI;
+scene.fog=new T.FogExp2(0xe4cdb9,.0095);
+let seed=756;function rand(){seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296}
+const V=(x,y,z)=>new T.Vector3(x,y,z),mat=(c,metalness=0,roughness=.72)=>new T.MeshStandardMaterial({color:c,metalness,roughness});
+const grp=(p=scene)=>{const g=new T.Group();p.add(g);return g};
+function mesh(p,g,m,x=0,y=0,z=0){const o=new T.Mesh(g,m);p.add(o);o.position.set(x,y,z);return o}
+const cube=new T.BoxGeometry(1,1,1);
+function box(p,m,x,y,z,w,h,d){const o=mesh(p,cube,m,x,y,z);o.scale.set(w,h,d);return o}
+function cyl(p,m,x,y,z,rt,rb,h,axis='y',n=32){const o=mesh(p,new T.CylinderGeometry(rt,rb,h,n),m,x,y,z);if(axis==='x')o.rotation.z=-Math.PI/2;if(axis==='z')o.rotation.x=Math.PI/2;return o}
+function ball(p,m,x,y,z,a,b,c){const o=mesh(p,new T.SphereGeometry(1,20,12),m,x,y,z);o.scale.set(a,b,c);return o}
+function bar(p,m,a,b,r){const v=b.clone().sub(a),o=cyl(p,m,0,0,0,r,r,v.length(),'y',8);o.position.copy(a).lerp(b,.5);o.quaternion.setFromUnitVectors(V(0,1,0),v.normalize());return o}
+// Consolidate rigid parts in local space, retaining separate moving assemblies.
+function batch(p){const bags=new Map();
+ for(const o of [...p.children]){if(!o.isMesh||Array.isArray(o.material))continue;o.updateMatrix();const g=o.geometry.index?o.geometry.toNonIndexed():o.geometry.clone();g.applyMatrix4(o.matrix);
+ let b=bags.get(o.material);if(!b)bags.set(o.material,b={position:[],normal:[],uv:[]});for(const k in b){const a=g.attributes[k];if(a)for(const v of a.array)b[k].push(v)}p.remove(o);g.dispose()}
+ for(const [m,b] of bags){const g=new T.BufferGeometry();for(const k in b)if(b[k].length)g.setAttribute(k,new T.Float32BufferAttribute(b[k],k==='uv'?2:3));mesh(p,g,m)}}
+function texture(w,h,draw){const c=document.createElement('canvas');c.width=w;c.height=h;draw(c.getContext('2d'),w,h);const tex=new T.CanvasTexture(c);tex.colorSpace=T.SRGBColorSpace;tex.anisotropy=Math.min(8,renderer.capabilities.getMaxAnisotropy());return tex}
+const sunDir=V(-.60,.19,-1).normalize();
+const sky=mesh(scene,new T.SphereGeometry(390,40,28),new T.ShaderMaterial({side:T.BackSide,depthWrite:false,uniforms:{sun:{value:sunDir}},vertexShader:`varying vec3 dir;void main(){dir=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}`,fragmentShader:`varying vec3 dir;uniform vec3 sun;
+ float hash(vec2 p){return fract(sin(dot(p,vec2(127.1,311.7)))*43758.5453);}
+ float noise(vec2 p){vec2 i=floor(p),f=fract(p);f=f*f*(3.-2.*f);return mix(mix(hash(i),hash(i+vec2(1,0)),f.x),mix(hash(i+vec2(0,1)),hash(i+1.),f.x),f.y);}
+ void main(){vec3 d=normalize(dir);float h=max(d.y,0.),a=max(dot(d,sun),0.);vec3 c=mix(vec3(.84,.72,.69),vec3(.17,.37,.53),smoothstep(.0,.68,h));vec2 uv=d.xz/max(.055,h)*vec2(2.,5.);
+ float cloud=noise(uv)*.57+noise(uv*2.7)*.29+noise(uv*7.1)*.14;c=mix(c,vec3(.93,.80,.71),smoothstep(.47,.78,cloud)*.48*smoothstep(.01,.18,h));c+=vec3(.58,.26,.055)*pow(a,9.)+vec3(1.,.51,.18)*pow(a,180.);c=mix(c,vec3(4.,2.8,1.4),smoothstep(.99971,.99985,a));gl_FragColor=vec4(c,1.);
+ #include <tonemapping_fragment>
+ #include <colorspace_fragment>
+ }`}));
+scene.add(new T.HemisphereLight(0xffe6d5,0xa9bbc8,1.85));
+const light=new T.DirectionalLight(0xffcd8d,3.8);light.position.copy(sunDir).multiplyScalar(100);scene.add(light);
+const fill=new T.DirectionalLight(0xdce9ff,1.15);fill.position.set(6,15,12);scene.add(fill);
+const snow=mat(0xe4e9e9),iron=mat(0x1a2327,.53,.35),black=mat(0x11191c,.35,.47),red=mat(0x983728,.44,.38),steel=mat(0x94a2a3,.67,.32),gold=mat(0xcc9b56,.56,.34),coal=mat(0x202426),wood=mat(0x814729);
+const lamp=new T.MeshBasicMaterial({color:new T.Color(2.6,1.55,.47)});
+const span=14,L=span*8,tile=grp(),stoneTex=texture(512,512,(c,w,h)=>{
+ c.fillStyle='#565754';c.fillRect(0,0,w,h);
+ for(let row=0;row<16;row++)for(let j=-1;j<9;j++){let x=j*64+(row%2)*32,y=row*32,q=Math.floor(rand()*24);c.fillStyle=`rgb(${120+q},${116+q},${109+q})`;c.fillRect(x+1,y+1,62,30);c.fillStyle='#aaa49a';c.fillRect(x+2,y+2,60,1)}
+ for(let i=0;i<50000;i++){c.fillStyle=rand()<.52?'rgba(246,239,216,.10)':'rgba(48,52,55,.12)';c.fillRect(rand()*512,rand()*512,1+rand()*4,2)}
+});stoneTex.wrapS=stoneTex.wrapT=T.RepeatWrapping;
+const masonry=mat(0xc5c1bb);masonry.map=stoneTex;masonry.bumpMap=stoneTex;masonry.bumpScale=.075;
+const trim=Array.from({length:5},(_,i)=>mat(new T.Color().setRGB(.31+i*.023,.30+i*.022,.27+i*.021)));
+function extrude(p,shape,depth,m,x,z,stone=false){const g=new T.ExtrudeGeometry(shape,{depth,bevelEnabled:false,curveSegments:26});
+ if(stone){const pos=g.attributes.position,n=g.attributes.normal,u=g.attributes.uv;for(let i=0;i<pos.count;i++)u.setXY(i,(Math.abs(n.getZ(i))>.5?pos.getX(i):pos.getZ(i))/8,pos.getY(i)/8)}
+ return mesh(p,g,m,x,0,z)}
+for(let i=0;i<8;i++){
+ const x=i*span-L/2+span/2,r=5.75,sy=-10.1,s=new T.Shape();s.moveTo(-7,-28);s.lineTo(-r,-28);s.lineTo(-r,sy);s.absarc(0,sy,r,Math.PI,0,true);s.lineTo(r,-28);s.lineTo(7,-28);s.lineTo(7,-.85);s.lineTo(-7,-.85);s.closePath();extrude(tile,s,4.7,masonry,x,-2.35,true);
+ for(let j=0;j<21;j++){const a=j*Math.PI/21+.002,b=(j+1)*Math.PI/21-.002,k=new T.Shape();k.absarc(0,sy,r+.81,a,b,false);k.absarc(0,sy,r,b,a,true);k.closePath();for(const z of [-2.46,2.34])extrude(tile,k,.12,trim[Math.floor(rand()*5)],x,z)}
+ for(const side of [-1,1]){box(tile,trim[1],x,-1.47,2.38*side,14,.32,.28);box(tile,snow,x,-1.27,2.4*side,14,.09,.38);box(tile,trim[3],x-7,sy,2.35*side,2.72,.47,.47)}
+ box(tile,snow,x,-.74,0,14,.28,4.93);for(let j=0;j<20;j++)box(tile,coal,x-6.65+j*.7,-.52,0,.24,.14,2.34);
+ for(const z of [-.88,.88]){box(tile,iron,x,-.28,z,14,.37,.11);box(tile,steel,x,-.05,z,14,.1,.16)}
+}
+function terrain(x,z){const a=x*tau/L;
+ return -22+2*Math.sin(a+z*.074)+1.2*Math.sin(a*3-z*.12)+Math.min(11,Math.abs(z)*.13)+Math.max(0,Math.abs(z)-38)*.17*(1+.62*Math.sin(a*.999999+z*.027))}
+const ground=new T.PlaneGeometry(L,230,80,95);ground.rotateX(-Math.PI/2);const gp=ground.attributes.position;
+for(let i=0;i<gp.count;i++)gp.setY(i,terrain(gp.getX(i),gp.getZ(i)));ground.computeVertexNormals();mesh(tile,ground,snow);
+batch(tile);
+// Each spruce is built from whorls of pointed boughs, with separate sunlit snow faces.
+function spruce(){const pos=[],col=[],tri=(a,b,c,color)=>{pos.push(...a,...b,...c);col.push(...color,...color,...color)};
+ for(let k=0;k<13;k++){let y=.08+k*.067,rad=.255*(1-y)**.74,count=10+(k%3),spin=rand()*tau;
+ for(let b=0;b<count;b++){let a=spin+b*tau/count,R=rad*(.74+.4*rand()),w=.25+rand()*.16;
+ const pt=(r,ang,h)=>[Math.cos(ang)*r,h,Math.sin(ang)*r],root=pt(.02,a,y+.135),l=pt(R*.72,a-w,y+.008),r=pt(R*.72,a+w,y),tip=pt(R,a,y-.038-rand()*.037),ridge=pt(R*.61,a,y+.05),under=pt(.015,a,y-.055),f=.68+rand()*.32;
+ const white=[.61*f,.74*f,.76*f],shade=[.28*f,.40*f,.42*f],pine=[.034*f,.089*f,.088*f];
+ tri(root,l,ridge,white);tri(root,ridge,r,white);tri(l,tip,ridge,shade);tri(ridge,tip,r,white);tri(under,tip,l,pine);tri(under,r,tip,pine);
+ }}
+ const g=new T.BufferGeometry();g.setAttribute('position',new T.Float32BufferAttribute(pos,3));g.setAttribute('color',new T.Float32BufferAttribute(col,3));g.computeVertexNormals();return g}
+const needle=new T.MeshStandardMaterial({vertexColors:true,side:T.DoubleSide,roughness:.95});
+for(let k=0;k<3;k++){const count=106,o=new T.InstancedMesh(spruce(),needle,count),dummy=new T.Object3D();
+ for(let i=0;i<count;i++){const x=(rand()-.5)*L,z=(rand()-.5)*210,h=4+rand()*9;
+ dummy.position.set(x,terrain(x,z)-.13,z);dummy.scale.setScalar(h);dummy.rotation.y=rand()*tau;dummy.updateMatrix();o.setMatrixAt(i,dummy.matrix)}tile.add(o)}
+const tiles=[tile];for(const k of [-2,-1,1,2]){const g=tile.clone();g.position.x=k*L;scene.add(g);tiles.push(g)}
+// Serrated, snow-cut ridgelines beyond the wooded valley.
+for(const side of [-1,1]){const g=new T.PlaneGeometry(650,88,276,24);g.rotateX(-Math.PI/2);const p=g.attributes.position,cols=[];
+ for(let i=0;i<p.count;i++){const x=p.getX(i),z=p.getZ(i),t=(z*side+44)/88;
+ const ridge=30+9*Math.sin(x*.038)+8*Math.cos(x*.071)+5*Math.abs(Math.sin(x*.15))+3*Math.sin(x*.47);
+ const folded=6*Math.sin(x*.12+z*.11)+3*Math.sin(x*.38-z*.18);
+ const h=-10+Math.sin(t*Math.PI*.85)*(ridge+folded);p.setY(i,h);p.setZ(i,z+side*153);
+ const c=new T.Color(h>ridge*.56+folded*.75?0xe9e4dd:0x747f85);c.multiplyScalar(.85+.15*Math.sin(x*.45+z*.21));cols.push(c.r,c.g,c.b)}
+ g.setAttribute('color',new T.Float32BufferAttribute(cols,3));g.computeVertexNormals();mesh(scene,g,new T.MeshStandardMaterial({vertexColors:true,flatShading:true,side:T.DoubleSide}))}
+const engine=grp(),wheels=[],links=[],R=L/(tau*20);
+function sign(p,text,x,y,z,w,h,bg,fg){
+ const t=texture(512,128,(c)=>{c.fillStyle=bg;c.fillRect(0,0,512,128);c.strokeStyle=fg;c.lineWidth=3;c.strokeRect(5,5,502,118);c.fillStyle=fg;c.font='bold 76px Georgia';c.textAlign='center';c.textBaseline='middle';c.fillText(text,256,68,470)});
+ const m=new T.MeshStandardMaterial({map:t,roughness:.5}),o=mesh(p,new T.PlaneGeometry(w,h),m,x,y,z);if(z<0)o.rotation.y=Math.PI}
+function wheel(p,x,r,side,drive=false){const w=grp(p),z=.89*side;w.position.set(x,r,z);
+ const tire=mesh(w,new T.TorusGeometry(r*.899,r*.10,8,36),steel);tire.scale.z=1.1;
+ mesh(w,new T.TorusGeometry(r*.83,r*.095,7,32),drive?red:iron);
+ for(let i=0;i<8;i++)box(w,drive?red:iron,0,0,0,r*.105,r*1.7,.11).rotation.z=i*Math.PI/8;
+ cyl(w,black,0,0,0,r*.22,r*.22,.28,'z');cyl(w,gold,0,0,side*.16,r*.12,r*.12,.07,'z');
+ if(drive)cyl(w,steel,r*.49,0,side*.18,.106,.106,.13,'z');batch(w);wheels.push({w,r,offset:side<0?Math.PI/2:0})}
+box(engine,black,.05,1.33,0,9,.47,1.56);box(engine,red,.2,1.65,0,9.5,.18,2.38);box(engine,black,.2,1.79,0,9.5,.13,2.49);
+cyl(engine,iron,.76,2.65,0,.94,.94,6.65,'x',56);cyl(engine,black,3.54,2.65,0,.97,.97,1.75,'x',56);
+for(const x of [-2.4,-1.34,.05,1.48,2.73,4.35])cyl(engine,x>2?steel:gold,x,2.65,0,.959,.959,.055,'x',56);
+cyl(engine,iron,4.43,2.65,0,.88,.94,.17,'x',48);ball(engine,black,4.51,2.65,0,.13,.78,.78);
+for(let i=0;i<20;i++){const a=i*tau/20;ball(engine,steel,4.55,2.65+.84*Math.cos(a),.84*Math.sin(a),.043,.044,.044)}
+cyl(engine,gold,4.64,2.65,0,.26,.26,.05,'x');cyl(engine,red,4.68,2.65,0,.20,.20,.04,'x');
+function stack(x){cyl(engine,black,x,3.61,0,.34,.52,.33);cyl(engine,iron,x,4.06,0,.34,.28,.8);cyl(engine,black,x,4.51,0,.46,.34,.25);cyl(engine,gold,x,4.65,0,.46,.46,.07);cyl(engine,coal,x,4.69,0,.40,.40,.03)}
+stack(3.35);
+for(const [x,r] of [[-.94,.45],[.83,.34]]){cyl(engine,iron,x,3.68,0,r,r*1.18,.40);ball(engine,iron,x,3.90,0,r,r*.75,r);cyl(engine,gold,x,3.55,0,r*1.2,r*1.2,.06)}
+for(const s of [-1,1]){const z=s*.95;
+ bar(engine,steel,V(-2.39,2.98,z),V(4.05,2.98,z),.035);
+ for(let x=-2.3;x<4.2;x+=1.02)bar(engine,gold,V(x,2.97,z*.91),V(x,2.98,z*1.03),.047);
+ bar(engine,gold,V(-2.4,2.30,z),V(2.42,2.30,z),.055);bar(engine,gold,V(2.42,2.30,z),V(3.32,1.28,z),.061);
+ cyl(engine,iron,3.32,1.03,z,.32,.32,1.24,'x');for(const x of [2.77,3.9])cyl(engine,steel,x,1.03,z,.33,.33,.10,'x');
+ for(const x of [-2.25,-.36,1.53])wheel(engine,x,R,s,true);
+ for(const x of [2.86,4.11])wheel(engine,x,L/(tau*38),s);
+ const tie=box(engine,steel,0,0,s*1.19,3.78,.14,.12),main=box(engine,steel,0,0,s*1.32,1,.116,.135);
+ engine.remove(tie,main);scene.add(tie,main);links.push({s,tie,main});
+}
+box(engine,red,4.95,1.42,0,.22,.52,2.72);
+for(const s of [-1,1]){cyl(engine,black,5.17,1.43,s*.89,.14,.14,.32,'x');cyl(engine,iron,5.36,1.43,s*.89,.245,.245,.10,'x')}
+cyl(engine,black,4.22,3.72,0,.27,.27,.56,'x');cyl(engine,gold,4.51,3.72,0,.26,.26,.08,'x');cyl(engine,lamp,4.56,3.72,0,.208,.208,.03,'x');
+box(engine,black,-3.56,2.8,0,2.06,1.98,2.17);
+for(const s of [-1,1]){box(engine,gold,-3.55,3.43,s*1.095,1.72,.92,.035);box(engine,wood,-3.55,3.43,s*1.122,1.59,.82,.035);
+ for(const x of [-4,-3.12])box(engine,lamp,x,3.42,s*1.145,.64,.66,.03);
+ sign(engine,'271',-3.54,2.49,s*1.10,1.05,.42,'#712a22','#f1cb85');
+ for(let j=0;j<3;j++)box(engine,iron,-4.43,.67+j*.35,s*1.14,.77,.08,.28)}
+function roof(p,x,y,w,len){for(let j=0;j<11;j++){const a=(j-5)*.11;box(p,iron,x,y+Math.cos(a)*w*1.83,Math.sin(a)*w*1.83,len,.13,w*.216).rotation.x=-a}}
+roof(engine,-3.55,1.67,1.4,2.87);batch(engine);
+const tender=grp();box(tender,iron,-7.56,1.13,0,5.27,.45,2.12);box(tender,black,-7.52,2.12,0,4.89,1.63,2.2);
+for(const s of [-1,1]){for(const x of [-9.04,-7.55,-6.04])wheel(tender,x,L/(tau*33),s);
+ box(tender,red,-7.52,1.52,s*1.12,4.86,.11,.08);sign(tender,'NORTHLIGHT',-7.52,2.23,s*1.114,3.56,.54,'#192325','#e8c084');
+ for(let j=0;j<18;j++)ball(tender,steel,-9.78+j*.26,2.81,s*1.11,.032,.032,.02)}
+const lump=new T.IcosahedronGeometry(1,0);for(let i=0;i<82;i++){const z=(rand()-.5)*1.87,o=mesh(tender,lump,coal,-9.69+rand()*4.29,2.93+(1-Math.abs(z))*.22+rand()*.16,z);o.scale.set(.2+rand()*.23,.17+rand()*.1,.26);o.rotation.y=rand()*6}
+batch(tender);
+const pane=texture(1024,256,(c,w,h)=>{
+ c.fillStyle='#774027';c.fillRect(0,0,w,h);
+ for(let i=0;i<2700;i++){const v=rand();c.fillStyle=v<.5?'rgba(40,18,14,.18)':'rgba(242,176,112,.19)';c.fillRect(rand()*w,rand()*h,2+rand()*103,1)}
+ for(let y=8;y<h;y+=14){c.fillStyle='#593523';c.fillRect(0,y,w,1)}
+ for(let i=0;i<9;i++){const x=21+i*111,y=28;c.fillStyle='#c19a5e';c.fillRect(x-4,y-4,100,122);c.fillStyle='#342c27';c.fillRect(x,y,92,114);
+ const g=c.createLinearGradient(0,y,0,141);g.addColorStop(0,'#ffecaf');g.addColorStop(.58,'#ffc779');g.addColorStop(1,'#c58148');c.fillStyle=g;c.fillRect(x+5,y+5,82,102);
+ for(const s of [0,1]){let e=x+5+s*82;c.fillStyle='rgba(151,75,35,.44)';c.beginPath();c.moveTo(e,33);c.lineTo(e+(1-2*s)*(14+rand()*14),33);c.quadraticCurveTo(e+(1-2*s)*12,76,e+(1-2*s)*5,96);c.lineTo(e,132);c.fill()}
+ c.fillStyle='#705237';c.fillRect(x+44,y+2,4,109);c.fillRect(x+2,57,88,4);
+ c.strokeStyle='#b28352';c.lineWidth=2;c.strokeRect(x,162,92,67);c.strokeStyle='#553421';c.strokeRect(x+4,166,84,59)}
+ c.fillStyle='#dcad68';c.fillRect(0,151,w,3);c.fillRect(0,245,w,3)
+});
+const coachFace=new T.MeshStandardMaterial({map:pane,emissiveMap:pane,emissive:0xffbc82,emissiveIntensity:.67});
+const coach=grp();box(coach,iron,0,1.13,0,9.72,.4,2.23);box(coach,wood,0,2.47,0,9.19,2.37,2.31);
+for(const s of [-1,1]){const o=mesh(coach,new T.PlaneGeometry(9.18,2.37),coachFace,0,2.47,s*1.161);if(s<0)o.rotation.y=Math.PI;
+ for(const x of [-3.9,-2.70,2.70,3.9])wheel(coach,x,L/(tau*34),s);
+ for(const x of [-4.75,4.75]){bar(coach,gold,V(x,1.35,s),V(x,3.57,s),.046);box(coach,iron,x,1.27,s*.82,.59,.13,.66)}}
+roof(coach,0,1.34,1.36,9.85);box(coach,black,0,3.91,0,8.52,.23,.93);box(coach,snow,0,4.035,0,8.59,.067,.98);
+box(coach,black,4.94,1.05,0,.56,.18,.38);batch(coach);coach.position.x=-15.24;
+for(let i=1;i<5;i++){const c=coach.clone();c.position.x-=i*10.08;scene.add(c);for(const q of wheels.filter(q=>q.w.parent===coach))wheels.push({...q,w:c.children[coach.children.indexOf(q.w)]})}
+// Bake lit, overlapping lobes to soft particle impostors rather than rendering
+// translucent spheres (whose back faces sort poorly inside a dense plume).
+function puffMap(){return texture(192,192,(c)=>{
+ for(let i=0;i<80;i++){const a=rand()*tau,d=Math.sqrt(rand())*.61,x=96+Math.cos(a)*d*84,y=96+Math.sin(a)*d*85,r=17+rand()*22;
+ const g=c.createRadialGradient(x-r*.16,y-r*.31,0,x,y,r);g.addColorStop(0,'rgba(255,244,225,.74)');g.addColorStop(.52,'rgba(218,215,205,.57)');g.addColorStop(.78,'rgba(145,155,161,.36)');g.addColorStop(1,'rgba(148,154,158,0)');c.fillStyle=g;c.fillRect(x-r,y-r,2*r,2*r)}
+ })}
+const clouds=Array.from({length:5},puffMap),plumes=[];
+function vapor(n,side=0){for(let i=0;i<n;i++){const m=new T.SpriteMaterial({map:clouds[i%5],transparent:true,depthWrite:false}),o=new T.Sprite(m);scene.add(o);plumes.push({o,side,phase:(i+.45*rand())/n,j:rand()*tau,k:rand()*tau,spread:rand()-.5})}}
+vapor(85);vapor(18,-1);vapor(18,1);
+const soot=new T.Color(0x585452),vaporColor=new T.Color(0xffe6c6);
+const feather=texture(128,128,c=>{const g=c.createRadialGradient(64,64,0,64,64,63);g.addColorStop(0,'rgba(255,255,255,.92)');g.addColorStop(.24,'rgba(255,255,255,.52)');g.addColorStop(1,'rgba(255,255,255,0)');c.fillStyle=g;c.fillRect(0,0,128,128)});
+const halo=new T.Sprite(new T.SpriteMaterial({map:feather,color:0xffbb65,blending:T.AdditiveBlending,depthWrite:false}));scene.add(halo);halo.position.set(4.62,3.72,0);halo.scale.setScalar(1.42);
+const contact=new T.MeshBasicMaterial({map:feather,color:0x26343e,transparent:true,opacity:.48,depthWrite:false});
+for(const [x,w] of [[0,12],[-7.55,7],...Array.from({length:5},(_,i)=>[-15.24-10.08*i,12])]){
+ const shade=mesh(scene,new T.PlaneGeometry(w,4.7),contact,x,-.585,0);shade.rotation.x=-Math.PI/2}
+const snowGeo=new T.BufferGeometry(),flakes=[];for(let i=0;i<4700;i++)flakes.push((rand()-.5)*95,rand()*50-22,(rand()-.5)*90);
+snowGeo.setAttribute('position',new T.Float32BufferAttribute(flakes,3));
+const snowShader=new T.ShaderMaterial({transparent:true,depthWrite:false,uniforms:{phase:{value:0},pixels:{value:1}},vertexShader:`uniform float phase,pixels;varying float alpha;
+ void main(){vec3 p=position;p.x=mod(p.x-95.*phase+1.1*sin(6.28318*phase+p.z)+47.5,95.)-47.5;p.y=mod(p.y+22.-50.*phase,50.)-22.;vec4 mv=modelViewMatrix*vec4(p,1.);gl_Position=projectionMatrix*mv;
+ gl_PointSize=clamp(pixels*(.7+fract(position.z*9.1))/max(1.,-mv.z),1.,5.5);alpha=.55*smoothstep(.6,3.,-mv.z)*smoothstep(0.,2.,28.-p.y)*smoothstep(0.,3.,47.5-abs(p.x));}`,
+ fragmentShader:`varying float alpha;void main(){float r=length(gl_PointCoord-.5);gl_FragColor=vec4(1.,.96,.89,alpha*(1.-smoothstep(.15,.5,r)));}`});
+scene.add(new T.Points(snowGeo,snowShader));
+const mist=[];for(let i=0;i<22;i++){let o=new T.Sprite(new T.SpriteMaterial({map:clouds[i%5],color:0xffe1b4,opacity:.115,transparent:true,depthWrite:false}));scene.add(o);const z=-24-rand()*54;o.position.set((i/22-.5)*170,-8+rand()*9,z);o.scale.set(35+rand()*28,3+rand()*4,1);mist.push([o,o.position.x])}
+const clamp=T.MathUtils.clamp;let dragging=false,lx=0,ly=0,lastInput=-1e9,az=.76,el=.14,radius=27,manual=false,lastTime,elapsed=0;
+let paused=matchMedia('(prefers-reduced-motion: reduce)').matches;
+canvas.addEventListener('pointerdown',e=>{dragging=manual=true;lastInput=performance.now();lx=e.clientX;ly=e.clientY;canvas.setPointerCapture(e.pointerId)});
+canvas.addEventListener('pointermove',e=>{if(!dragging)return;az-=(e.clientX-lx)*.006;el=clamp(el+(e.clientY-ly)*.005,-.27,1.18);lx=e.clientX;ly=e.clientY;lastInput=performance.now()});
+canvas.addEventListener('lostpointercapture',()=>{dragging=false;lastInput=performance.now()});
+canvas.addEventListener('wheel',e=>{e.preventDefault();manual=true;lastInput=performance.now();radius=clamp(radius*Math.exp(clamp(e.deltaY*(e.deltaMode===1?16:1),-180,180)*.0011),9,68)},{passive:false});
+window.addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();if(!e.repeat)paused=!paused}});
+function resize(){camera.aspect=innerWidth/innerHeight;camera.updateProjectionMatrix();renderer.setSize(innerWidth,innerHeight,false);snowShader.uniforms.pixels.value=innerHeight*renderer.getPixelRatio()*.059}resize();addEventListener('resize',resize);
+const period=48;
+function frame(ms){const dt=Math.min(.09,(ms-(lastTime??ms))/1000);lastTime=ms;if(!paused)elapsed=(elapsed+dt)%period;
+ const u=elapsed/period,a=tau*u,dist=u*L;
+ for(let i=0;i<tiles.length;i++)tiles[i].position.x=([0,-2,-1,1,2][i])*L-dist;
+ for(const {w,r,offset} of wheels)w.rotation.z=offset-dist/r;
+ for(const {s,tie,main} of links){const th=(s<0?Math.PI/2:0)-dist/R,dx=.49*R*Math.cos(th),dy=.49*R*Math.sin(th),y=R+dy;
+ tie.position.set(-.36+dx,y,s*1.19);const cx=-.36+dx,slideY=1.03,slideX=cx+Math.sqrt(3.08**2-(slideY-y)**2);
+ main.position.set((cx+slideX)/2,(y+slideY)/2,s*1.32);main.scale.x=3.08;main.rotation.z=Math.atan2(slideY-y,slideX-cx)}
+ for(const {o,phase,j,k,spread,side} of plumes){const f=(u*(side?32:6)+phase)%1;
+ if(!side){const bend=f*f,travel=3*f+34*bend,size=.76+8.7*Math.pow(f,.68);
+ o.position.set(3.35-travel+Math.sin(k+f*10)*f,4.7+6.6*(1-Math.exp(-4*f))+2.15*f+Math.sin(j+f*9)*f*1.8,spread*(.1+4*f)+Math.sin(k+f*8)*f);
+ o.scale.set(size*(1+.33*f),size,1);o.material.color.copy(soot).lerp(vaporColor,.20+.77*(1-Math.exp(-3.1*f))+.026*Math.sin(k));o.material.opacity=(.71-.24*f)*Math.min(1,f*100)*Math.min(1,(1-f)*7);o.material.rotation=.22*Math.sin(j+f*7)}
+ else{const size=.19+1.73*f;o.position.set(3.03-3.5*f, .91+.95*f*f+spread*f*.42,side*(1.15+1.43*f));o.scale.set(size*1.65,size,1);o.material.color.setHex(0xfaf2df);o.material.opacity=.52*Math.sin(Math.PI*f)**.57*(.72+.28*Math.sin(40*a+j));o.material.rotation=.3*Math.sin(k)}}
+ for(const [o,x] of mist)o.position.x=x+4*Math.sin(a+x);
+ snowShader.uniforms.phase.value=u;
+ const autoAz=.70+.53*Math.sin(a),autoEl=.12+.15*Math.sin(a-.3),autoR=29+7.5*(1-Math.cos(a));
+ if(!manual){az=autoAz;el=autoEl;radius=autoR}else if(!dragging&&ms-lastInput>3000){
+ let f=1-Math.exp(-dt*1.15);az+=Math.atan2(Math.sin(autoAz-az),Math.cos(autoAz-az))*f;el+=(autoEl-el)*f;radius+=(autoR-radius)*f}
+ const focus=V(-4.3-2.1*(1-Math.cos(a)),1.28,0),d=radius*Math.max(1,1.35/camera.aspect);
+ camera.position.set(focus.x+d*Math.cos(el)*Math.sin(az),focus.y+d*Math.sin(el),d*Math.cos(el)*Math.cos(az));camera.lookAt(focus);sky.position.copy(camera.position);
+ halo.material.opacity=.7*clamp((camera.position.x-4.5)/6,0,1);
+ renderer.render(scene,camera);status.hidden=true;requestAnimationFrame(frame)}
+frame(performance.now());
+}catch(error){status.hidden=false;status.textContent='The railway could not start. Check your internet connection and WebGL support.';console.error(error)}
+</script></body></html>

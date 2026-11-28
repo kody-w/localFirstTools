@@ -1,0 +1,1435 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Neon Night Drive — 3D Sports Car</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #05030e;
+  }
+  canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(() => {
+  'use strict';
+
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d', { alpha: false });
+
+  let W = 0, H = 0, DPR = 1;
+  let horizonY = 0;
+  let fov = 720;
+
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    W = window.innerWidth;
+    H = window.innerHeight;
+    canvas.width = Math.floor(W * DPR);
+    canvas.height = Math.floor(H * DPR);
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    horizonY = H * 0.44;
+    fov = Math.min(W, H) * 0.92;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // Deterministic PRNG for stars, buildings, and mountains
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return function() {
+      a |= 0; a = (a + 0x6D2B79F5) | 0;
+      let t = Math.imul(a ^ (a >>> 15), 1 | a);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(2084);
+
+  // Stars
+  const stars = Array.from({ length: 190 }, () => ({
+    x: rand(),
+    y: rand() * 0.46,
+    r: 0.5 + rand() * 1.6,
+    phase: rand() * Math.PI * 2,
+    speed: 0.8 + rand() * 2.4,
+    hue: rand() > 0.7 ? (rand() > 0.5 ? '#8ff8ff' : '#ff9ee8') : '#ffffff'
+  }));
+
+  // Distant neon city skyline silhouettes
+  const buildings = [];
+  {
+    let bx = -0.25;
+    while (bx < 1.25) {
+      const bw = 0.012 + rand() * 0.028;
+      const bh = 0.025 + Math.pow(rand(), 1.8) * 0.14;
+      const litColor = rand() > 0.5 ? '#00f0ff' : (rand() > 0.45 ? '#ff2a9d' : '#9d4edd');
+      const cols = 2 + Math.floor(rand() * 4);
+      const rows = 3 + Math.floor(rand() * 10);
+      const windows = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) {
+          if (rand() > 0.58) windows.push({ r, c, bright: 0.35 + rand() * 0.65 });
+        }
+      }
+      buildings.push({ x: bx, w: bw, h: bh, color: litColor, cols, rows, windows, spire: rand() > 0.75 });
+      bx += bw * (0.72 + rand() * 0.45);
+    }
+  }
+
+  // Mountain layers (parallax synthwave ridges)
+  function buildMountainLayer(points, amp, base, seedOffset) {
+    const r = mulberry32(seedOffset);
+    const arr = [];
+    for (let i = 0; i <= points; i++) {
+      const u = i / points;
+      const distFromCenter = Math.abs(u - 0.5) * 2;
+      const valley = Math.min(1, Math.pow(distFromCenter * 1.15, 1.35));
+      const h = (0.18 + r() * 0.82) * amp * (0.28 + 0.72 * valley);
+      arr.push({ u, h, base });
+    }
+    return arr;
+  }
+  const farMountains = buildMountainLayer(42, 0.16, 0.0, 901);
+  const nearMountains = buildMountainLayer(30, 0.11, 0.0, 1337);
+
+  // Road curve & elevation functions based on world Z
+  function roadCurveAt(z) {
+    return (
+      Math.sin(z * 0.0022) * 0.00055 +
+      Math.sin(z * 0.0009 + 1.4) * 0.00038 +
+      Math.cos(z * 0.0041) * 0.00018
+    );
+  }
+
+  function roadSlopeAt(z) {
+    return (
+      Math.sin(z * 0.0018 + 0.7) * 0.022 +
+      Math.cos(z * 0.0033) * 0.011
+    );
+  }
+
+  // World state
+  const state = {
+    time: 0,
+    z: 0,
+    speed: 145,         // world units / sec
+    targetSpeed: 155,
+    carX: 0,            // lateral offset on road (-1..1 normalized, road half-width ~ 6.2)
+    carVx: 0,
+    carYaw: 0,
+    carRoll: 0,
+    carPitch: 0,
+    wheelSpin: 0,
+    camX: 0,
+    camY: 3.15,
+    camRoll: 0,
+    skyPan: 0,
+    boost: 0,
+    gantryFlash: 0,
+    gantryHue: 185,
+    mouseSteer: null,
+    keys: { left: false, right: false, boost: false }
+  };
+
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') state.keys.left = true;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') state.keys.right = true;
+    if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') state.keys.boost = true;
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') state.keys.left = false;
+    if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') state.keys.right = false;
+    if (e.key === ' ' || e.key === 'ArrowUp' || e.key === 'w' || e.key === 'W') state.keys.boost = false;
+  });
+  window.addEventListener('pointermove', (e) => {
+    state.mouseSteer = ((e.clientX / Math.max(1, W)) - 0.5) * 1.4;
+  });
+  window.addEventListener('pointerleave', () => { state.mouseSteer = null; });
+
+  // 3D Camera projection (camera at camX, camY, z=0 looking down +Z)
+  function projectPoint(wx, wy, wz) {
+    if (wz <= 0.15) return null;
+    let dx = wx - state.camX;
+    let dy = wy - state.camY;
+    // Apply subtle camera roll
+    const cr = Math.cos(state.camRoll);
+    const sr = Math.sin(state.camRoll);
+    const rx = dx * cr - dy * sr;
+    const ry = dx * sr + dy * cr;
+    const scale = fov / wz;
+    return {
+      x: W * 0.5 + rx * scale,
+      y: horizonY - ry * scale,
+      scale,
+      z: wz
+    };
+  }
+
+  // Draw night sky, stars, synthwave sun, mountains & distant city
+  function drawBackdrop(t) {
+    // Deep night sky gradient
+    const skyGrad = ctx.createLinearGradient(0, 0, 0, horizonY + H * 0.08);
+    skyGrad.addColorStop(0.0, '#04020c');
+    skyGrad.addColorStop(0.42, '#0b0622');
+    skyGrad.addColorStop(0.75, '#1d0b3a');
+    skyGrad.addColorStop(0.93, '#4a1259');
+    skyGrad.addColorStop(1.0, '#8d1b63');
+    ctx.fillStyle = skyGrad;
+    ctx.fillRect(0, 0, W, horizonY + H * 0.08);
+
+    // Subtle cosmic nebula glow
+    const nebX = W * 0.5 - state.skyPan * 0.08;
+    const nebGrad = ctx.createRadialGradient(nebX, horizonY * 0.65, 10, nebX, horizonY * 0.65, W * 0.55);
+    nebGrad.addColorStop(0, 'rgba(255, 42, 157, 0.14)');
+    nebGrad.addColorStop(0.5, 'rgba(72, 22, 160, 0.08)');
+    nebGrad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = nebGrad;
+    ctx.fillRect(0, 0, W, horizonY);
+
+    // Twinkling stars
+    for (let i = 0; i < stars.length; i++) {
+      const s = stars[i];
+      const sx = ((s.x * W - state.skyPan * 0.04) % W + W) % W;
+      const sy = s.y * H;
+      if (sy > horizonY - 6) continue;
+      const alpha = 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(t * s.speed + s.phase));
+      ctx.globalAlpha = alpha;
+      ctx.fillStyle = s.hue;
+      ctx.beginPath();
+      ctx.arc(sx, sy, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+
+    // Glowing retro-futuristic sun on horizon
+    const sunX = W * 0.5 - state.skyPan * 0.12;
+    const sunR = Math.min(W, H) * 0.165;
+    const sunY = horizonY - sunR * 0.28;
+
+    // Outer atmospheric sun bloom
+    const bloom = ctx.createRadialGradient(sunX, sunY, sunR * 0.3, sunX, sunY, sunR * 2.8);
+    bloom.addColorStop(0, 'rgba(255, 64, 150, 0.42)');
+    bloom.addColorStop(0.45, 'rgba(180, 28, 128, 0.16)');
+    bloom.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = bloom;
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR * 2.8, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Sun disc with horizontal synthwave scanline cuts
+    ctx.save();
+    ctx.beginPath();
+    ctx.arc(sunX, sunY, sunR, 0, Math.PI * 2);
+    ctx.clip();
+
+    const sunGrad = ctx.createLinearGradient(0, sunY - sunR, 0, sunY + sunR);
+    sunGrad.addColorStop(0.0, '#fff3a1');
+    sunGrad.addColorStop(0.32, '#ff9a3c');
+    sunGrad.addColorStop(0.66, '#ff2e88');
+    sunGrad.addColorStop(1.0, '#8f137c');
+    ctx.fillStyle = sunGrad;
+    ctx.fillRect(sunX - sunR, sunY - sunR, sunR * 2, sunR * 2);
+
+    // Scanline cutouts in lower half of sun
+    ctx.fillStyle = '#200a38';
+    for (let i = 0; i < 7; i++) {
+      const frac = 0.15 + i * 0.115;
+      const cutY = sunY + sunR * frac;
+      const cutH = 1.6 + i * 1.45;
+      ctx.fillRect(sunX - sunR, cutY, sunR * 2, cutH);
+    }
+    ctx.restore();
+
+    // Far mountains with subtle purple-magenta rim
+    drawMountainRidge(farMountains, state.skyPan * 0.22, '#130728', 'rgba(255, 62, 165, 0.45)', 1.2);
+    // Near mountains with crisp cyan/violet neon wireframe edge
+    drawMountainRidge(nearMountains, state.skyPan * 0.38, '#0b051c', 'rgba(0, 235, 255, 0.55)', 1.5);
+
+    // Distant neon city skyline at horizon center
+    const cityShift = -state.skyPan * 0.3;
+    for (let i = 0; i < buildings.length; i++) {
+      const b = buildings[i];
+      const bx = b.x * W + cityShift;
+      if (bx + b.w * W < -20 || bx > W + 20) continue;
+      const bw = b.w * W;
+      const bh = b.h * H;
+      const by = horizonY - bh;
+
+      ctx.fillStyle = '#090517';
+      ctx.fillRect(bx, by, bw, bh + 2);
+
+      // Neon roof trim
+      ctx.fillStyle = b.color;
+      ctx.globalAlpha = 0.65;
+      ctx.fillRect(bx, by, bw, 1.5);
+      if (b.spire) {
+        ctx.fillRect(bx + bw * 0.48, by - bh * 0.22, 1.4, bh * 0.22);
+      }
+
+      // Tiny lit windows
+      const padX = bw * 0.15;
+      const padY = bh * 0.12;
+      const cw = (bw - padX * 2) / b.cols;
+      const ch = (bh - padY * 2) / b.rows;
+      for (let j = 0; j < b.windows.length; j++) {
+        const win = b.windows[j];
+        ctx.globalAlpha = win.bright * 0.55;
+        ctx.fillRect(bx + padX + win.c * cw, by + padY + win.r * ch, Math.max(1.2, cw * 0.5), Math.max(1.2, ch * 0.45));
+      }
+    }
+    ctx.globalAlpha = 1;
+
+    // Ground base gradient below horizon
+    const groundGrad = ctx.createLinearGradient(0, horizonY, 0, H);
+    groundGrad.addColorStop(0.0, '#16062c');
+    groundGrad.addColorStop(0.18, '#0a041a');
+    groundGrad.addColorStop(1.0, '#04020b');
+    ctx.fillStyle = groundGrad;
+    ctx.fillRect(0, horizonY, W, H - horizonY);
+  }
+
+  function drawMountainRidge(layer, pan, fillColor, strokeColor, lineW) {
+    ctx.beginPath();
+    ctx.moveTo(-40, horizonY + 4);
+    for (let i = 0; i < layer.length; i++) {
+      const p = layer[i];
+      const px = (p.u - 0.15) * W * 1.3 - pan * 0.5;
+      const py = horizonY - p.h * H;
+      ctx.lineTo(px, py);
+    }
+    ctx.lineTo(W + 40, horizonY + 4);
+    ctx.closePath();
+    ctx.fillStyle = fillColor;
+    ctx.fill();
+
+    ctx.beginPath();
+    for (let i = 0; i < layer.length; i++) {
+      const p = layer[i];
+      const px = (p.u - 0.15) * W * 1.3 - pan * 0.5;
+      const py = horizonY - p.h * H;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.strokeStyle = strokeColor;
+    ctx.lineWidth = lineW;
+    ctx.stroke();
+  }
+
+  // =========================================================================
+  // 3D CURVED NEON HIGHWAY, TERRAIN GRID & OVERHEAD LIGHT ARCHES
+  // =========================================================================
+  const ROAD_HALF_W = 7.6;
+  const SEG_LEN = 2.6;
+  const NUM_SEGS = 135;
+  const ARCH_INTERVAL = 18;
+
+  // Pre-allocated slice buffer for zero-GC road projection
+  const roadSlices = new Array(NUM_SEGS + 1);
+
+  function computeRoadSlices() {
+    const baseIdx = Math.floor(state.z / SEG_LEN);
+    const frac = (state.z - baseIdx * SEG_LEN) / SEG_LEN;
+
+    let x = 0;
+    let dx = 0;
+    let y = 0;
+    let dy = 0;
+
+    for (let i = 0; i <= NUM_SEGS; i++) {
+      const segIndex = baseIdx + i;
+      const worldZ = segIndex * SEG_LEN;
+      const camZ = (i - frac) * SEG_LEN;
+
+      const curve = roadCurveAt(worldZ);
+      const slope = roadSlopeAt(worldZ);
+
+      if (i > 0) {
+        dx += curve * SEG_LEN;
+        x += dx * SEG_LEN;
+        dy += (slope - dy * 0.06) * 0.14;
+        y += dy * SEG_LEN;
+      }
+
+      roadSlices[i] = {
+        segIndex,
+        worldZ,
+        camZ,
+        x,
+        y,
+        curve,
+        pL: null,
+        pR: null,
+        pC: null
+      };
+    }
+
+    // Offset so slice at car's Z (~9.5 units ahead) aligns smoothly
+    const carSliceZ = 9.2;
+    const carSliceF = carSliceZ / SEG_LEN + frac;
+    const idx0 = Math.max(0, Math.min(NUM_SEGS - 1, Math.floor(carSliceF)));
+    const t0 = carSliceF - idx0;
+    const roadCarX = roadSlices[idx0].x + (roadSlices[idx0 + 1].x - roadSlices[idx0].x) * t0;
+    const roadCarY = roadSlices[idx0].y + (roadSlices[idx0 + 1].y - roadSlices[idx0].y) * t0;
+
+    // Shift world vertically so road under car stays at y = 0
+    for (let i = 0; i <= NUM_SEGS; i++) {
+      const s = roadSlices[i];
+      s.x -= roadCarX * 0.25;
+      s.y -= roadCarY;
+      if (s.camZ > 0.35) {
+        s.pL = projectPoint(s.x - ROAD_HALF_W, s.y, s.camZ);
+        s.pR = projectPoint(s.x + ROAD_HALF_W, s.y, s.camZ);
+        s.pC = projectPoint(s.x, s.y, s.camZ);
+      }
+    }
+  }
+
+  function sampleRoad(camZ) {
+    const baseIdx = Math.floor(state.z / SEG_LEN);
+    const frac = (state.z - baseIdx * SEG_LEN) / SEG_LEN;
+    const f = camZ / SEG_LEN + frac;
+    const i0 = Math.max(0, Math.min(NUM_SEGS - 1, Math.floor(f)));
+    const u = Math.max(0, Math.min(1, f - i0));
+    const a = roadSlices[i0];
+    const b = roadSlices[i0 + 1];
+    return {
+      x: a.x + (b.x - a.x) * u,
+      y: a.y + (b.y - a.y) * u,
+      curve: a.curve + (b.curve - a.curve) * u
+    };
+  }
+
+  function drawNeonArch(s, fog) {
+    const archH = 9.4;
+    const pillarX = ROAD_HALF_W + 1.35;
+    const topInset = 2.0;
+    const thickness = 0.42;
+
+    const isCyan = (Math.floor(s.segIndex / ARCH_INTERVAL) % 2) === 0;
+    const coreColor = isCyan ? '#7efbff' : '#ff8be6';
+    const glowColor = isCyan ? 'rgba(0, 240, 255,' : 'rgba(255, 42, 165,';
+
+    const bl = projectPoint(s.x - pillarX, s.y, s.camZ);
+    const br = projectPoint(s.x + pillarX, s.y, s.camZ);
+    const ml = projectPoint(s.x - pillarX, s.y + archH * 0.72, s.camZ);
+    const mr = projectPoint(s.x + pillarX, s.y + archH * 0.72, s.camZ);
+    const tl = projectPoint(s.x - pillarX + topInset, s.y + archH, s.camZ);
+    const tr = projectPoint(s.x + pillarX - topInset, s.y + archH, s.camZ);
+
+    if (!bl || !br || !ml || !mr || !tl || !tr) return;
+
+    const alpha = Math.max(0, Math.min(1, (1 - fog) * 1.15));
+    if (alpha <= 0.02) return;
+
+    const pxThick = Math.max(1.2, thickness * bl.scale);
+
+    // Subtle dark structural frame behind the neon tube
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.beginPath();
+    ctx.moveTo(bl.x, bl.y);
+    ctx.lineTo(ml.x, ml.y);
+    ctx.lineTo(tl.x, tl.y);
+    ctx.lineTo(tr.x, tr.y);
+    ctx.lineTo(mr.x, mr.y);
+    ctx.lineTo(br.x, br.y);
+
+    ctx.strokeStyle = `rgba(12, 8, 28, ${alpha * 0.92})`;
+    ctx.lineWidth = pxThick * 2.15;
+    ctx.stroke();
+
+    // Wide soft outer neon bloom
+    ctx.strokeStyle = `${glowColor} ${alpha * 0.22})`;
+    ctx.lineWidth = pxThick * 4.4;
+    ctx.stroke();
+
+    // Mid neon glow
+    ctx.strokeStyle = `${glowColor} ${alpha * 0.58})`;
+    ctx.lineWidth = pxThick * 1.6;
+    ctx.stroke();
+
+    // Bright white-hot inner LED core
+    ctx.strokeStyle = coreColor;
+    ctx.globalAlpha = alpha * 0.95;
+    ctx.lineWidth = Math.max(1, pxThick * 0.55);
+    ctx.stroke();
+
+    // Wet-road specular reflection band directly underneath the arch
+    if (s.pL && s.pR) {
+      const roadW = s.pR.x - s.pL.x;
+      const reflH = Math.max(2, bl.scale * 1.15);
+      const reflGrad = ctx.createLinearGradient(s.pL.x, s.pL.y, s.pR.x, s.pR.y);
+      reflGrad.addColorStop(0.0, `${glowColor} ${alpha * 0.34})`);
+      reflGrad.addColorStop(0.25, `${glowColor} ${alpha * 0.14})`);
+      reflGrad.addColorStop(0.5, `${glowColor} ${alpha * 0.24})`);
+      reflGrad.addColorStop(0.75, `${glowColor} ${alpha * 0.14})`);
+      reflGrad.addColorStop(1.0, `${glowColor} ${alpha * 0.34})`);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = reflGrad;
+      ctx.fillRect(s.pL.x, s.pL.y - reflH * 0.35, roadW, reflH);
+    }
+
+    ctx.restore();
+  }
+
+  function drawRoadAndEnvironment() {
+    computeRoadSlices();
+
+    // 1) Synthwave glowing terrain grid beside the road (back to front)
+    const gridMaxX = 68;
+    const gridCols = 8;
+
+    // Longitudinal grid lines along the valley floor
+    ctx.save();
+    for (let side = -1; side <= 1; side += 2) {
+      for (let c = 1; c <= gridCols; c++) {
+        const offset = ROAD_HALF_W + 2.2 + c * ((gridMaxX - ROAD_HALF_W) / gridCols);
+        ctx.beginPath();
+        let started = false;
+        for (let i = NUM_SEGS; i >= 1; i -= 2) {
+          const s = roadSlices[i];
+          if (s.camZ <= 0.6) continue;
+          const p = projectPoint(s.x + side * offset, s.y - 0.15, s.camZ);
+          if (!p) continue;
+          if (!started) { ctx.moveTo(p.x, p.y); started = true; }
+          else ctx.lineTo(p.x, p.y);
+        }
+        const edgeFade = 1 - c / (gridCols + 1);
+        ctx.strokeStyle = `rgba(176, 38, 255, ${0.14 + edgeFade * 0.22})`;
+        ctx.lineWidth = 1.1;
+        ctx.stroke();
+      }
+    }
+
+    // Transverse grid lines + Road quads + Arches (back to front)
+    for (let i = NUM_SEGS - 1; i >= 1; i--) {
+      const s1 = roadSlices[i + 1]; // far
+      const s0 = roadSlices[i];     // near
+      if (!s0.pL || !s0.pR || !s1.pL || !s1.pR) continue;
+      if (s0.pL.y < horizonY - 4 && s1.pL.y < horizonY - 4) continue;
+
+      const fog = Math.min(1, Math.pow(i / NUM_SEGS, 1.35));
+      const invFog = 1 - fog;
+
+      // Transverse terrain neon grid line every 3 segments
+      if (s0.segIndex % 3 === 0) {
+        const gFarL = projectPoint(s0.x - gridMaxX, s0.y - 0.15, s0.camZ);
+        const gFarR = projectPoint(s0.x + gridMaxX, s0.y - 0.15, s0.camZ);
+        if (gFarL && gFarR) {
+          ctx.strokeStyle = `rgba(255, 42, 165, ${invFog * 0.32})`;
+          ctx.lineWidth = Math.max(0.7, s0.pL.scale * 0.08);
+          ctx.beginPath();
+          ctx.moveTo(gFarL.x, gFarL.y);
+          ctx.lineTo(s0.pL.x, s0.pL.y);
+          ctx.moveTo(s0.pR.x, s0.pR.y);
+          ctx.lineTo(gFarR.x, gFarR.y);
+          ctx.stroke();
+        }
+      }
+
+      // Dark wet asphalt road surface
+      const stripeAlt = (Math.floor(s0.segIndex / 2) % 2) === 0;
+      const rCol = stripeAlt ? 14 : 18;
+      const gCol = stripeAlt ? 11 : 14;
+      const bCol = stripeAlt ? 28 : 34;
+      ctx.fillStyle = `rgb(${rCol}, ${gCol}, ${bCol})`;
+      ctx.beginPath();
+      ctx.moveTo(s1.pL.x, s1.pL.y);
+      ctx.lineTo(s1.pR.x, s1.pR.y);
+      ctx.lineTo(s0.pR.x, s0.pR.y);
+      ctx.lineTo(s0.pL.x, s0.pL.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Subtle glossy center reflection of horizon sunset/magenta sky
+      if (invFog > 0.05) {
+        const c1 = (s1.pL.x + s1.pR.x) * 0.5;
+        const c0 = (s0.pL.x + s0.pR.x) * 0.5;
+        const w1 = (s1.pR.x - s1.pL.x) * 0.24;
+        const w0 = (s0.pR.x - s0.pL.x) * 0.24;
+        ctx.fillStyle = `rgba(255, 62, 165, ${0.065 * (0.3 + fog * 0.7)})`;
+        ctx.beginPath();
+        ctx.moveTo(c1 - w1, s1.pL.y);
+        ctx.lineTo(c1 + w1, s1.pL.y);
+        ctx.lineTo(c0 + w0, s0.pL.y);
+        ctx.lineTo(c0 - w0, s0.pL.y);
+        ctx.closePath();
+        ctx.fill();
+      }
+
+      // Glowing neon road edge rails (cyan outer + magenta inner shoulder)
+      const edgeW0 = Math.max(1.2, (s0.pR.x - s0.pL.x) * 0.022);
+      const edgeW1 = Math.max(0.7, (s1.pR.x - s1.pL.x) * 0.022);
+
+      // Left & right cyan glowing strips
+      ctx.fillStyle = `rgba(0, 245, 255, ${0.88 * invFog + 0.12})`;
+      // Left edge
+      ctx.beginPath();
+      ctx.moveTo(s1.pL.x - edgeW1, s1.pL.y);
+      ctx.lineTo(s1.pL.x + edgeW1 * 0.9, s1.pL.y);
+      ctx.lineTo(s0.pL.x + edgeW0 * 0.9, s0.pL.y);
+      ctx.lineTo(s0.pL.x - edgeW0, s0.pL.y);
+      ctx.closePath();
+      ctx.fill();
+      // Right edge
+      ctx.beginPath();
+      ctx.moveTo(s1.pR.x - edgeW1 * 0.9, s1.pR.y);
+      ctx.lineTo(s1.pR.x + edgeW1, s1.pR.y);
+      ctx.lineTo(s0.pR.x + edgeW0, s0.pR.y);
+      ctx.lineTo(s0.pR.x - edgeW0 * 0.9, s0.pR.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Soft neon bloom along road edges
+      ctx.fillStyle = `rgba(0, 235, 255, ${0.22 * invFog})`;
+      ctx.beginPath();
+      ctx.moveTo(s1.pL.x - edgeW1 * 3.2, s1.pL.y);
+      ctx.lineTo(s1.pL.x + edgeW1 * 3.2, s1.pL.y);
+      ctx.lineTo(s0.pL.x + edgeW0 * 3.2, s0.pL.y);
+      ctx.lineTo(s0.pL.x - edgeW0 * 3.2, s0.pL.y);
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.moveTo(s1.pR.x - edgeW1 * 3.2, s1.pR.y);
+      ctx.lineTo(s1.pR.x + edgeW1 * 3.2, s1.pR.y);
+      ctx.lineTo(s0.pR.x + edgeW0 * 3.2, s0.pR.y);
+      ctx.lineTo(s0.pR.x - edgeW0 * 3.2, s0.pR.y);
+      ctx.closePath();
+      ctx.fill();
+
+      // Dashed glowing lane dividers (3-lane highway: two divider lines at -1/3 and +1/3)
+      if ((s0.segIndex % 6) < 3) {
+        const laneW0 = Math.max(0.9, (s0.pR.x - s0.pL.x) * 0.011);
+        const laneW1 = Math.max(0.5, (s1.pR.x - s1.pL.x) * 0.011);
+        ctx.fillStyle = `rgba(255, 65, 195, ${0.82 * invFog})`;
+        for (const fracLane of [1 / 3, 2 / 3]) {
+          const lx1 = s1.pL.x + (s1.pR.x - s1.pL.x) * fracLane;
+          const lx0 = s0.pL.x + (s0.pR.x - s0.pL.x) * fracLane;
+          ctx.beginPath();
+          ctx.moveTo(lx1 - laneW1, s1.pL.y);
+          ctx.lineTo(lx1 + laneW1, s1.pL.y);
+          ctx.lineTo(lx0 + laneW0, s0.pL.y);
+          ctx.lineTo(lx0 - laneW0, s0.pL.y);
+          ctx.closePath();
+          ctx.fill();
+        }
+      }
+
+      // Roadside glowing kilometer/chevron posts every 6 segments (when not an arch)
+      if (s0.segIndex % 6 === 0 && s0.segIndex % ARCH_INTERVAL !== 0 && invFog > 0.08) {
+        const postH = 1.65;
+        const pxOut = ROAD_HALF_W + 0.9;
+        for (const side of [-1, 1]) {
+          const pb = projectPoint(s0.x + side * pxOut, s0.y, s0.camZ);
+          const pt = projectPoint(s0.x + side * pxOut, s0.y + postH, s0.camZ);
+          if (pb && pt) {
+            ctx.strokeStyle = side < 0
+              ? `rgba(0, 245, 255, ${invFog * 0.78})`
+              : `rgba(255, 42, 165, ${invFog * 0.78})`;
+            ctx.lineWidth = Math.max(1.2, pb.scale * 0.12);
+            ctx.beginPath();
+            ctx.moveTo(pb.x, pb.y);
+            ctx.lineTo(pt.x, pt.y);
+            ctx.stroke();
+          }
+        }
+      }
+
+      // Overhead 3D neon arches behind the car (drawn before car if farther than carZ)
+      if (s0.segIndex % ARCH_INTERVAL === 0 && s0.camZ > 9.6) {
+        drawNeonArch(s0, fog);
+      }
+    }
+
+    // Horizon atmospheric fog band to fuse distant road into sky
+    const fogBand = ctx.createLinearGradient(0, horizonY - 14, 0, horizonY + H * 0.12);
+    fogBand.addColorStop(0.0, 'rgba(141, 27, 99, 0.32)');
+    fogBand.addColorStop(0.35, 'rgba(58, 14, 88, 0.22)');
+    fogBand.addColorStop(1.0, 'rgba(10, 4, 26, 0)');
+    ctx.fillStyle = fogBand;
+    ctx.fillRect(0, horizonY - 14, W, H * 0.14);
+
+    ctx.restore();
+  }
+
+  function drawForegroundArches() {
+    // Any neon arch that has passed between the car and the camera renders OVER the car!
+    for (let i = 1; i < 10; i++) {
+      const s0 = roadSlices[i];
+      if (!s0) continue;
+      if (s0.segIndex % ARCH_INTERVAL === 0 && s0.camZ <= 9.6 && s0.camZ > 0.5) {
+        drawNeonArch(s0, 0);
+      }
+    }
+  }
+
+  // =========================================================================
+  // TRUE 3D SPORTS CAR MESH, LIGHTING, WHEELS, TRAILS & HEADLIGHTS
+  // =========================================================================
+  const CAR_Z = 9.2;
+
+  // Build static local-space 3D car body faces
+  // Coordinates: x (right+), y (up+), z (forward+, toward horizon)
+  const carFaces = [];
+
+  function addQuad(p0, p1, p2, p3, mat, options = {}) {
+    carFaces.push({
+      verts: [p0, p1, p2, p3],
+      mat,
+      doubleSided: !!options.doubleSided,
+      bias: options.bias || 0,
+      stroke: options.stroke || null,
+      emissive: options.emissive || null
+    });
+  }
+
+  function addTri(p0, p1, p2, mat, options = {}) {
+    carFaces.push({
+      verts: [p0, p1, p2],
+      mat,
+      doubleSided: !!options.doubleSided,
+      bias: options.bias || 0,
+      stroke: options.stroke || null,
+      emissive: options.emissive || null
+    });
+  }
+
+  // Symmetric helper: mirrors a quad across X=0 (reversing winding so normals stay outward)
+  function addSymQuad(p0, p1, p2, p3, mat, options = {}) {
+    addQuad(p0, p1, p2, p3, mat, options);
+    addQuad(
+      [-p0[0], p0[1], p0[2]],
+      [-p3[0], p3[1], p3[2]],
+      [-p2[0], p2[1], p2[2]],
+      [-p1[0], p1[1], p1[2]],
+      mat,
+      options
+    );
+  }
+
+  function buildSportsCarMesh() {
+    // Key longitudinal stations (rear = -2.42, front = +2.45)
+    // Lower body skirt & wide rear haunches
+    // Rear fascia (facing -Z, toward camera)
+    // Upper rear deck edge
+    const rDeckL = [-1.18, 0.94, -2.30];
+    const rDeckR = [ 1.18, 0.94, -2.30];
+    const rMidL  = [-1.32, 0.72, -2.40];
+    const rMidR  = [ 1.32, 0.72, -2.40];
+    const rLowL  = [-1.24, 0.42, -2.34];
+    const rLowR  = [ 1.24, 0.42, -2.34];
+    const rBotL  = [-1.16, 0.24, -2.26];
+    const rBotR  = [ 1.16, 0.24, -2.26];
+
+    // Rear deck upper bevel
+    addQuad(rDeckL, rDeckR, rMidR, rMidL, 'paint', { stroke: 'rgba(130, 230, 255, 0.35)' });
+    // Rear recessed dark tail-light fascia
+    addQuad(rMidL, rMidR, rLowR, rLowL, 'carbon', { stroke: 'rgba(255, 45, 130, 0.35)' });
+    // Lower rear diffuser panel
+    addQuad(rLowL, rLowR, rBotR, rBotL, 'diffuser', { stroke: 'rgba(0, 240, 255, 0.22)' });
+
+    // Full-width cyberpunk LED tail light bar (slightly offset -0.02 in Z so it sits crisp on fascia)
+    const tlY1 = 0.71, tlY2 = 0.62, tlZ = -2.42;
+    addQuad([-1.24, tlY1, tlZ], [1.24, tlY1, tlZ], [1.22, tlY2, tlZ], [-1.22, tlY2, tlZ], 'taillight', {
+      bias: -0.25,
+      emissive: '#ff1654'
+    });
+    // Inner bright core of tail light bar
+    addQuad([-1.18, 0.685, tlZ - 0.01], [1.18, 0.685, tlZ - 0.01], [1.16, 0.645, tlZ - 0.01], [-1.16, 0.645, tlZ - 0.01], 'taillightCore', {
+      bias: -0.32,
+      emissive: '#ff9ec4'
+    });
+    // Signature outer rear fang LEDs
+    addSymQuad(
+      [0.92, 0.62, tlZ], [1.24, 0.62, tlZ], [1.18, 0.50, tlZ + 0.02], [0.98, 0.52, tlZ + 0.01],
+      'taillight', { bias: -0.28, emissive: '#ff1654' }
+    );
+
+    // Rear diffuser vertical fins
+    for (const fx of [-0.62, -0.22, 0.22, 0.62]) {
+      addQuad(
+        [fx, 0.41, -2.35], [fx, 0.23, -2.30], [fx, 0.23, -2.12], [fx, 0.41, -2.18],
+        'carbon', { doubleSided: true, bias: -0.1, stroke: 'rgba(0,240,255,0.3)' }
+      );
+    }
+
+    // Quad exhaust tips (two pairs)
+    for (const ex of [-0.88, -0.70, 0.70, 0.88]) {
+      const r = 0.058;
+      const ez = -2.38;
+      const ey = 0.32;
+      addQuad(
+        [ex - r, ey + r, ez], [ex + r, ey + r, ez],
+        [ex + r, ey - r, ez], [ex - r, ey - r, ez],
+        'exhaust', { bias: -0.2 }
+      );
+    }
+
+    // Rear haunches / top rear fenders (connecting rear deck to cabin & sides)
+    const haunchRearIn  = [0.80, 0.96, -2.24];
+    const haunchRearOut = [1.18, 0.94, -2.30];
+    const haunchMidOut  = [1.34, 0.92, -1.15];
+    const haunchMidIn   = [0.90, 0.98, -1.10];
+
+    addSymQuad(haunchRearIn, haunchMidIn, haunchMidOut, haunchRearOut, 'paint', {
+      stroke: 'rgba(120, 235, 255, 0.28)'
+    });
+
+    // Rear engine deck (center between haunches, dark louvered glass)
+    addQuad(
+      [-0.80, 0.96, -2.24], [ 0.80, 0.96, -2.24],
+      [ 0.90, 0.98, -1.10], [-0.90, 0.98, -1.10],
+      'glass', { stroke: 'rgba(0, 240, 255, 0.3)' }
+    );
+    // Glowing cyan engine-bay louvers on rear deck
+    for (let k = 0; k < 4; k++) {
+      const zA = -2.04 + k * 0.24;
+      const wA = 0.62 + k * 0.03;
+      addQuad(
+        [-wA, 0.985, zA], [wA, 0.985, zA],
+        [wA, 0.985, zA + 0.055], [-wA, 0.985, zA + 0.055],
+        'neonAccent', { bias: -0.05, emissive: '#00f0ff' }
+      );
+    }
+
+    // Side body panels (upper shoulder + lower door + side air intake)
+    const shRear = [1.32, 0.72, -2.40];
+    const shMidR = [1.34, 0.92, -1.15];
+    const shMidF = [1.26, 0.86,  0.55];
+    const shFront = [1.16, 0.66, 2.25];
+
+    const skRear  = [1.24, 0.26, -2.26];
+    const skMidR  = [1.28, 0.24, -1.05];
+    const skMidF  = [1.24, 0.24,  0.65];
+    const skFront = [1.14, 0.24,  2.22];
+
+    // Upper rear quarter flank
+    addSymQuad(haunchRearOut, haunchMidOut, shMidR, shRear, 'paint', { stroke: 'rgba(120,235,255,0.22)' });
+    // Lower rear quarter
+    addSymQuad(shRear, shMidR, skMidR, skRear, 'paint');
+    // Mid door upper
+    addSymQuad(haunchMidOut, [1.26, 0.86, 0.55], [1.28, 0.58, 0.55], [1.34, 0.60, -1.15], 'paint', {
+      stroke: 'rgba(120,235,255,0.2)'
+    });
+    // Mid door lower + sculpted side skirt
+    addSymQuad([1.34, 0.60, -1.15], [1.28, 0.58, 0.55], skMidF, skMidR, 'paint');
+    // Dark side air intake vent ahead of rear wheel
+    addSymQuad(
+      [1.345, 0.84, -1.08], [1.315, 0.78, -0.35],
+      [1.305, 0.42, -0.42], [1.345, 0.40, -1.08],
+      'carbon', { bias: -0.04, stroke: 'rgba(0, 240, 255, 0.45)' }
+    );
+    // Front fender flank
+    addSymQuad(shMidF, shFront, skFront, skMidF, 'paint');
+
+    // Front hood & nose
+    const hoodRearL = [-0.90, 0.92,  0.68];
+    const hoodRearR = [ 0.90, 0.92,  0.68];
+    const hoodFrontL = [-1.06, 0.60, 2.38];
+    const hoodFrontR = [ 1.06, 0.60, 2.38];
+
+    // Center hood
+    addQuad(hoodRearL, hoodRearR, hoodFrontR, hoodFrontL, 'paint', { stroke: 'rgba(140,230,255,0.25)' });
+    // Front fender tops
+    addSymQuad(hoodRearR, [1.26, 0.86, 0.55], shFront, hoodFrontR, 'paint');
+    // Front bumper / nose
+    addQuad(hoodFrontL, hoodFrontR, [1.14, 0.24, 2.22], [-1.14, 0.24, 2.22], 'carbon');
+
+    // Cabin / Greenhouse (sleek low-slung teardrop canopy)
+    const roofRearL  = [-0.74, 1.24, -0.88];
+    const roofRearR  = [ 0.74, 1.24, -0.88];
+    const roofFrontL = [-0.72, 1.25,  0.08];
+    const roofFrontR = [ 0.72, 1.25,  0.08];
+
+    // Roof top
+    addQuad(roofRearL, roofRearR, roofFrontR, roofFrontL, 'paint', {
+      stroke: 'rgba(180, 240, 255, 0.42)'
+    });
+    // Rear sloped cabin glass (fastback)
+    addQuad(
+      [-0.88, 0.98, -1.16], [ 0.88, 0.98, -1.16],
+      roofRearR, roofRearL,
+      'glass', { stroke: 'rgba(0, 245, 255, 0.35)' }
+    );
+    // Front windshield
+    addQuad(roofFrontL, roofFrontR, hoodRearR, hoodRearL, 'glass', {
+      stroke: 'rgba(0, 245, 255, 0.3)'
+    });
+    // Side cabin windows
+    addSymQuad(
+      [0.90, 0.98, -1.10], [0.90, 0.92, 0.68],
+      roofFrontR, roofRearR,
+      'glass', { stroke: 'rgba(255, 65, 195, 0.32)' }
+    );
+
+    // Dramatic GT Rear Wing / Spoiler
+    const wingY = 1.38;
+    const wingZRear = -2.44;
+    const wingZFront = -2.06;
+    const wingW = 1.34;
+    // Main airfoil top & bottom
+    addQuad(
+      [-wingW, wingY, wingZRear], [ wingW, wingY, wingZRear],
+      [ wingW, wingY - 0.05, wingZFront], [-wingW, wingY - 0.05, wingZFront],
+      'carbon', { doubleSided: true, bias: -0.15, stroke: 'rgba(0, 245, 255, 0.65)' }
+    );
+    // Neon trailing edge strip on wing
+    addQuad(
+      [-wingW, wingY + 0.015, wingZRear - 0.01], [ wingW, wingY + 0.015, wingZRear - 0.01],
+      [ wingW, wingY - 0.02,  wingZRear - 0.01], [-wingW, wingY - 0.02,  wingZRear - 0.01],
+      'neonAccent', { bias: -0.2, emissive: '#00f0ff' }
+    );
+    // Wing struts (twin swan-neck mounts)
+    addSymQuad(
+      [0.56, 0.95, -2.22], [0.62, 0.95, -2.22],
+      [0.62, wingY - 0.02, wingZRear + 0.14], [0.56, wingY - 0.02, wingZRear + 0.14],
+      'carbon', { doubleSided: true, bias: -0.08 }
+    );
+    // Wing side endplates
+    addSymQuad(
+      [wingW, wingY + 0.08, wingZRear - 0.04], [wingW, wingY + 0.05, wingZFront + 0.04],
+      [wingW, wingY - 0.16, wingZFront + 0.02], [wingW, wingY - 0.14, wingZRear - 0.04],
+      'paint', { doubleSided: true, bias: -0.12, stroke: 'rgba(255, 42, 165, 0.7)' }
+    );
+
+    // Side mirrors
+    addSymQuad(
+      [0.98, 0.96, 0.42], [1.22, 1.00, 0.36],
+      [1.20, 0.92, 0.36], [0.96, 0.90, 0.42],
+      'paint', { doubleSided: true, stroke: 'rgba(0,240,255,0.4)' }
+    );
+  }
+  buildSportsCarMesh();
+
+  // Transform a local car-space 3D point into camera-relative world 3D space
+  function transformCarPoint(lx, ly, lz, carWorldX, carWorldY, bounceY) {
+    // 1) Pitch (around X)
+    const cp = Math.cos(state.carPitch), sp = Math.sin(state.carPitch);
+    let y1 = ly * cp - lz * sp;
+    let z1 = ly * sp + lz * cp;
+    let x1 = lx;
+
+    // 2) Roll (around Z)
+    const cr = Math.cos(state.carRoll), sr = Math.sin(state.carRoll);
+    let x2 = x1 * cr - y1 * sr;
+    let y2 = x1 * sr + y1 * cr;
+    let z2 = z1;
+
+    // 3) Yaw (around Y)
+    const cy = Math.cos(state.carYaw), sy = Math.sin(state.carYaw);
+    let x3 = x2 * cy + z2 * sy;
+    let z3 = -x2 * sy + z2 * cy;
+    let y3 = y2;
+
+    return [
+      carWorldX + x3,
+      carWorldY + y3 + bounceY,
+      CAR_Z + z3
+    ];
+  }
+
+  // Generate dynamic 3D wheel faces (tire tread + alloy rim + spinning neon spokes)
+  function appendWheelFaces(renderList, cx, cy, cz, radius, width, side, carWorldX, carWorldY, bounceY) {
+    const segs = 12;
+    const xIn  = cx - side * width * 0.5;
+    const xOut = cx + side * width * 0.5;
+    const spin = state.wheelSpin;
+
+    // Tire tread ring quads
+    for (let i = 0; i < segs; i++) {
+      const a0 = spin + (i / segs) * Math.PI * 2;
+      const a1 = spin + ((i + 1) / segs) * Math.PI * 2;
+      const y0 = cy + Math.sin(a0) * radius;
+      const z0 = cz + Math.cos(a0) * radius;
+      const y1 = cy + Math.sin(a1) * radius;
+      const z1 = cz + Math.cos(a1) * radius;
+
+      const p0 = transformCarPoint(xIn,  y0, z0, carWorldX, carWorldY, bounceY);
+      const p1 = transformCarPoint(xOut, y0, z0, carWorldX, carWorldY, bounceY);
+      const p2 = transformCarPoint(xOut, y1, z1, carWorldX, carWorldY, bounceY);
+      const p3 = transformCarPoint(xIn,  y1, z1, carWorldX, carWorldY, bounceY);
+
+      const verts = side > 0 ? [p0, p1, p2, p3] : [p1, p0, p3, p2];
+      pushFaceToRenderList(renderList, verts, 'tire', false, 0.12, null, null);
+    }
+
+    // Outer wheel hubcap / rim polygon
+    const rimPts = [];
+    for (let i = 0; i < segs; i++) {
+      const a = spin + (i / segs) * Math.PI * 2;
+      rimPts.push(transformCarPoint(xOut, cy + Math.sin(a) * radius * 0.96, cz + Math.cos(a) * radius * 0.96, carWorldX, carWorldY, bounceY));
+    }
+    if (side < 0) rimPts.reverse();
+    pushFaceToRenderList(renderList, rimPts, 'rim', true, 0.08, 'rgba(0, 240, 255, 0.72)', null);
+  }
+
+  function pushFaceToRenderList(list, worldVerts, mat, doubleSided, bias, stroke, emissive) {
+    // Compute face normal in camera space
+    const v0 = worldVerts[0], v1 = worldVerts[1], v2 = worldVerts[2];
+    const ax = v1[0] - v0[0], ay = v1[1] - v0[1], az = v1[2] - v0[2];
+    const bx = v2[0] - v0[0], by = v2[1] - v0[1], bz = v2[2] - v0[2];
+    let nx = ay * bz - az * by;
+    let ny = az * bx - ax * bz;
+    let nz = ax * by - ay * bx;
+    const len = Math.hypot(nx, ny, nz) || 1;
+    nx /= len; ny /= len; nz /= len;
+
+    // Average center
+    let cx = 0, cy = 0, cz = 0;
+    for (let i = 0; i < worldVerts.length; i++) {
+      cx += worldVerts[i][0];
+      cy += worldVerts[i][1];
+      cz += worldVerts[i][2];
+    }
+    cx /= worldVerts.length;
+    cy /= worldVerts.length;
+    cz /= worldVerts.length;
+
+    // View vector from face center to camera (camX, camY, 0)
+    const vx = state.camX - cx;
+    const vy = state.camY - cy;
+    const vz = -cz;
+    const facing = nx * vx + ny * vy + nz * vz;
+    if (!doubleSided && facing < 0) return;
+
+    // Project vertices
+    const proj = [];
+    for (let i = 0; i < worldVerts.length; i++) {
+      const p = projectPoint(worldVerts[i][0], worldVerts[i][1], worldVerts[i][2]);
+      if (!p) return;
+      proj.push(p);
+    }
+
+    list.push({
+      proj,
+      z: cz + bias,
+      nx, ny, nz,
+      mat,
+      stroke,
+      emissive
+    });
+  }
+
+  function shadeFace(f) {
+    if (f.emissive) return f.emissive;
+
+    // Key light from horizon sun + overhead night sky
+    const sunDot = Math.max(0, f.nx * 0.12 + f.ny * 0.72 + f.nz * 0.68);
+    const rimDot = Math.max(0, Math.abs(f.nx) * 0.8 + Math.max(0, f.ny) * 0.45);
+    const gantry = state.gantryFlash * Math.max(0, f.ny * 0.85 - f.nz * 0.35);
+
+    const gR = state.gantryHue < 220 ? 0 : 255;
+    const gG = state.gantryHue < 220 ? 240 : 48;
+    const gB = state.gantryHue < 220 ? 255 : 185;
+
+    let r = 20, g = 24, b = 45;
+    if (f.mat === 'paint') {
+      // Sleek midnight-cyber-violet / deep sapphire metallic supercar paint
+      r = 26 + sunDot * 54 + rimDot * 28 + gantry * gR * 0.42;
+      g = 22 + sunDot * 38 + rimDot * 44 + gantry * gG * 0.42;
+      b = 64 + sunDot * 98 + rimDot * 72 + gantry * gB * 0.42;
+    } else if (f.mat === 'glass') {
+      // Tinted reflective canopy catching pink/cyan sky
+      r = 16 + sunDot * 55 + rimDot * 40 + gantry * gR * 0.55;
+      g = 24 + sunDot * 65 + rimDot * 55 + gantry * gG * 0.55;
+      b = 58 + sunDot * 95 + rimDot * 75 + gantry * gB * 0.55;
+    } else if (f.mat === 'carbon') {
+      r = 14 + sunDot * 22 + gantry * gR * 0.18;
+      g = 14 + sunDot * 22 + gantry * gG * 0.18;
+      b = 24 + sunDot * 34 + gantry * gB * 0.18;
+    } else if (f.mat === 'diffuser') {
+      r = 10 + sunDot * 14;
+      g = 10 + sunDot * 16;
+      b = 20 + sunDot * 26;
+    } else if (f.mat === 'tire') {
+      r = 12 + sunDot * 14;
+      g = 12 + sunDot * 14;
+      b = 18 + sunDot * 18;
+    } else if (f.mat === 'rim') {
+      r = 28 + sunDot * 40;
+      g = 36 + sunDot * 55;
+      b = 60 + sunDot * 75;
+    } else if (f.mat === 'exhaust') {
+      r = 70 + state.boost * 120;
+      g = 76 + state.boost * 90;
+      b = 110 + state.boost * 145;
+    }
+
+    r = Math.min(255, Math.max(0, r | 0));
+    g = Math.min(255, Math.max(0, g | 0));
+    b = Math.min(255, Math.max(0, b | 0));
+    return `rgb(${r},${g},${b})`;
+  }
+
+  // Tail-light ribbon history for dramatic neon motion trails
+  const trailHistory = [];
+  const MAX_TRAIL = 14;
+
+  function drawHeadlightBeams(carWorldX, carWorldY) {
+    // Volumetric dual headlight beams cast onto the curved road ahead
+    const nearL = projectPoint(carWorldX - 0.85, carWorldY + 0.42, CAR_Z + 2.2);
+    const nearR = projectPoint(carWorldX + 0.85, carWorldY + 0.42, CAR_Z + 2.2);
+    const roadAhead = sampleRoad(CAR_Z + 38);
+    const farL = projectPoint(roadAhead.x + state.carX * 0.5 - 4.2, roadAhead.y + 0.05, CAR_Z + 38);
+    const farR = projectPoint(roadAhead.x + state.carX * 0.5 + 4.2, roadAhead.y + 0.05, CAR_Z + 38);
+    if (!nearL || !nearR || !farL || !farR) return;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const beamGrad = ctx.createLinearGradient(0, nearL.y, 0, farL.y);
+    beamGrad.addColorStop(0.0, 'rgba(130, 245, 255, 0.24)');
+    beamGrad.addColorStop(0.45, 'rgba(90, 215, 255, 0.10)');
+    beamGrad.addColorStop(1.0, 'rgba(0, 180, 255, 0.0)');
+    ctx.fillStyle = beamGrad;
+    ctx.beginPath();
+    ctx.moveTo(nearL.x, nearL.y);
+    ctx.lineTo(nearR.x, nearR.y);
+    ctx.lineTo(farR.x, farR.y);
+    ctx.lineTo(farL.x, farL.y);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  function drawSportsCar() {
+    const roadHere = sampleRoad(CAR_Z);
+    const carWorldX = roadHere.x + state.carX;
+    const carWorldY = roadHere.y;
+    const bounceY = Math.sin(state.time * 16.5) * 0.018 + Math.sin(state.time * 7.2) * 0.014;
+
+    // 1) Headlight beams projected onto road ahead
+    drawHeadlightBeams(carWorldX, carWorldY);
+
+    // 2) Neon underglow + shadow + wet-road tail-light reflection on asphalt
+    const groundCenter = projectPoint(carWorldX, carWorldY + 0.02, CAR_Z - 0.2);
+    if (groundCenter) {
+      const rx = groundCenter.scale * 2.15;
+      const ry = groundCenter.scale * 0.56;
+
+      ctx.save();
+      // Ground ambient shadow
+      const shGrad = ctx.createRadialGradient(groundCenter.x, groundCenter.y, rx * 0.1, groundCenter.x, groundCenter.y, rx * 1.05);
+      shGrad.addColorStop(0.0, 'rgba(2, 1, 8, 0.92)');
+      shGrad.addColorStop(0.68, 'rgba(4, 2, 14, 0.65)');
+      shGrad.addColorStop(1.0, 'rgba(4, 2, 14, 0)');
+      ctx.fillStyle = shGrad;
+      ctx.beginPath();
+      ctx.ellipse(groundCenter.x, groundCenter.y, rx * 1.1, ry * 0.9, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Pulsing electric cyan/magenta underglow
+      ctx.globalCompositeOperation = 'lighter';
+      const pulse = 0.8 + 0.2 * Math.sin(state.time * 5.2);
+      const ugGrad = ctx.createRadialGradient(groundCenter.x, groundCenter.y + ry * 0.1, rx * 0.05, groundCenter.x, groundCenter.y + ry * 0.1, rx * 1.25);
+      ugGrad.addColorStop(0.0, `rgba(0, 245, 255, ${0.42 * pulse})`);
+      ugGrad.addColorStop(0.55, `rgba(195, 38, 255, ${0.22 * pulse})`);
+      ugGrad.addColorStop(1.0, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = ugGrad;
+      ctx.beginPath();
+      ctx.ellipse(groundCenter.x, groundCenter.y + ry * 0.1, rx * 1.25, ry * 1.05, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Wet-road crimson reflection of the tail light bar directly beneath rear bumper
+      const rearGround = projectPoint(carWorldX, carWorldY, CAR_Z - 2.45);
+      if (rearGround) {
+        const reflW = rearGround.scale * 1.45;
+        const reflH = rearGround.scale * 0.85;
+        const tlRefl = ctx.createRadialGradient(rearGround.x, rearGround.y + reflH * 0.35, 2, rearGround.x, rearGround.y + reflH * 0.35, reflW);
+        tlRefl.addColorStop(0.0, 'rgba(255, 22, 92, 0.48)');
+        tlRefl.addColorStop(0.5, 'rgba(255, 20, 120, 0.16)');
+        tlRefl.addColorStop(1.0, 'rgba(255, 20, 120, 0)');
+        ctx.fillStyle = tlRefl;
+        ctx.beginPath();
+        ctx.ellipse(rearGround.x, rearGround.y + reflH * 0.42, reflW, reflH * 0.72, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // 3) Build transformed 3D render list (body + 4 rotating 3D wheels)
+    const renderList = [];
+    for (let i = 0; i < carFaces.length; i++) {
+      const f = carFaces[i];
+      const wVerts = new Array(f.verts.length);
+      for (let j = 0; j < f.verts.length; j++) {
+        const v = f.verts[j];
+        wVerts[j] = transformCarPoint(v[0], v[1], v[2], carWorldX, carWorldY, bounceY);
+      }
+      pushFaceToRenderList(renderList, wVerts, f.mat, f.doubleSided, f.bias, f.stroke, f.emissive);
+    }
+
+    // 4 rotating 3D wheels (wide rear tires, sleek front tires)
+    appendWheelFaces(renderList, -1.24, 0.38, -1.52, 0.38, 0.34, -1, carWorldX, carWorldY, bounceY);
+    appendWheelFaces(renderList,  1.24, 0.38, -1.52, 0.38, 0.34,  1, carWorldX, carWorldY, bounceY);
+    appendWheelFaces(renderList, -1.16, 0.36,  1.52, 0.36, 0.28, -1, carWorldX, carWorldY, bounceY);
+    appendWheelFaces(renderList,  1.16, 0.36,  1.52, 0.36, 0.28,  1, carWorldX, carWorldY, bounceY);
+
+    // Painter's algorithm: farthest first
+    renderList.sort((a, b) => b.z - a.z);
+
+    // Draw all sorted 3D polygons
+    ctx.save();
+    ctx.lineJoin = 'round';
+    for (let i = 0; i < renderList.length; i++) {
+      const f = renderList[i];
+      ctx.beginPath();
+      ctx.moveTo(f.proj[0].x, f.proj[0].y);
+      for (let j = 1; j < f.proj.length; j++) {
+        ctx.lineTo(f.proj[j].x, f.proj[j].y);
+      }
+      ctx.closePath();
+      ctx.fillStyle = shadeFace(f);
+      ctx.fill();
+      if (f.stroke) {
+        ctx.strokeStyle = f.stroke;
+        ctx.lineWidth = 1.05;
+        ctx.stroke();
+      }
+    }
+    ctx.restore();
+
+    // 4) Additive bloom on tail lights + tail-light neon motion trails + exhaust flames
+    const tlL = transformCarPoint(-1.12, 0.66, -2.44, carWorldX, carWorldY, bounceY);
+    const tlR = transformCarPoint( 1.12, 0.66, -2.44, carWorldX, carWorldY, bounceY);
+    const pTlL = projectPoint(tlL[0], tlL[1], tlL[2]);
+    const pTlR = projectPoint(tlR[0], tlR[1], tlR[2]);
+
+    // Update trail history (shift older samples backward in Z as car moves forward)
+    trailHistory.unshift({
+      lx: tlL[0], ly: tlL[1], lz: tlL[2],
+      rx: tlR[0], ry: tlR[1], rz: tlR[2]
+    });
+    for (let i = 1; i < trailHistory.length; i++) {
+      trailHistory[i].lz -= state.speed * 0.0042;
+      trailHistory[i].rz -= state.speed * 0.0042;
+    }
+    if (trailHistory.length > MAX_TRAIL) trailHistory.pop();
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+
+    // Neon tail light ribbons
+    for (const side of ['l', 'r']) {
+      for (let i = 0; i < trailHistory.length - 1; i++) {
+        const a = trailHistory[i];
+        const b = trailHistory[i + 1];
+        const pa = projectPoint(side === 'l' ? a.lx : a.rx, side === 'l' ? a.ly : a.ry, side === 'l' ? a.lz : a.rz);
+        const pb = projectPoint(side === 'l' ? b.lx : b.rx, side === 'l' ? b.ly : b.ry, side === 'l' ? b.lz : b.rz);
+        if (!pa || !pb) continue;
+        const frac = 1 - i / MAX_TRAIL;
+        ctx.strokeStyle = `rgba(255, 24, 96, ${frac * (0.34 + state.boost * 0.32)})`;
+        ctx.lineWidth = Math.max(1.2, pa.scale * 0.085 * frac);
+        ctx.beginPath();
+        ctx.moveTo(pa.x, pa.y);
+        ctx.lineTo(pb.x, pb.y);
+        ctx.stroke();
+      }
+    }
+
+    // Glowing bloom halo across full LED tail-light bar
+    if (pTlL && pTlR) {
+      const midX = (pTlL.x + pTlR.x) * 0.5;
+      const midY = (pTlL.y + pTlR.y) * 0.5;
+      const span = Math.hypot(pTlR.x - pTlL.x, pTlR.y - pTlL.y);
+
+      const barGlow = ctx.createRadialGradient(midX, midY, span * 0.06, midX, midY, span * 0.9);
+      barGlow.addColorStop(0.0, 'rgba(255, 45, 115, 0.55)');
+      barGlow.addColorStop(0.45, 'rgba(255, 20, 105, 0.22)');
+      barGlow.addColorStop(1.0, 'rgba(255, 0, 80, 0)');
+      ctx.fillStyle = barGlow;
+      ctx.beginPath();
+      ctx.ellipse(midX, midY, span * 0.92, span * 0.32, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Crisp bright flare on left & right tail-light corners
+      for (const pt of [pTlL, pTlR]) {
+        const fg = ctx.createRadialGradient(pt.x, pt.y, 1, pt.x, pt.y, pt.scale * 0.55);
+        fg.addColorStop(0.0, 'rgba(255, 220, 235, 0.85)');
+        fg.addColorStop(0.35, 'rgba(255, 24, 96, 0.45)');
+        fg.addColorStop(1.0, 'rgba(255, 0, 80, 0)');
+        ctx.fillStyle = fg;
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, pt.scale * 0.55, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // Turbo exhaust blue-violet afterburner flicker
+    const flameStrength = 0.25 + state.boost * 0.75 + 0.15 * Math.sin(state.time * 43);
+    if (flameStrength > 0.32) {
+      for (const ex of [-0.79, 0.79]) {
+        const ep = transformCarPoint(ex, 0.32, -2.42, carWorldX, carWorldY, bounceY);
+        const pp = projectPoint(ep[0], ep[1], ep[2]);
+        if (!pp) continue;
+        const fr = pp.scale * (0.14 + state.boost * 0.16) * (0.8 + 0.25 * Math.sin(state.time * 61 + ex));
+        const eg = ctx.createRadialGradient(pp.x, pp.y, 1, pp.x, pp.y, fr * 2.1);
+        eg.addColorStop(0.0, `rgba(210, 250, 255, ${0.85 * flameStrength})`);
+        eg.addColorStop(0.4, `rgba(0, 210, 255, ${0.55 * flameStrength})`);
+        eg.addColorStop(0.8, `rgba(180, 40, 255, ${0.28 * flameStrength})`);
+        eg.addColorStop(1.0, 'rgba(180, 40, 255, 0)');
+        ctx.fillStyle = eg;
+        ctx.beginPath();
+        ctx.arc(pp.x, pp.y, fr * 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.restore();
+  }
+
+  // =========================================================================
+  // SPEED STREAKS, AUTONOMOUS DRIVING PHYSICS & MAIN ANIMATION LOOP
+  // =========================================================================
+  const streaks = Array.from({ length: 42 }, () => ({
+    angle: rand() * Math.PI * 2,
+    dist: 0.12 + rand() * 0.88,
+    speed: 0.7 + rand() * 1.4,
+    hue: rand() > 0.5 ? '0, 240, 255' : '255, 48, 175'
+  }));
+
+  function drawSpeedStreaks(dt) {
+    const intensity = 0.28 + state.boost * 0.55;
+    const cx = W * 0.5;
+    const cy = horizonY;
+    const maxR = Math.hypot(W, H) * 0.65;
+
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < streaks.length; i++) {
+      const s = streaks[i];
+      s.dist += dt * s.speed * (0.9 + state.boost * 1.15);
+      if (s.dist > 1.15) {
+        s.dist = 0.08 + rand() * 0.14;
+        s.angle = rand() * Math.PI * 2;
+      }
+      if (s.dist < 0.22) continue;
+
+      const r0 = s.dist * maxR;
+      const r1 = r0 + (18 + s.dist * 62) * (0.65 + state.boost * 0.85);
+      const x0 = cx + Math.cos(s.angle) * r0;
+      const y0 = cy + Math.sin(s.angle) * r0;
+      const x1 = cx + Math.cos(s.angle) * r1;
+      const y1 = cy + Math.sin(s.angle) * r1;
+
+      // Keep streaks mostly around edges so center car stays crisp
+      if (r0 < Math.min(W, H) * 0.24) continue;
+
+      const alpha = Math.min(1, (s.dist - 0.22) * 1.4) * intensity * 0.45;
+      ctx.strokeStyle = `rgba(${s.hue}, ${alpha})`;
+      ctx.lineWidth = 1.0 + s.dist * 1.4;
+      ctx.beginPath();
+      ctx.moveTo(x0, y0);
+      ctx.lineTo(x1, y1);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  function drawVignette() {
+    const vig = ctx.createRadialGradient(W * 0.5, H * 0.5, Math.min(W, H) * 0.34, W * 0.5, H * 0.5, Math.max(W, H) * 0.75);
+    vig.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vig.addColorStop(1, 'rgba(2, 1, 10, 0.58)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, W, H);
+  }
+
+  let lastTime = performance.now();
+
+  function update(dt) {
+    state.time += dt;
+
+    // Periodic automatic turbo surge for lively cinema pacing (or manual boost)
+    const autoBoost = Math.pow(Math.max(0, Math.sin(state.time * 0.38 - 0.6)), 6);
+    const desiredBoost = state.keys.boost ? 1 : autoBoost * 0.72;
+    state.boost += (desiredBoost - state.boost) * Math.min(1, dt * 4.5);
+
+    state.targetSpeed = 148 + state.boost * 72;
+    state.speed += (state.targetSpeed - state.speed) * Math.min(1, dt * 3.0);
+
+    const prevSeg = Math.floor((state.z + CAR_Z) / SEG_LEN);
+    state.z += state.speed * dt;
+    const currSeg = Math.floor((state.z + CAR_Z) / SEG_LEN);
+
+    // Trigger overhead neon light wash on car body whenever passing under a neon arch
+    if (Math.floor(currSeg / ARCH_INTERVAL) !== Math.floor(prevSeg / ARCH_INTERVAL)) {
+      state.gantryFlash = 1.0;
+      state.gantryHue = (Math.floor(currSeg / ARCH_INTERVAL) % 2) === 0 ? 185 : 320;
+    }
+    state.gantryFlash = Math.max(0, state.gantryFlash - dt * 2.4);
+
+    // Wheel rotation
+    state.wheelSpin += state.speed * dt * 0.24;
+
+    // Determine desired lateral lane position (smooth autonomous lane cruising + optional user input)
+    let targetCarX;
+    if (state.keys.left || state.keys.right) {
+      const steerDir = (state.keys.right ? 1 : 0) - (state.keys.left ? 1 : 0);
+      targetCarX = Math.max(-4.6, Math.min(4.6, state.carX + steerDir * 7.5 * dt));
+    } else if (state.mouseSteer !== null) {
+      targetCarX = Math.max(-4.6, Math.min(4.6, state.mouseSteer * 4.2));
+    } else {
+      // Smooth autonomous weaving across the 3-lane highway
+      targetCarX = Math.sin(state.time * 0.42) * 2.55 + Math.sin(state.time * 0.95 + 1.2) * 0.65;
+    }
+
+    const lateralForce = (targetCarX - state.carX) * 6.2;
+    state.carVx += (lateralForce - state.carVx * 4.2) * dt;
+    state.carX += state.carVx * dt;
+    state.carX = Math.max(-5.0, Math.min(5.0, state.carX));
+
+    // Road curvature & slope at car position for authentic 3D body yaw, roll & pitch
+    const curveNow = roadCurveAt(state.z + CAR_Z);
+    const slopeNow = roadSlopeAt(state.z + CAR_Z);
+
+    const targetYaw = state.carVx * 0.048 + curveNow * 240;
+    const targetRoll = -state.carVx * 0.032 - curveNow * 140;
+    const targetPitch = slopeNow * 1.4 - state.boost * 0.025;
+
+    state.carYaw   += (targetYaw   - state.carYaw)   * Math.min(1, dt * 7.0);
+    state.carRoll  += (targetRoll  - state.carRoll)  * Math.min(1, dt * 6.5);
+    state.carPitch += (targetPitch - state.carPitch) * Math.min(1, dt * 5.0);
+
+    // Smooth chase camera follow with subtle banking & horizon parallax
+    const targetCamX = state.carX * 0.62 - curveNow * 900;
+    state.camX += (targetCamX - state.camX) * Math.min(1, dt * 4.5);
+    state.camY = 3.05 + Math.sin(state.time * 1.9) * 0.06 - state.boost * 0.14;
+    const targetCamRoll = -curveNow * 85 - state.carVx * 0.008;
+    state.camRoll += (targetCamRoll - state.camRoll) * Math.min(1, dt * 3.8);
+    state.skyPan += (curveNow * state.speed * 145) * dt;
+  }
+
+  function frame(now) {
+    const dt = Math.min(0.05, Math.max(0.001, (now - lastTime) / 1000));
+    lastTime = now;
+
+    update(dt);
+
+    drawBackdrop(state.time);
+    drawRoadAndEnvironment();
+    drawSportsCar();
+    drawForegroundArches();
+    drawSpeedStreaks(dt);
+    drawVignette();
+
+    requestAnimationFrame(frame);
+  }
+
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

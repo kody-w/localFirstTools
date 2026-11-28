@@ -1,0 +1,967 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Starship on Mars — pastel on toned paper</title>
+<style>
+  html,body{margin:0;height:100%;background:#111014;}
+  body{display:flex;align-items:center;justify-content:center;}
+  canvas{max-width:100vw;max-height:100vh;width:auto;height:auto;box-shadow:0 0 40px #000;}
+</style>
+</head>
+<body>
+<canvas id="c" width="3840" height="2160"></canvas>
+<script id="art">
+/*ART-BEGIN*/
+function createArt(W, H, seed) {
+  const k = W / 3840, N = W * H;
+  const CR = new Float32Array(N), CG = new Float32Array(N), CB = new Float32Array(N);
+  const tooth = new Float32Array(N), fill = new Float32Array(N);
+  const sid = new Int32Array(N), scov = new Float32Array(N), spk = new Uint8Array(N);
+  let SID = 0;
+
+  // ---------- randomness & noise ----------
+  let st = seed >>> 0;
+  function rnd() { st = (st + 0x6D2B79F5) | 0; let t = st; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }
+  const R = (a, b) => a + (b - a) * rnd();
+  const gauss = () => (rnd() + rnd() + rnd() + rnd() - 2) * 1.732;
+  const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+  function hash2(x, y, s) { let h = (Math.imul(x, 374761393) + Math.imul(y, 668265263) + Math.imul(s, 1442695041)) | 0; h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0) / 4294967296; }
+  function vn(x, y, s = 0) {
+    const ix = Math.floor(x), iy = Math.floor(y); let fx = x - ix, fy = y - iy;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    const a = hash2(ix, iy, s), b = hash2(ix + 1, iy, s), c = hash2(ix, iy + 1, s), d = hash2(ix + 1, iy + 1, s);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+  }
+  function fbm(x, y, o = 4, s = 0) { let v = 0, a = 0.5, f = 1, n = 0; for (let i = 0; i < o; i++) { v += a * vn(x * f, y * f, s + i * 17); n += a; a *= 0.5; f *= 2.03; } return v / n; }
+
+  // ---------- colour ----------
+  function hex(h) { h = h.replace('#', ''); return [parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255]; }
+  function mix(a, b, t) { return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t]; }
+  function ramp(stops, t) {
+    t = clamp(t);
+    for (let i = 1; i < stops.length; i++) if (t <= stops[i][0]) { const a = stops[i - 1], b = stops[i]; return mix(a[1], b[1], (t - a[0]) / ((b[0] - a[0]) || 1)); }
+    return stops[stops.length - 1][1];
+  }
+  function jit(c, amt) { const l = (rnd() - 0.5) * amt; return [clamp(c[0] + l + (rnd() - 0.5) * amt * 0.7), clamp(c[1] + l + (rnd() - 0.5) * amt * 0.7), clamp(c[2] + l + (rnd() - 0.5) * amt * 0.7)]; }
+  function angMix(a, b, t) { const x = lerp(Math.cos(2 * a), Math.cos(2 * b), t), y = lerp(Math.sin(2 * a), Math.sin(2 * b), t); return Math.atan2(y, x) / 2; }
+
+  // ---------- paper: dark plum Mi-Teintes-like sheet with honeycomb tooth ----------
+  const PAPER = hex('#30243f');
+  function makePaper() {
+    const cs = 6.5 * k + 1.2, m1 = 2.0 * k + 0.7, m2 = 70 * k;
+    for (let y = 0; y < H; y++) {
+      const gy = y / cs, iy = Math.floor(gy);
+      for (let x = 0; x < W; x++) {
+        const gx = x / cs, ix = Math.floor(gx);
+        let f1 = 9;
+        for (let oy = -1; oy <= 1; oy++) for (let ox = -1; ox <= 1; ox++) {
+          const cx = ix + ox, cy = iy + oy;
+          const dx = cx + hash2(cx, cy, 11) - gx, dy = (cy + hash2(cx, cy, 12) - gy) * 1.2;
+          const d = dx * dx + dy * dy; if (d < f1) f1 = d;
+        }
+        const bump = 1 - Math.min(1, Math.sqrt(f1) * 1.3);
+        const i = y * W + x;
+        tooth[i] = 0.42 * bump + 0.3 * vn(x / m1, y / m1, 7) + 0.06 * hash2(x, y, 5) + 0.22 * vn(x / m2, y / m2, 9);
+        spk[i] = (hash2(x, y, 21) * 255) | 0;
+      }
+    }
+    // fibres pressed into the sheet
+    const nf = Math.floor(9000 * k * k) + 200;
+    for (let f = 0; f < nf; f++) {
+      let x = R(0, W), y = R(0, H), a = R(0, Math.PI * 2); const len = R(8, 45) * k + 3, dv = R(-0.16, 0.14);
+      for (let s = 0; s < len; s++) { a += R(-0.15, 0.15); x += Math.cos(a); y += Math.sin(a); const xi = x | 0, yi = y | 0; if (xi >= 0 && yi >= 0 && xi < W && yi < H) tooth[yi * W + xi] += dv; }
+    }
+    // equalise tooth to a uniform 0..1 distribution
+    const S = 200000, smp = new Float32Array(S);
+    for (let s = 0; s < S; s++) smp[s] = tooth[(rnd() * N) | 0];
+    smp.sort(); const Q = 1024, q = new Float32Array(Q + 1);
+    for (let j = 0; j <= Q; j++) q[j] = smp[Math.min(S - 1, Math.floor(j / Q * (S - 1)))];
+    for (let i = 0; i < N; i++) {
+      const v = tooth[i]; let lo = 0, hi = Q;
+      while (hi - lo > 1) { const md = (lo + hi) >> 1; if (q[md] <= v) lo = md; else hi = md; }
+      tooth[i] = lo / Q;
+    }
+    // paper colour: mottled, darker in the valleys, a few coloured fibres
+    const mt = 300 * k;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x, m = fbm(x / mt, y / mt, 3, 40), h = vn(x / mt * 1.7, y / mt * 1.7, 44);
+      const v = 0.86 + 0.22 * m + (tooth[i] - 0.5) * 0.18;
+      CR[i] = PAPER[0] * v * (0.95 + 0.1 * h); CG[i] = PAPER[1] * v; CB[i] = PAPER[2] * v * (1.05 - 0.1 * h);
+    }
+    const fc = [hex('#7d5a8c'), hex('#4a3f78'), hex('#8a4a5a'), hex('#5c6aa0')];
+    for (let f = 0; f < 1600 * k * k + 40; f++) {
+      let x = R(0, W), y = R(0, H), a = R(0, 6.3); const len = R(6, 26) * k + 2, c = fc[(rnd() * 4) | 0];
+      for (let s = 0; s < len; s++) { a += R(-0.2, 0.2); x += Math.cos(a); y += Math.sin(a); const xi = x | 0, yi = y | 0; if (xi >= 0 && yi >= 0 && xi < W && yi < H) { const i = yi * W + xi; CR[i] = lerp(CR[i], c[0], 0.5); CG[i] = lerp(CG[i], c[1], 0.5); CB[i] = lerp(CB[i], c[2], 0.5); } }
+    }
+  }
+
+  // ---------- dry media ----------
+  // bite: how deep into the tooth a given pressure reaches; soft: grain edge; slip: less grip on loaded paper
+  const TOOLS = {
+    pastel:   { bite: 1.00, soft: 0.22, opacity: 0.93, load: 0.32, slip: 0.30, lift: 0.55, streak: 0.55, rough: 0.40, speck: 0.14 },
+    pencil:   { bite: 0.92, soft: 0.16, opacity: 0.96, load: 0.18, slip: 0.15, lift: 0.40, streak: 0.00, rough: 0.18, speck: 0.07 },
+    charcoal: { bite: 0.86, soft: 0.14, opacity: 0.92, load: 0.30, slip: 0.20, lift: 0.30, streak: 0.45, rough: 0.45, speck: 0.22 },
+    rub:      { bite: 1.75, soft: 0.55, opacity: 0.62, load: 0.22, slip: 0.08, lift: 0.3, streak: 0.35, rough: 0.6, speck: 0.05 },
+    chalk:    { bite: 0.84, soft: 0.18, opacity: 0.97, load: 0.22, slip: 0.25, lift: 0.50, streak: 0.30, rough: 0.35, speck: 0.10 },
+  };
+  const prof = new Float32Array(66);
+
+  function seg(A, B, col, T) {
+    const x0 = A[0], y0 = A[1], w0 = A[2] * 0.5, p0 = A[3], x1 = B[0], y1 = B[1], w1 = B[2] * 0.5, p1 = B[3];
+    const rm = Math.max(w0, w1) * (1 + T.rough * 0.5) + 1.5;
+    const xa = Math.max(0, Math.floor(Math.min(x0, x1) - rm)), xb = Math.min(W - 1, Math.ceil(Math.max(x0, x1) + rm));
+    const ya = Math.max(0, Math.floor(Math.min(y0, y1) - rm)), yb = Math.min(H - 1, Math.ceil(Math.max(y0, y1) + rm));
+    if (xa > xb || ya > yb) return;
+    const dx = x1 - x0, dy = y1 - y0, L2 = dx * dx + dy * dy, L = Math.sqrt(L2) || 1e-6, nx = -dy / L, ny = dx / L;
+    const cr = col[0], cg = col[1], cb = col[2];
+    const rough = T.rough, bite = T.bite, isoft = 1 / T.soft, op = T.opacity, slip = T.slip, lift = T.lift, load = T.load, sp = T.speck / 255, useP = T.streak > 0;
+    for (let y = ya; y <= yb; y++) {
+      const py = y + 0.5 - y0; let i = y * W + xa;
+      for (let x = xa; x <= xb; x++, i++) {
+        const px = x + 0.5 - x0;
+        let t = L2 > 0 ? (px * dx + py * dy) / L2 : 0; if (t < 0) t = 0; else if (t > 1) t = 1;
+        const ex = px - t * dx, ey = py - t * dy, d = Math.sqrt(ex * ex + ey * ey);
+        const r = w0 + (w1 - w0) * t, tv = tooth[i];
+        const re = r * (1 - rough * 0.5 + rough * tv) + 0.35;
+        if (d >= re) continue;
+        let a = (p0 + (p1 - p0) * t) * Math.min(1, (re - d) / (0.7 + r * 0.3));
+        if (useP && r > 1.5) { let u = ((ex * nx + ey * ny) / re + 1) * 32; u = u < 0 ? 0 : u > 65 ? 65 : u; a *= prof[u | 0]; }
+        const fl = fill[i];
+        let c = (tv + fl * lift - 1 + a * bite) * isoft + 0.5;
+        if (c <= 0) continue; if (c > 1) c = 1;
+        const al = c * op * (1 - fl * slip);
+        if (sid[i] !== SID) { sid[i] = SID; scov[i] = 0; }
+        const pv = scov[i]; if (al <= pv) continue;
+        const da = (al - pv) / (1 - pv + 1e-4); scov[i] = al;
+        const sv = 1 + (spk[i] - 127.5) * sp;
+        CR[i] += (cr * sv - CR[i]) * da; CG[i] += (cg * sv - CG[i]) * da; CB[i] += (cb * sv - CB[i]) * da;
+        fill[i] = fl + (1 - fl) * da * load;
+      }
+    }
+  }
+  function drawStroke(P, col, T) {
+    SID++;
+    const ph = rnd() * 500;
+    for (let j = 0; j < 66; j++) prof[j] = (1 - T.streak) + T.streak * 1.55 * Math.pow(vn(j * 0.33 + ph, 7.7), 1.3);
+    for (let i = 0; i < P.length - 1; i++) seg(P[i], P[i + 1], col, T);
+  }
+  // a hand-made path: curvature, slow wander, fast tremor, pressure envelope
+  function mkPath(x, y, ang, len, w, p, o) {
+    o = o || {};
+    const curv = o.curv || 0, trem = o.trem == null ? 1 : o.trem, taper = o.taper == null ? 1 : o.taper;
+    const step = Math.max(1.4, Math.min(w * 0.45, 18)), n = Math.max(2, Math.ceil(len / step)), ds = len / n;
+    const ph = rnd() * 1000, ph2 = rnd() * 1000, ph3 = rnd() * 1000;
+    const a0 = 0.03 + rnd() * 0.14, a1 = 0.62 + rnd() * 0.33;
+    const wob = len * 0.022 * trem, tr = (0.45 + w * 0.035) * trem;
+    const pts = new Array(n + 1);
+    let cx = x, cy = y;
+    for (let i = 0; i <= n; i++) {
+      const s = i / n, a = ang + curv * (s - 0.5);
+      if (i > 0) { cx += Math.cos(a) * ds; cy += Math.sin(a) * ds; }
+      const off = (vn(ph + s * len / 28, 0.5) - 0.5) * 2 * tr + (vn(ph2 + s * len / 170, 1.5) - 0.5) * 2 * wob;
+      const env = sstep(0, a0, s) * (1 - taper * 0.85 * sstep(a1, 1, s));
+      const pv = p * (0.3 + 0.7 * env) * (0.78 + 0.44 * vn(ph3 + s * len / 45, 2.5));
+      const wv = w * (0.62 + 0.38 * env) * (0.88 + 0.24 * vn(ph3 + s * len / 90, 3.5));
+      pts[i] = [cx - Math.sin(a) * off, cy + Math.cos(a) * off, wv, Math.min(1, pv)];
+    }
+    return pts;
+  }
+  function toPx(P) { for (const q of P) { q[0] *= k; q[1] *= k; q[2] = Math.max(0.9, q[2] * k); } return P; }
+  // centred stroke in design space (3840x2160)
+  function S(x, y, ang, len, w, p, col, tool, o) {
+    const c = Math.cos(ang), s = Math.sin(ang), cv = (o && o.curv) || 0;
+    drawStroke(toPx(mkPath(x - c * len / 2 + s * cv * len * 0.06, y - s * len / 2 - c * cv * len * 0.06, ang, len, w, p, o)), col, TOOLS[tool]);
+  }
+  // stroke along an arbitrary design-space polyline (pts [x,y]), still with tremor & pressure
+  function SL(line, w, p, col, tool, o) {
+    o = o || {}; const trem = o.trem == null ? 1 : o.trem, ph = rnd() * 900, taper = o.taper == null ? 1 : o.taper;
+    let tot = 0; const cum = [0];
+    for (let i = 1; i < line.length; i++) { tot += Math.hypot(line[i][0] - line[i - 1][0], line[i][1] - line[i - 1][1]); cum.push(tot); }
+    if (tot < 0.5) return;
+    const a0 = 0.03 + rnd() * 0.12, a1 = 0.65 + rnd() * 0.3, P = [];
+    for (let i = 0; i < line.length; i++) {
+      const s = cum[i] / tot, j = Math.min(line.length - 1, i + 1), jj = Math.max(0, i - 1);
+      let tx = line[j][0] - line[jj][0], ty = line[j][1] - line[jj][1]; const tl = Math.hypot(tx, ty) || 1; tx /= tl; ty /= tl;
+      const off = (vn(ph + cum[i] / 26, 0.5) - 0.5) * 2 * (0.45 + w * 0.03) * trem;
+      const env = sstep(0, a0, s) * (1 - taper * 0.8 * sstep(a1, 1, s));
+      P.push([line[i][0] - ty * off, line[i][1] + tx * off, w * (0.65 + 0.35 * env), Math.min(1, p * (0.35 + 0.65 * env) * (0.8 + 0.4 * vn(ph + cum[i] / 40, 4.5)))]);
+    }
+    drawStroke(toPx(P), col, TOOLS[tool]);
+  }
+  // finger / stump blending: drags pigment along a path and presses it into the tooth
+  function smudge(x, y, ang, len, w, str, o) {
+    const c0 = Math.cos(ang), s0 = Math.sin(ang);
+    const P = toPx(mkPath(x - c0 * len / 2, y - s0 * len / 2, ang, len, w, 1, o || { trem: 0.6 }));
+    let car = null;
+    for (const q of P) {
+      const cx = q[0], cy = q[1], r = Math.max(1.5, q[2] * 0.5), f0 = str * q[3];
+      const xa = Math.max(0, Math.floor(cx - r)), xb = Math.min(W - 1, Math.ceil(cx + r)), ya = Math.max(0, Math.floor(cy - r)), yb = Math.min(H - 1, Math.ceil(cy + r));
+      let sr = 0, sg = 0, sb = 0, sw = 0;
+      for (let yy = ya; yy <= yb; yy++) for (let xx = xa; xx <= xb; xx++) {
+        const d = Math.hypot(xx + 0.5 - cx, yy + 0.5 - cy) / r; if (d >= 1) continue;
+        const i = yy * W + xx, f = f0 * (1 - d) * (0.6 + 0.4 * tooth[i]);
+        if (car) { CR[i] += (car[0] - CR[i]) * f * 0.55; CG[i] += (car[1] - CG[i]) * f * 0.55; CB[i] += (car[2] - CB[i]) * f * 0.55; fill[i] = Math.min(1, fill[i] + f * 0.06); }
+        sr += CR[i] * (1 - d); sg += CG[i] * (1 - d); sb += CB[i] * (1 - d); sw += 1 - d;
+      }
+      if (sw > 0) { const av = [sr / sw, sg / sw, sb / sw]; car = car ? mix(car, av, 0.28) : av; }
+    }
+  }
+  function dot(x, y, w, p, col, tool) { S(x, y, R(0, 6.28), Math.max(0.6, w * R(0.2, 0.9)), w, p, col, tool || 'chalk', { trem: 0.3, taper: 0.3 }); }
+  function sample(x, y) { const i = (Math.min(H - 1, Math.max(0, (y * k) | 0))) * W + Math.min(W - 1, Math.max(0, (x * k) | 0)); return [CR[i], CG[i], CB[i]]; }
+
+  // ================= SCENE =================
+  const HOR = 1500, F = 2742, HC = 2.0, CXc = 1920;
+  const proj = (X, Y, Z) => [CXc + F * X / Z, HOR - F * (Y - HC) / Z];
+  const SX = 24.3, SZ = 121, SY0 = 8.8;            // ship base: 8.8 m above the ground, first seconds of lift-off
+  const GP = proj(SX, 0, SZ);                      // where the plume hits the ground
+  const SUN = { x: 600, y: 1492 };                 // the sun has just set behind the far rim
+  const gaussR = (x, c, w) => Math.exp(-((x - c) / w) * ((x - c) / w));
+  function ridgeFar(x) {
+    return HOR - 26 - 64 * fbm(x / 520, 3.3, 4, 31) - 118 * gaussR(x, 1300, 470) - 60 * gaussR(x, 230, 260) - 46 * gaussR(x, 3480, 650) + 30 * gaussR(x, 600, 150);
+  }
+  function ridgeNear(x) {
+    const mesa = 92 * sstep(2930, 3070, x) * (1 - 0.35 * sstep(3550, 3900, x)) * (0.9 + 0.2 * fbm(x / 90, 2.2, 3, 77));
+    return HOR - 6 - mesa - 54 * gaussR(x, 180, 330) - 22 * gaussR(x, 1750, 300) - 14 * fbm(x / 140, 9.1, 3, 52);
+  }
+  const SKY = [[0, hex('#ffc287')], [0.07, hex('#ffa08c')], [0.19, hex('#f57ca6')], [0.36, hex('#bf62c6')], [0.56, hex('#7a52c8')], [0.78, hex('#4a3cb0')], [1, hex('#2e2d92')]];
+  const HALO = [[0, hex('#fdfff2')], [0.03, hex('#dcfcff')], [0.08, hex('#96f2f2')], [0.16, hex('#52cbee')], [0.26, hex('#3f95e4')], [0.4, hex('#5470d2')]];
+  function skyCol(x, y) {
+    const alt = clamp((HOR - y) / HOR);
+    let c = ramp(SKY, Math.pow(alt, 0.85) + (fbm(x / 900, y / 500, 3, 61) - 0.5) * 0.09);
+    const dx = (x - SUN.x) / 3840, dy = (y - SUN.y) / 3840 * 1.3, d = Math.sqrt(dx * dx + dy * dy);
+    c = mix(c, ramp(HALO, d * 0.85), Math.exp(-Math.pow(d / 0.31, 1.45)));
+    const gx = (x - GP[0]) / 3840, gy = (y - GP[1]) / 3840 * 1.5, gd = Math.sqrt(gx * gx + gy * gy);
+    c = mix(c, hex('#ffd99c'), 0.6 * Math.exp(-Math.pow(gd / 0.14, 1.3)));
+    return c;
+  }
+  function skyAng(x, y) {
+    const t = Math.atan2(y - SUN.y, x - SUN.x) + Math.PI / 2;
+    return angMix(t, -0.1 + 0.15 * (fbm(x / 700, y / 700, 2, 63) - 0.5), sstep(500, 2600, Math.hypot(x - SUN.x, (y - SUN.y) * 1.3)));
+  }
+  const IRI = ['#ffc4e8', '#ffd6a2', '#f8f6ae', '#b4f6cf', '#9ee5f8', '#cdb8ff'].map(hex);
+  function iri(v) { v = ((v % 1) + 1) % 1 * 6; const i = Math.floor(v), f = v - i; return mix(IRI[i % 6], IRI[(i + 1) % 6], f); }
+
+  function sceneCol(x, y) {
+    if (y < ridgeFar(x)) return skyCol(x, y);
+    if (y < ridgeNear(x)) return mix(hex('#8a62b0'), hex('#3a3888'), Math.exp(-Math.abs(x - SUN.x) / 800));
+    return groundCol(x, y);
+  }
+  function toneGround() {
+    for (let pass = 0; pass < 2; pass++) for (let i = 0; i < 520; i++) {
+      const x = R(-200, 4040), y = R(-150, 2300), sky = y < HOR;
+      S(x, y, sky ? skyAng(x, y) + gauss() * 0.15 : gauss() * 0.08, R(400, 900), R(160, 320), R(0.55, 0.85), jit(sceneCol(x, y), 0.04), 'rub', { curv: R(-0.3, 0.3), trem: 1.5 });
+    }
+  }
+  function paintSky() {
+    const inSky = (x, y) => y < ridgeFar(x) + 40;
+    for (let i = 0; i < 1100; i++) {
+      const x = R(-150, 3990), y = R(-80, HOR + 40); if (!inSky(x, y)) continue;
+      S(x, y, skyAng(x, y) + gauss() * 0.1, R(260, 700), R(70, 150), R(0.4, 0.65), jit(skyCol(x, y), 0.05), 'pastel', { curv: R(-0.25, 0.25) });
+    }
+    for (let i = 0; i < 900; i++) {
+      const x = R(-100, 3940), y = R(-60, HOR); if (!inSky(x, y)) continue;
+      smudge(x, y, skyAng(x, y) + gauss() * 0.15, R(200, 480), R(60, 130), R(0.5, 0.85));
+    }
+    for (let i = 0; i < 12000; i++) {
+      const x = R(-60, 3900), y = R(-40, HOR + 20); if (!inSky(x, y)) continue;
+      S(x, y, skyAng(x, y) + gauss() * 0.1, R(90, 260), R(16, 40), R(0.5, 0.85), jit(skyCol(x, y), 0.07), 'pastel', { curv: R(-0.3, 0.3) });
+    }
+    for (let i = 0; i < 30000; i++) {
+      const x = R(-20, 3860), y = R(-20, HOR + 10); if (!inSky(x, y)) continue;
+      let c = jit(skyCol(x, y), 0.1); const alt = (HOR - y) / HOR, r = rnd();
+      if (r < 0.12) {
+        const hd = Math.hypot(x - SUN.x, (y - SUN.y) * 1.3);
+        const acc = hd < 900 ? (rnd() < 0.5 ? hex('#c8ffd8') : hex('#fff6b8')) : alt > 0.55 ? (rnd() < 0.5 ? hex('#e05ad8') : hex('#3c6cf0')) : (rnd() < 0.5 ? hex('#ffb070') : hex('#ff70b0'));
+        c = mix(c, acc, R(0.25, 0.45));
+      }
+      S(x, y, skyAng(x, y) + gauss() * 0.14, R(30, 120), R(5, 14), R(0.45, 0.9), c, 'pastel', { curv: R(-0.4, 0.4) });
+    }
+    for (let i = 0; i < 12000; i++) {
+      const x = R(-20, 3860), y = R(-20, HOR); if (!inSky(x, y)) continue;
+      const c = mix(skyCol(x, y), hex('#ffffff'), R(0.04, 0.16));
+      S(x, y, skyAng(x, y) + 0.5 + gauss() * 0.12, R(18, 50), R(2, 3.4), R(0.3, 0.55), jit(c, 0.05), 'pencil', { curv: R(-0.3, 0.3) });
+    }
+  }
+
+  function cloudBand(x0, y0, cx, cy, x1, y1, th, cs, bright, count) {
+    const bz = (t) => { const u = 1 - t; return [u * u * x0 + 2 * u * t * cx + t * t * x1, u * u * y0 + 2 * u * t * cy + t * t * y1]; };
+    for (let i = 0; i < count; i++) {
+      const t = rnd(), p = bz(t), q = bz(Math.min(1, t + 0.01)), p0 = bz(Math.max(0, t - 0.01));
+      const ang = Math.atan2(q[1] - p0[1], q[0] - p0[0]), nx = -Math.sin(ang), ny = Math.cos(ang);
+      const g = fbm(t * 7 + cs, 0.5 + cs, 3, 70); if (g < 0.4) continue;
+      const thk = th * (0.25 + 0.75 * Math.sin(Math.PI * t)) * Math.min(1.3, (g - 0.32) * 2.6);
+      const v = clamp(gauss() * 0.42, -1, 1), wave = 18 * Math.sin(t * 23 + cs * 5) * (th / 80);
+      const x = p[0] + nx * (v * thk + wave), y = p[1] + ny * (v * thk + wave);
+      const sunb = clamp(1.25 - Math.hypot(x - SUN.x, y - SUN.y) / 3600) * bright;
+      let c = mix(skyCol(x, y), mix(iri(t * 1.3 + v * 0.25 + cs + 0.15 * fbm(t * 9, v, 2, 71)), hex('#fff0f6'), 0.2), clamp(sunb * (0.45 + 0.45 * (v + 1) / 2)));
+      if (v > 0.55) c = mix(c, hex('#fff4ea'), 0.25 * sunb);
+      S(x, y, ang + gauss() * 0.06, R(60, 230), R(5, 17) * (0.5 + thk / th), R(0.4, 0.85), jit(c, 0.04), 'pastel', { curv: R(-0.15, 0.15) });
+      if (rnd() < 0.18) S(x, y + R(-3, 3), ang + gauss() * 0.04, R(80, 260), R(1.8, 3), R(0.4, 0.8), mix(c, hex('#ffffff'), 0.35), 'pencil', { curv: R(-0.1, 0.1) });
+      if (rnd() < 0.025) smudge(x - nx * thk * 0.8 * Math.sign(v || 1), y - ny * thk * 0.8 * Math.sign(v || 1), ang + gauss() * 0.05, R(120, 300), R(30, 70), R(0.35, 0.6));
+    }
+  }
+  function paintClouds() {
+    cloudBand(-140, 600, 900, 330, 2350, 430, 95, 0.1, 1.0, 4200);
+    cloudBand(200, 860, 1500, 640, 3150, 700, 60, 0.45, 0.95, 2600);
+    cloudBand(1600, 250, 2800, 80, 4000, 210, 75, 0.72, 0.8, 2800);
+    cloudBand(-100, 1120, 500, 1010, 1300, 1080, 40, 0.3, 1.1, 1300);
+    cloudBand(2950, 1060, 3400, 980, 3990, 1040, 38, 0.9, 0.8, 1100);
+    // cirrus hooks, quick flicks of the wrist
+    for (let i = 0; i < 110; i++) {
+      const x = R(1900, 3900), y = R(380, 900), a = -0.12 + gauss() * 0.08;
+      const c = mix(skyCol(x, y), iri(R(0, 1)), 0.5);
+      S(x, y, a, R(160, 420), R(2, 5), R(0.3, 0.6), c, rnd() < 0.5 ? 'pencil' : 'pastel', { curv: R(-0.25, 0.25) });
+    }
+  }
+  function paintStarsMoons() {
+    for (let i = 0; i < 260; i++) {
+      const x = R(0, 3840), y = R(0, 640);
+      if (Math.abs(x - GP[0]) < 190) continue; const hd = Math.hypot(x - SUN.x, y - SUN.y);
+      if (hd < 1300 || rnd() > (760 - y) / 760 + 0.15) continue;
+      const big = rnd() < 0.08;
+      dot(x, y, big ? R(5, 8) : R(2, 4.5), R(0.6, 1), jit(rnd() < 0.3 ? hex('#ffe6f4') : rnd() < 0.5 ? hex('#d8f2ff') : hex('#fffbe8'), 0.04), 'chalk');
+    }
+    // Phobos: a lumpy little potato, lit from the set sun below-left
+    const px = 1610, py = 290;
+    for (let i = 0; i < 260; i++) {
+      const a = R(0, 6.28), rr = Math.sqrt(rnd()), lump = 1 + 0.18 * Math.sin(a * 3 + 1) + 0.1 * Math.sin(a * 5);
+      const x = px + Math.cos(a) * rr * 34 * lump, y = py + Math.sin(a) * rr * 24 * lump;
+      const lit = clamp(((x - px) * -0.6 + (y - py) * 0.8) / 30 + 0.3);
+      S(x, y, R(0, 3.14), R(4, 12), R(2.5, 5), R(0.6, 0.95), jit(mix(hex('#4b3d6e'), hex('#ffd0b0'), lit * lit), 0.05), 'pencil');
+    }
+    SL([[px - 30, py + 6], [px - 22, py + 20], [px - 4, py + 26], [px + 14, py + 22]], 3.5, 0.8, hex('#fff0d8'), 'chalk');
+    dot(3410, 430, 7, 1, hex('#fff6e8'), 'chalk'); dot(3412, 431, 3, 1, hex('#ffffff'), 'chalk');
+  }
+  function paintRidges() {
+    for (let i = 0; i < 9000; i++) {
+      const x = R(-20, 3860), top = ridgeFar(x), y = R(top - 10, HOR + 30); if (y < top) continue;
+      const hd = Math.hypot(x - SUN.x, y - SUN.y), near = Math.exp(-hd / 700);
+      let c = mix(hex('#9a78c8'), hex('#e6a0b4'), sstep(1800, 3600, x));
+      c = mix(c, hex('#3a3c8a'), near * 0.85);
+      c = mix(c, sample(x, top - 30), 0.25);
+      S(x, y, Math.PI / 2 + gauss() * 0.25, R(10, 40), R(4, 10), R(0.55, 0.9), jit(c, 0.05), 'pastel');
+    }
+    for (let x = -10; x < 3860; x += R(14, 40)) {
+      const xe = x + R(30, 120), line = [];
+      for (let xx = x; xx <= xe; xx += 6) line.push([xx, ridgeFar(xx) + R(-0.8, 0.8)]);
+      const hd = Math.abs(x - SUN.x);
+      const c = hd < 900 ? mix(hex('#c8fbff'), hex('#7ad4f0'), hd / 900) : mix(hex('#ffc0c8'), hex('#f4a6d8'), rnd());
+      if (rnd() < 0.75) SL(line, R(2, 4), R(0.5, 0.9), c, 'chalk');
+    }
+    for (let i = 0; i < 9000; i++) {
+      const x = R(-20, 3860), top = ridgeNear(x), y = R(top - 10, HOR + 40); if (y < top) continue;
+      const hd = Math.hypot(x - SUN.x, y - SUN.y), near = Math.exp(-hd / 900);
+      let c = mix(hex('#6a3f8e'), hex('#b45e8e'), sstep(2000, 3800, x));
+      c = mix(c, hex('#252a6a'), near * 0.8);
+      S(x, y, Math.PI / 2 + gauss() * 0.3, R(10, 36), R(4, 11), R(0.6, 0.95), jit(c, 0.05), 'pastel');
+    }
+    for (let x = -10; x < 3860; x += R(20, 60)) {
+      const xe = x + R(30, 140), line = [];
+      for (let xx = x; xx <= xe; xx += 6) line.push([xx, ridgeNear(xx) + R(-1, 1)]);
+      const c = x < 1500 ? hex('#9ff0ff') : x > 2900 ? mix(hex('#ffb0a0'), hex('#ffd2a0'), rnd()) : hex('#e9a0d8');
+      if (rnd() < 0.7) SL(line, R(2, 4.5), R(0.5, 0.95), c, 'chalk');
+    }
+  }
+  // ---------- ground ----------
+  const toWorld = (x, y) => { const Z = F * HC / Math.max(0.5, y - HOR); return [(x - CXc) * Z / F, Z]; };
+  function glowAt(X, Z) { const d = Math.hypot(X - SX, (Z - SZ) * 0.8); return clamp(1.35 * Math.exp(-d / 30) + 0.22 * Math.exp(-d / 90)); }
+  const WARM = [[0, hex('#c8405a')], [0.25, hex('#ff6e3c')], [0.5, hex('#ffa646')], [0.75, hex('#ffd982')], [1, hex('#fff7dc')]];
+  function groundCol(x, y) {
+    const [X, Z] = toWorld(x, y), t = clamp((y - HOR) / 660);
+    let c = mix(hex('#d27a8a'), hex('#5a2a74'), Math.pow(t, 0.6));
+    const pt = fbm(X / 9, Z / 9, 3, 83);
+    c = mix(c, hex('#c8604a'), 0.3 * sstep(0.5, 0.75, pt) * (1 - t * 0.6));
+    c = mix(c, hex('#36338e'), 0.45 * sstep(0.35, 1, t) * (0.4 + 0.6 * fbm(x / 400, y / 200, 2, 81)));
+    c = mix(c, hex('#82c4ee'), 0.45 * Math.exp(-Math.hypot(x - SUN.x, (y - SUN.y) * 2.5) / 800));
+    const g = glowAt(X, Z);
+    return mix(c, ramp(WARM, g), clamp(Math.pow(g * 1.4, 0.8)));
+  }
+  function paintGround() {
+    for (let i = 0; i < 42000; i++) {
+      const x = R(-40, 3880), y = R(HOR - 20, 2190); if (y < ridgeNear(x) + 4) continue;
+      const t = clamp((y - HOR) / 660);
+      const [X, Z] = toWorld(x, y), ang = (0.22 * Math.cos(X / 2.6 + Z * 0.9) + 0.12 * Math.cos(X / 7 - Z * 0.3)) * (0.3 + 0.9 * t) + gauss() * 0.1;
+      S(x, y, ang, R(20, 50) + 150 * t * R(0.4, 1.2), R(4, 8) + 26 * t * R(0.5, 1.2), R(0.5, 0.9), jit(groundCol(x, y), 0.08), 'pastel', { curv: R(-0.5, 0.5) * t });
+    }
+    for (let i = 0; i < 260; i++) { const x = R(0, 3840), y = R(HOR + 40, 2160), t = (y - HOR) / 660; smudge(x, y, gauss() * 0.05, R(150, 500) * (0.4 + t), R(30, 90) * (0.4 + t), R(0.35, 0.6)); }
+  }
+  function paintGrains() {
+    for (let i = 0; i < 26000; i++) {
+      const y = HOR + 4 + Math.pow(rnd(), 0.7) * 660, x = R(0, 3840), t = clamp((y - HOR) / 660);
+      if (y < ridgeNear(x) + 3) continue;
+      const [X, Z] = toWorld(x, y), g = glowAt(X, Z), sz = (0.8 + 5 * t) * R(0.5, 1.4);
+      const dark = rnd() < 0.55;
+      const c = dark ? mix(hex('#2e1840'), hex('#5a2a5a'), rnd()) : mix(ramp(WARM, clamp(0.25 + g)), hex('#f0a0c0'), 0.4 * (1 - clamp(g * 2)));
+      dot(x, y, sz, R(0.5, 0.9), jit(c, 0.05), dark ? 'charcoal' : 'pastel');
+      if (dark && t > 0.25 && rnd() < 0.35) dot(x - sz * 0.1, y - sz * 0.35, sz * 0.5, 0.8, jit(ramp(WARM, clamp(0.3 + g)), 0.04), 'chalk');
+    }
+  }
+  function paintRipples() {
+    let Z0 = 3.2;
+    const slope = 0.34;
+    while (Z0 < 700) {
+      const lam = R(0.9, 2.2), amp = 0.5 * Math.max(0.6, Z0 * 0.02) * R(0.6, 1.4), ph = R(0, 99);
+      const sZ = F / Z0, s = sZ, crestW = clamp(0.04 * s, 1.4, 8), shW = clamp(0.11 * s, 2, 26);
+      let x = R(-120, -10);
+      while (x < 3900) {
+        const segL = R(60, 420) * (0.5 + 0.5 * clamp(s / 120)), line = [], shadow = [];
+        for (let xx = x; xx <= x + segL; xx += 5) {
+          let X = (xx - CXc) * Z0 / F, Zr = Z0;
+          for (let it = 0; it < 3; it++) { X = (xx - CXc) * Zr / F; Zr = Z0 - slope * X + amp * Math.sin(X / lam + ph + 0.7 * Math.sin(X / (lam * 3.3) + ph)) + 0.4 * (fbm(X / 6, Z0, 2, 90) - 0.5) * Z0 * 0.05; if (Zr < 5) Zr = 5; }
+          const y = HOR + F * HC / Zr; if (y > 2200 || Zr <= 5) continue; line.push([xx, y]); shadow.push([xx, y + shW * 0.55]);
+        }
+        const mid = line[line.length >> 1]; if (!mid || line.length < 2) { x += segL; continue; }
+        if (mid[1] > ridgeNear(mid[0]) + 3) {
+          const [X, Z] = toWorld(mid[0], mid[1]), g = glowAt(X, Z);
+          const shc = mix(mix(hex('#3a2a86'), hex('#5c3a9a'), rnd()), groundCol(mid[0], mid[1]), 0.35 + 0.3 * g);
+          if (rnd() < 0.8) SL(shadow, shW * R(0.6, 1.2), R(0.4, 0.75), jit(shc, 0.05), 'pastel', { trem: 1.2 });
+          const sunside = Math.exp(-Math.abs(mid[0] - SUN.x) / 900) * (1 - clamp(g * 2));
+          let cc = mix(hex('#f39ac4'), ramp(WARM, clamp(0.35 + g)), clamp(g * 3 + 0.15));
+          cc = mix(cc, hex('#a8f2ff'), sunside * 0.75);
+          SL(line, crestW, R(0.55, 0.95), jit(cc, 0.05), rnd() < 0.5 ? 'chalk' : 'pencil', { trem: 0.8 });
+        }
+        x += segL + R(30, 260) * (0.4 + clamp(s / 100));
+      }
+      Z0 *= R(1.03, 1.11);
+    }
+  }
+  function rock(X, Z, size, detail) {
+    const [cx, cy] = proj(X, 0, Z), s = F / Z, rx = size * s, ry = size * 0.55 * s;
+    if (cx < -rx * 2 || cx > 3840 + rx * 2 || cy < ridgeNear(cx)) return;
+    const d = Math.hypot(X - SX, Z - SZ), g = glowAt(X, Z), hgt = size * 0.7;
+    const vx = (X - SX) / d, vz = (Z - SZ) / d, ell = Math.min(14 + size * 10, hgt * d / Math.max(0.6, 5.5 - hgt));
+    const tip = proj(X + vx * ell, 0, Math.max(6, Z + vz * ell));
+    // angular outline: a few facets, flat-ish base
+    const nv = 6 + (rnd() * 4 | 0), V = [];
+    for (let j = 0; j < nv; j++) {
+      const a = Math.PI + (j / (nv - 1)) * Math.PI + R(-0.12, 0.12);
+      const rr = R(0.7, 1.08) * (j === 0 || j === nv - 1 ? 1.05 : 1);
+      V.push([cx + Math.cos(a) * rx * rr, cy + Math.sin(a) * ry * rr * R(0.9, 1.5)]);
+    }
+    V.push([cx + rx * R(0.8, 1), cy + ry * 0.18], [cx - rx * R(0.8, 1), cy + ry * 0.2]);
+    let ya = 1e9; for (const v of V) ya = Math.min(ya, v[1]);
+    const ridgeTop = V[(nv / 2) | 0];
+    // soft cast shadow, fanned away from the fire
+    const nsh = Math.ceil(3 + rx * 0.08);
+    for (let i = 0; i < nsh; i++) {
+      const o = R(-0.8, 0.8), a0 = [cx + o * rx * 0.85, cy + ry * 0.12];
+      const tp = [tip[0] + o * rx * 0.5, tip[1] + R(-3, 3)];
+      SL([a0, [lerp(a0[0], tp[0], 0.5), lerp(a0[1], tp[1], 0.5)], tp], R(0.14, 0.26) * rx + 2, R(0.25, 0.45), jit(mix(hex('#2e2266'), hex('#4a4ab0'), rnd() * 0.6), 0.04), 'pastel', { taper: 1 });
+    }
+    const ldx = GP[0] - cx, ldy = (GP[1] - 30) - cy, ll = Math.hypot(ldx, ldy) || 1;
+    const backlit = Z < SZ, n = Math.ceil((detail || 1) * (10 + rx * ry * 0.06));
+    for (let i = 0; i < n; i++) {
+      const x = R(cx - rx * 1.1, cx + rx * 1.1), y = R(ya, cy + ry * 0.25); if (!inPoly(x, y, V)) continue;
+      const top = clamp((cy - y) / (cy - ya + 1)), lr = (x - cx) / rx;
+      const facet = Math.floor((lr + 1.2) * 2.2 + top * 1.7);
+      let c = mix(hex('#24142e'), hex('#3e2458'), (facet % 3) * 0.3 + top * 0.3);
+      if (!backlit) c = mix(c, ramp(WARM, g), clamp(g * 1.6) * 0.8);
+      c = mix(c, hex('#5862c4'), top * top * 0.4);
+      if (cx < 1600) c = mix(c, hex('#3e9ad0'), clamp(-lr) * 0.45 * Math.exp(-Math.abs(cx - SUN.x) / 1500));
+      const ang = (facet % 2 ? 0.9 : -0.7) + gauss() * 0.2;
+      S(x, y, ang, R(0.1, 0.3) * rx + 2, R(0.05, 0.12) * rx + 1.4, R(0.65, 0.95), jit(c, 0.035), rnd() < 0.4 ? 'charcoal' : 'pastel', { trem: 0.5 });
+    }
+    // the backlit rim: only the edges that face the fire
+    for (let j = 0; j < nv - 1; j++) {
+      const a = V[j], b = V[j + 1], mx = (a[0] + b[0]) / 2 - cx, my = (a[1] + b[1]) / 2 - cy;
+      const toward = (mx * ldx + my * ldy) / ((Math.hypot(mx, my) || 1) * ll);
+      if (toward < -0.15 && !(cx < 1500 && mx < 0)) continue;
+      if (rnd() < 0.25) continue;
+      let c = toward > -0.15 ? ramp(WARM, clamp(0.4 + g + toward * 0.3)) : hex('#a6f4ff');
+      const t0 = R(0, 0.3), t1 = R(0.7, 1);
+      SL([[lerp(a[0], b[0], t0), lerp(a[1], b[1], t0)], [lerp(a[0], b[0], t1), lerp(a[1], b[1], t1)]], clamp(rx * 0.025, 1.3, 5), R(0.6, 1), jit(c, 0.04), 'chalk');
+    }
+    SL([V[nv], V[nv + 1]], clamp(rx * 0.04, 1.5, 9), 0.8, hex('#140c22'), 'charcoal');
+  }
+  const crestY = (x) => 1735 + 0.00011 * (x - 420) * (x - 420) + 22 * (fbm(x / 260, 5.5, 3, 120) - 0.5);
+  function paintDune() {
+    const below = (x, y) => y > crestY(x);
+    const dcol = (x, y) => {
+      const dd = clamp((y - crestY(x)) / 300);
+      let c = mix(hex('#9a4a86'), hex('#3a1a52'), Math.pow(dd, 0.55));
+      c = mix(c, hex('#c0607a'), 0.3 * (1 - dd) * Math.exp(-Math.abs(x - 1500) / 900));
+      c = mix(c, hex('#6a7ad0'), 0.25 * (1 - dd) * Math.exp(-Math.abs(x - 300) / 700));
+      c = mix(c, hex('#5a2448'), 0.3 * fbm(x / 300, y / 200, 2, 121));
+      return c;
+    };
+    for (let i = 0; i < 2500; i++) {
+      const x = R(-100, 2800), y = R(1760, 2220); if (!below(x, y)) continue;
+      const a = Math.atan2(crestY(x + 5) - crestY(x - 5), 10);
+      S(x, y, a + gauss() * 0.06, R(100, 300), R(14, 40), R(0.6, 0.9), jit(dcol(x, y), 0.05), 'pastel', { curv: R(-0.15, 0.15) });
+    }
+    for (let i = 0; i < 60; i++) { const x = R(0, 2500), y = crestY(x) + R(30, 300); if (below(x, y)) smudge(x, y, Math.atan2(crestY(x + 5) - crestY(x - 5), 10), R(150, 350), R(40, 90), 0.45); }
+    // wind ripples on the shadowed face, echoing the crest
+    for (let j = 0; j < 34; j++) {
+      const off = 16 + Math.pow(j / 33, 1.15) * 420, x0 = R(-100, 300), x1 = R(1600, 2900), line = [];
+      let x = x0;
+      while (x < x1) {
+        const segL = R(120, 600); const L = [];
+        for (let xx = x; xx < Math.min(x1, x + segL); xx += 8) L.push([xx, crestY(xx) + off * (1 + 0.15 * Math.sin(xx / 400 + j * 0.3)) + 3 * Math.sin(xx / 90 + j * 1.7)]);
+        if (L.length > 2) {
+          const mid = L[L.length >> 1], dd = clamp(off / 380);
+          SL(L.map(q => [q[0], q[1] + 3 + dd * 6]), 3 + dd * 8, R(0.55, 0.85), jit(mix(hex('#24103a'), hex('#341850'), rnd()), 0.04), 'charcoal', { trem: 0.6 });
+          const lc = mix(mix(hex('#e8a0c8'), hex('#ffc0a0'), rnd()), hex('#b0b8ff'), 0.35 * Math.exp(-Math.abs(mid[0] - 300) / 800));
+          SL(L, 1.6 + dd * 2.5, R(0.4, 0.75), jit(lc, 0.05), 'pencil', { trem: 0.6 });
+        }
+        x += segL + R(40, 200);
+      }
+    }
+    for (let i = 0; i < 5000; i++) {
+      const x = R(-20, 2800), y = R(1780, 2170); if (!below(x, y)) continue;
+      const dark = rnd() < 0.6;
+      dot(x, y, R(1.5, 5), R(0.5, 0.9), jit(dark ? hex('#200c30') : mix(hex('#f0a0c0'), hex('#ffc890'), rnd()), 0.05), dark ? 'charcoal' : 'pastel');
+    }
+    // the crest catches the fire: a line of light like the lip of a wave
+    for (let pass = 0; pass < 3; pass++) {
+      let x = R(-60, 0);
+      while (x < 2700) {
+        const segL = R(160, 520), L = [];
+        for (let xx = x; xx < x + segL; xx += 6) L.push([xx, crestY(xx) + R(-0.6, 0.6) + pass * 2.5]);
+        if (crestY(x) < 2160) {
+          const g = Math.exp(-Math.abs(x - 1300) / 1400);
+          const c = pass === 0 ? ramp(WARM, 0.55 + 0.4 * g) : pass === 1 ? mix(hex('#ff9ac0'), hex('#ffd890'), rnd()) : hex('#f0a0d8');
+          SL(L, pass === 0 ? R(4, 8) : R(2, 4), R(0.7, 1), jit(c, 0.04), 'chalk', { trem: 0.8 });
+        }
+        x += segL + R(-30, 50);
+      }
+    }
+    // dust blown off the crest
+    for (let i = 0; i < 500; i++) {
+      const x = R(0, 2600), y = crestY(x) - Math.pow(rnd(), 2) * 40;
+      S(x, y, -0.12 + gauss() * 0.1, R(10, 60), R(1.5, 3.5), R(0.3, 0.7), jit(mix(hex('#ffd8a8'), hex('#ffb0d0'), rnd()), 0.04), 'chalk', { curv: R(-0.4, 0.4) });
+    }
+  }
+  function paintRocks() {
+    const list = [];
+    for (let i = 0; i < 150; i++) {
+      const Z = 9 * Math.exp(R(0, Math.log(45))), X = (R(-80, 3920) - CXc) * Z / F;
+      let size = R(0.06, 0.35) * (rnd() < 0.1 ? 2.2 : 1);
+      if (Math.hypot(X - SX, Z - SZ) < 40) continue;
+      { const q = proj(X, 0, Z); if (q[1] > crestY(q[0]) - 10 && q[0] < 2700) continue; }
+      list.push([X, Z, size, 1]);
+    }
+    list.push([-5.9, 8.4, 0.75, 2.4], [7.7, 10.4, 0.85, 2], [5.4, 13.8, 0.28, 1.3], [-14, 34, 0.9, 1.4], [-2.2, 26, 0.4, 1.3]);
+    list.sort((a, b) => b[1] - a[1]);
+    for (const r of list) rock(r[0], r[1], r[2], r[3]);
+  }
+
+  // ---------- the dust surge ----------
+  const puffs = [];
+  function buildPuffs() {
+    for (let i = 0; i < 230; i++) {
+      const psi = (i / 230) * Math.PI * 2 + R(-0.01, 0.01), front = Math.sin(psi) < 0, side = Math.abs(Math.cos(psi));
+      const rho = (front ? 50 : 56) + 9 * (fbm(psi * 2, 1.3, 3, 97) - 0.5) * 2;
+      const hmax = front ? 1.0 + 19 * Math.pow(side, 2.2) : 5 + 20 * Math.pow(side, 1.2);
+      const X = SX + rho * Math.cos(psi), Z = SZ + rho * Math.sin(psi) * 0.9;
+      const hm = hmax * (0.75 + 0.5 * fbm(psi * 3, 4.4, 2, 98));
+      let Y = 0, rb = front ? 1.2 + 4.5 * Math.pow(side, 1.5) : 4 + 4 * side;
+      while (Y < hm) { const r = rb * R(0.7, 1.15); puffs.push({ X: X + R(-2, 2), Y: Y + r * 0.6, Z: Z + R(-2, 2), r }); Y += r * R(0.8, 1.3); rb *= 0.86; }
+    }
+    for (let i = 0; i < 520; i++) {
+      const psi = (rnd() < 0.5 ? 0 : Math.PI) + gauss() * 0.3, rho = 62 + 38 * Math.pow(rnd(), 0.7), fall = 1 - (rho - 62) / 40;
+      const r = R(1.5, 4.5) * (0.4 + 0.6 * fall), Y = R(0.2, 1) * (2 + 16 * fall * fall);
+      puffs.push({ X: SX + rho * Math.cos(psi), Y: Y * 0.7 + r * 0.4, Z: SZ + rho * Math.sin(psi) * 0.9, r, sq: 0.62 });
+    }
+    for (let i = 0; i < 200; i++) {
+      const psi = R(0, Math.PI * 2), rho = R(14, 46), front = Math.sin(psi) < 0, side = Math.abs(Math.cos(psi));
+      const X = SX + rho * Math.cos(psi), near = sstep(6, 22, Math.abs(X - SX));
+      const r = (front ? R(1.2, 2.6) + 3 * side : R(2.5, 6)) * (front ? 0.45 + 0.55 * near : 1);
+      puffs.push({ X, Y: R(0.3, 1) * (front ? 0.4 + 6 * side * near : 6), Z: SZ + rho * Math.sin(psi) * 0.9, r, inner: true });
+    }
+    for (let i = 0; i < 70; i++) {
+      const psi = R(0, Math.PI * 2), rho = R(4, 14);
+      puffs.push({ X: SX + rho * Math.cos(psi), Y: R(0.1, 0.8), Z: SZ + rho * Math.sin(psi) * 0.9, r: R(1.0, 2.0), core: true });
+    }
+    puffs.sort((a, b) => b.Z - a.Z);
+  }
+  const DUSTW = [[0, hex('#d23c62')], [0.2, hex('#ff5e44')], [0.42, hex('#ff9a3a')], [0.66, hex('#ffd36e')], [0.86, hex('#fff0b8')], [1, hex('#fffdf2')]];
+  function drawPuff(P) {
+    const [cx, cy] = proj(P.X, P.Y, P.Z), rs = F * P.r / P.Z, sq = P.sq || 1;
+    if (cx < -rs || cx > 3840 + rs) return;
+    const lx0 = SX - P.X, ly0 = 3.5 - P.Y, lz0 = SZ - P.Z, dist = Math.hypot(lx0, ly0, lz0) || 1;
+    const fall = clamp(1.5 * Math.exp(-dist / 34) + 0.38 * Math.exp(-dist / 110)), haze = clamp((P.Z - 70) / 160);
+    const w = clamp(rs * 0.085, 2.5, 26), n = Math.min(900, Math.ceil(rs * rs / (w * rs * 0.42) * 3.2));
+    const strokeAt = (x, y, nx, ny, a, len, ww, p, edge) => {
+      const nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      const wx = nx, wy = -ny, wz = -nz;
+      const lam = Math.max(0, (wx * lx0 + wy * ly0 + wz * lz0) / dist);
+      let warm = clamp(fall * (0.35 + 0.95 * lam) + (P.core ? 0.35 : 0));
+      const cool = clamp(-ny) * 0.8, sun = clamp(-nx) * Math.exp(-Math.abs(cx - SUN.x) / 1900) * 0.9;
+      let c = mix(hex('#5a2c74'), hex('#a777c4'), haze * 0.7);
+      c = mix(c, hex('#9eaaff'), cool * 0.7);
+      c = mix(c, hex('#86eef8'), sun * (1 - warm));
+      c = mix(c, ramp(DUSTW, warm), clamp(warm * 1.5));
+      if (edge) { c = mix(c, hex('#ffffff'), 0.25); if (nx < 0.2 && cx < GP[0] - 300) c = mix(c, hex('#c4fbff'), clamp(0.9 - warm) * 0.85); }
+      S(x, y, a, len, ww, p, jit(c, 0.05), edge ? 'chalk' : 'pastel', { curv: R(0.3, 0.9) * (rnd() < 0.5 ? 1 : -1) });
+    };
+    for (let i = 0; i < Math.min(40, 3 + rs * 0.12); i++) {
+      const a = R(0, 6.283), rr = Math.sqrt(rnd()) * 0.6, ox = Math.cos(a) * rr, oy = Math.sin(a) * rr;
+      const sv = TOOLS.pastel; TOOLS.pastel = TOOLS.rub;
+      strokeAt(cx + ox * rs, cy + oy * rs * sq, ox, oy, a + Math.PI / 2, rs * R(0.6, 1.1), rs * R(0.3, 0.55) * sq, R(0.6, 0.85), false);
+      TOOLS.pastel = sv;
+    }
+    for (let i = 0; i < n; i++) {
+      const a = R(0, 6.283), rr = Math.sqrt(rnd()) * 0.98, ox = Math.cos(a) * rr, oy = Math.sin(a) * rr;
+      strokeAt(cx + ox * rs, cy + oy * rs * sq, ox, oy, Math.atan2(Math.sin(a + Math.PI / 2) * sq, Math.cos(a + Math.PI / 2)) + gauss() * 0.2, rs * R(0.2, 0.55), w * R(0.7, 1.3), R(0.55, 0.92), false);
+    }
+    const rim = Math.ceil(2 + rs * (cx < GP[0] - 300 ? 0.1 : 0.05));
+    for (let j = 0; j < rim; j++) {
+      const a = R(-3.0, -0.1), ox = Math.cos(a) * 0.93, oy = Math.sin(a) * 0.93;
+      strokeAt(cx + ox * rs, cy + oy * rs * sq, ox, oy, Math.atan2(Math.sin(a + Math.PI / 2) * sq, Math.cos(a + Math.PI / 2)), rs * R(0.25, 0.6), clamp(rs * 0.02, 1.5, 6), R(0.5, 0.9), true);
+    }
+  }
+  // ---------- Starship (V3 proportions: ~52 m tall, 9 m wide) ----------
+  const SR = 4.5, SLEN = 52, NOSE0 = 35.0, TILT = 0.006, PPM = F / SZ;
+  const WIND = -0.98, TB = WIND + Math.PI / 2 + 0.03;     // windward faces viewer-left; steel lee strip on the right
+  function rad(h) { if (h < NOSE0) return SR; const t = clamp((h - NOSE0) / (SLEN - NOSE0)); return SR * Math.pow(Math.max(0, 1 - Math.pow(t, 2.05)), 0.58) + 0.05; }
+  function sp(th, h, rr) { const r_ = rr == null ? rad(h) : rr; return proj(SX + r_ * Math.sin(th) + h * TILT, SY0 + h, SZ - r_ * Math.cos(th)); }
+  function shipCol(th, h) {
+    const lowWarm = Math.exp(-h / 2.0) * 0.9 + 0.14 * Math.exp(-h / 12);
+    if (th < TB) {
+      let c = mix(hex('#141230'), hex('#2e2858'), clamp(Math.cos(th + 0.3)) * 0.7);
+      c = mix(c, hex('#4a2a6a'), 0.3 * sstep(0.2, 0.8, th));
+      c = mix(c, hex('#7464c4'), 0.5 * Math.exp(-Math.pow((th + 0.3) / 0.24, 2)) * (0.6 + 0.4 * sstep(5, 30, h)));
+      c = mix(c, hex('#d070b0'), 0.18 * Math.exp(-Math.pow((th - 0.35) / 0.15, 2)));
+      c = mix(c, hex('#3a3270'), 0.25 * sstep(20, 45, h));
+      c = mix(c, hex('#62d8f4'), sstep(-0.95, -1.52, th) * 0.9);
+      c = mix(c, hex('#8a6ad0'), sstep(-0.6, -1.1, th) * 0.25);
+      const wing = clamp(1 - h / 26) * 0.26;
+      c = mix(c, hex('#ff9a6a'), wing * sstep(0.0, 0.7, th));
+      c = mix(c, hex('#e07ac8'), wing * 0.8 * sstep(-0.3, -1.2, th));
+      c = mix(c, ramp(WARM, 0.35 + lowWarm * 0.6), clamp(lowWarm * 0.85));
+      return c;
+    }
+    const u = clamp((th - TB) / (Math.PI / 2 - TB));
+    let c = ramp([[0, hex('#e2d4ff')], [0.12, hex('#fffaf2')], [0.3, hex('#ffbcd0')], [0.55, hex('#ffd49a')], [0.8, hex('#f08ab8')], [1, hex('#9a6ad0')]], u);
+    c = mix(c, hex('#ffa45a'), clamp(Math.exp(-h / 9) * 0.7));
+    c = mix(c, hex('#d68ad8'), sstep(25, 50, h) * 0.3);
+    return c;
+  }
+  function shipPath(u, h, ang, len, w, p, o) {
+    const P = mkPath(u * SR * PPM - Math.cos(ang) * len / 2, -h * PPM - Math.sin(ang) * len / 2, ang, len, w, p, o);
+    const out = [];
+    for (const q of P) {
+      const hh = -q[1] / PPM; if (hh < 0 || hh > SLEN) continue;
+      const uu = clamp(q[0] / (SR * PPM), -0.995, 0.995), xy = sp(Math.asin(uu), hh);
+      out.push([xy[0], xy[1], q[2], q[3]]);
+    }
+    return out;
+  }
+  function shipStroke(u, h, ang, len, w, p, col, tool, o) { const P = shipPath(u, h, ang, len, w, p, o); if (P.length > 1) drawStroke(toPx(P), col, TOOLS[tool]); }
+  function paintBody() {
+    for (let i = 0; i < 6200; i++) {
+      const u = R(-1, 1), h = R(0, SLEN), th = Math.asin(u), low = h < 9;
+      shipStroke(u, h, low ? gauss() * 0.04 : -Math.PI / 2 + gauss() * 0.04, low ? R(15, 45) : R(20, 90), R(4, 10), R(0.75, 1), jit(shipCol(th, h), 0.04), 'pastel', { trem: 0.5 });
+    }
+    for (let i = 0; i < 4200; i++) {
+      const u = R(-1, 1), h = R(0, SLEN), th = Math.asin(u);
+      shipStroke(u, h, gauss() * 0.05, R(10, 30), R(2, 4), R(0.5, 0.9), jit(shipCol(th, h), 0.07), th < TB ? 'charcoal' : 'pencil', { trem: 0.4 });
+    }
+    for (let i = 0; i < 4000; i++) {
+      const u = R(-1, 1), h = R(0, SLEN), th = Math.asin(u);
+      shipStroke(u, h, -Math.PI / 2 + gauss() * 0.02, R(15, 60), R(1.6, 3.2), R(0.6, 1), jit(shipCol(th, h), 0.06), 'pencil', { trem: 0.35 });
+    }
+  }
+  function paintTiles() {
+    const pitch = 0.3, hh = pitch / 0.75;
+    for (let row = 0, h = 0.25; h < SLEN - 0.6; row++, h += pitch) {
+      const r_ = rad(h), cnt = Math.max(6, Math.round(2 * Math.PI * r_ / 0.34)), dth = 2 * Math.PI / cnt;
+      for (let j = 0; j < cnt; j++) {
+        const th = ((j + (row & 1) * 0.5) * dth + 3 * Math.PI) % (2 * Math.PI) - Math.PI;
+        if (th < -Math.PI / 2 + 0.05 || th > TB - dth * 0.3 || th > Math.PI / 2) continue;
+        const base = shipCol(th, h), vis = Math.cos(th);
+        const roll = rnd();
+        const tc = roll < 0.003 ? hex('#d8d2e4') : roll < 0.03 ? mix(base, hex('#4a4466'), 0.5) : jit(mix(base, hex('#000010'), R(0, 0.3)), 0.03);
+        const c0 = sp(th, h);
+        S(c0[0], c0[1], R(0, 3.14), Math.max(1.5, dth * r_ * PPM * vis * 0.6), Math.max(1.6, pitch * PPM * 0.75), R(0.6, 1), tc, 'pencil', { trem: 0.2, taper: 0.2 });
+        const sheen = clamp(0.25 + Math.exp(-Math.pow((th + 0.32) / 0.25, 2)) + sstep(-1.0, -1.45, th) + Math.exp(-h / 5));
+        if (rnd() < 0.85 * sheen) {
+          const cn = [[-dth / 2, hh / 4], [0, hh / 2], [dth / 2, hh / 4], [dth / 2, -hh / 4]].map(([a, b]) => sp(th + a, h + b));
+          const lit = mix(base, hex('#c8c0ff'), 0.22 + 0.15 * vis);
+          SL(cn, 1.3, R(0.3, 0.65) * (0.5 + 0.5 * sheen), jit(mix(lit, hex('#ffd0a0'), clamp(Math.exp(-h / 5))), 0.04), 'pencil', { trem: 0.3, taper: 0.3 });
+        }
+      }
+    }
+  }
+  function paintSteelDetail() {
+    for (let h = 1.0; h < SLEN - 2; h += 1.83) {
+      const line = []; for (let th = TB - 0.02; th <= Math.PI / 2 - 0.02; th += 0.03) line.push(sp(th, h));
+      SL(line, 1.6, R(0.4, 0.75), rnd() < 0.5 ? mix(shipCol(TB + 0.2, h), hex('#5a4080'), 0.5) : hex('#fff0f4'), 'pencil', { trem: 0.4 });
+    }
+    // specular streak and edge reflections running the full height
+    const spec = []; for (let h = 0.3; h < SLEN - 0.5; h += 0.6) spec.push(sp(TB + 0.1 + 0.02 * Math.sin(h), h));
+    SL(spec, 3.2, 0.95, hex('#fffdf6'), 'chalk', { trem: 0.5 });
+    const spec2 = []; for (let h = 2; h < 34; h += 0.6) spec2.push(sp(TB + 0.33, h));
+    SL(spec2, 2.4, 0.8, hex('#ffd6a0'), 'chalk', { trem: 0.6 });
+    // the boundary between tiles and steel: a ragged pencil seam
+    for (let h = 0.3; h < SLEN - 1; h += R(1.5, 5)) {
+      const line = []; for (let hh2 = h; hh2 < Math.min(SLEN - 1, h + R(2, 7)); hh2 += 0.4) line.push(sp(TB - 0.01, hh2));
+      SL(line, 1.5, R(0.5, 0.85), hex('#1a1030'), 'charcoal', { trem: 0.5 });
+    }
+  }
+  function flapPoly(thf, pts) { return pts.map(([h, e]) => sp(thf, h, rad(h) + e)); }
+  function inPoly(x, y, poly) { let c = false; for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) { const a = poly[i], b = poly[j]; if ((a[1] > y) !== (b[1] > y) && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]) c = !c; } return c; }
+  const AFT = [[0.9, 0], [0.9, 2.6], [1.2, 4.2], [1.9, 4.9], [6.6, 5.0], [7.6, 4.6], [12.8, 0.0]];
+  const FWD = [[36.0, 0], [36.2, 1.8], [36.9, 3.0], [38.0, 3.4], [40.6, 3.3], [41.6, 2.8], [46.0, 0]];
+  function paintFlap(thf, shape, back) {
+    const poly = flapPoly(thf, shape);
+    let xa = 1e9, xb = -1e9, ya = 1e9, yb = -1e9; for (const p of poly) { xa = Math.min(xa, p[0]); xb = Math.max(xb, p[0]); ya = Math.min(ya, p[1]); yb = Math.max(yb, p[1]); }
+    const area = (xb - xa) * (yb - ya), hb = shape[0][0], ht = shape[shape.length - 1][0];
+    for (let i = 0; i < area / 9; i++) {
+      const x = R(xa, xb), y = R(ya, yb); if (!inPoly(x, y, poly)) continue;
+      const hf = clamp((HC + (HOR - y) * SZ / F - SY0 - hb) / (ht - hb));
+      const span = clamp(Math.abs(x - poly[0][0]) / (Math.abs(poly[2][0] - poly[0][0]) + 1));
+      let c = mix(hex('#1a1634'), hex('#5a4ca0'), 0.3 * hf + 0.45 * span);
+      if (!back) c = mix(c, hex('#d070b0'), 0.25 * span * hf);
+      if (back) c = mix(mix(c, hex('#0e0c1c'), 0.3), hex('#56c8ee'), 0.5 * span * span);
+      c = mix(c, ramp(WARM, 0.5), clamp(Math.exp(-(hb + hf * (ht - hb)) / 4)) * (back ? 0.4 : 0.8));
+      S(x, y, Math.atan2(poly[3][1] - poly[0][1], poly[3][0] - poly[0][0]) + gauss() * 0.1, R(8, 22), R(2.5, 6), R(0.7, 1), jit(c, 0.04), rnd() < 0.5 ? 'pastel' : 'charcoal', { trem: 0.4 });
+    }
+    for (let i = 0; i < area / 140; i++) {
+      const x = R(xa, xb), y = R(ya, yb); if (!inPoly(x, y, poly)) continue;
+      const a = R(0, 1.05) | 0, L = [];
+      for (let q = 0; q < 4; q++) L.push([x + Math.cos(a + q * 1.047) * 4 * q, y + Math.sin(a + q * 1.047) * 4 * q]);
+      SL([[x - 4, y - 2], [x, y - 4.5], [x + 4, y - 2], [x + 4, y + 2]], 1.2, R(0.25, 0.5), back ? hex('#4aa0c8') : hex('#6a5ca8'), 'pencil', { trem: 0.2 });
+    }
+    // steel edges
+    const outer = poly.slice(1, poly.length - 1);
+    SL(outer, 4.2, 1, back ? hex('#bff6ff') : hex('#ffe8c8'), 'chalk', { trem: 0.4 });
+    SL(outer.map(p => [p[0] + (back ? 2 : -2), p[1] + 1]), 1.6, 0.8, back ? hex('#ffffff') : hex('#ff9ec0'), 'pencil', { trem: 0.4 });
+    SL([poly[0], poly[1]], 2.6, 0.8, hex('#ffb070'), 'chalk', { trem: 0.5 });
+    SL(poly.concat([poly[0]]), 1.8, 0.75, hex('#0c0a18'), 'charcoal', { trem: 0.6 });
+  }
+  function paintEngines(geomOnly) {
+    const eng = [];
+    for (let j = 0; j < 3; j++) eng.push({ rho: 3.0, phi: 0.35 + j * 2.094, re: 1.25, lb: 3.0 });
+    for (let j = 0; j < 3; j++) eng.push({ rho: 1.3, phi: 1.4 + j * 2.094, re: 0.66, lb: 1.7 });
+    eng.forEach(e => { e.X = SX + e.rho * Math.sin(e.phi); e.Z = SZ - e.rho * Math.cos(e.phi); });
+    eng.sort((a, b) => b.Z - a.Z);
+    if (geomOnly) return eng;
+    for (const e of eng) {
+      const lines = 26;
+      for (let i = 0; i < lines; i++) {
+        const s = i / (lines - 1), top = SY0 + 0.2, bot = SY0 - e.lb;
+        const L = [], side = s * 2 - 1;
+        for (let t = 0; t <= 1.0001; t += 0.1) { const rr = e.re * (0.4 + 0.6 * Math.pow(t, 0.7)); L.push(proj(e.X + side * rr, lerp(top, bot, t), e.Z - Math.sqrt(Math.max(0, 1 - side * side)) * rr)); }
+        const glow = 1 - Math.abs(side) * 0.5;
+        for (let q = 0; q < L.length - 1; q++) {
+          const t = q / (L.length - 1);
+          const c = ramp([[0, hex('#3a2a48')], [0.3, hex('#a03050')], [0.55, hex('#ff6a30')], [0.8, hex('#ffc060')], [1, hex('#fff6c8')]], t * glow + 0.18);
+          SL([L[q], L[q + 1]], 2.6, R(0.7, 1), jit(c, 0.04), 'pastel', { trem: 0.3, taper: 0 });
+        }
+      }
+      const lip = []; for (let a = 0; a <= 6.3; a += 0.25) lip.push(proj(e.X + e.re * Math.sin(a), SY0 - e.lb, e.Z - e.re * Math.cos(a)));
+      SL(lip, 4.2, 1, hex('#fffbe8'), 'chalk', { trem: 0.4 });
+    }
+    return eng;
+  }
+  function paintPlume(eng) {
+    const top = proj(SX, SY0 - 2.6, SZ)[1], gy = GP[1], cx = GP[0];
+    const half = (y) => { const t = clamp((y - top) / (gy - top)); return 118 + 210 * Math.pow(t, 1.6); };
+    const PL = [[0, hex('#fffef6')], [0.22, hex('#fff2be')], [0.42, hex('#ffd27c')], [0.6, hex('#ff9ec8')], [0.78, hex('#b7a2ff')], [1, hex('#76c6ff')]];
+    for (let i = 0; i < 7000; i++) {
+      const y = R(top - 6, gy + 25), hw = half(y), u = clamp(gauss() * 0.42, -1.05, 1.05), x = cx + u * hw;
+      const a = Math.PI / 2 + u * 0.35 * clamp((y - top) / (gy - top) + 0.2) + gauss() * 0.04;
+      S(x, y, a, R(25, 110), R(5, 18), R(0.6, 1), jit(ramp(PL, Math.abs(u) + R(-0.05, 0.05)), 0.03), Math.abs(u) < 0.35 ? 'chalk' : 'pastel', { trem: 0.6 });
+    }
+    for (const e of eng) {
+      if (e.Z > SZ + 1.5) continue;
+      const p0 = proj(e.X, SY0 - e.lb, e.Z);
+      for (let j = 0; j < 30; j++) S(p0[0] + gauss() * e.re * 6, lerp(p0[1], gy, R(0.2, 0.6)), Math.PI / 2 + gauss() * 0.05, (gy - p0[1]) * R(0.5, 1), R(3, 9), R(0.8, 1), hex('#fffff4'), 'chalk', { trem: 0.4, taper: 1 });
+    }
+    // where the fire meets Mars: a flat burst along the ground
+    for (let i = 0; i < 1800; i++) {
+      const dx = gauss() * 380, y = gy + R(-26, 22) + Math.abs(dx) * R(-0.04, 0.02), t = Math.abs(dx) / 1100;
+      S(cx + dx, y, (dx > 0 ? 0 : Math.PI) + gauss() * 0.06 + (dx > 0 ? -1 : 1) * 0.03, R(40, 180), R(4, 14), R(0.6, 1), jit(ramp(DUSTW, 1 - t * 1.4), 0.04), t < 0.15 ? 'chalk' : 'pastel');
+    }
+  }
+  function paintShip() {
+    paintFlap(-2.25, AFT, true);
+    paintFlap(-2.2, FWD, true);
+    paintBody();
+    paintTiles();
+    paintSteelDetail();
+    paintFlap(WIND + Math.PI / 2, AFT, false);
+    paintFlap(WIND + Math.PI / 2 + 0.2, FWD, false);
+    // silhouettes: charcoal on the shadow side, light where the world touches the steel
+    const left = [], right = [];
+    for (let h = 0; h <= SLEN; h += 0.5) { left.push(sp(-Math.PI / 2 + 0.01, h)); right.push(sp(Math.PI / 2 - 0.01, h)); }
+    for (let k2 = 0; k2 < 2; k2++) {
+      const a = R(0, 8) | 0;
+      SL(left.slice(a, left.length - R(0, 6) | 0), 2.6, 0.85, hex('#0d0b1a'), 'charcoal');
+      SL(right.slice(a, right.length - R(0, 4) | 0), 2.4, 0.8, hex('#1a1230'), 'charcoal');
+    }
+    SL(left.slice(2, 74).map(p => [p[0] - 2.5, p[1]]), 3.2, 0.95, hex('#a8f6ff'), 'chalk');
+    SL(left.slice(70, 104).map(p => [p[0] - 2, p[1]]), 2.6, 0.8, hex('#d0c0ff'), 'chalk');
+    SL(right.slice(0, 40).map(p => [p[0] + 1.5, p[1]]), 2.4, 0.85, hex('#ffc070'), 'chalk');
+    const nose = []; for (let th = -1.5; th <= 1.5; th += 0.1) nose.push(sp(th, SLEN - 0.3));
+    dot(nose[15][0], nose[15][1] - 2, 5, 1, hex('#fff2e0'), 'chalk');
+    const base = []; for (let th = -1.55; th <= 1.55; th += 0.06) base.push(sp(th, 0));
+    SL(base, 3.4, 0.95, hex('#ffcf80'), 'chalk');
+  }
+  // ---------- the hand: construction, light, crumbs, smudges ----------
+  const GRAPH = hex('#8a7fb0');
+  function construction(onTop) {
+    const p = onTop ? 0.32 : 0.55, c = onTop ? mix(GRAPH, hex('#ffffff'), 0.2) : GRAPH;
+    const axTop = sp(0, SLEN + 6), axBot = proj(SX, -1, SZ);
+    if (onTop) {
+      SL([[axTop[0] - 1, axTop[1] - 70], [axTop[0], axTop[1] + 40]], 2, p, c, 'pencil');
+      SL([[R(-20, 40), HOR + 1], [900, HOR + 2], [1500, HOR], [2100, HOR + 1]], 1.8, p * 0.8, c, 'pencil');
+      SL([[3240, HOR + 1], [3900, HOR + 3]], 1.8, p * 0.8, c, 'pencil');
+      const e = []; for (let a = 2.6; a < 6.0; a += 0.08) e.push([GP[0] + Math.cos(a) * 1450, GP[1] + 8 + Math.sin(a) * 70]);
+      SL(e, 1.8, p * 0.7, c, 'pencil');
+      SL([[3150, 120], [3420, 180]], 1.6, p, c, 'pencil'); SL([[3160, 150], [3400, 120]], 1.6, p * 0.8, c, 'pencil');
+      return;
+    }
+    SL([[axTop[0], 20], [axBot[0], axBot[1] + 60]], 2.2, p, c, 'pencil');
+    SL([[-10, HOR], [3850, HOR + 2]], 2, p, c, 'pencil');
+    for (const h of [0, 12, 35, SLEN]) { const L = []; for (let th = -1.7; th <= 1.7; th += 0.1) L.push(sp(th, h, SR * 1.1)); SL(L, 1.8, p, c, 'pencil'); }
+    SL([[sp(-1.57, 0)[0] - 40, 1380], [sp(-1.57, 0)[0] - 40, 150]], 1.6, p * 0.7, c, 'pencil');
+    for (let i = 0; i < 6; i++) { const a = R(-2.9, -0.2); SL([[GP[0], GP[1]], [GP[0] + Math.cos(a) * 1800, GP[1] + Math.sin(a) * 900]], 1.4, p * 0.6, c, 'pencil'); }
+  }
+  function dustVeil() {
+    for (let i = 0; i < 900; i++) {
+      const psi = R(0, Math.PI * 2), rho = R(20, 95), X = SX + rho * Math.cos(psi), Z = SZ + rho * Math.sin(psi) * 0.9;
+      const [x, y] = proj(X, R(0, 5), Z); if (Math.abs(x - GP[0]) < 220) continue;
+      const c = mix(sample(x, y), sample(x + R(-80, 80), y - R(40, 160)), 0.5);
+      S(x, y, gauss() * 0.15, R(80, 260), R(16, 46), R(0.35, 0.6), jit(c, 0.03), 'rub', { curv: R(-0.3, 0.3) });
+    }
+  }
+  function plumeGlow() {
+    const top = proj(SX, SY0 - 2.6, SZ)[1], gy = GP[1], cx = GP[0];
+    // light scattered in the dust around the engines
+    for (let i = 0; i < 2600; i++) {
+      const a = R(0, Math.PI * 2), d = 40 + Math.pow(rnd(), 1.6) * 520;
+      const x = cx + Math.cos(a) * d * 1.5, y = (top + gy) / 2 + 10 + Math.sin(a) * d * 0.5;
+      if (Math.abs(x - cx) < 120 && y < 1352) continue;
+      const g = 1 - d / 560, c = ramp(DUSTW, 0.45 + g * 0.6);
+      S(x, y, a + Math.PI / 2 + gauss() * 0.3, R(14, 50), R(3, 9), R(0.25, 0.6) * g + 0.1, jit(mix(sample(x, y), c, 0.6 + 0.3 * g), 0.03), 'pastel', { curv: R(-0.6, 0.6) });
+    }
+    // the column itself, burning through
+    for (let i = 0; i < 2200; i++) {
+      const y = R(top - 2, gy - 6), t = clamp((y - top) / (gy - top)), hw = 100 + 170 * Math.pow(t, 1.5), u = clamp(gauss() * 0.3, -0.85, 0.85);
+      const c = ramp([[0, hex('#fffff8')], [0.35, hex('#fff3c4')], [0.6, hex('#ffd890')], [0.85, hex('#ffa6d0')]], Math.abs(u));
+      S(cx + u * hw, y, Math.PI / 2 + u * 0.3 * t + gauss() * 0.03, R(20, 80), R(4, 14), R(0.5, 0.95), jit(c, 0.02), Math.abs(u) < 0.3 ? 'chalk' : 'pastel', { trem: 0.5 });
+    }
+    // white-hot crest where the surge rolls over the fire
+    for (let i = 0; i < 900; i++) {
+      const dx = gauss() * 300, y = gy - 18 + Math.abs(dx) * 0.035 + gauss() * 10, g = Math.exp(-Math.abs(dx) / 380);
+      S(cx + dx, y, gauss() * 0.12 + (dx > 0 ? 0.05 : -0.05), R(30, 140) * (0.5 + g), R(3, 10), R(0.5, 1) * (0.4 + 0.6 * g), jit(ramp(DUSTW, 0.55 + 0.45 * g), 0.03), g > 0.5 ? 'chalk' : 'pastel', { curv: R(-0.3, 0.3) });
+    }
+  }
+  function glitterPaths() {
+    // two roads of light running across the ripples to whoever is looking
+    const paths = [
+      { x0: GP[0], x1: GP[0] - 260, w0: 80, w1: 1100, cols: ['#fff4d0', '#ffd87a', '#ffb050', '#ff9060', '#ffc8a0'], n: 4200, p: 0.85 },
+    ];
+    for (const P of paths) for (let i = 0; i < P.n; i++) {
+      const y = HOR + 8 + Math.pow(rnd(), 0.8) * 660, t = clamp((y - HOR) / 660);
+      const cxp = lerp(P.x0, P.x1, t), wp = lerp(P.w0, P.w1, Math.pow(t, 0.9)), x = cxp + gauss() * wp * 0.45;
+      const g = Math.exp(-Math.pow((x - cxp) / wp, 2) * 1.6);
+      if (rnd() > g * P.p) continue;
+      const c = hex(P.cols[(rnd() * P.cols.length) | 0]);
+      const [X, Z] = toWorld(x, y), ang = 0.35 * Math.cos(X / 1.8 + Z * 1.3) * (0.3 + t);
+      if (rnd() < 0.3) { dot(x, y, R(1.5, 3) + 4 * t, R(0.6, 1), jit(c, 0.04), 'chalk'); continue; }
+      S(x, y, ang + gauss() * 0.1, R(5, 16) + 55 * t * R(0.3, 1), R(1.5, 2.6) + 3.5 * t, R(0.5, 0.95) * (0.45 + 0.55 * g), jit(c, 0.03), rnd() < 0.5 ? 'chalk' : 'pencil', { trem: 0.8, curv: R(0.6, 1.6) * (rnd() < 0.5 ? 1 : -1) });
+    }
+  }
+  function lightRays() {
+    // joy leaking out of the moment: fans of warm hatching from the plume
+    for (let i = 0; i < 700; i++) {
+      const a = -Math.PI / 2 + gauss() * 0.9, d = R(150, 1100) * Math.pow(rnd(), 0.8) + 180;
+      const x = GP[0] + Math.cos(a) * d, y = GP[1] - 40 + Math.sin(a) * d * 0.55;
+      if (y > HOR + 60) continue;
+      const c = mix(sample(x, y), rnd() < 0.5 ? hex('#ffe3a0') : hex('#ffb8d8'), R(0.4, 0.7));
+      if (Math.abs(x - GP[0]) < 150 && y < 1360) continue;
+      S(x, y, a + gauss() * 0.04, R(30, 110), R(2, 4.5), R(0.2, 0.42) * (1 - d / 1400), c, 'pastel', { trem: 0.7, curv: R(-0.2, 0.2) });
+    }
+  }
+  function sparkles() {
+    // sand and sugar: grains catching the fire
+    for (let i = 0; i < 5200; i++) {
+      const x = R(0, 3840), y = R(HOR - 700, 2160);
+      let g;
+      if (y > HOR) { const [X, Z] = toWorld(x, y); g = glowAt(X, Z); } else g = Math.exp(-Math.hypot(x - GP[0], (y - GP[1]) * 1.4) / 700);
+      if (rnd() > g * 1.4 + 0.05) continue;
+      if (Math.abs(x - GP[0]) < 170 && y < 1420) continue;
+      const c = rnd() < 0.15 ? hex('#a8f4ff') : rnd() < 0.3 ? hex('#ffc0e0') : mix(hex('#fff6d0'), hex('#ffd070'), rnd());
+      dot(x, y, R(1.6, 4.5) * (y > HOR ? 0.6 + (y - HOR) / 500 : 1), R(0.7, 1), c, 'chalk');
+    }
+  }
+  function crumbs() {
+    for (let i = 0; i < 600; i++) {
+      const x = R(0, 3840), y = R(0, 2160), sx = x + gauss() * 30, sy = y + R(0, 60);
+      if (Math.abs(x - GP[0]) < 200 && y < 1420) continue;
+      dot(x, y, R(1.5, 3.5), R(0.4, 0.7), jit(mix(sample(sx, sy), hex('#ffffff'), 0.15), 0.06), 'pastel');
+    }
+  }
+  function handSmudges() {
+    // heel of the hand resting at the lower right, a thumb pass in the plume, edge drags
+    for (let i = 0; i < 26; i++) smudge(3260 + R(-260, 420), 1980 + R(-120, 160), Math.PI * 0.85 + gauss() * 0.1, R(160, 360), R(60, 120), R(0.25, 0.45));
+    for (let i = 0; i < 10; i++) smudge(GP[0] + gauss() * 120, GP[1] - R(20, 100), R(-0.4, 0.4), R(80, 200), R(30, 60), R(0.3, 0.5));
+    for (let i = 0; i < 14; i++) smudge(R(0, 3840), R(2080, 2170), gauss() * 0.1, R(120, 300), R(30, 70), R(0.3, 0.5));
+    for (let i = 0; i < 40; i++) smudge(R(1500, 3800), R(900, 1450), R(-0.3, 0.3), R(100, 240), R(40, 80), R(0.2, 0.4));
+  }
+  function emboss() {
+    for (let i = 0; i < N; i++) {
+      const v = 1 + (tooth[i] - 0.5) * 0.11 * (1 - fill[i] * 0.55);
+      CR[i] *= v; CG[i] *= v; CB[i] *= v;
+    }
+  }
+
+  function render(log) {
+    log = log || (() => {});
+    const T0 = Date.now(), t = (n) => log(n + ' ' + ((Date.now() - T0) / 1000).toFixed(1) + 's');
+    makePaper(); t('paper');
+    construction(false);
+    toneGround(); t('tone');
+    paintSky(); t('sky');
+    paintClouds(); paintStarsMoons(); t('clouds');
+    paintRidges(); t('ridges');
+    paintGround(); paintRipples(); paintGrains(); t('ground');
+    paintDune(); paintRocks(); t('rocks');
+    buildPuffs();
+    for (const P of puffs) if (P.Z >= SZ) drawPuff(P);
+    t('dust back');
+    const eng = paintEngines(true);
+    paintPlume(eng);
+    paintShip(); paintEngines(); t('ship');
+    for (const P of puffs) if (P.Z < SZ) drawPuff(P);
+    dustVeil();
+    t('dust front');
+    plumeGlow(); glitterPaths(); lightRays(); sparkles(); t('light');
+    construction(true);
+    handSmudges(); crumbs(); emboss(); t('finish');
+  }
+  function toRGBA(out) {
+    out = out || new Uint8ClampedArray(N * 4);
+    for (let i = 0, j = 0; i < N; i++, j += 4) { out[j] = CR[i] * 255; out[j + 1] = CG[i] * 255; out[j + 2] = CB[i] * 255; out[j + 3] = 255; }
+    return out;
+  }
+  function toRGB() {
+    const out = new Uint8Array(N * 3);
+    for (let i = 0, j = 0; i < N; i++, j += 3) { out[j] = Math.max(0, Math.min(255, Math.round(CR[i] * 255))); out[j + 1] = Math.max(0, Math.min(255, Math.round(CG[i] * 255))); out[j + 2] = Math.max(0, Math.min(255, Math.round(CB[i] * 255))); }
+    return out;
+  }
+  return { render, toRGBA, toRGB, W, H };
+}
+/*ART-END*/
+</script>
+<script>
+window.addEventListener('load', () => {
+  const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+  ctx.fillStyle = '#30243f'; ctx.fillRect(0, 0, cv.width, cv.height);
+  setTimeout(() => {
+    const art = createArt(cv.width, cv.height, 20261127);
+    art.render(m => console.log(m));
+    const img = ctx.createImageData(cv.width, cv.height);
+    art.toRGBA(img.data);
+    ctx.putImageData(img, 0, 0);
+  }, 30);
+});
+</script>
+</body>
+</html>

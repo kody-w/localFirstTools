@@ -1,0 +1,614 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Siege on the Hill — Catapult vs Castle</title>
+<style>
+  html,body{margin:0;height:100%;overflow:hidden;background:#87b4d8;font-family:Georgia,"Times New Roman",serif}
+  canvas{display:block;width:100vw;height:100vh;cursor:crosshair}
+  #hud{position:fixed;left:16px;top:14px;color:#fff8e6;text-shadow:0 1px 3px rgba(0,0,0,.65);font-size:15px;pointer-events:none;letter-spacing:.3px}
+  #hud b{font-size:22px;display:block;margin-bottom:4px}
+  #msg{position:fixed;top:16%;left:0;right:0;text-align:center;color:#fff;font-size:34px;text-shadow:0 2px 10px rgba(0,0,0,.6);opacity:0;transition:opacity .7s;pointer-events:none}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hud"><b>Siege on the Hill</b>Click anywhere to aim &amp; fire · Space = random shot · <span id="hits">Hits: 0</span> · <span id="snd">🔇 click for sound</span></div>
+<div id="msg"></div>
+<script>
+// ---------- setup & utilities ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+let W, H, dpr, S, CS, CSc, GY, HX, HW, HH, catX;
+let dt = 0, time = 0, shake = 0, flash = 0;
+const rand = (a, b) => a + Math.random() * (b - a);
+function mulberry(seed){return()=>{seed|=0;seed=seed+0x6D2B79F5|0;let t=Math.imul(seed^seed>>>15,1|seed);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+
+function terrainY(x){
+  const d = (x - HX) / HW;
+  return GY - HH * Math.exp(-d*d*d*d) - 5*S*Math.sin(x*0.004 + 1);
+}
+const fhY = x => H*0.66 - Math.sin(x*0.006 + 0.5)*H*0.04 - Math.sin(x*0.017)*8;
+
+let mountains = [], trees = [], clouds = [], tufts = [];
+
+function resize(){
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = innerWidth; H = innerHeight;
+  cv.width = W*dpr; cv.height = H*dpr;
+  S = Math.max(Math.min(W/1400, H/800), 0.45);
+  CS = S*0.95; CSc = S*1.15;
+  GY = H*0.82; HX = W*0.76; HW = Math.max(W*0.2, 300*S); HH = H*0.27;
+  catX = Math.max(W*0.14, 85*CSc);
+  const r = mulberry(7);
+  mountains = [];
+  for (let x = -40; x <= W + 40; x += 18)
+    mountains.push([x, H*0.54 - Math.abs(Math.sin(x*0.0035 + 1.3))*H*0.17 - r()*10 - Math.sin(x*0.011)*14]);
+  trees = [];
+  for (let i = 0; i < 70; i++){ const x = r()*W; trees.push([x, fhY(x) + 3 + r()*10, (9 + r()*13)*S]); }
+  trees.sort((a, b) => a[1] - b[1]);
+  tufts = [];
+  for (let i = 0; i < 160; i++) tufts.push([r()*W, (4 + r()*8)*S, r()]);
+  if (!clouds.length) for (let i = 0; i < 7; i++) clouds.push({x: rand(0, W), y: rand(H*.05, H*.32), s: rand(.6, 1.4), v: rand(5, 14)});
+  buildCastle();
+}
+
+// ---------- background ----------
+function drawCloud(x, y, s){
+  ctx.fillStyle = 'rgba(255,255,255,0.88)';
+  const p = [[0,0,30],[28,-12,34],[60,0,28],[30,8,30],[-26,6,22],[86,8,20]];
+  ctx.beginPath();
+  for (const [a, b, rr] of p){ ctx.moveTo(x + a*s + rr*s, y + b*s); ctx.arc(x + a*s, y + b*s, rr*s, 0, 7); }
+  ctx.fill();
+  ctx.fillStyle = 'rgba(180,195,220,0.35)';
+  ctx.beginPath(); ctx.ellipse(x + 30*s, y + 24*s, 70*s, 9*s, 0, 0, 7); ctx.fill();
+}
+
+function drawSky(){
+  const g = ctx.createLinearGradient(0, 0, 0, GY);
+  g.addColorStop(0, '#3b78bd'); g.addColorStop(0.55, '#9cc6e6'); g.addColorStop(1, '#f5ddb0');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const sx = W*0.38, sy = H*0.18, sr = 38*S;
+  const sg = ctx.createRadialGradient(sx, sy, 0, sx, sy, sr*7);
+  sg.addColorStop(0, 'rgba(255,250,220,0.95)'); sg.addColorStop(0.14, 'rgba(255,236,170,0.55)'); sg.addColorStop(1, 'rgba(255,220,150,0)');
+  ctx.fillStyle = sg; ctx.fillRect(sx - sr*7, sy - sr*7, sr*14, sr*14);
+  ctx.fillStyle = '#fffbea'; ctx.beginPath(); ctx.arc(sx, sy, sr, 0, 7); ctx.fill();
+  for (const c of clouds){ c.x += c.v*dt; if (c.x > W + 200*S) c.x = -200*S; drawCloud(c.x, c.y, c.s*S); }
+}
+
+function drawScenery(){
+  // distant mountains
+  let g = ctx.createLinearGradient(0, H*0.35, 0, H*0.62);
+  g.addColorStop(0, '#8ea6c4'); g.addColorStop(1, '#b4c6d8');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(-40, H);
+  for (const [x, y] of mountains) ctx.lineTo(x, y);
+  ctx.lineTo(W + 40, H); ctx.fill();
+  // far hills
+  g = ctx.createLinearGradient(0, H*0.6, 0, H*0.8);
+  g.addColorStop(0, '#7fa47e'); g.addColorStop(1, '#6a9460');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(-40, H);
+  for (let x = -40; x <= W + 40; x += 12) ctx.lineTo(x, fhY(x));
+  ctx.lineTo(W + 40, H); ctx.fill();
+  // tree line
+  for (const [x, y, s] of trees){
+    ctx.fillStyle = '#4a7550';
+    ctx.beginPath(); ctx.moveTo(x - s*0.45, y); ctx.lineTo(x, y - s*1.6); ctx.lineTo(x + s*0.45, y); ctx.fill();
+    ctx.fillStyle = 'rgba(30,60,40,0.35)';
+    ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x, y - s*1.6); ctx.lineTo(x + s*0.45, y); ctx.fill();
+  }
+}
+
+function drawGround(){
+  const g = ctx.createLinearGradient(0, GY - HH, 0, H);
+  g.addColorStop(0, '#79ad4f'); g.addColorStop(0.45, '#5f9440'); g.addColorStop(1, '#3a6a2a');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(-20, H + 20);
+  for (let x = -20; x <= W + 20; x += 6) ctx.lineTo(x, terrainY(x));
+  ctx.lineTo(W + 20, H + 20); ctx.fill();
+  // shaded right flank of the hill
+  ctx.save(); ctx.clip();
+  const sh = ctx.createLinearGradient(HX - HW*0.3, 0, HX + HW*1.2, 0);
+  sh.addColorStop(0, 'rgba(20,50,20,0)'); sh.addColorStop(1, 'rgba(20,50,20,0.35)');
+  ctx.fillStyle = sh; ctx.fillRect(HX - HW*0.3, 0, HW*2, H);
+  // winding dirt path up the hill
+  ctx.strokeStyle = 'rgba(150,120,80,0.55)'; ctx.lineWidth = 7*S; ctx.lineCap = 'round';
+  ctx.beginPath();
+  for (let i = 0; i <= 40; i++){
+    const t = i/40, x = HX - HW*1.3 + t*HW*1.25 + Math.sin(t*9)*12*S;
+    const y = terrainY(x) + (1 - t)*14*S + 8*S;
+    i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+  ctx.strokeStyle = 'rgba(255,255,210,0.25)'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let x = -20; x <= W + 20; x += 6) x < -14 ? ctx.moveTo(x, terrainY(x)) : ctx.lineTo(x, terrainY(x));
+  ctx.stroke();
+  // trampled dirt around the catapult
+  ctx.fillStyle = 'rgba(120,90,55,0.45)';
+  ctx.beginPath(); ctx.ellipse(catX, terrainY(catX) + 6*S, 110*CSc, 14*CSc, 0, 0, 7); ctx.fill();
+}
+
+function drawTufts(){
+  ctx.strokeStyle = '#3f7a2c'; ctx.lineWidth = 1.4;
+  for (const [x, h, p] of tufts){
+    const y = terrainY(x) + 2 + p*(H - terrainY(x))*0.8;
+    const sway = Math.sin(time*2 + x*0.05)*2;
+    ctx.beginPath();
+    for (let k = -2; k <= 2; k++){ ctx.moveTo(x + k*2, y); ctx.quadraticCurveTo(x + k*3, y - h*0.6, x + k*3.5 + sway, y - h); }
+    ctx.stroke();
+  }
+}
+
+// ---------- castle (offscreen, takes damage) ----------
+const CW = 280, CH = 340, CB = 300;
+const castleCv = document.createElement('canvas');
+const cctx = castleCv.getContext('2d', {willReadFrequently: true});
+let holes = [], castleX = 0, castleY = 0, K = 1, hits = 0, surrender = false;
+const flags = [{u:140, v:6, L:30, h:18, ph:0, alive:true}, {u:45, v:42, L:18, h:10, ph:1.3, alive:true}, {u:235, v:42, L:18, h:10, ph:2.1, alive:true}];
+
+function buildCastle(){
+  K = CS*dpr;
+  castleCv.width = Math.ceil(CW*K); castleCv.height = Math.ceil(CH*K);
+  castleX = HX - CW/2*CS;
+  castleY = terrainY(HX) + 10*S - CB*CS;
+  redrawCastle();
+}
+
+function stoneRect(c, x, y, w, h, r, shade){
+  c.save(); c.beginPath(); c.rect(x, y, w, h); c.clip();
+  const g = c.createLinearGradient(x, 0, x + w, 0);
+  g.addColorStop(0, `hsl(36,14%,${72*shade}%)`); g.addColorStop(1, `hsl(30,11%,${50*shade}%)`);
+  c.fillStyle = g; c.fillRect(x, y, w, h);
+  const bh = 9;
+  for (let yy = y + h, row = 0; yy > y - bh; yy -= bh, row++){
+    const off = (row % 2)*10;
+    for (let xx = x - 20 + off; xx < x + w; xx += 20){
+      const l = r()*16 - 8;
+      c.fillStyle = l > 0 ? `rgba(255,245,225,${l/55})` : `rgba(30,20,10,${-l/45})`;
+      c.fillRect(xx + 1, yy - bh + 1, 18, bh - 2);
+    }
+    c.fillStyle = 'rgba(55,45,35,0.4)'; c.fillRect(x, yy - bh, w, 1.2);
+    for (let xx = x - 20 + off; xx < x + w; xx += 20) c.fillRect(xx, yy - bh, 1.2, bh);
+  }
+  c.restore();
+  c.strokeStyle = 'rgba(40,32,25,0.65)'; c.lineWidth = 1.4; c.strokeRect(x, y, w, h);
+}
+
+function merlons(c, x, y, count, mw, gap, mh, r, shade){
+  for (let i = 0; i < count; i++) stoneRect(c, x + i*(mw + gap), y - mh, mw, mh, r, shade);
+}
+
+function roof(c, x, y, w, apex){
+  c.beginPath(); c.moveTo(x, y); c.lineTo(x + w/2, apex); c.lineTo(x + w, y); c.closePath();
+  const g = c.createLinearGradient(x, 0, x + w, 0);
+  g.addColorStop(0, '#c65c40'); g.addColorStop(0.5, '#9c3f2c'); g.addColorStop(1, '#6a281d');
+  c.fillStyle = g; c.fill();
+  c.save(); c.clip(); c.strokeStyle = 'rgba(40,10,5,0.35)'; c.lineWidth = 1;
+  for (let yy = apex + 8; yy < y; yy += 7){ c.beginPath(); c.moveTo(x, yy); c.lineTo(x + w, yy); c.stroke(); }
+  for (let i = 1; i < 8; i++){ c.beginPath(); c.moveTo(x + w/2, apex); c.lineTo(x + w*i/8, y); c.stroke(); }
+  c.restore();
+  c.strokeStyle = 'rgba(40,15,10,.75)'; c.lineWidth = 1.5;
+  c.beginPath(); c.moveTo(x, y); c.lineTo(x + w/2, apex); c.lineTo(x + w, y); c.stroke();
+}
+
+function pole(c, x, y1, y2){
+  c.strokeStyle = '#3a2a1c'; c.lineWidth = 2; c.beginPath(); c.moveTo(x, y1); c.lineTo(x, y2); c.stroke();
+  c.fillStyle = '#d4b04a'; c.beginPath(); c.arc(x, y2, 2.2, 0, 7); c.fill();
+}
+
+function slit(c, x, y){ c.fillStyle = '#1d1510'; c.fillRect(x - 2, y, 4, 18); c.fillRect(x - 5, y + 7, 10, 3); }
+function windowArch(c, x, y, glow){
+  c.beginPath(); c.moveTo(x - 4, y + 16); c.lineTo(x - 4, y + 4); c.arc(x, y + 4, 4, Math.PI, 0); c.lineTo(x + 4, y + 16); c.closePath();
+  c.fillStyle = glow ? '#f2b450' : '#1d1510'; c.fill();
+  c.strokeStyle = 'rgba(30,20,10,.7)'; c.lineWidth = 1; c.stroke();
+}
+
+function redrawCastle(){
+  const c = cctx, r = mulberry(42);
+  c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, castleCv.width, castleCv.height);
+  c.setTransform(K, 0, 0, K, 0, 0);
+  // rocky foundation fading into the hill
+  const fr = mulberry(3);
+  const fg = c.createLinearGradient(0, 288, 0, CH);
+  fg.addColorStop(0, 'rgba(112,102,88,1)'); fg.addColorStop(0.55, 'rgba(95,90,70,0.9)'); fg.addColorStop(1, 'rgba(90,120,60,0)');
+  c.fillStyle = fg; c.beginPath(); c.moveTo(-4, CH);
+  for (let x = -4; x <= 284; x += 14) c.lineTo(x, 292 + fr()*8 + Math.pow(Math.abs(x - 140)/140, 3)*25);
+  c.lineTo(284, CH); c.closePath(); c.fill();
+  c.strokeStyle = 'rgba(50,45,35,0.35)'; c.lineWidth = 1;
+  for (let i = 0; i < 14; i++){ const x = fr()*280, y = 300 + fr()*25; c.beginPath(); c.moveTo(x, y); c.lineTo(x + 8 + fr()*12, y + fr()*6 - 3); c.stroke(); }
+  // keep (rear)
+  pole(c, 140, 36, 6);
+  stoneRect(c, 105, 95, 70, 205, r, 0.85);
+  roof(c, 100, 96, 80, 34);
+  windowArch(c, 128, 118, true); windowArch(c, 152, 118, true); windowArch(c, 140, 150, false);
+  // curtain wall
+  stoneRect(c, 40, 185, 200, 115, r, 0.96);
+  merlons(c, 40, 185, 10, 12, 8.2, 12, r, 0.98);
+  // towers
+  for (const tx of [12, 202]){
+    pole(c, tx + 33, 60, 42);
+    stoneRect(c, tx, 132, 66, 168, r, 1.0);
+    stoneRect(c, tx - 4, 124, 74, 10, r, 1.06);
+    roof(c, tx - 8, 124, 82, 60);
+    slit(c, tx + 33, 160); slit(c, tx + 33, 218);
+  }
+  // gatehouse
+  c.beginPath(); c.moveTo(117, 300); c.lineTo(117, 258); c.arc(140, 258, 23, Math.PI, 0); c.lineTo(163, 300); c.closePath();
+  c.fillStyle = '#2a1d14'; c.fill();
+  c.save(); c.clip(); c.strokeStyle = '#6b6256'; c.lineWidth = 2;
+  for (let x = 120; x < 163; x += 7){ c.beginPath(); c.moveTo(x, 230); c.lineTo(x, 290); c.stroke(); }
+  for (let y = 244; y < 292; y += 9){ c.beginPath(); c.moveTo(115, y); c.lineTo(165, y); c.stroke(); }
+  c.restore();
+  c.strokeStyle = '#cdbfa6'; c.lineWidth = 4; c.beginPath(); c.arc(140, 258, 25, Math.PI, 0); c.stroke();
+  windowArch(c, 80, 215, false); windowArch(c, 200, 215, false);
+  // ivy / moss
+  c.fillStyle = 'rgba(70,110,50,0.55)';
+  for (let i = 0; i < 40; i++){ const x = 14 + r()*60, y = 250 + r()*48; c.beginPath(); c.arc(x, y, 1.5 + r()*2.5, 0, 7); c.fill(); }
+  // damage
+  for (const h of holes){
+    c.beginPath(); h.pts.forEach(([px, py], i) => i ? c.lineTo(px, py) : c.moveTo(px, py)); c.closePath();
+    c.globalCompositeOperation = 'destination-out'; c.fillStyle = '#000'; c.fill();
+    c.globalCompositeOperation = 'source-atop';
+    c.strokeStyle = 'rgba(28,20,14,0.85)'; c.lineWidth = 6; c.stroke();
+    c.strokeStyle = 'rgba(25,18,12,0.7)'; c.lineWidth = 1.1;
+    for (const [x1, y1, x2, y2] of h.cracks){ c.beginPath(); c.moveTo(x1, y1); c.lineTo(x2, y2); c.stroke(); }
+    c.fillStyle = 'rgba(20,15,10,0.18)'; c.beginPath(); c.arc(h.u, h.v, h.r*1.9, 0, 7); c.fill();
+    c.globalCompositeOperation = 'source-over';
+  }
+  for (const f of flags) f.alive = castleAlphaLocal(f.u, f.v + 6) > 0;
+}
+
+function castleAlphaLocal(u, v){
+  if (u < 0 || v < 0 || u >= CW || v >= CH) return 0;
+  return cctx.getImageData(Math.floor(u*K), Math.floor(v*K), 1, 1).data[3];
+}
+
+function addHole(u, v){
+  const r = rand(13, 21), pts = [], cracks = [];
+  const n = 13;
+  for (let i = 0; i < n; i++){ const a = i/n*Math.PI*2, rr = r*rand(0.65, 1.25); pts.push([u + Math.cos(a)*rr, v + Math.sin(a)*rr]); }
+  for (let i = 0; i < 6; i++){
+    const a = rand(0, 7), r1 = r*0.9, r2 = r*rand(1.4, 2.3);
+    cracks.push([u + Math.cos(a)*r1, v + Math.sin(a)*r1, u + Math.cos(a + rand(-.3, .3))*r2, v + Math.sin(a + rand(-.3, .3))*r2]);
+  }
+  holes.push({u, v, r, pts, cracks});
+  redrawCastle();
+}
+
+function drawFlag(x, y, L, h, col, ph){
+  const n = 10, wave = i => Math.sin(time*5 + ph - i*0.6)*(i/n)*h*0.4;
+  ctx.beginPath(); ctx.moveTo(x, y);
+  for (let i = 1; i <= n; i++) ctx.lineTo(x + L*i/n, y + wave(i));
+  for (let i = n; i >= 0; i--) ctx.lineTo(x + L*i/n, y + wave(i) + h*(1 - 0.75*i/n));
+  ctx.closePath(); ctx.fillStyle = col; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.3)'; ctx.lineWidth = 1; ctx.stroke();
+}
+
+function drawCastle(){
+  ctx.drawImage(castleCv, castleX, castleY, CW*CS, CH*CS);
+  for (const f of flags){
+    if (!f.alive) continue;
+    const x = castleX + f.u*CS, y = castleY + f.v*CS + 1;
+    drawFlag(x, y, f.L*CS, f.h*CS, surrender ? '#f4f1e8' : (f.L > 20 ? '#b8242a' : '#2f4f9e'), f.ph);
+    if (!surrender && f.L > 20){
+      ctx.fillStyle = '#e8c34a';
+      ctx.beginPath(); ctx.arc(x + f.L*CS*0.32, y + f.h*CS*0.45 + Math.sin(time*5 + f.ph - 3)*f.h*CS*0.1, 3*CS, 0, 7); ctx.fill();
+    }
+  }
+}
+
+// ---------- sound ----------
+let AC = null;
+function initAudio(){
+  if (AC) return;
+  try { AC = new (window.AudioContext || window.webkitAudioContext)(); document.getElementById('snd').textContent = '🔊 sound on'; } catch(e){}
+}
+function noise(dur, freq, vol, type){
+  if (!AC) return;
+  const n = Math.floor(AC.sampleRate*dur), b = AC.createBuffer(1, n, AC.sampleRate), d = b.getChannelData(0);
+  for (let i = 0; i < n; i++) d[i] = (Math.random()*2 - 1)*Math.pow(1 - i/n, 2);
+  const s = AC.createBufferSource(); s.buffer = b;
+  const f = AC.createBiquadFilter(); f.type = type || 'lowpass'; f.frequency.value = freq;
+  const g = AC.createGain(); g.gain.value = vol;
+  s.connect(f).connect(g).connect(AC.destination); s.start();
+}
+function thud(f0, dur, vol){
+  if (!AC) return;
+  const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+  o.frequency.setValueAtTime(f0, t); o.frequency.exponentialRampToValueAtTime(35, t + dur);
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + dur);
+}
+function creak(){
+  if (!AC) return;
+  const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+  o.type = 'sawtooth'; o.frequency.setValueAtTime(90, t); o.frequency.linearRampToValueAtTime(140, t + 1.2);
+  g.gain.setValueAtTime(0.0001, t); g.gain.linearRampToValueAtTime(0.025, t + 0.2); g.gain.linearRampToValueAtTime(0.0001, t + 1.3);
+  const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 400;
+  o.connect(f).connect(g).connect(AC.destination); o.start(t); o.stop(t + 1.35);
+}
+
+// ---------- catapult ----------
+const TH_L = Math.PI - 0.12, TH_S = Math.PI*1.5 + 0.45, TH_R = Math.PI*1.5 - 0.22, ARM = 125;
+const cat = {th: TH_S, w: 0, state: 'load', t: 0, loaded: false, released: false};
+let queued = null, autoTimer = 0;
+const catY = () => terrainY(catX);
+const pivotW = () => [catX - 10*CSc, catY() - 40*CSc];
+function armPoint(d, off){
+  const [px, py] = pivotW(), c = Math.cos(cat.th), s = Math.sin(cat.th);
+  return [px + (c*d - s*off)*CSc, py + (s*d + c*off)*CSc];
+}
+
+function beam(x1, y1, x2, y2, w, col){
+  const a = Math.atan2(y2 - y1, x2 - x1), L = Math.hypot(x2 - x1, y2 - y1);
+  ctx.save(); ctx.translate(x1, y1); ctx.rotate(a);
+  ctx.fillStyle = col; ctx.fillRect(0, -w/2, L, w);
+  ctx.fillStyle = 'rgba(255,220,170,0.18)'; ctx.fillRect(0, -w/2, L, w*0.3);
+  ctx.strokeStyle = 'rgba(40,22,10,0.35)'; ctx.lineWidth = 0.6;
+  ctx.beginPath(); ctx.moveTo(2, w*0.1); ctx.lineTo(L - 2, w*0.15); ctx.stroke();
+  ctx.strokeStyle = '#3a2210'; ctx.lineWidth = 1.2; ctx.strokeRect(0, -w/2, L, w);
+  ctx.restore();
+}
+function bolt(x, y){ ctx.fillStyle = '#2b2b2b'; ctx.beginPath(); ctx.arc(x, y, 1.8, 0, 7); ctx.fill(); }
+
+function wheel(x, y, r, rot){
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  ctx.strokeStyle = '#5a3a1e'; ctx.lineWidth = 3;
+  for (let i = 0; i < 6; i++){ const a = i*Math.PI/3; ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(Math.cos(a)*r, Math.sin(a)*r); ctx.stroke(); }
+  ctx.lineWidth = 5; ctx.strokeStyle = '#6b4424'; ctx.beginPath(); ctx.arc(0, 0, r - 2, 0, 7); ctx.stroke();
+  ctx.lineWidth = 1.6; ctx.strokeStyle = '#2e2e2e'; ctx.beginPath(); ctx.arc(0, 0, r + 0.6, 0, 7); ctx.stroke();
+  ctx.fillStyle = '#3a2a1a'; ctx.beginPath(); ctx.arc(0, 0, 3.5, 0, 7); ctx.fill();
+  ctx.restore();
+}
+
+function drawCatapult(){
+  const gy = catY();
+  ctx.save(); ctx.translate(catX, gy); ctx.scale(CSc, CSc);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.beginPath(); ctx.ellipse(0, 2, 80, 7, 0, 0, 7); ctx.fill();
+  const wood = '#8a5a30', dark = '#6e4524';
+  // rear frame side (darker, behind)
+  beam(-66, -32, 60, -32, 9, dark);
+  beam(-26, -28, 30, -116, 7, dark);
+  // winch
+  const wr = cat.state === 'load' ? cat.t*6 : 0;
+  ctx.save(); ctx.translate(-56, -42); ctx.rotate(wr);
+  ctx.strokeStyle = '#5a3a1e'; ctx.lineWidth = 3;
+  for (let i = 0; i < 4; i++){ const a = i*Math.PI/2; ctx.beginPath(); ctx.moveTo(-Math.cos(a)*12, -Math.sin(a)*12); ctx.lineTo(Math.cos(a)*12, Math.sin(a)*12); ctx.stroke(); }
+  ctx.fillStyle = '#c9a66b'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fill();
+  ctx.restore();
+  // throwing arm
+  ctx.save(); ctx.translate(-10, -40); ctx.rotate(cat.th);
+  ctx.fillStyle = wood; ctx.beginPath();
+  ctx.moveTo(-14, -6); ctx.lineTo(ARM - 10, -3.5); ctx.lineTo(ARM - 10, 3.5); ctx.lineTo(-14, 6); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#3a2210'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,220,170,0.2)'; ctx.fillRect(-12, -5, ARM - 4, 2);
+  ctx.fillStyle = '#3d3d3d'; for (const bx of [20, 60, 95]) ctx.fillRect(bx, -5.5, 3, 11);
+  ctx.beginPath(); ctx.arc(ARM, 6, 15, Math.PI, 0); ctx.closePath();
+  ctx.fillStyle = '#6b4424'; ctx.fill(); ctx.strokeStyle = '#3a2210'; ctx.stroke();
+  ctx.restore();
+  if (cat.loaded) { ctx.save(); ctx.translate(-10, -40); ctx.rotate(cat.th); drawRockShape(ARM, -3, 9, 0); ctx.restore(); }
+  // winch rope while loaded / winding
+  if (cat.state === 'load' || cat.state === 'ready'){
+    const c = Math.cos(cat.th), s = Math.sin(cat.th);
+    ctx.strokeStyle = '#c9b07a'; ctx.lineWidth = 1.6;
+    ctx.beginPath(); ctx.moveTo(-56, -42); ctx.lineTo(-10 + c*70, -40 + s*70); ctx.stroke();
+  }
+  // torsion skein at pivot
+  ctx.fillStyle = '#a88a55'; ctx.beginPath(); ctx.arc(-10, -40, 10, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(80,55,25,0.8)'; ctx.lineWidth = 1;
+  for (let i = -8; i <= 8; i += 3){ ctx.beginPath(); ctx.moveTo(-10 + i, -49); ctx.lineTo(-10 + i*0.6 + 3, -31); ctx.stroke(); }
+  ctx.fillStyle = '#4a4a4a'; ctx.beginPath(); ctx.arc(-10, -40, 3, 0, 7); ctx.fill();
+  // front frame side
+  beam(-70, -26, 64, -26, 10, wood);
+  beam(-60, -26, -40, -50, 6, wood); beam(20, -26, 0, -50, 6, wood);
+  beam(-46, -48, 8, -48, 6, wood);
+  beam(42, -24, 34, -120, 8, wood);
+  beam(-30, -24, 33, -114, 7, wood);
+  // crossbar with leather cushion
+  ctx.fillStyle = '#5c3a1c'; ctx.fillRect(20, -126, 22, 10); ctx.strokeStyle = '#2e1a0b'; ctx.strokeRect(20, -126, 22, 10);
+  ctx.fillStyle = '#7a3e2a'; ctx.beginPath(); ctx.ellipse(24, -121, 4, 6, 0, 0, 7); ctx.fill();
+  for (const [bx, by] of [[-60,-26],[42,-26],[-30,-26],[34,-118],[-40,-48],[0,-48]]) bolt(bx, by);
+  wheel(-48, -14, 15, 0); wheel(46, -14, 15, 0.4);
+  ctx.restore();
+}
+
+// ---------- rocks & particles ----------
+const rocks = [], parts = [];
+function drawRockShape(x, y, r, rot){
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot);
+  const g = ctx.createRadialGradient(-r*0.35, -r*0.35, r*0.1, 0, 0, r);
+  g.addColorStop(0, '#b8b0a4'); g.addColorStop(1, '#5d5750');
+  ctx.fillStyle = g; ctx.beginPath();
+  for (let i = 0; i < 9; i++){ const a = i/9*Math.PI*2, rr = r*(0.85 + 0.15*Math.sin(i*2.7)); ctx.lineTo(Math.cos(a)*rr, Math.sin(a)*rr); }
+  ctx.closePath(); ctx.fill(); ctx.strokeStyle = 'rgba(30,25,20,0.6)'; ctx.lineWidth = 1; ctx.stroke();
+  ctx.restore();
+}
+
+function launch(){
+  const [px, py] = armPoint(ARM, -3);
+  let tx, ty;
+  if (queued){ [tx, ty] = queued; queued = null; } else [tx, ty] = randomCastleTarget();
+  const G = 760*S, T = 1.05 + Math.abs(tx - px)/Math.max(W, 800)*0.9;
+  rocks.push({x: px, y: py, vx: (tx - px)/T, vy: (ty - py - 0.5*G*T*T)/T, G, rot: 0, vr: rand(-8, 8), r: 9*CSc, trail: []});
+  thud(140, 0.25, 0.45); noise(0.45, 900, 0.25, 'bandpass');
+}
+
+function randomCastleTarget(){
+  for (let i = 0; i < 30; i++){
+    const u = rand(25, 255), v = rand(110, 285);
+    if (castleAlphaLocal(u, v) > 200) return [castleX + u*CS, castleY + v*CS];
+  }
+  return [castleX + 140*CS, castleY + 230*CS];
+}
+
+function burst(x, y, n, colors, power, dirX){
+  for (let i = 0; i < n; i++){
+    const a = rand(-Math.PI*0.95, -Math.PI*0.05), sp = rand(0.3, 1)*power;
+    parts.push({type: 'chunk', x, y, vx: Math.cos(a)*sp + dirX*rand(0, power*0.4), vy: Math.sin(a)*sp,
+      size: rand(1.5, 5)*S, rot: rand(0, 7), vr: rand(-10, 10), life: rand(1.5, 3), max: 3, col: colors[i % colors.length]});
+  }
+}
+function dust(x, y, n, col, spread){
+  for (let i = 0; i < n; i++)
+    parts.push({type: 'dust', x: x + rand(-spread, spread), y: y + rand(-spread, spread)*0.6, vx: rand(-30, 30)*S, vy: rand(-40, -5)*S,
+      r: rand(6, 14)*S, grow: rand(14, 30)*S, life: rand(1.2, 2.4), max: 2.4, col});
+}
+
+function impactCastle(x, y, u, v, rk){
+  addHole(u, v);
+  burst(x, y, 34, ['#9c9384', '#7d756a', '#b5ab99', '#5e574f'], 340*S, -0.6);
+  dust(x, y, 16, '150,140,125', 14*S);
+  parts.push({type: 'ring', x, y, r: 4*S, life: 0.35, max: 0.35});
+  shake = 14*S; flash = 0.35;
+  noise(1.1, 700, 0.9); thud(90, 0.6, 0.8);
+  hits++; document.getElementById('hits').textContent = 'Hits: ' + hits;
+  if (hits >= 8 && !surrender){
+    surrender = true; showMsg('🏳️ The castle surrenders!');
+    setTimeout(() => {
+      holes = []; hits = 0; surrender = false; redrawCastle();
+      document.getElementById('hits').textContent = 'Hits: 0';
+      showMsg('The masons rebuild the walls…');
+    }, 5500);
+  }
+}
+function impactGround(x, y){
+  burst(x, y, 22, ['#6b4f2e', '#4f3a22', '#5f8f3d', '#8a6b45'], 260*S, 0);
+  dust(x, y, 12, '130,105,70', 10*S);
+  shake = Math.max(shake, 6*S);
+  noise(0.6, 320, 0.6); thud(60, 0.35, 0.5);
+}
+
+let msgTimer = 0;
+function showMsg(t){ const m = document.getElementById('msg'); m.textContent = t; m.style.opacity = 1; clearTimeout(msgTimer); msgTimer = setTimeout(() => m.style.opacity = 0, 2800); }
+
+// ---------- update ----------
+function updateCatapult(){
+  cat.t += dt;
+  if (cat.state === 'load'){
+    const k = Math.min(cat.t/1.4, 1), e = k < 0.5 ? 2*k*k : 1 - Math.pow(-2*k + 2, 2)/2;
+    cat.th = TH_S + (TH_L - TH_S)*e;
+    if (k >= 1){ cat.state = 'ready'; cat.loaded = true; cat.t = 0; }
+  } else if (cat.state === 'ready'){
+    autoTimer += dt;
+    if (queued || autoTimer > 1.6){ cat.state = 'fire'; cat.w = 0; cat.released = false; autoTimer = 0; }
+  } else if (cat.state === 'fire'){
+    cat.w += 42*dt; cat.th += cat.w*dt;
+    if (!cat.released && cat.th >= TH_R){ cat.released = true; launch(); cat.loaded = false; }
+    if (cat.th >= TH_S){ cat.th = TH_S; cat.state = 'recoil'; cat.t = 0; thud(70, 0.2, 0.4); shake = Math.max(shake, 3*S);
+      dust(catX + 30*CSc, catY(), 5, '140,115,80', 20*S); }
+  } else if (cat.state === 'recoil'){
+    cat.th = TH_S - 0.22*Math.exp(-5*cat.t)*Math.abs(Math.sin(cat.t*13));
+    if (cat.t > 0.9){ cat.state = 'load'; cat.t = 0; creak(); }
+  }
+}
+
+function updateRocks(){
+  for (let i = rocks.length - 1; i >= 0; i--){
+    const rk = rocks[i];
+    const steps = Math.max(1, Math.ceil(Math.hypot(rk.vx, rk.vy)*dt/3));
+    const h = dt/steps;
+    let dead = false;
+    for (let s = 0; s < steps && !dead; s++){
+      rk.vy += rk.G*h; rk.x += rk.vx*h; rk.y += rk.vy*h;
+      const u = (rk.x - castleX)/CS, v = (rk.y - castleY)/CS;
+      if (u >= 0 && u < CW && v >= 0 && v < CB + 10 && castleAlphaLocal(u, v) > 60){ impactCastle(rk.x, rk.y, u, v, rk); dead = true; }
+      else if (rk.y >= terrainY(rk.x)){ impactGround(rk.x, terrainY(rk.x)); dead = true; }
+    }
+    rk.rot += rk.vr*dt;
+    rk.trail.push([rk.x, rk.y]); if (rk.trail.length > 14) rk.trail.shift();
+    if (dead || rk.x > W + 200 || rk.x < -200 || rk.y > H + 200) rocks.splice(i, 1);
+  }
+}
+
+function updateParticles(){
+  for (let i = parts.length - 1; i >= 0; i--){
+    const p = parts[i];
+    p.life -= dt;
+    if (p.life <= 0){ parts.splice(i, 1); continue; }
+    if (p.type === 'chunk'){
+      p.vy += 900*S*dt; p.x += p.vx*dt; p.y += p.vy*dt; p.rot += p.vr*dt;
+      const gy = terrainY(p.x);
+      if (p.y > gy){ p.y = gy; p.vy *= -0.3; p.vx *= 0.55; p.vr *= 0.5; }
+    } else if (p.type === 'dust'){
+      p.x += p.vx*dt; p.y += p.vy*dt; p.vx *= 0.98; p.vy *= 0.97; p.r += p.grow*dt;
+    } else if (p.type === 'ring'){ p.r += 260*S*dt; }
+  }
+}
+
+// ---------- render ----------
+function drawRocks(){
+  for (const rk of rocks){
+    for (let j = 0; j < rk.trail.length; j++){
+      const [x, y] = rk.trail[j], a = j/rk.trail.length;
+      ctx.fillStyle = `rgba(235,230,215,${a*0.35})`;
+      ctx.beginPath(); ctx.arc(x, y, rk.r*a*0.8, 0, 7); ctx.fill();
+    }
+    ctx.save(); ctx.translate(rk.x, rk.y); ctx.scale(CSc, CSc); drawRockShape(0, 0, 9, rk.rot); ctx.restore();
+  }
+}
+
+function drawParticles(){
+  for (const p of parts){
+    const a = Math.min(1, p.life/0.6);
+    if (p.type === 'chunk'){
+      ctx.save(); ctx.globalAlpha = a; ctx.translate(p.x, p.y); ctx.rotate(p.rot);
+      ctx.fillStyle = p.col; ctx.fillRect(-p.size/2, -p.size/2, p.size, p.size*0.8); ctx.restore();
+    } else if (p.type === 'dust'){
+      const g = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, p.r);
+      g.addColorStop(0, `rgba(${p.col},${0.5*p.life/p.max})`); g.addColorStop(1, `rgba(${p.col},0)`);
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.fill();
+    } else if (p.type === 'ring'){
+      ctx.strokeStyle = `rgba(255,240,200,${p.life/p.max})`; ctx.lineWidth = 3*S;
+      ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, 7); ctx.stroke();
+    }
+  }
+}
+
+function drawAim(){
+  if (!queued) return;
+  const [x, y] = queued, r = 10*S + Math.sin(time*8)*2*S;
+  ctx.strokeStyle = 'rgba(255,60,40,0.85)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 7); ctx.moveTo(x - r*1.6, y); ctx.lineTo(x + r*1.6, y); ctx.moveTo(x, y - r*1.6); ctx.lineTo(x, y + r*1.6); ctx.stroke();
+}
+
+function render(){
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  drawSky();
+  const sx = (Math.random() - 0.5)*shake, sy = (Math.random() - 0.5)*shake;
+  ctx.save(); ctx.translate(sx, sy);
+  drawScenery();
+  drawGround();
+  drawCastle();
+  drawTufts();
+  drawCatapult();
+  drawParticles();
+  drawRocks();
+  drawAim();
+  ctx.restore();
+  if (flash > 0){ ctx.fillStyle = `rgba(255,245,220,${flash*0.35})`; ctx.fillRect(0, 0, W, H); }
+  // soft vignette
+  const vg = ctx.createRadialGradient(W/2, H/2, Math.min(W, H)*0.4, W/2, H/2, Math.max(W, H)*0.75);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(20,10,0,0.28)');
+  ctx.fillStyle = vg; ctx.fillRect(0, 0, W, H);
+}
+
+let last = performance.now();
+function frame(now){
+  dt = Math.min(0.033, (now - last)/1000); last = now; time += dt;
+  shake *= Math.pow(0.02, dt); if (shake < 0.2) shake = 0;
+  flash = Math.max(0, flash - dt*1.5);
+  updateCatapult(); updateRocks(); updateParticles();
+  render();
+  requestAnimationFrame(frame);
+}
+
+// ---------- input ----------
+cv.addEventListener('pointerdown', e => { initAudio(); if (AC && AC.state === 'suspended') AC.resume(); queued = [e.clientX, e.clientY]; });
+addEventListener('keydown', e => { if (e.code === 'Space'){ e.preventDefault(); initAudio(); queued = randomCastleTarget(); } });
+addEventListener('resize', () => { const hh = holes; resize(); holes = hh; redrawCastle(); });
+
+resize();
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

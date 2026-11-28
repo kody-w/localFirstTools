@@ -1,0 +1,1465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Starship on Mars — Hand-Drawn Dry Pastel on Cotton Paper</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #12101a;
+    color: #efe4d4;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    overflow: hidden;
+  }
+  .frame {
+    position: relative;
+    width: min(96vw, calc(90vh * 16 / 9));
+    aspect-ratio: 16 / 9;
+    box-shadow: 0 28px 80px rgba(0, 0, 0, 0.72), 0 0 0 1px rgba(255, 232, 200, 0.14);
+    border-radius: 4px;
+    overflow: hidden;
+    background: #e0ccb6;
+  }
+  canvas { width: 100%; height: 100%; display: block; }
+  .bar {
+    margin-top: 12px;
+    display: flex; align-items: center; gap: 14px;
+    font-size: 13px; color: #c9bfb5;
+  }
+  button {
+    background: #2b2438; color: #f6ead8;
+    border: 1px solid rgba(255, 224, 182, 0.28);
+    padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px;
+  }
+  button:hover { background: #3b314d; }
+</style>
+</head>
+<body>
+  <div class="frame">
+    <canvas id="art" width="1920" height="1080"></canvas>
+  </div>
+  <div class="bar">
+    <span id="status">Drawing on cotton pastel paper...</span>
+    <button id="btn4k">Render &amp; Download 4K PNG (3840×2160)</button>
+  </div>
+<script>
+// Self-contained pure-JavaScript Dry-Media Paper & Stroke Engine
+// Tools: Soft Chalk Pastel, Compressed Charcoal, Wax Colored Pencil, White/Cream Conté Crayon
+function createRNG(seed = 20261127) {
+  let s = seed >>> 0;
+  return function rand() {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function createNoise(seed = 1337) {
+  const rng = createRNG(seed);
+  const perm = new Uint8Array(512);
+  const vals = new Float32Array(256);
+  for (let i = 0; i < 256; i++) { perm[i] = i; vals[i] = rng(); }
+  for (let i = 255; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = perm[i]; perm[i] = perm[j]; perm[j] = tmp;
+  }
+  for (let i = 0; i < 256; i++) perm[i + 256] = perm[i];
+  function noise2(x, y) {
+    const xi = Math.floor(x) & 255, yi = Math.floor(y) & 255;
+    const xf = x - Math.floor(x), yf = y - Math.floor(y);
+    const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+    const aa = vals[perm[perm[xi] + yi]], ba = vals[perm[perm[xi + 1] + yi]];
+    const ab = vals[perm[perm[xi] + yi + 1]], bb = vals[perm[perm[xi + 1] + yi + 1]];
+    return (aa + u * (ba - aa)) + v * ((ab + u * (bb - ab)) - (aa + u * (ba - aa)));
+  }
+  function fbm(x, y, octaves = 4) {
+    let sum = 0, amp = 0.5, freq = 1, norm = 0;
+    for (let i = 0; i < octaves; i++) {
+      sum += noise2(x * freq, y * freq) * amp;
+      norm += amp; amp *= 0.5; freq *= 2.03;
+    }
+    return sum / norm;
+  }
+  return { noise2, fbm };
+}
+
+function lerpColor(c1, c2, t) {
+  const k = Math.max(0, Math.min(1, t));
+  return [c1[0] + (c2[0] - c1[0]) * k, c1[1] + (c2[1] - c1[1]) * k, c1[2] + (c2[2] - c1[2]) * k];
+}
+
+class PaperCanvas {
+  constructor(width, height, seed = 20261127) {
+    this.width = width; this.height = height; this.scale = width / 3840;
+    this.rng = createRNG(seed); this.noise = createNoise(seed + 99);
+    const n = width * height;
+    this.r = new Float32Array(n); this.g = new Float32Array(n); this.b = new Float32Array(n);
+    this.tooth = new Float32Array(n); this.load = new Float32Array(n);
+    this._initPaper();
+  }
+  _initPaper() {
+    const { width, height, r, g, b, tooth, noise } = this;
+    const baseR = 224, baseG = 204, baseB = 182, tile = 256;
+    const micro = new Float32Array(tile * tile), fiber = new Float32Array(tile * tile);
+    const tNoise = createNoise(8842), rng = createRNG(7771);
+    for (let y = 0; y < tile; y++) {
+      for (let x = 0; x < tile; x++) {
+        const n1 = tNoise.noise2((x / tile) * 32, (y / tile) * 32);
+        const n2 = tNoise.noise2((x / tile) * 76 + 11, (y / tile) * 76 + 5);
+        const gran = rng();
+        const fib = tNoise.noise2((x / tile) * 18, (y / tile) * 64 + 3.1);
+        micro[y * tile + x] = 0.42 * gran + 0.28 * n1 + 0.20 * n2 + 0.10 * fib;
+        fiber[y * tile + x] = (gran - 0.5) * 14;
+      }
+    }
+    const invW = 1 / width, invH = 1 / height;
+    for (let y = 0; y < height; y++) {
+      const ty = (Math.floor(y / this.scale) & 255) * tile, ny = y * invH, row = y * width;
+      for (let x = 0; x < width; x++) {
+        const tx = Math.floor(x / this.scale) & 255, nx = x * invW;
+        const macro = noise.fbm(nx * 9, ny * 5.5, 3);
+        const t = Math.max(0, Math.min(1, micro[ty + tx] * 0.78 + macro * 0.22));
+        const idx = row + x; tooth[idx] = t;
+        const shade = (t - 0.5) * 20 + (macro - 0.5) * 12 + fiber[ty + tx] * 0.3;
+        const edgeWarm = Math.max(0, Math.hypot((nx - 0.5) * 1.4, (ny - 0.5) * 1.4) - 0.55) * 18;
+        r[idx] = Math.max(0, Math.min(255, baseR + shade - edgeWarm * 0.25));
+        g[idx] = Math.max(0, Math.min(255, baseG + shade - edgeWarm * 0.55));
+        b[idx] = Math.max(0, Math.min(255, baseB + shade - edgeWarm * 0.9));
+      }
+    }
+  }
+  _dab(px, py, cr, cg, cb, alpha, pressure, grainSensitivity, pigmentMode = 'mix') {
+    const x = px | 0, y = py | 0;
+    if (x < 0 || x >= this.width || y < 0 || y >= this.height) return;
+    const idx = y * this.width + x, t = this.tooth[idx];
+    const threshold = (1.0 - pressure) * grainSensitivity;
+    if (t < threshold) return;
+    const catchFactor = Math.min(1, Math.pow((t - threshold) / Math.max(0.06, 1.0 - threshold), 0.72));
+    const loadResist = pigmentMode === 'opaque' ? 1.0 : (1.0 - this.load[idx] * 0.14);
+    const a = Math.min(1, alpha * catchFactor * loadResist);
+    if (a <= 0.002) return;
+    if (pigmentMode === 'multiply') {
+      const tr = (this.r[idx] * cr) / 255, tg = (this.g[idx] * cg) / 255, tb = (this.b[idx] * cb) / 255;
+      this.r[idx] = this.r[idx] * (1 - a) + (tr * 0.35 + cr * 0.65) * a;
+      this.g[idx] = this.g[idx] * (1 - a) + (tg * 0.35 + cg * 0.65) * a;
+      this.b[idx] = this.b[idx] * (1 - a) + (tb * 0.35 + cb * 0.65) * a;
+      this.load[idx] = Math.min(1, this.load[idx] + a * 0.22);
+    } else if (pigmentMode === 'luminous') {
+      const inv = 1 - a;
+      const lr = 255 - ((255 - this.r[idx]) * (255 - cr)) / 255;
+      const lg = 255 - ((255 - this.g[idx]) * (255 - cg)) / 255;
+      const lb = 255 - ((255 - this.b[idx]) * (255 - cb)) / 255;
+      this.r[idx] = this.r[idx] * inv + (lr * 0.45 + cr * 0.55) * a;
+      this.g[idx] = this.g[idx] * inv + (lg * 0.45 + cg * 0.55) * a;
+      this.b[idx] = this.b[idx] * inv + (lb * 0.45 + cb * 0.55) * a;
+      this.load[idx] = Math.min(1, this.load[idx] + a * 0.2);
+    } else {
+      const inv = 1 - a;
+      this.r[idx] = this.r[idx] * inv + cr * a;
+      this.g[idx] = this.g[idx] * inv + cg * a;
+      this.b[idx] = this.b[idx] * inv + cb * a;
+      this.load[idx] = Math.min(1, this.load[idx] + a * 0.22);
+    }
+  }
+  _chalkStamp(px, py, cr, cg, cb, alpha, pressure, grain, mode) {
+    this._dab(px, py, cr, cg, cb, alpha, pressure, grain, mode);
+    this._dab(px + 1, py, cr, cg, cb, alpha * 0.85, pressure * 0.95, grain, mode);
+    this._dab(px, py + 1, cr, cg, cb, alpha * 0.85, pressure * 0.95, grain, mode);
+    this._dab(px + 1, py + 1, cr, cg, cb, alpha * 0.72, pressure * 0.90, grain, mode);
+    if (this.scale > 0.75) {
+      this._dab(px - 1, py, cr, cg, cb, alpha * 0.65, pressure * 0.88, grain, mode);
+      this._dab(px, py - 1, cr, cg, cb, alpha * 0.65, pressure * 0.88, grain, mode);
+    }
+  }
+  softPastel(x0, y0, x1, y1, color, opts = {}) {
+    const s = this.scale, width = (opts.width ?? 36) * s, pressure = opts.pressure ?? 0.68;
+    const opacity = opts.opacity ?? 0.36, curve = (opts.curve ?? 0) * s, tremor = (opts.tremor ?? 2.2) * s;
+    const mode = opts.mode ?? 'mix', grain = opts.grain ?? 0.62, [cr, cg, cb] = color;
+    const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 0.5) return;
+    const nx = -dy / len, ny = dx / len;
+    const steps = Math.max(4, Math.ceil(len / Math.max(1.2, 2.0 * s)));
+    const strands = Math.max(7, Math.min(34, Math.ceil(width / Math.max(1.3, 2.0 * s))));
+    const strandBias = new Float32Array(strands), strandOff = new Float32Array(strands);
+    for (let k = 0; k < strands; k++) {
+      const u = strands === 1 ? 0 : (k / (strands - 1) - 0.5);
+      strandBias[k] = Math.max(0.22, (1 - Math.pow(Math.abs(u) * 1.9, 2.2)) * (0.65 + this.rng() * 0.55));
+      strandOff[k] = u * width + (this.rng() - 0.5) * (width / strands) * 0.65;
+    }
+    const phase = this.rng() * 100;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, env = Math.sin(t * Math.PI) * 0.4 + 0.6;
+      const wobble = (this.noise.noise2(t * 5 + phase, phase) - 0.5) * tremor * 2;
+      const cx = x0 + dx * t + nx * (Math.sin(t * Math.PI) * curve + wobble);
+      const cy = y0 + dy * t + ny * (Math.sin(t * Math.PI) * curve + wobble);
+      const p = Math.min(0.99, pressure * env), jitter = (this.rng() - 0.5) * 10;
+      const r = Math.max(0, Math.min(255, cr + jitter)), g = Math.max(0, Math.min(255, cg + jitter * 0.8)), b = Math.max(0, Math.min(255, cb + jitter * 0.7));
+      for (let k = 0; k < strands; k++) {
+        if (this.rng() > 0.86) continue;
+        const off = strandOff[k] + (this.rng() - 0.5) * 2.2 * s;
+        this._chalkStamp(cx + nx * off + (this.rng() - 0.5) * 1.5 * s, cy + ny * off + (this.rng() - 0.5) * 1.5 * s, r, g, b, opacity * strandBias[k] * env, p, grain, mode);
+      }
+    }
+  }
+  charcoal(x0, y0, x1, y1, color = [24, 18, 34], opts = {}) {
+    const s = this.scale, width = (opts.width ?? 11) * s, pressure = opts.pressure ?? 0.76;
+    const opacity = opts.opacity ?? 0.56, tremor = (opts.tremor ?? 1.8) * s, curve = (opts.curve ?? 0) * s;
+    const [cr, cg, cb] = color, dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 0.5) return;
+    const nx = -dy / len, ny = dx / len, steps = Math.max(4, Math.ceil(len / Math.max(1.0, 1.4 * s)));
+    const rad = Math.max(1, width * 0.5), phase = this.rng() * 200;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, env = Math.pow(Math.sin(t * Math.PI), 0.5) * 0.45 + 0.55;
+      const wob = (this.noise.noise2(t * 7 + phase, phase * 0.7) - 0.5) * tremor * 2;
+      const cx = x0 + dx * t + nx * (Math.sin(t * Math.PI) * curve + wob);
+      const cy = y0 + dy * t + ny * (Math.sin(t * Math.PI) * curve + wob);
+      const p = Math.min(0.98, pressure * env), dots = Math.max(4, Math.ceil(rad * 2.6));
+      for (let d = 0; d < dots; d++) {
+        const ang = this.rng() * Math.PI * 2, rr = Math.pow(this.rng(), 0.72) * rad;
+        this._chalkStamp(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr, cr, cg, cb, opacity * (1 - (rr / (rad + 0.001)) * 0.55) * env, p, 0.72, 'multiply');
+      }
+    }
+  }
+  coloredPencil(x0, y0, x1, y1, color, opts = {}) {
+    const s = this.scale, width = Math.max(1.1, (opts.width ?? 3.4) * s), pressure = opts.pressure ?? 0.78;
+    const opacity = opts.opacity ?? 0.64, tremor = (opts.tremor ?? 1.1) * s, curve = (opts.curve ?? 0) * s;
+    const mode = opts.mode ?? 'mix', [cr, cg, cb] = color, dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 0.5) return;
+    const nx = -dy / len, ny = dx / len, steps = Math.max(3, Math.ceil(len / Math.max(0.8, 1.0 * s)));
+    const phase = this.rng() * 300, rad = width * 0.5;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, env = Math.min(1, t * 7, (1 - t) * 7) * 0.55 + 0.45;
+      const wob = (this.noise.noise2(t * 9 + phase, phase * 0.3) - 0.5) * tremor * 2;
+      const cx = x0 + dx * t + nx * (Math.sin(t * Math.PI) * curve + wob);
+      const cy = y0 + dy * t + ny * (Math.sin(t * Math.PI) * curve + wob);
+      const p = Math.min(0.98, pressure * env), samples = Math.max(3, Math.ceil(rad * 2.5));
+      for (let k = 0; k < samples; k++) {
+        const ox = (this.rng() - 0.5) * width, oy = (this.rng() - 0.5) * width;
+        this._dab(cx + ox, cy + oy, cr, cg, cb, opacity * env, p, 0.58, mode);
+        if (width >= 2.2) this._dab(cx + ox + 1, cy + oy, cr, cg, cb, opacity * env * 0.75, p * 0.92, 0.58, mode);
+      }
+    }
+  }
+  conteCrayon(x0, y0, x1, y1, color = [255, 250, 236], opts = {}) {
+    const s = this.scale, width = (opts.width ?? 9) * s, pressure = opts.pressure ?? 0.88;
+    const opacity = opts.opacity ?? 0.78, tremor = (opts.tremor ?? 1.5) * s, curve = (opts.curve ?? 0) * s;
+    const mode = opts.mode ?? 'opaque', [cr, cg, cb] = color, dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 0.5) return;
+    const nx = -dy / len, ny = dx / len, steps = Math.max(3, Math.ceil(len / Math.max(1.0, 1.3 * s)));
+    const rad = Math.max(1, width * 0.5), phase = this.rng() * 400;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, env = Math.sin(t * Math.PI) * 0.35 + 0.65;
+      const wob = (this.noise.noise2(t * 6 + phase, phase * 1.1) - 0.5) * tremor * 2;
+      const cx = x0 + dx * t + nx * (Math.sin(t * Math.PI) * curve + wob);
+      const cy = y0 + dy * t + ny * (Math.sin(t * Math.PI) * curve + wob);
+      const p = Math.min(0.99, pressure * env), dots = Math.max(4, Math.ceil(rad * 2.8));
+      for (let d = 0; d < dots; d++) {
+        const ang = this.rng() * Math.PI * 2, rr = Math.pow(this.rng(), 0.82) * rad;
+        this._chalkStamp(cx + Math.cos(ang) * rr, cy + Math.sin(ang) * rr, cr, cg, cb, opacity * env * (1 - rr / (rad + 1) * 0.35), p, 0.52, mode);
+      }
+    }
+  }
+  constructionLine(x0, y0, x1, y1, color = [92, 82, 108], opacity = 0.22) {
+    this.coloredPencil(x0, y0, x1, y1, color, { width: 2.0, pressure: 0.48, opacity, tremor: 1.4, mode: 'multiply' });
+  }
+  smudge(x0, y0, x1, y1, radius = 32, strength = 0.45) {
+    const s = this.scale, rad = Math.max(3, Math.round(radius * s));
+    const dx = x1 - x0, dy = y1 - y0, len = Math.hypot(dx, dy);
+    if (len < 1) return;
+    const steps = Math.max(4, Math.ceil(len / Math.max(2, rad * 0.35)));
+    const { width: W, height: H, r, g, b, tooth } = this;
+    let cr = 0, cg = 0, cb = 0, sampled = false;
+    for (let i = 0; i <= steps; i++) {
+      const t = i / steps, cx = (x0 + dx * t) | 0, cy = (y0 + dy * t) | 0;
+      if (cx < rad || cx >= W - rad || cy < rad || cy >= H - rad) continue;
+      if (!sampled) { const idx = cy * W + cx; cr = r[idx]; cg = g[idx]; cb = b[idx]; sampled = true; }
+      const str = strength * (1 - t * 0.35);
+      for (let oy = -rad; oy <= rad; oy += 2) {
+        const py = cy + oy, row = py * W;
+        for (let ox = -rad; ox <= rad; ox += 2) {
+          const d2 = ox * ox + oy * oy; if (d2 > rad * rad) continue;
+          const idx = row + cx + ox, a = (1 - Math.sqrt(d2) / rad) * str * (0.55 + tooth[idx] * 0.45);
+          r[idx] = r[idx] * (1 - a) + cr * a; g[idx] = g[idx] * (1 - a) + cg * a; b[idx] = b[idx] * (1 - a) + cb * a;
+          if (cx + ox + 1 < W) { const i2 = idx + 1; r[i2] = r[i2] * (1 - a * 0.7) + cr * (a * 0.7); g[i2] = g[i2] * (1 - a * 0.7) + cg * (a * 0.7); b[i2] = b[i2] * (1 - a * 0.7) + cb * (a * 0.7); }
+          if (py + 1 < H) { const i3 = idx + W; r[i3] = r[i3] * (1 - a * 0.7) + cr * (a * 0.7); g[i3] = g[i3] * (1 - a * 0.7) + cg * (a * 0.7); b[i3] = b[i3] * (1 - a * 0.7) + cb * (a * 0.7); }
+        }
+      }
+      const cidx = cy * W + cx; cr = cr * 0.72 + r[cidx] * 0.28; cg = cg * 0.72 + g[cidx] * 0.28; cb = cb * 0.72 + b[cidx] * 0.28;
+    }
+  }
+  hatchPoly(poly, angleDeg, spacingPx, drawFn) {
+    const s = this.scale, step = Math.max(1.5, spacingPx * s), rad = (angleDeg * Math.PI) / 180;
+    const cos = Math.cos(rad), sin = Math.sin(rad);
+    let minV = Infinity, maxV = -Infinity;
+    const rpoly = poly.map(([x, y]) => {
+      const u = x * cos + y * sin, v = -x * sin + y * cos;
+      if (v < minV) minV = v; if (v > maxV) maxV = v; return [u, v];
+    });
+    const n = rpoly.length;
+    for (let v = minV; v <= maxV; v += step) {
+      const xs = [];
+      for (let i = 0; i < n; i++) {
+        const [u1, v1] = rpoly[i], [u2, v2] = rpoly[(i + 1) % n];
+        if ((v1 <= v && v2 > v) || (v2 <= v && v1 > v)) xs.push(u1 + ((v - v1) / (v2 - v1)) * (u2 - u1));
+      }
+      xs.sort((a, b) => a - b);
+      for (let j = 0; j + 1 < xs.length; j += 2) {
+        const uA = xs[j] - (this.rng() - 0.45) * 6 * s, uB = xs[j + 1] + (this.rng() - 0.45) * 6 * s;
+        if (uB - uA < 1.5 * s) continue;
+        drawFn(uA * cos - v * sin, uA * sin + v * cos, uB * cos - v * sin, uB * sin + v * cos, (v - minV) / Math.max(1, maxV - minV));
+      }
+    }
+  }
+  toImageData(ctx) {
+    const img = ctx.createImageData(this.width, this.height), d = img.data;
+    const { r, g, b } = this, n = this.width * this.height;
+    for (let i = 0, p = 0; i < n; i++, p += 4) {
+      d[p] = r[i] < 0 ? 0 : r[i] > 255 ? 255 : (r[i] + 0.5) | 0;
+      d[p + 1] = g[i] < 0 ? 0 : g[i] > 255 ? 255 : (g[i] + 0.5) | 0;
+      d[p + 2] = b[i] < 0 ? 0 : b[i] > 255 ? 255 : (b[i] + 0.5) | 0;
+      d[p + 3] = 255;
+    }
+    return img;
+  }
+}
+
+// Starship on Mars — Scene Composition & Hand-Drawn Dry-Media Pass (Iteration 3 — Masterpiece)
+// Moment: Final landing burn at Martian blue dawn — towering Block 3 Starship
+// descending into an ocean-vast crater basin, igniting a curling wave of glowing dust.
+// Tools: Soft Chalk Pastel, Compressed Charcoal, Wax Colored Pencil, White/Cream Conté Crayon.
+
+
+
+function drawMasterpiece(canvas, onProgress = null) {
+  const W = canvas.width;
+  const H = canvas.height;
+  const s = canvas.scale;
+  const rng = canvas.rng;
+  const noise = canvas.noise;
+  const progress = (p, label) => { if (onProgress) onProgress(p, label); };
+
+  const sunX = 0.235, sunY = 0.552;
+  const horizonY = 0.592;
+
+  const ship = {
+    cx: 0.618 * W,
+    cy: 0.400 * H,
+    angle: -5.5 * Math.PI / 180,
+    totalH: 0.488 * H,
+    radius: 0.0465 * H,
+  };
+  const cosA = Math.cos(ship.angle);
+  const sinA = Math.sin(ship.angle);
+
+  function shipPt(uNorm, vNorm) {
+    const lx = uNorm * ship.radius;
+    const ly = (vNorm - 0.5) * ship.totalH;
+    return [
+      ship.cx + lx * cosA - ly * sinA,
+      ship.cy + lx * sinA + ly * cosA
+    ];
+  }
+
+  function hullWidth(v) {
+    if (v <= 0) return 0;
+    if (v >= 0.34) return 1.0;
+    const t = v / 0.34;
+    return Math.pow(Math.sin(t * Math.PI * 0.5), 0.72);
+  }
+
+  // =========================================================================
+  // PASS 1: ORGANIC, LUMINOUS 90s-OVA MARTIAN BLUE-DAWN SKY (Soft Pastel)
+  // =========================================================================
+  progress(0.05, 'Laying luminous Martian blue-dawn sky in soft pastel');
+  {
+    const sx = sunX * W, sy = sunY * H;
+
+    function skyColorAt(nx, ny) {
+      // Organic FBM warp so the blue dawn blooms naturally without any circular band seam!
+      const warp = (noise.fbm(nx * 4.5 + 2.1, ny * 4.5 + 1.3, 3) - 0.5) * 0.14;
+      const dx = (nx - sunX) * 1.35;
+      const dy = (ny - sunY) * 1.05;
+      const dist = Math.max(0, Math.hypot(dx, dy) + warp);
+      const elev = Math.max(0, (horizonY - ny) / horizonY);
+
+      const cSunCore  = [236, 254, 255];
+      const cTurqHalo = [74, 218, 248];
+      const cCerulean = [36, 140, 224];
+      const cPeach    = [255, 152, 98];
+      const cCoral    = [238, 86, 122];
+      const cMagenta  = [148, 46, 118];
+      const cViolet   = [58, 38, 122];
+      const cCobalt   = [22, 30, 88];
+
+      // Smooth continuous blend across the whole sky
+      const tBlue = Math.min(1, dist / 0.42);
+      const blueSide = dist < 0.16
+        ? lerpColor(cSunCore, cTurqHalo, dist / 0.16)
+        : lerpColor(cTurqHalo, cCerulean, (tBlue - 0.38) / 0.62);
+
+      const tWarm = Math.min(1, Math.max(0, (dist - 0.18) / 0.55));
+      const horizonWarm = lerpColor(cPeach, lerpColor(cCoral, cMagenta, Math.min(1, tWarm * 1.15)), tWarm);
+      const zenithCool = lerpColor(cCerulean, lerpColor(cViolet, cCobalt, Math.min(1, tWarm * 1.25)), Math.min(1, tWarm * 1.1));
+
+      const hMix = Math.pow(1 - Math.min(1, elev * 1.22), 1.25);
+      const farSky = lerpColor(zenithCool, horizonWarm, hMix * 0.86);
+
+      // Smoothly transition from Martian blue-dawn halo to warm-coral/twilight-violet sky
+      const haloBlend = Math.min(1, Math.pow(Math.max(0, (dist - 0.08) / 0.44), 1.35));
+      let col = lerpColor(blueSide, farSky, haloBlend);
+
+      // Luminous warm gold-apricot atmospheric scatter rising above Starship's engines
+      const fireDist = Math.hypot((nx - 0.62) * 1.25, (ny - 0.62) * 1.45);
+      if (fireDist < 0.46) {
+        const f = Math.pow(1 - fireDist / 0.46, 1.85) * 0.58;
+        col = lerpColor(col, [255, 146, 72], f);
+      }
+      return col;
+    }
+
+    // Lush base pastel wash (~4,400 expressive directional strokes)
+    const rows = 68;
+    const cols = 48;
+    for (let ry = 0; ry < rows; ry++) {
+      const nyBase = (ry / (rows - 1)) * (horizonY + 0.05);
+      for (let cx = 0; cx < cols; cx++) {
+        const nx = (cx + (rng() - 0.5) * 0.88) / cols;
+        const ny = nyBase + (rng() - 0.5) * 0.025;
+        const col = skyColorAt(nx, ny);
+        const tint = (rng() - 0.5) * 18;
+        const c = [
+          Math.max(0, Math.min(255, col[0] + tint)),
+          Math.max(0, Math.min(255, col[1] + tint * 0.65)),
+          Math.max(0, Math.min(255, col[2] - tint * 0.4))
+        ];
+        const ang = -0.15 + (rng() - 0.5) * 0.34;
+        const len = (135 + rng() * 170) * s;
+        const x0 = nx * W - Math.cos(ang) * len * 0.5;
+        const y0 = ny * H - Math.sin(ang) * len * 0.5;
+        canvas.softPastel(x0, y0, x0 + Math.cos(ang) * len, y0 + Math.sin(ang) * len, c, {
+          width: 58 + rng() * 44,
+          pressure: 0.68 + rng() * 0.24,
+          opacity: 0.46 + rng() * 0.18,
+          curve: (rng() - 0.5) * 20,
+          tremor: 2.5,
+          grain: 0.56
+        });
+      }
+    }
+
+    // Second rich cross-pass for lush hand-worked pastel depth
+    for (let i = 0; i < 950; i++) {
+      const nx = rng();
+      const ny = rng() * (horizonY + 0.02);
+      const col = skyColorAt(nx, ny);
+      const ang = -0.20 + (rng() - 0.5) * 0.52;
+      const len = (150 + rng() * 210) * s;
+      const x0 = nx * W - Math.cos(ang) * len * 0.5;
+      const y0 = ny * H - Math.sin(ang) * len * 0.5;
+      canvas.softPastel(x0, y0, x0 + Math.cos(ang) * len, y0 + Math.sin(ang) * len, col, {
+        width: 44 + rng() * 34,
+        pressure: 0.76 + rng() * 0.18,
+        opacity: 0.42,
+        curve: (rng() - 0.5) * 24,
+        grain: 0.52
+      });
+    }
+
+    // Subtle, organic atmospheric crepuscular dawn shafts (5 irregular, soft-fading shafts — NOT a cartoon wheel!)
+    const shafts = [
+      { ang: -1.18, len: 0.36, w: 62, op: 0.11, col: [152, 242, 255] },
+      { ang: -0.78, len: 0.48, w: 78, op: 0.13, col: [164, 244, 255] },
+      { ang: -0.44, len: 0.56, w: 84, op: 0.12, col: [255, 214, 178] },
+      { ang: -0.22, len: 0.44, w: 58, op: 0.10, col: [255, 198, 162] },
+      { ang: -1.78, len: 0.32, w: 54, op: 0.09, col: [148, 236, 255] },
+    ];
+    for (const sh of shafts) {
+      // Break each shaft into 4 fading segments so it dissolves gently into the upper twilight!
+      const segs = 4;
+      for (let sg = 0; sg < segs; sg++) {
+        const f0 = 0.06 + (sg / segs) * sh.len;
+        const f1 = 0.06 + ((sg + 1.15) / segs) * sh.len;
+        const fade = Math.pow(1 - sg / segs, 1.45);
+        for (let k = 0; k < 4; k++) {
+          const a = sh.ang + (rng() - 0.5) * 0.055;
+          canvas.softPastel(
+            sx + Math.cos(a) * f0 * W, sy + Math.sin(a) * f0 * W,
+            sx + Math.cos(a) * f1 * W, sy + Math.sin(a) * f1 * W,
+            sh.col,
+            {
+              width: sh.w * (0.7 + sg * 0.25),
+              pressure: 0.48,
+              opacity: sh.op * fade,
+              tremor: 3.5,
+              mode: 'luminous'
+            }
+          );
+        }
+      }
+    }
+
+    // Sweeping 90s-OVA Martian high-altitude CO2 cirrus clouds (layered, organic, luminous!)
+    const cloudBands = [
+      { y: 0.08, x0: 0.02, x1: 0.58, colBack: [88, 44, 132],  colLit: [128, 236, 255], count: 58 },
+      { y: 0.17, x0: 0.34, x1: 0.99, colBack: [122, 40, 114], colLit: [255, 194, 138], count: 68 },
+      { y: 0.27, x0: 0.01, x1: 0.52, colBack: [54, 108, 186], colLit: [218, 250, 255], count: 56 },
+      { y: 0.36, x0: 0.50, x1: 0.99, colBack: [138, 44, 108], colLit: [255, 164, 122], count: 62 },
+      { y: 0.45, x0: 0.03, x1: 0.46, colBack: [72, 156, 218], colLit: [255, 236, 192], count: 48 },
+    ];
+    for (const band of cloudBands) {
+      for (let i = 0; i < band.count; i++) {
+        const t = i / band.count;
+        const cx = (band.x0 + (band.x1 - band.x0) * t + (rng() - 0.5) * 0.055) * W;
+        const wave = Math.sin(t * Math.PI * 2.6 + band.y * 12) * 0.034 * H;
+        const cy = band.y * H + wave + (rng() - 0.5) * 0.032 * H;
+        const len = (115 + rng() * 220) * s;
+        const ang = -0.14 + Math.cos(t * Math.PI * 2) * 0.08 + (rng() - 0.5) * 0.09;
+        canvas.softPastel(
+          cx - Math.cos(ang) * len * 0.5, cy - Math.sin(ang) * len * 0.5 - 10 * s,
+          cx + Math.cos(ang) * len * 0.5, cy + Math.sin(ang) * len * 0.5 - 10 * s,
+          band.colBack,
+          { width: 24 + rng() * 22, pressure: 0.64, opacity: 0.36, curve: (rng() - 0.5) * 20 }
+        );
+        canvas.softPastel(
+          cx - Math.cos(ang) * len * 0.46, cy - Math.sin(ang) * len * 0.46 + 7 * s,
+          cx + Math.cos(ang) * len * 0.46, cy + Math.sin(ang) * len * 0.46 + 7 * s,
+          band.colLit,
+          { width: 16 + rng() * 14, pressure: 0.78, opacity: 0.46, curve: (rng() - 0.5) * 14, mode: 'luminous' }
+        );
+      }
+    }
+
+    // Finger-smudge the sunrise halo softly into the cotton paper
+    for (let i = 0; i < 22; i++) {
+      const a = (i / 22) * Math.PI * 2;
+      canvas.smudge(
+        sx + Math.cos(a) * 26 * s, sy + Math.sin(a) * 18 * s,
+        sx + Math.cos(a) * 240 * s, sy + Math.sin(a) * 150 * s,
+        52, 0.45
+      );
+    }
+
+    // Small Martian blue-white sunrise disc (hand-drawn with Conté Crayon)
+    for (let k = 0; k < 28; k++) {
+      const a = (k / 28) * Math.PI * 2;
+      const r0 = (6 + rng() * 20) * s;
+      const r1 = (26 + rng() * 44) * s;
+      canvas.conteCrayon(
+        sx + Math.cos(a) * r0, sy + Math.sin(a) * r0,
+        sx + Math.cos(a + 0.32) * r1, sy + Math.sin(a + 0.32) * r1,
+        [192, 250, 255],
+        { width: 15, pressure: 0.85, opacity: 0.60, mode: 'luminous' }
+      );
+    }
+    for (let k = 0; k < 18; k++) {
+      const a = rng() * Math.PI * 2;
+      const rr = rng() * 19 * s;
+      canvas.conteCrayon(
+        sx - Math.cos(a) * rr, sy - Math.sin(a) * rr,
+        sx + Math.cos(a) * rr, sy + Math.sin(a) * rr,
+        [255, 255, 252],
+        { width: 12, pressure: 0.98, opacity: 0.92, mode: 'opaque' }
+      );
+    }
+
+    // Dawn stars & tiny Phobos in upper-right cobalt twilight
+    for (let i = 0; i < 38; i++) {
+      const stx = (0.48 + rng() * 0.50) * W;
+      const sty = (0.02 + rng() * 0.28) * H;
+      const sc = rng() < 0.35 ? [175, 240, 255] : [255, 240, 212];
+      canvas.conteCrayon(stx - 2.2 * s, sty, stx + 2.2 * s, sty + 1.4 * s, sc, {
+        width: 2.8 + rng() * 2.4, pressure: 0.92, opacity: 0.80, mode: 'opaque'
+      });
+    }
+    const phX = 0.855 * W, phY = 0.135 * H;
+    canvas.conteCrayon(phX - 7.5 * s, phY - 3 * s, phX + 6.5 * s, phY + 3.5 * s, [255, 224, 194], {
+      width: 7.5, pressure: 0.92, opacity: 0.88, mode: 'opaque'
+    });
+  }
+
+  // =========================================================================
+  // PASS 2: SUBTLE, BROKEN ARTIST CONSTRUCTION LINES
+  // =========================================================================
+  progress(0.18, 'Sketching faint broken artist construction lines');
+  {
+    // Broken graphite guides (never cutting awkwardly across the sun disc!)
+    canvas.constructionLine(0.02 * W, horizonY * H, 0.14 * W, horizonY * H, [82, 58, 108], 0.14);
+    canvas.constructionLine(0.36 * W, horizonY * H, 0.52 * W, horizonY * H, [82, 58, 108], 0.13);
+    canvas.constructionLine(0.76 * W, horizonY * H, 0.98 * W, horizonY * H, [82, 58, 108], 0.14);
+    // Faint Starship central axis peeking above the nosecone
+    const [ax0, ay0] = shipPt(0, -0.15);
+    const [ax1, ay1] = shipPt(0, 0.02);
+    canvas.constructionLine(ax0, ay0, ax1, ay1, [74, 62, 108], 0.18);
+  }
+
+  // =========================================================================
+  // PASS 3: MONUMENTAL LAYERED MARTIAN CANYON WALLS & MESAS
+  // =========================================================================
+  progress(0.24, 'Drawing monumental Martian canyon rims and stratified mesas');
+  {
+    function makeRidge(yBase, amp, freq, seedOff, mesaFlatness = 0.28) {
+      const pts = [];
+      const steps = 120;
+      for (let i = 0; i <= steps; i++) {
+        const nx = i / steps;
+        let h = noise.fbm(nx * freq + seedOff, seedOff * 0.7, 4);
+        if (h > 0.54) h = 0.54 + (h - 0.54) * mesaFlatness;
+        const sunDip = Math.exp(-Math.pow((nx - sunX) / 0.14, 2)) * 0.052;
+        const y = (yBase - (h - 0.45) * amp + sunDip) * H;
+        pts.push([nx * W, y]);
+      }
+      return pts;
+    }
+
+    const farRidge = makeRidge(0.572, 0.14, 4.0, 11.3, 0.24);
+    const farPoly = [...farRidge, [W, 0.68 * H], [0, 0.68 * H]];
+    canvas.hatchPoly(farPoly, -4, 9.5, (x0, y0, x1, y1, v) => {
+      const midX = ((x0 + x1) * 0.5) / W;
+      const leftBlue = lerpColor([40, 88, 162], [108, 56, 128], Math.min(1, midX * 1.4));
+      const rightWarm = lerpColor([124, 54, 104], [176, 74, 78], Math.max(0, (midX - 0.38) * 1.55));
+      let col = midX < 0.45 ? leftBlue : lerpColor(leftBlue, rightWarm, (midX - 0.45) / 0.55);
+      col = lerpColor(col, [58, 34, 86], v * 0.42);
+      canvas.softPastel(x0, y0, x1, y1, col, {
+        width: 28, pressure: 0.76, opacity: 0.62, tremor: 2.0
+      });
+    });
+
+    for (let i = 0; i < farRidge.length - 1; i++) {
+      const [x0, y0] = farRidge[i];
+      const [x1, y1] = farRidge[i + 1];
+      const distSun = Math.abs(x0 / W - sunX);
+      const col = distSun < 0.26 ? [132, 244, 255] : [255, 168, 124];
+      canvas.conteCrayon(x0, y0 - 2 * s, x1, y1 - 2 * s, col, {
+        width: 4.5, pressure: 0.80, opacity: distSun < 0.26 ? 0.74 : 0.44, mode: 'luminous'
+      });
+    }
+
+    const midRidge = makeRidge(0.622, 0.118, 5.5, 27.9, 0.20);
+    for (let i = 0; i < midRidge.length; i++) {
+      const nx = midRidge[i][0] / W;
+      if (nx > 0.73) {
+        midRidge[i][1] -= Math.pow((nx - 0.73) / 0.27, 1.25) * 0.135 * H;
+      }
+      if (nx < 0.18) {
+        midRidge[i][1] -= Math.pow((0.18 - nx) / 0.18, 1.35) * 0.092 * H;
+      }
+    }
+    const midPoly = [...midRidge, [W, 0.74 * H], [0, 0.74 * H]];
+    canvas.hatchPoly(midPoly, -7, 8.5, (x0, y0, x1, y1, v) => {
+      const midX = ((x0 + x1) * 0.5) / W;
+      const baseShadow = lerpColor([52, 34, 78], [134, 48, 58], midX);
+      const fireProximity = Math.exp(-Math.pow((midX - 0.62) / 0.24, 2));
+      const col = lerpColor(baseShadow, [248, 118, 56], fireProximity * 0.68 * (1 - v * 0.35));
+      canvas.softPastel(x0, y0, x1, y1, col, {
+        width: 26, pressure: 0.80, opacity: 0.68, tremor: 2.2
+      });
+    });
+
+    for (let i = 0; i < 140; i++) {
+      const idx = Math.floor(rng() * (midRidge.length - 5));
+      const [rx, ry] = midRidge[idx];
+      const depth = (10 + rng() * 115) * s;
+      const len = (60 + rng() * 165) * s;
+      if (rng() < 0.55) {
+        canvas.charcoal(rx, ry + depth, rx + len, ry + depth + (rng() - 0.5) * 14 * s, [38, 20, 52], {
+          width: 7 + rng() * 6, pressure: 0.74, opacity: 0.50
+        });
+      } else {
+        const nx = rx / W;
+        const c = nx < 0.38 ? [112, 214, 248] : [255, 152, 84];
+        canvas.coloredPencil(rx, ry + depth, rx + len, ry + depth + (rng() - 0.5) * 10 * s, c, {
+          width: 3.8, pressure: 0.80, opacity: 0.60
+        });
+      }
+    }
+  }
+
+  // =========================================================================
+  // PASS 4: VAST MARTIAN BASIN FLOOR & CONTINUOUS FLOWING SAND DUNES
+  // =========================================================================
+  progress(0.36, 'Texturing Martian basin floor and sweeping dune fields');
+  {
+    const fireX = 0.625 * W;
+    const fireY = 0.755 * H;
+
+    // Rich continuous pastel ground
+    const rows = 58;
+    const cols = 42;
+    for (let ry = 0; ry < rows; ry++) {
+      const v = ry / (rows - 1);
+      const yBase = (0.64 + v * 0.37) * H;
+      for (let cx = 0; cx < cols; cx++) {
+        const nx = (cx + (rng() - 0.5) * 0.85) / cols;
+        const x = nx * W;
+        const y = yBase + (rng() - 0.5) * 16 * s;
+
+        const dFire = Math.hypot((x - fireX) / (0.38 * W), (y - fireY) / (0.18 * H));
+        const dSun = Math.hypot((nx - sunX) * 1.35, (y / H - 0.64) * 2.4);
+
+        let col = lerpColor([194, 76, 58], [104, 38, 58], v * 0.82);
+        if (dSun < 0.68) {
+          col = lerpColor(col, [78, 120, 188], (1 - dSun / 0.68) * 0.46);
+        }
+        if (dFire < 1.42) {
+          const glow = Math.pow(Math.max(0, 1 - dFire / 1.42), 1.45);
+          const fireCol = dFire < 0.42 ? [255, 228, 128] : [255, 122, 52];
+          col = lerpColor(col, fireCol, glow * 0.92);
+        }
+
+        const len = (125 + v * 175 + rng() * 90) * s;
+        const ang = (nx - 0.5) * 0.08 + (rng() - 0.5) * 0.07;
+        canvas.softPastel(
+          x - Math.cos(ang) * len * 0.5, y - Math.sin(ang) * len * 0.5,
+          x + Math.cos(ang) * len * 0.5, y + Math.sin(ang) * len * 0.5,
+          col,
+          { width: 38 + v * 30, pressure: 0.72 + rng() * 0.22, opacity: 0.58, curve: (rng() - 0.5) * 14, grain: 0.54 }
+        );
+      }
+    }
+
+    // Continuous, sweeping, S-curved Martian sand dune ridges in true perspective (NO short dashes!)
+    const duneCount = 16;
+    for (let d = 0; d < duneCount; d++) {
+      const v = Math.pow((d + 0.5) / duneCount, 1.38);
+      const yBase = (0.685 + v * 0.305) * H;
+      const segs = 26;
+      const phase = d * 1.9 + 0.4;
+      const amp = (10 + v * 28) * s;
+
+      for (let i = 0; i < segs; i++) {
+        const t0 = i / segs;
+        const t1 = (i + 1) / segs;
+        const x0 = t0 * W;
+        const x1 = t1 * W;
+        const y0 = yBase + Math.sin(t0 * Math.PI * 2.8 + phase) * amp + (noise.noise2(t0 * 5, d) - 0.5) * 14 * s;
+        const y1 = yBase + Math.sin(t1 * Math.PI * 2.8 + phase) * amp + (noise.noise2(t1 * 5, d) - 0.5) * 14 * s;
+        const midX = (x0 + x1) * 0.5;
+        const midY = (y0 + y1) * 0.5;
+        const dFire = Math.hypot((midX - fireX) / (0.42 * W), (midY - fireY) / (0.20 * H));
+
+        // Soft broad pastel shadow slope below the dune crest
+        const shCol = lerpColor([72, 26, 56], [44, 18, 44], v);
+        canvas.softPastel(x0, y0 + (6 + v * 12) * s, x1, y1 + (6 + v * 12) * s, shCol, {
+          width: 14 + v * 24, pressure: 0.62, opacity: 0.36
+        });
+
+        // Soft sunlit dune crest catching engine fire or blue dawn!
+        const litCol = dFire < 1.25
+          ? lerpColor([248, 128, 66], [255, 224, 134], Math.pow(Math.max(0, 1 - dFire / 1.25), 1.3))
+          : (midX < 0.40 * W ? [124, 188, 234] : [226, 108, 76]);
+        canvas.softPastel(x0, y0 - (2 + v * 4) * s, x1, y1 - (2 + v * 4) * s, litCol, {
+          width: 8 + v * 14, pressure: 0.72, opacity: 0.42, mode: dFire < 0.8 ? 'luminous' : 'mix'
+        });
+
+        // Occasional delicate colored-pencil ridge accent (broken, natural)
+        if (rng() < 0.45) {
+          canvas.coloredPencil(x0, y0, x1, y1, litCol, {
+            width: 2.2 + v * 2.2, pressure: 0.72, opacity: 0.46
+          });
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // PASS 5: VOLUMETRIC CAULIFLOWER MARTIAN DUST WAVE (Back Half)
+  // =========================================================================
+  progress(0.48, 'Building volumetric billowing Martian dust wave behind Starship');
+  {
+    const bx = 0.625 * W;
+    const by = 0.755 * H;
+
+    // Incandescent blast-pool glow on basin floor
+    for (let i = 0; i < 180; i++) {
+      const ang = (rng() - 0.5) * Math.PI * 2;
+      const rx = rng() * 0.27 * W;
+      const ry = rng() * 0.062 * H;
+      const x = bx + Math.cos(ang) * rx;
+      const y = by + Math.sin(ang) * ry;
+      const d = Math.hypot(rx / (0.27 * W), ry / (0.062 * H));
+      const col = d < 0.42 ? [255, 246, 178] : lerpColor([255, 162, 62], [238, 72, 64], (d - 0.42) / 0.58);
+      canvas.softPastel(x - 70 * s, y, x + 70 * s, y + (rng() - 0.5) * 20 * s, col, {
+        width: 54 + rng() * 34, pressure: 0.82, opacity: 0.48, mode: 'luminous'
+      });
+    }
+
+    // Back-half: ONE continuous, sweeping, billowing torus of backlit dust (connected, never isolated puffs!)
+    for (let i = 0; i < 320; i++) {
+      const side = rng() < 0.54 ? -1 : 1;
+      // Continuous radial distance from blast point (0 = plume base, 1 = outer curling wave tip)
+      const u = Math.pow(rng(), 0.72);
+      const maxSpan = side < 0 ? 0.44 : 0.36;
+      const px = bx + side * u * maxSpan * W + (rng() - 0.5) * 32 * s;
+      // Wave rises as it curls outward, then tapers at the very tip
+      const waveLift = Math.sin(Math.min(1, u * 1.15) * Math.PI) * 0.068 * H;
+      const thickness = (0.048 + Math.sin(u * Math.PI) * 0.055) * H;
+      const py = by - waveLift * 0.75 + (rng() - 0.55) * thickness;
+
+      // Height within wave (0 = shadowed bottom, 1 = sunlit golden curling top)
+      const hNorm = Math.max(0, Math.min(1, (by + thickness * 0.45 - py) / (thickness * 1.15)));
+      const hotness = Math.max(0, 1 - u * 0.85);
+
+      let col;
+      if (hNorm > 0.62) {
+        col = lerpColor([255, 168, 78], [255, 246, 182], (hNorm - 0.62) / 0.38 * (0.45 + hotness * 0.55));
+      } else if (hNorm > 0.28) {
+        col = lerpColor([228, 78, 62], [255, 148, 64], (hNorm - 0.28) / 0.34);
+      } else {
+        col = lerpColor([112, 30, 60], [196, 56, 62], hNorm / 0.28);
+      }
+
+      // Sweeping outward & curling upward stroke direction
+      const ang = (side < 0 ? Math.PI : 0) - side * (0.15 + hNorm * 0.52) + (rng() - 0.5) * 0.35;
+      const len = (95 + rng() * 175) * s;
+      canvas.softPastel(
+        px - Math.cos(ang) * len * 0.5, py - Math.sin(ang) * len * 0.5,
+        px + Math.cos(ang) * len * 0.5, py + Math.sin(ang) * len * 0.5,
+        col,
+        {
+          width: 48 + rng() * 44,
+          pressure: 0.72 + rng() * 0.22,
+          opacity: 0.36 + rng() * 0.16,
+          curve: side * (16 + rng() * 26),
+          mode: hNorm > 0.72 ? 'luminous' : 'mix'
+        }
+      );
+    }
+  }
+
+  // =========================================================================
+  // PASS 6: STARSHIP BLOCK 3 (Velvety Hex Tiles + Mirror 304L Steel + Flaps)
+  // =========================================================================
+  progress(0.58, 'Drawing Starship Block 3: stainless steel, hex tiles, flaps & engines');
+  {
+    function makePoly(localPts) {
+      return localPts.map(([u, v]) => shipPt(u, v));
+    }
+
+    const fwdLeftPoly = makePoly([
+      [-0.64, 0.135], [-1.70, 0.225], [-1.74, 0.315], [-0.96, 0.312]
+    ]);
+    const fwdRightPoly = makePoly([
+      [0.64, 0.135], [1.64, 0.220], [1.67, 0.308], [0.95, 0.306]
+    ]);
+    const aftLeftPoly = makePoly([
+      [-1.00, 0.735], [-2.18, 0.875], [-2.18, 1.005], [-1.00, 1.005]
+    ]);
+    const aftRightPoly = makePoly([
+      [1.00, 0.735], [2.14, 0.872], [2.14, 1.005], [1.00, 1.005]
+    ]);
+
+    function drawSteelFlap(poly, isLeft, isAft) {
+      canvas.hatchPoly(poly, isLeft ? -16 : 16, 4.0, (x0, y0, x1, y1, v) => {
+        let col;
+        if (isLeft) {
+          col = isAft
+            ? lerpColor([26, 24, 42], [112, 48, 48], v * 0.75)
+            : lerpColor([24, 28, 48], [46, 52, 76], v);
+        } else {
+          col = isAft
+            ? lerpColor([184, 118, 134], [255, 166, 74], Math.pow(v, 0.8))
+            : lerpColor([124, 170, 226], [244, 148, 160], v);
+        }
+        canvas.coloredPencil(x0, y0, x1, y1, col, {
+          width: 5.0, pressure: 0.86, opacity: 0.82
+        });
+      });
+
+      const [hx0, hy0] = poly[0];
+      const [hx1, hy1] = poly[3];
+      canvas.charcoal(hx0, hy0, hx1, hy1, [16, 12, 24], { width: 12, pressure: 0.94, opacity: 0.90 });
+
+      for (let i = 0; i < poly.length; i++) {
+        const [a0, b0] = poly[i];
+        const [a1, b1] = poly[(i + 1) % poly.length];
+        canvas.charcoal(a0, b0, a1, b1, [18, 16, 30], { width: 4.5, pressure: 0.88, opacity: 0.82 });
+      }
+      if (isLeft) {
+        canvas.conteCrayon(poly[0][0], poly[0][1], poly[1][0], poly[1][1], [140, 242, 255], {
+          width: 4.8, pressure: 0.88, opacity: 0.84, mode: 'luminous'
+        });
+        canvas.conteCrayon(poly[1][0], poly[1][1], poly[2][0], poly[2][1], [128, 234, 255], {
+          width: 4.2, pressure: 0.84, opacity: 0.76, mode: 'luminous'
+        });
+      }
+      if (isAft) {
+        canvas.conteCrayon(poly[2][0], poly[2][1], poly[3][0], poly[3][1], [255, 214, 116], {
+          width: 6.2, pressure: 0.94, opacity: 0.90, mode: 'luminous'
+        });
+      }
+    }
+
+    drawSteelFlap(fwdLeftPoly, true, false);
+    drawSteelFlap(fwdRightPoly, false, false);
+    drawSteelFlap(aftLeftPoly, true, true);
+    drawSteelFlap(aftRightPoly, false, true);
+
+    // Recessed Engine Bay & 6 Raptor 3 Engines
+    {
+      const bayPts = [];
+      for (let i = 0; i <= 16; i++) {
+        const u = -0.96 + (i / 16) * 1.92;
+        const sag = Math.sin((i / 16) * Math.PI) * 0.022;
+        bayPts.push(shipPt(u, 1.00 + sag));
+      }
+      bayPts.push(shipPt(0.96, 0.985), shipPt(-0.96, 0.985));
+      canvas.hatchPoly(bayPts, 0, 3.2, (x0, y0, x1, y1) => {
+        canvas.charcoal(x0, y0, x1, y1, [16, 12, 24], { width: 7, pressure: 0.94, opacity: 0.90 });
+      });
+
+      const rvacPositions = [-0.62, 0.0, 0.62];
+      for (const u of rvacPositions) {
+        const bell = makePoly([
+          [u - 0.16, 0.995], [u + 0.16, 0.995],
+          [u + 0.25, 1.044], [u - 0.25, 1.044]
+        ]);
+        canvas.hatchPoly(bell, 85, 2.8, (x0, y0, x1, y1) => {
+          canvas.charcoal(x0, y0, x1, y1, [26, 22, 36], { width: 5.0, pressure: 0.88, opacity: 0.86 });
+        });
+        const [l0, l1] = [shipPt(u - 0.24, 1.044), shipPt(u + 0.24, 1.044)];
+        canvas.conteCrayon(l0[0], l0[1], l1[0], l1[1], [255, 192, 98], {
+          width: 4.5, pressure: 0.90, opacity: 0.86, mode: 'luminous'
+        });
+      }
+
+      const slPositions = [-0.28, 0.0, 0.28];
+      for (const u of slPositions) {
+        const [n0, n1] = [shipPt(u - 0.13, 1.038), shipPt(u + 0.13, 1.038)];
+        canvas.conteCrayon(n0[0], n0[1], n1[0], n1[1], [255, 254, 240], {
+          width: 13, pressure: 0.99, opacity: 0.98, mode: 'opaque'
+        });
+      }
+    }
+
+    // Main Starship Hull
+    const hullLeft = [], hullRight = [];
+    const hullSteps = 44;
+    for (let i = 0; i <= hullSteps; i++) {
+      const v = i / hullSteps;
+      const hw = hullWidth(v);
+      hullLeft.push(shipPt(-hw, v));
+      hullRight.push(shipPt(hw, v));
+    }
+
+    const numRings = 22;
+    for (let r = 0; r < numRings; r++) {
+      const v0 = r / numRings;
+      const v1 = (r + 1) / numRings;
+      const ringTone = (rng() - 0.5) * 20;
+
+      const subRows = Math.max(5, Math.round((ship.totalH / numRings) / (2.8 * s)));
+      for (let sr = 0; sr < subRows; sr++) {
+        const v = v0 + (sr / subRows) * (v1 - v0);
+        const hw = hullWidth(v);
+        if (hw < 0.04) continue;
+
+        const stepTooth = (Math.floor(v * 64) % 2 === 0 ? 0.04 : -0.025) + Math.sin(v * 18) * 0.02;
+        const uSplit = v < 0.055 ? hw : (-0.14 + stepTooth) * hw;
+
+        const strips = 6;
+        for (let k = 0; k < strips; k++) {
+          const t0 = k / strips;
+          const t1 = (k + 1) / strips;
+          const uA = uSplit + (hw - uSplit) * t0;
+          const uB = uSplit + (hw - uSplit) * t1;
+          if (uB - uA < 0.01) continue;
+
+          const specPeak = Math.exp(-Math.pow((t0 - 0.16) / 0.13, 2));
+          const darkBand = Math.exp(-Math.pow((t0 - 0.66) / 0.18, 2));
+          const rimRight = Math.pow(t1, 2.8);
+
+          let col = lerpColor([176, 198, 228], [250, 254, 255], specPeak * 0.90);
+          col = lerpColor(col, [52, 46, 98], darkBand * 0.72);
+          col = lerpColor(col, [255, 144, 118], rimRight * 0.68);
+
+          // Subtle reentry straw-gold/blue heat patina near forward flap shoulder
+          if (v > 0.18 && v < 0.34) {
+            col = lerpColor(col, [186, 168, 198], 0.18);
+          }
+
+          if (v > 0.48) {
+            const fireReflect = Math.pow((v - 0.48) / 0.52, 1.35);
+            const fireTint = lerpColor([255, 118, 52], [255, 232, 126], specPeak * 0.72 + fireReflect * 0.28);
+            col = lerpColor(col, fireTint, fireReflect * 0.88);
+          }
+
+          col = [
+            Math.max(0, Math.min(255, col[0] + ringTone)),
+            Math.max(0, Math.min(255, col[1] + ringTone * 0.92)),
+            Math.max(0, Math.min(255, col[2] + ringTone * 0.85))
+          ];
+
+          const [p0x, p0y] = shipPt(uA, v);
+          const [p1x, p1y] = shipPt(uB, v);
+          canvas.coloredPencil(p0x, p0y, p1x, p1y, col, {
+            width: 5.2, pressure: 0.84 + specPeak * 0.14, opacity: 0.84, tremor: 0.85
+          });
+        }
+
+        if (uSplit > -hw + 0.01) {
+          const [t0x, t0y] = shipPt(-hw, v);
+          const [t1x, t1y] = shipPt(uSplit, v);
+          const heatGlow = v > 0.62 ? Math.pow((v - 0.62) / 0.38, 1.4) : 0;
+          const tileCol = lerpColor([22, 20, 34], [94, 42, 46], heatGlow * 0.62);
+          canvas.charcoal(t0x, t0y, t1x, t1y, tileCol, {
+            width: 6.5, pressure: 0.92, opacity: 0.88, tremor: 0.75
+          });
+        }
+      }
+
+      if (r >= 2 && r < numRings) {
+        const hw = hullWidth(v0);
+        const uSplit = -0.14 * hw;
+        const [w0x, w0y] = shipPt(uSplit, v0);
+        const [w1x, w1y] = shipPt(hw, v0);
+        canvas.coloredPencil(w0x, w0y, w1x, w1y, [44, 38, 68], {
+          width: 2.4, pressure: 0.78, opacity: 0.68, tremor: 0.7, mode: 'multiply'
+        });
+        const [h0x, h0y] = shipPt(uSplit + 0.05, v0 + 0.002);
+        const [h1x, h1y] = shipPt(hw * 0.55, v0 + 0.002);
+        canvas.conteCrayon(h0x, h0y, h1x, h1y, [242, 250, 255], {
+          width: 2.2, pressure: 0.68, opacity: 0.44, mode: 'luminous'
+        });
+      }
+    }
+
+    // Individually hand-sketched Hexagonal TPS Heat-Shield Tiles
+    {
+      const hexRows = 48;
+      const hexCols = 8;
+      for (let r = 2; r < hexRows; r++) {
+        const v = r / hexRows;
+        const hw = hullWidth(v);
+        if (hw < 0.12) continue;
+        const uSplit = v < 0.055 ? hw : (-0.14 + (r % 2 === 0 ? 0.04 : -0.025)) * hw;
+        const dv = 1 / hexRows;
+
+        for (let c = 0; c < hexCols; c++) {
+          const frac = (c + (r % 2) * 0.5) / hexCols;
+          const uCenter = -hw + Math.sin(frac * Math.PI * 0.5) * (uSplit + hw);
+          if (uCenter > uSplit - 0.02 || uCenter < -hw + 0.03) continue;
+
+          const localDu = 0.095 * Math.cos(Math.min(1.3, (1 - frac) * 1.12)) * hw;
+          const localDv = dv * 0.56;
+          const hex = [
+            shipPt(uCenter, v - localDv),
+            shipPt(uCenter + localDu, v - localDv * 0.5),
+            shipPt(uCenter + localDu, v + localDv * 0.5),
+            shipPt(uCenter, v + localDv),
+            shipPt(uCenter - localDu, v + localDv * 0.5),
+            shipPt(uCenter - localDu, v - localDv * 0.5),
+          ];
+          const isGlint = rng() < 0.16;
+          const col = isGlint
+            ? [136, 198, 232]
+            : (v > 0.66 ? [184, 108, 72] : [92, 114, 152]);
+          const op = isGlint ? 0.72 : 0.46;
+          for (let e = 0; e < 3; e++) {
+            canvas.coloredPencil(hex[e][0], hex[e][1], hex[e + 1][0], hex[e + 1][1], col, {
+              width: 1.8, pressure: 0.78, opacity: op, tremor: 0.45
+            });
+          }
+        }
+      }
+    }
+
+    // Crisp Vertical Specular Conté Highlight down the Stainless Steel Flank
+    for (let i = 3; i < hullSteps - 1; i++) {
+      const v0 = i / hullSteps;
+      const v1 = (i + 1) / hullSteps;
+      const [x0, y0] = shipPt(0.08 * hullWidth(v0), v0);
+      const [x1, y1] = shipPt(0.08 * hullWidth(v1), v1);
+      const col = v0 > 0.58 ? [255, 242, 182] : [244, 254, 255];
+      canvas.conteCrayon(x0, y0, x1, y1, col, {
+        width: 9.0 + (v0 > 0.58 ? 3.5 : 0), pressure: 0.92, opacity: 0.76, mode: 'luminous'
+      });
+    }
+
+    // Leeward Raceway Spine, Subtle Vent Ports & Cold-Gas RCS Thruster Puff
+    {
+      const [sp0, sp1] = [shipPt(0.46, 0.34), shipPt(0.46, 0.96)];
+      canvas.charcoal(sp0[0], sp0[1], sp1[0], sp1[1], [46, 40, 66], { width: 4.5, pressure: 0.76, opacity: 0.62 });
+      canvas.conteCrayon(sp0[0] - 4 * s, sp0[1], sp1[0] - 4 * s, sp1[1], [248, 246, 255], {
+        width: 2.5, pressure: 0.74, opacity: 0.54, mode: 'luminous'
+      });
+
+      const ports = [[0.26, 0.45], [0.64, 0.58], [0.24, 0.84]];
+      for (const [pu, pv] of ports) {
+        const [px, py] = shipPt(pu, pv);
+        canvas.coloredPencil(px - 4 * s, py - 3 * s, px + 4 * s, py + 3 * s, [38, 34, 54], {
+          width: 6, pressure: 0.78, opacity: 0.72, mode: 'multiply'
+        });
+      }
+
+      const [rcsX, rcsY] = shipPt(0.54, 0.115);
+      for (let k = 0; k < 14; k++) {
+        const a = -0.25 + (rng() - 0.5) * 0.42;
+        const l = (32 + rng() * 78) * s;
+        canvas.softPastel(rcsX, rcsY, rcsX + Math.cos(a) * l, rcsY + Math.sin(a) * l, [215, 248, 255], {
+          width: 10 + rng() * 12, pressure: 0.65, opacity: 0.38, mode: 'luminous'
+        });
+      }
+    }
+
+    // Expressive Silhouette Contours + Organic Cyan Sunrise Rim-Light
+    for (let i = 0; i < hullSteps; i++) {
+      const [lx0, ly0] = hullLeft[i];
+      const [lx1, ly1] = hullLeft[i + 1];
+      const [rx0, ry0] = hullRight[i];
+      const [rx1, ry1] = hullRight[i + 1];
+      if (rng() < 0.92) {
+        canvas.charcoal(lx0, ly0, lx1, ly1, [16, 14, 28], { width: 4.8, pressure: 0.88, opacity: 0.80 });
+      }
+      if (rng() < 0.88) {
+        canvas.charcoal(rx0, ry0, rx1, ry1, [38, 26, 52], { width: 4.0, pressure: 0.78, opacity: 0.70 });
+      }
+      if (rng() < 0.90) {
+        canvas.conteCrayon(lx0 - 2 * s, ly0, lx1 - 2 * s, ly1, [136, 244, 255], {
+          width: 5.5 + rng() * 2.0, pressure: 0.88, opacity: 0.82, mode: 'luminous'
+        });
+      }
+    }
+    const [sk0, sk1] = [shipPt(-1.0, 1.0), shipPt(1.0, 1.0)];
+    canvas.conteCrayon(sk0[0], sk0[1], sk1[0], sk1[1], [255, 224, 134], {
+      width: 6.0, pressure: 0.95, opacity: 0.92, mode: 'luminous'
+    });
+  }
+
+  // =========================================================================
+  // PASS 7: INCANDESCENT RAPTOR 3 METHALOX PLUME & MACH DIAMONDS!
+  // =========================================================================
+  progress(0.74, 'Igniting Raptor 3 methalox plume and Mach shock diamonds');
+  {
+    const [plumeTopX, plumeTopY] = shipPt(0, 1.03);
+    const [plumeBotX, plumeBotY] = shipPt(0, 1.33);
+
+    for (let i = 0; i < 110; i++) {
+      const spread = (rng() - 0.5) * 0.85;
+      const [p0x, p0y] = shipPt(spread * 0.65, 1.03 + rng() * 0.03);
+      const [p1x, p1y] = shipPt(spread * 2.15, 1.24 + rng() * 0.15);
+      const col = rng() < 0.55 ? [255, 142, 42] : [255, 76, 62];
+      canvas.softPastel(p0x, p0y, p1x, p1y, col, {
+        width: 30 + rng() * 28, pressure: 0.84, opacity: 0.48, mode: 'luminous'
+      });
+    }
+
+    for (let i = 0; i < 70; i++) {
+      const u = (rng() - 0.5) * 0.62;
+      const [p0x, p0y] = shipPt(u * 0.82, 1.03);
+      const [p1x, p1y] = shipPt(u * 1.22, 1.26 + rng() * 0.08);
+      const col = rng() < 0.52 ? [96, 198, 255] : [192, 118, 255];
+      canvas.softPastel(p0x, p0y, p1x, p1y, col, {
+        width: 18 + rng() * 14, pressure: 0.88, opacity: 0.56, mode: 'luminous'
+      });
+    }
+
+    const diamonds = [1.065, 1.125, 1.185, 1.248];
+    for (let d = 0; d < diamonds.length; d++) {
+      const v = diamonds[d];
+      const sz = (0.34 - d * 0.04);
+      const [topX, topY] = shipPt(0, v - 0.028);
+      const [botX, botY] = shipPt(0, v + 0.030);
+      const [ltX, ltY] = shipPt(-sz, v);
+      const [rtX, rtY] = shipPt(sz, v);
+      canvas.conteCrayon(topX, topY, botX, botY, [255, 255, 246], {
+        width: 26 - d * 3, pressure: 0.99, opacity: 0.96, mode: 'opaque'
+      });
+      canvas.conteCrayon(ltX, ltY, rtX, rtY, [186, 238, 255], {
+        width: 15 - d * 2, pressure: 0.94, opacity: 0.86, mode: 'luminous'
+      });
+    }
+
+    canvas.conteCrayon(plumeTopX, plumeTopY, plumeBotX, plumeBotY, [255, 254, 238], {
+      width: 34, pressure: 0.99, opacity: 0.94, mode: 'luminous'
+    });
+  }
+
+  // =========================================================================
+  // PASS 8: FOREGROUND VOLUMETRIC CURLING DUST WAVE & FINE SPARKS
+  // =========================================================================
+  progress(0.82, 'Sculpting curling foreground dust waves and glowing grit');
+  {
+    const bx = 0.625 * W;
+    const by = 0.765 * H;
+
+    // Continuous foreground curling wave collar wrapping the engine blast & surging outward!
+    for (let i = 0; i < 360; i++) {
+      const side = rng() < 0.54 ? -1 : 1;
+      const u = Math.pow(rng(), 0.78);
+      const maxSpan = side < 0 ? 0.48 : 0.37;
+      const px = bx + side * u * maxSpan * W + (rng() - 0.5) * 28 * s;
+      // Ground-hugging collar near plume, curling upward into a breaking wave mid-span!
+      const curlLift = Math.sin(Math.pow(u, 0.8) * Math.PI) * 0.052 * H;
+      const spreadY = (0.036 + Math.sin(u * Math.PI) * 0.042) * H;
+      const py = by + 0.012 * H - curlLift + (rng() - 0.5) * spreadY;
+      const hNorm = Math.max(0, Math.min(1, (by + 0.03 * H - py) / (spreadY * 1.35)));
+      const hotness = Math.max(0, 1 - u * 0.82);
+
+      let col;
+      if (hNorm > 0.65) {
+        col = lerpColor([255, 184, 88], [255, 250, 196], (hNorm - 0.65) / 0.35 * (0.4 + hotness * 0.6));
+      } else if (hNorm > 0.28) {
+        col = lerpColor([236, 82, 62], [255, 146, 62], (hNorm - 0.28) / 0.37);
+      } else {
+        col = lerpColor([96, 24, 54], [186, 48, 58], hNorm / 0.28);
+      }
+
+      const ang = (side < 0 ? Math.PI : 0) - side * (0.08 + hNorm * 0.44) + (rng() - 0.5) * 0.32;
+      const len = (85 + rng() * 165) * s;
+      canvas.softPastel(
+        px - Math.cos(ang) * len * 0.5, py - Math.sin(ang) * len * 0.5,
+        px + Math.cos(ang) * len * 0.5, py + Math.sin(ang) * len * 0.5,
+        col,
+        {
+          width: 40 + rng() * 42,
+          pressure: 0.74 + rng() * 0.22,
+          opacity: 0.38 + rng() * 0.16,
+          curve: side * (16 + rng() * 24),
+          mode: hNorm > 0.70 ? 'luminous' : 'mix'
+        }
+      );
+    }
+
+    // Blazing ground-hugging blast wind streaks shooting outward from the plume base
+    for (let i = 0; i < 80; i++) {
+      const side = rng() < 0.54 ? -1 : 1;
+      const u = 0.02 + Math.pow(rng(), 0.85) * 0.36;
+      const x0 = bx + side * u * W;
+      const y0 = by + (rng() - 0.35) * 0.048 * H;
+      const len = (75 + rng() * 160) * s;
+      const col = u < 0.14 ? [255, 246, 186] : [255, 178, 86];
+      canvas.softPastel(x0, y0, x0 + side * len, y0 - (4 + rng() * 18) * s, col, {
+        width: 14 + rng() * 16, pressure: 0.78, opacity: 0.36, mode: 'luminous'
+      });
+    }
+
+    // Hand-smudge dust wave crests for authentic soft-pastel atmosphere
+    for (let i = 0; i < 24; i++) {
+      const side = i % 2 === 0 ? -1 : 1;
+      const sx = (0.625 + side * (0.04 + rng() * 0.34)) * W;
+      const sy = (0.71 + rng() * 0.08) * H;
+      canvas.smudge(sx, sy, sx + side * (115 + rng() * 80) * s, sy - (20 + rng() * 34) * s, 44, 0.46);
+    }
+
+    // Fine, varied glowing sparks & dust-grit streaks (delicate, NOT uniform white dashes!)
+    for (let i = 0; i < 65; i++) {
+      const side = rng() < 0.52 ? -1 : 1;
+      const dist = 0.04 + Math.pow(rng(), 0.9) * 0.36;
+      const x0 = bx + side * dist * W;
+      const y0 = by + (rng() - 0.55) * 0.13 * H;
+      const len = (14 + rng() * 52) * s;
+      const ang = (side < 0 ? Math.PI : 0) - side * (0.08 + rng() * 0.34);
+      const col = rng() < 0.35 ? [255, 248, 198] : [255, 184, 92];
+      canvas.coloredPencil(x0, y0, x0 + Math.cos(ang) * len, y0 + Math.sin(ang) * len, col, {
+        width: 2.0 + rng() * 2.2, pressure: 0.86, opacity: 0.68, mode: 'luminous'
+      });
+    }
+  }
+
+  // =========================================================================
+  // PASS 9: ORGANIC FRACTURED MARTIAN ESCARPMENT & VARIED BASALT ROCKS
+  // =========================================================================
+  progress(0.90, 'Drawing organic foreground Martian basalt outcrop and weathered rocks');
+  {
+    // Organic stepped rocky ridge on lower-left (NO straight ruler line!)
+    const leftRidgePts = [];
+    const lSteps = 32;
+    for (let i = 0; i <= lSteps; i++) {
+      const t = i / lSteps;
+      const x = t * 0.44 * W;
+      const jag = (noise.fbm(t * 7.5 + 1.2, 3.4, 3) - 0.5) * 0.045 * H;
+      const y = (0.815 + Math.pow(t, 1.25) * 0.195) * H + jag;
+      leftRidgePts.push([x, y]);
+    }
+    const leftShelf = [...leftRidgePts, [0.44 * W, H], [0, H]];
+    canvas.hatchPoly(leftShelf, -16, 7.5, (x0, y0, x1, y1, v) => {
+      const col = lerpColor([72, 32, 54], [24, 14, 36], v);
+      canvas.softPastel(x0, y0, x1, y1, col, { width: 28, pressure: 0.84, opacity: 0.78 });
+      if (rng() < 0.5) {
+        canvas.charcoal(x0, y0, x1, y1, [22, 12, 32], { width: 10, pressure: 0.76, opacity: 0.55 });
+      }
+    });
+    // Broken, feathered sunlit ochre/orange grazing light along rocky ledge top (NOT a solid yellow line!)
+    for (let i = 0; i < leftRidgePts.length - 1; i++) {
+      if (rng() < 0.25) continue;
+      const [a0, b0] = leftRidgePts[i];
+      const [a1, b1] = leftRidgePts[i + 1];
+      canvas.coloredPencil(a0, b0, a1, b1, [248, 152, 82], {
+        width: 4.5 + rng() * 3, pressure: 0.80, opacity: 0.64, mode: 'luminous'
+      });
+    }
+
+    // Organic right foreground rocky ridge
+    const rightRidgePts = [];
+    for (let i = 0; i <= 20; i++) {
+      const t = i / 20;
+      const x = (0.76 + t * 0.24) * W;
+      const jag = (noise.fbm(t * 6.5 + 9.1, 2.1, 3) - 0.5) * 0.038 * H;
+      const y = (1.0 - Math.pow(t, 0.85) * 0.145) * H + jag;
+      rightRidgePts.push([x, y]);
+    }
+    const rightShelf = [...rightRidgePts, [W, H], [0.76 * W, H]];
+    canvas.hatchPoly(rightShelf, 18, 7.5, (x0, y0, x1, y1, v) => {
+      const col = lerpColor([86, 36, 54], [26, 15, 38], v);
+      canvas.softPastel(x0, y0, x1, y1, col, { width: 26, pressure: 0.84, opacity: 0.76 });
+    });
+
+    // Natural, individually shaped Martian basalt boulders (NO uniform pyramid or bottom yellow outline!)
+    function drawNaturalRock(cx, cy, rx, ry, rimSide = 'right', shapeVariant = 0) {
+      const templates = [
+        // 0: Low flat weathered slab
+        [[-1.0, 0.22], [-0.82, -0.35], [-0.25, -0.62], [0.55, -0.48], [1.02, 0.12], [0.72, 0.42], [-0.65, 0.45]],
+        // 1: Craggy asymmetrical boulder
+        [[-0.95, 0.30], [-0.70, -0.58], [-0.08, -0.92], [0.42, -0.52], [0.96, -0.05], [0.82, 0.38], [-0.45, 0.42]],
+        // 2: Half-buried tilted ledge rock
+        [[-1.05, 0.35], [-0.40, -0.28], [0.35, -0.78], [0.88, -0.32], [0.98, 0.32], [0.20, 0.45], [-0.72, 0.42]],
+      ];
+      const tmpl = templates[shapeVariant % templates.length];
+      const pts = tmpl.map(([ux, uy]) => [
+        cx + (ux + (rng() - 0.5) * 0.14) * rx,
+        cy + (uy + (rng() - 0.5) * 0.12) * ry
+      ]);
+
+      // Grounding cast shadow anchored into sand
+      const shDir = rimSide === 'right' ? -1 : 1;
+      canvas.softPastel(
+        cx, cy + ry * 0.35,
+        cx + shDir * rx * 1.9, cy + ry * 0.58,
+        [24, 12, 34],
+        { width: (ry * 0.72) / s, pressure: 0.84, opacity: 0.66, mode: 'multiply' }
+      );
+
+      // Deep velvety charcoal-plum rock mass
+      canvas.hatchPoly(pts, -22 + (rng() - 0.5) * 28, 5.2, (x0, y0, x1, y1, v) => {
+        const base = lerpColor([58, 34, 62], [20, 12, 30], v);
+        canvas.charcoal(x0, y0, x1, y1, base, {
+          width: 11, pressure: 0.86, opacity: 0.80
+        });
+      });
+
+      // Subtle cool sky dust on top-left plane
+      const topPlane = [pts[1], pts[2], pts[3], [cx, cy + ry * 0.05]];
+      canvas.hatchPoly(topPlane, 12, 5.5, (x0, y0, x1, y1) => {
+        canvas.coloredPencil(x0, y0, x1, y1, [92, 134, 186], {
+          width: 4.0, pressure: 0.65, opacity: 0.44
+        });
+      });
+
+      // Warm fiery bounce light softly feathered across the engine-facing rock face
+      const litPlane = rimSide === 'right'
+        ? [pts[2], pts[3], pts[4], [cx + rx * 0.15, cy + ry * 0.12]]
+        : [pts[0], pts[1], pts[2], [cx - rx * 0.15, cy + ry * 0.12]];
+      canvas.hatchPoly(litPlane, -32, 5.5, (x0, y0, x1, y1) => {
+        canvas.coloredPencil(x0, y0, x1, y1, [238, 114, 58], {
+          width: 4.2, pressure: 0.74, opacity: 0.58
+        });
+      });
+
+      // Expressive charcoal contour on top/shadow edges only (softly buried at base!)
+      for (let i = 0; i < pts.length - 2; i++) {
+        if (rng() < 0.18) continue;
+        canvas.charcoal(pts[i][0], pts[i][1], pts[i + 1][0], pts[i + 1][1], [14, 10, 24], {
+          width: 4.8, pressure: 0.88, opacity: 0.80
+        });
+      }
+
+      // Delicate fiery gold rim ONLY on the upper-facing engine edge (NEVER along the buried bottom!)
+      const rimEdge = rimSide === 'right' ? [2, 3] : [1];
+      for (const idx of rimEdge) {
+        canvas.conteCrayon(pts[idx][0], pts[idx][1], pts[idx + 1][0], pts[idx + 1][1], [255, 198, 104], {
+          width: 5.5, pressure: 0.90, opacity: 0.82, mode: 'luminous'
+        });
+      }
+
+      // Drifted Martian sand banking softly across the rock's buried base
+      canvas.softPastel(
+        cx - rx * 0.85, cy + ry * 0.40,
+        cx + rx * 0.85, cy + ry * 0.44,
+        [82, 32, 52],
+        { width: (ry * 0.34) / s, pressure: 0.72, opacity: 0.56 }
+      );
+    }
+
+    drawNaturalRock(0.085 * W, 0.875 * H, 195 * s, 110 * s, 'right', 1);
+    drawNaturalRock(0.205 * W, 0.925 * H, 145 * s, 72 * s, 'right', 0);
+    drawNaturalRock(0.315 * W, 0.962 * H, 92 * s, 48 * s, 'right', 2);
+    drawNaturalRock(0.032 * W, 0.968 * H, 145 * s, 74 * s, 'right', 0);
+    drawNaturalRock(0.915 * W, 0.912 * H, 185 * s, 102 * s, 'left', 2);
+    drawNaturalRock(0.815 * W, 0.965 * H, 105 * s, 54 * s, 'left', 0);
+
+    // Smaller weathered midground rocks
+    const stones = [
+      [0.37, 0.885, 38, 19, 'right', 0],
+      [0.45, 0.935, 48, 22, 'right', 2],
+      [0.54, 0.955, 32, 16, 'right', 1],
+      [0.71, 0.918, 42, 20, 'left', 0],
+      [0.24, 0.848, 44, 21, 'right', 1],
+    ];
+    for (const [px, py, rx, ry, side, v] of stones) {
+      drawNaturalRock(px * W, py * H, rx * s, ry * s, side, v);
+    }
+  }
+
+  // =========================================================================
+  // PASS 10: FLOATING BACKLIT DUST MOTES & FINAL HAND-DRAWN SPARKLE
+  // =========================================================================
+  progress(0.97, 'Adding sunlit atmospheric dust motes and final Conté accents');
+  {
+    for (let i = 0; i < 85; i++) {
+      const mx = rng() * W;
+      const my = (0.32 + rng() * 0.64) * H;
+      const nearSun = mx < 0.42 * W && my < 0.72 * H;
+      const col = nearSun ? [182, 248, 255] : [255, 228, 146];
+      const len = (3.5 + rng() * 11) * s;
+      canvas.conteCrayon(mx, my, mx + len, my - len * 0.22, col, {
+        width: 2.5 + rng() * 2.0, pressure: 0.88, opacity: 0.68, mode: 'luminous'
+      });
+    }
+  }
+
+  progress(1.0, 'Finished drawing');
+}
+
+
+const artCanvas = document.getElementById("art");
+const statusEl = document.getElementById("status");
+const btn4k = document.getElementById("btn4k");
+
+function renderToCanvas(targetCanvas, w, h) {
+  targetCanvas.width = w;
+  targetCanvas.height = h;
+  const ctx = targetCanvas.getContext("2d");
+  const pc = new PaperCanvas(w, h, 20261127);
+  drawMasterpiece(pc);
+  ctx.putImageData(pc.toImageData(ctx), 0, 0);
+}
+
+setTimeout(() => {
+  const t0 = performance.now();
+  renderToCanvas(artCanvas, 1920, 1080);
+  const sec = ((performance.now() - t0) / 1000).toFixed(2);
+  statusEl.textContent = "Hand-drawn in " + sec + "s — Soft Pastel, Charcoal, Colored Pencil & Conté on Cotton Paper";
+}, 30);
+
+btn4k.addEventListener("click", () => {
+  btn4k.disabled = true;
+  statusEl.textContent = "Rendering full 4K (3840×2160) masterpiece...";
+  setTimeout(() => {
+    const off = document.createElement("canvas");
+    renderToCanvas(off, 3840, 2160);
+    const a = document.createElement("a");
+    a.download = "starship-marte.png";
+    a.href = off.toDataURL("image/png");
+    a.click();
+    statusEl.textContent = "4K PNG downloaded (3840×2160).";
+    btn4k.disabled = false;
+  }, 50);
+});
+
+</script>
+</body>
+</html>

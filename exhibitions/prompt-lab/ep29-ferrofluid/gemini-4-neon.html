@@ -1,0 +1,1363 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Ferrofluid Electromagnetic Chamber</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    overflow: hidden;
+    background: #040507;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: rgba(230, 236, 245, 0.85);
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  #gl {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    cursor: grab;
+  }
+  #gl:active { cursor: grabbing; }
+  .hud {
+    position: fixed;
+    pointer-events: none;
+    z-index: 10;
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-variant-numeric: tabular-nums;
+  }
+  .hud-top-left {
+    top: 22px; left: 26px;
+    display: flex; flex-direction: column; gap: 5px;
+    opacity: 0.72;
+  }
+  .hud-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.22em;
+    color: rgba(240, 245, 255, 0.88);
+    display: flex; align-items: center; gap: 8px;
+  }
+  .hud-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #52d1ff;
+    box-shadow: 0 0 8px rgba(82, 209, 255, 0.85);
+  }
+  .hud-sub {
+    font-size: 10px;
+    color: rgba(175, 190, 210, 0.62);
+    letter-spacing: 0.16em;
+  }
+  .hud-bottom-left {
+    bottom: 22px; left: 26px;
+    display: flex; gap: 22px;
+    opacity: 0.65;
+  }
+  .metric { display: flex; flex-direction: column; gap: 2px; }
+  .metric-label { font-size: 9px; color: rgba(160, 175, 195, 0.52); letter-spacing: 0.18em; }
+  .metric-val { font-size: 12px; color: rgba(235, 242, 252, 0.88); font-weight: 500; }
+  .hud-bottom-right {
+    bottom: 22px; right: 26px;
+    text-align: right;
+    font-size: 10px;
+    color: rgba(180, 195, 215, 0.48);
+    letter-spacing: 0.14em;
+    transition: opacity 1.2s ease;
+  }
+  .hud-bottom-right.faded { opacity: 0.22; }
+  @media (max-width: 640px) {
+    .hud-top-left { top: 14px; left: 16px; }
+    .hud-bottom-left { bottom: 14px; left: 16px; gap: 12px; }
+    .hud-bottom-left .metric:nth-child(2) { display: none; }
+    .hud-bottom-right { bottom: 16px; right: 16px; font-size: 9px; letter-spacing: 0.1em; }
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+
+<div class="hud hud-top-left">
+  <div class="hud-title"><span class="hud-dot"></span>EM-CHAMBER 04 // FERROFLUID</div>
+  <div class="hud-sub" id="phaseLabel">ROSENSWEIG INSTABILITY</div>
+</div>
+
+<div class="hud hud-bottom-left">
+  <div class="metric">
+    <span class="metric-label">FLUX DENSITY</span>
+    <span class="metric-val" id="fluxVal">0.0 mT</span>
+  </div>
+  <div class="metric">
+    <span class="metric-label">SURFACE TENSION</span>
+    <span class="metric-val">29.0 mN/m</span>
+  </div>
+</div>
+
+<div class="hud hud-bottom-right" id="hintLabel">DRAG TO ORBIT · SCROLL / PINCH TO ZOOM</div>
+
+<script id="vs-quad" type="x-shader/x-vertex">#version 300 es
+precision highp float;
+const vec2 POS[3] = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0));
+out vec2 vUv;
+void main() {
+  vec2 p = POS[gl_VertexID];
+  vUv = p * 0.5 + 0.5;
+  gl_Position = vec4(p, 0.0, 1.0);
+}
+</script>
+
+<script id="fs-scene" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uCamPos;
+uniform vec3 uCamTarget;
+uniform float uFov;
+
+// Continuous choreographed phase weights & magnetic flux
+uniform float uFlux;        // 0..1 magnetic field intensity
+uniform float uRosensweig;  // Rosensweig spike instability weight
+uniform float uWaves;       // Organic waves & branching ridges weight
+uniform float uDroplets;    // Pinching & merging satellite droplets weight
+uniform float uTorus;       // Magnetic flux torus sculptural form weight
+uniform float uPoly;        // Geodesic harmonic polyhedron sculptural form weight
+
+const float PI  = 3.14159265359;
+const float TAU = 6.28318530718;
+const float PHI = 1.61803398875;
+
+// Material IDs
+const float MAT_FERRO   = 1.0;
+const float MAT_METAL   = 2.0;
+const float MAT_COPPER  = 3.0;
+const float MAT_FLOOR   = 4.0;
+const float MAT_SOFTBOX = 5.0;
+const float MAT_LED     = 6.0;
+const float MAT_WALL    = 7.0;
+
+mat2 rot2(float a) {
+  float c = cos(a), s = sin(a);
+  return mat2(c, -s, s, c);
+}
+
+// Smooth minimum (polynomial C2-like blend for liquid cohesion & necking)
+float smin(float a, float b, float k) {
+  float h = max(k - abs(a - b), 0.0) / max(k, 1e-5);
+  return min(a, b) - h * h * h * k * (1.0 / 6.0);
+}
+
+float smax(float a, float b, float k) {
+  return -smin(-a, -b, k);
+}
+
+float sdCylinder(vec3 p, float r, float h) {
+  vec2 d = abs(vec2(length(p.xz), p.y)) - vec2(r, h);
+  return min(max(d.x, d.y), 0.0) + length(max(d, 0.0));
+}
+
+float sdTorus(vec3 p, vec2 t) {
+  vec2 q = vec2(length(p.xz) - t.x, p.y);
+  return length(q) - t.y;
+}
+
+float sdBox(vec3 p, vec3 b) {
+  vec3 q = abs(p) - b;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+}
+
+float gyroid(vec3 p) {
+  return dot(sin(p), cos(p.yzx));
+}
+
+// Icosahedral symmetry fold (used for coherent geodesic sculptural form)
+vec3 foldIcosa(vec3 p) {
+  const vec3 n1 = normalize(vec3(-0.5, 0.80901699, 0.30901699));
+  const vec3 n2 = normalize(vec3( 0.80901699, 0.30901699, -0.5));
+  const vec3 n3 = normalize(vec3( 0.30901699, -0.5, 0.80901699));
+  p = abs(p);
+  p -= 2.0 * min(0.0, dot(p, n1)) * n1;
+  p = abs(p);
+  p -= 2.0 * min(0.0, dot(p, n2)) * n2;
+  p = abs(p);
+  p -= 2.0 * min(0.0, dot(p, n3)) * n3;
+  p = abs(p);
+  p -= 2.0 * min(0.0, dot(p, n1)) * n1;
+  p = abs(p);
+  p -= 2.0 * min(0.0, dot(p, n2)) * n2;
+  return p;
+}
+
+// Inverse Spherical Fibonacci Mapping (Keinert et al. 2015)
+// Produces a uniform, pole-free hexagonal lattice of N mutually-repelling Rosensweig spikes
+// Returns smooth spike height in [0, 1] with zero symmetry seams and smooth surface-tension valleys!
+float sphericalFibonacciSpikes(vec3 dir, float N, float sharpness, float time) {
+  float phi = min(atan(dir.z, dir.x), PI);
+  float cosTheta = clamp(dir.y, -1.0, 1.0);
+  float k = max(2.0, floor(log2(N * PI * sqrt(5.0) * (1.0 - cosTheta * cosTheta)) / log2(PHI + 1.0)));
+  float Fk = pow(PHI, k) / sqrt(5.0);
+  vec2 F = vec2(floor(Fk + 0.5), floor(Fk * PHI + 0.5));
+
+  vec2 ka = 2.0 * F / N;
+  vec2 kb = TAU * (fract((F + 1.0) * (PHI - 1.0)) - (PHI - 1.0));
+  mat2 iB = mat2(ka.y, -ka.x, kb.y, -kb.x) / (ka.y * kb.x - ka.x * kb.y);
+
+  vec2 c = floor(iB * vec2(phi, cosTheta - (1.0 - 1.0 / N)));
+
+  // Accumulate compactly-supported C2 Rosensweig cusp spikes over the 3x3 nearest hexagonal cells
+  // Compact support (exact zero value & derivative at d >= rCut) guarantees 100% seamless normals!
+  float acc = 0.0;
+  float maxPeak = 0.0;
+  float rCut = sharpness * 2.05 * sqrt(4.0 * PI / N);
+
+  for (int j = -1; j <= 1; j++) {
+    for (int i = -1; i <= 1; i++) {
+      vec2 uv = vec2(float(i), float(j));
+      float idx = dot(F, uv + c);
+      if (idx < 0.0 || idx >= N) continue;
+
+      float y = 1.0 - (2.0 * idx + 1.0) / N;
+      float r = sqrt(max(0.0, 1.0 - y * y));
+      float ang = TAU * fract(idx * (PHI - 1.0));
+      vec3 site = vec3(cos(ang) * r, y, sin(ang) * r);
+
+      float d = length(dir - site);
+      if (d >= rCut) continue;
+
+      // Compact C2 smooth bump raised to cusp power:
+      // Smooth surface-tension-rounded tip at d=0, concave hyperbolic flanks, exact 0 at d=rCut
+      float u = 1.0 - d / rCut;
+      float s = u * u * (3.0 - 2.0 * u);
+      float cellPhase = sin(time * 2.1 + idx * 1.37) * 0.14 + 0.92;
+      float peak = pow(s, 2.35) * cellPhase;
+      maxPeak = smax(maxPeak, peak, 0.14);
+      acc += peak;
+    }
+  }
+  return mix(maxPeak, min(1.0, acc * 0.85), 0.22);
+}
+
+// Full Rosensweig Instability Field (primary hexagonal lattice + high-flux harmonic micro-spikes)
+float rosensweigField(vec3 dir, float time, float flux) {
+  // Slow viscous drift & gentle magnetic axis precession
+  vec3 d = dir;
+  d.xz *= rot2(time * 0.11);
+  d.xy *= rot2(sin(time * 0.19) * 0.14);
+
+  // Primary hexagonal Rosensweig lattice (N = 76 densely packed peaks)
+  float primary = sphericalFibonacciSpikes(d, 76.0, 0.44, time);
+
+  // Secondary finer lattice emerges softly at high magnetic flux (field-dependent wavelength)
+  vec3 d2 = dir;
+  d2.xz *= rot2(-time * 0.07 + 0.5);
+  float secondary = sphericalFibonacciSpikes(d2, 138.0, 0.40, time * 1.25);
+  float secWeight = smoothstep(0.50, 0.98, flux) * 0.36;
+
+  float combined = smax(primary, secondary * secWeight, 0.14);
+
+  // Dipole magnetic field alignment: spikes are tallest along the vertical pole-to-pole flux axis
+  // and taper gracefully around the magnetic equator
+  float dipoleAlign = 0.58 + 0.42 * smoothstep(0.05, 0.92, abs(dir.y));
+  float traveling = 0.90 + 0.10 * sin(dir.y * 6.5 - time * 2.2 + atan(dir.z, dir.x) * 2.0);
+  return combined * dipoleAlign * traveling;
+}
+
+// --- Ferrofluid Signed Distance Function ---
+float mapFerrofluid(vec3 p) {
+  vec3 q = p;
+  q.y -= sin(uTime * 0.85) * 0.025;
+
+  float r = length(q);
+  vec3 dir = q / max(r, 1e-5);
+
+  // 1. Dipole vertical elongation under strong vertical pole-to-pole magnetic field
+  float stretch = 1.0 + 0.10 * uFlux * (1.0 - 0.75 * uTorus);
+  vec3 qElong = vec3(q.x * sqrt(stretch), q.y / stretch, q.z * sqrt(stretch));
+  float rElong = length(qElong);
+
+  // 2. Rosensweig instability spikes (tall, crisp, dense hexagonal cones with rounded tips)
+  float spikeVal = rosensweigField(dir, uTime, uFlux);
+  float spikeHeight = (0.31 * uRosensweig + 0.13 * uWaves + 0.11 * uDroplets + 0.06 * uPoly) * (0.38 + 0.62 * uFlux);
+  float spikeDisp = spikeVal * spikeHeight;
+
+  // 3. Organic traveling magnetic waves & branching dendritic ridges
+  float waveDisp = 0.0;
+  float az = atan(dir.z, dir.x);
+  if (uWaves > 0.001 || uRosensweig > 0.001) {
+    float helix = sin(dir.y * 8.0 + az * 3.0 - uTime * 1.85);
+    vec3 gw = q * 3.8 + vec3(0.0, -uTime * 0.62, 0.0);
+    gw.xz *= rot2(uTime * 0.22);
+    float branch = gyroid(gw) * 0.65 + gyroid(gw * 2.05 + 1.4) * 0.35;
+    float ridge = smoothstep(-0.15, 0.95, branch);
+    waveDisp = (0.145 * ridge + 0.055 * helix) * uWaves;
+    // Subtle capillary surface ripple
+    waveDisp += 0.015 * sin(dir.y * 6.0 - uTime * 1.5) * cos(az * 3.0 + uTime * 0.8);
+  }
+
+  // Approximate volume conservation: core shrinks as spikes grow or satellite droplets pinch off
+  float volDisplaced = spikeHeight * 0.44 + uDroplets * 0.16 + uWaves * 0.04;
+  float baseRadius = 0.78 * pow(max(0.45, 1.0 - volDisplaced), 0.3333);
+
+  float dCore = rElong - (baseRadius + spikeDisp + waveDisp);
+
+  // 4. Sculptural Form A: Magnetic Flux Torus / Twisted Liquid Crown
+  if (uTorus > 0.001) {
+    vec3 pt = q;
+    pt.xy *= rot2(sin(uTime * 0.35) * 0.26);
+    pt.yz *= rot2(0.36 + cos(uTime * 0.28) * 0.15);
+    float azT = atan(pt.z, pt.x);
+    float majorR = 0.72 + 0.035 * sin(azT * 3.0 - uTime * 1.3);
+    vec2 tc = vec2(length(pt.xz) - majorR, pt.y);
+    float minorAngle = atan(tc.y, tc.x);
+    // Fine Rosensweig crown spikes along the outer magnetic rim of the torus
+    float crownSpikes = exp(-pow(abs(sin(azT * 9.0 + uTime * 0.5)), 1.5) * 3.2)
+                      * exp(-pow(abs(sin(minorAngle * 1.5 - azT)), 1.5) * 2.5);
+    float minorR = 0.215 + 0.095 * crownSpikes * (0.45 + 0.55 * uFlux);
+    float dTorus = length(tc) - minorR;
+    dCore = mix(dCore, dTorus, uTorus);
+  }
+
+  // 5. Sculptural Form B: Coherent Harmonic Magnetic Flux Cage (programmable matter)
+  // Interlocking glossy liquid-metal flux rings + sculpted inner core with Rosensweig crest ridges
+  if (uPoly > 0.001) {
+    vec3 pp = q;
+    pp.xz *= rot2(uTime * 0.28);
+    pp.xy *= rot2(sin(uTime * 0.32) * 0.22);
+
+    // Glossy inner core
+    float dInner = length(pp) - 0.44;
+    // 3 mutually-tilted interlocking magnetic flux rings (smooth gyroscopic liquid sculpture)
+    float ringR = 0.82;
+    float tubeR = 0.125 + 0.025 * sin(atan(pp.z, pp.x) * 6.0 - uTime * 2.0);
+    float r1 = sdTorus(pp, vec2(ringR, tubeR));
+    vec3 p2 = pp; p2.xy *= rot2(PI / 3.0); p2.yz *= rot2(PI / 3.0);
+    float r2 = sdTorus(p2, vec2(ringR, tubeR));
+    vec3 p3 = pp; p3.xy *= rot2(-PI / 3.0); p3.yz *= rot2(PI / 3.0);
+    float r3 = sdTorus(p3, vec2(ringR, tubeR));
+
+    float dCage = smin(smin(r1, r2, 0.14), r3, 0.14);
+    float dPoly = smin(dInner, dCage, 0.18) - 0.045 * spikeVal * uPoly;
+    dCore = mix(dCore, dPoly, uPoly);
+  }
+
+  // 6. Pinching, Orbiting & Merging Satellite Droplets (surface tension necking via smin)
+  float dropPresence = max(uDroplets, uTorus * 0.42);
+  if (dropPresence > 0.001) {
+    float dDrops = 1e5;
+    for (int i = 0; i < 8; i++) {
+      float fi = float(i);
+      float phase = fi * 0.98 + uTime * (0.55 + 0.06 * mod(fi, 3.0));
+      float cycle = 0.5 + 0.5 * sin(uTime * 0.82 + fi * 1.65);
+      float orbitR = mix(0.48, 1.12, smoothstep(0.08, 0.92, cycle)) * (0.76 + 0.24 * uDroplets);
+      float elev = sin(phase * 1.25 + fi) * mix(0.58, 0.36, uTorus);
+      vec3 dPos = vec3(cos(phase) * orbitR, elev, sin(phase) * orbitR);
+      float dRad = (0.095 + 0.038 * sin(fi * 2.3 + uTime * 1.6)) * smoothstep(0.0, 0.35, dropPresence);
+      float dSphere = length(q - dPos) - dRad;
+      dDrops = smin(dDrops, dSphere, 0.13);
+    }
+    dCore = smin(dCore, dDrops, 0.20);
+  }
+
+  // Conservative Lipschitz scaling for steep Rosensweig spike cones
+  return dCore * 0.36;
+}
+
+// --- Precision-Engineered Laboratory Chamber SDF ---
+vec2 opU(vec2 a, vec2 b) { return a.x < b.x ? a : b; }
+
+vec2 mapChamber(vec3 p) {
+  vec2 res = vec2(1e5, MAT_WALL);
+
+  // Upper & Lower Electromagnetic Pole Assemblies (symmetric around y = 0, framed cleanly in hero shot!)
+  vec3 ps = vec3(p.x, abs(p.y), p.z);
+  float rXZ = length(p.xz);
+  float ang = atan(p.z, p.x);
+
+  // 1. Central magnetic flux concentrator pole tip (tapered precision dark titanium)
+  float poleR = mix(0.44, 0.62, clamp((ps.y - 1.44) / 0.45, 0.0, 1.0));
+  float dPole = max(rXZ - poleR, abs(ps.y - 1.72) - 0.28);
+  // Recessed optical aperture at pole face
+  float dPoleRecess = max(rXZ - 0.25, -(ps.y - 1.50));
+  dPole = max(dPole, -dPoleRecess);
+  // Fine beveled collar at pole tip
+  float dCollar = sdTorus(vec3(p.x, ps.y - 1.45, p.z), vec2(0.43, 0.018));
+  dPole = min(dPole, dCollar);
+  res = opU(res, vec2(dPole, MAT_METAL));
+
+  // 2. Glowing precision cyan-white telemetry ring recessed around pole tip
+  float dLedRing = sdTorus(vec3(p.x, ps.y - 1.47, p.z), vec2(0.36, 0.016));
+  res = opU(res, vec2(dLedRing, MAT_LED));
+
+  // 3. Precision-Wound Copper Solenoid Coil Assembly (prominently visible in hero & macro shots!)
+  float dCoilOuter = sdCylinder(vec3(p.x, ps.y - 1.76, p.z), 1.12, 0.24);
+  float dCoilInner = sdCylinder(vec3(p.x, ps.y - 1.76, p.z), 0.65, 0.32);
+  float dCoil = max(dCoilOuter, -dCoilInner);
+  // Procedural copper wire winding micro-grooves
+  dCoil += 0.0038 * sin(ps.y * 220.0);
+  res = opU(res, vec2(dCoil, MAT_COPPER));
+
+  // 4. Outer Machined Titanium Stator Housing & Stepped Flange
+  float dStatorOuter = sdCylinder(vec3(p.x, ps.y - 1.94, p.z), 1.82, 0.20);
+  float dStatorInner = sdCylinder(vec3(p.x, ps.y - 1.94, p.z), 1.15, 0.28);
+  float dStator = max(dStatorOuter, -dStatorInner);
+  float dFlangeGroove = sdTorus(vec3(p.x, ps.y - 1.74, p.z), vec2(1.48, 0.028));
+  dStator = max(dStator, -dFlangeGroove);
+  res = opU(res, vec2(dStator, MAT_METAL));
+
+  // 8 Radial Precision Clamping Struts / Stator Cooling Fins
+  float sector8 = mod(ang + PI / 8.0, PI / 4.0) - PI / 8.0;
+  vec3 pRep8 = vec3(cos(sector8) * rXZ, ps.y, sin(sector8) * rXZ);
+  float dFin = sdBox(pRep8 - vec3(1.50, 1.80, 0.0), vec3(0.30, 0.12, 0.048)) - 0.01;
+  res = opU(res, vec2(dFin, MAT_METAL));
+
+  // 16 Socket-Cap Bolts around the outer stator ring
+  float sector16 = mod(ang + PI / 16.0, PI / 8.0) - PI / 16.0;
+  vec3 pRep16 = vec3(cos(sector16) * rXZ, ps.y, sin(sector16) * rXZ);
+  float dBolt = sdCylinder(pRep16 - vec3(1.68, 1.72, 0.0), 0.026, 0.03);
+  res = opU(res, vec2(dBolt, MAT_METAL));
+
+  // 5. Upper Cryostat / Electromagnetic Gantry Column (supports upper pole from high bay ceiling)
+  float dGantry = sdCylinder(p - vec3(0.0, 3.45, 0.0), 1.05, 1.42);
+  res = opU(res, vec2(dGantry, MAT_METAL));
+
+  // Optical Chamber Floor (y = -2.14) & High-Bay Ceiling (y = +4.85 — never blocks overhead camera!)
+  float dFloor = p.y + 2.14;
+  res = opU(res, vec2(dFloor, MAT_FLOOR));
+  float dCeil = 4.85 - p.y;
+  res = opU(res, vec2(dCeil, MAT_WALL));
+
+  // Overhead Studio Ring Diffuser recessed high in the ceiling bay
+  float dRingLight = sdTorus(vec3(p.x, p.y - 4.78, p.z), vec2(2.85, 0.12));
+  res = opU(res, vec2(dRingLight, MAT_SOFTBOX));
+
+  // 6. Outer Cylindrical Cleanroom Chamber Wall (r = 6.6, safely outside camera maxDist = 5.0)
+  float dWall = 6.6 - rXZ;
+  res = opU(res, vec2(dWall, MAT_WALL));
+
+  // 4 Vertical Structural Flux-Return Columns at r = 5.88 with subtle recessed architectural light slits
+  float sec4 = mod(ang + PI * 0.25, PI * 0.5) - PI * 0.25;
+  vec3 pCol = vec3(cos(sec4) * rXZ, p.y, sin(sec4) * rXZ);
+  float dCol = sdBox(pCol - vec3(5.92, 1.3, 0.0), vec3(0.24, 3.6, 0.24)) - 0.025;
+  res = opU(res, vec2(dCol, MAT_METAL));
+
+  // Sleek narrow recessed architectural LED light channels tucked into the 4 structural columns
+  // (replaces the distracting flat white wall billboard while maintaining moody lab lighting!)
+  float dSlit = sdBox(pCol - vec3(5.68, 0.35, 0.0), vec3(0.025, 1.85, 0.032));
+  res = opU(res, vec2(dSlit, MAT_SOFTBOX));
+
+  return res;
+}
+
+vec2 mapScene(vec3 p) {
+  vec2 res = mapChamber(p);
+  float r = length(p);
+  float dFerroBound = r - 1.48;
+  if (dFerroBound < res.x) {
+    float df = (r < 1.62) ? mapFerrofluid(p) : dFerroBound;
+    if (df < res.x) {
+      res = vec2(df, MAT_FERRO);
+    }
+  }
+  return res;
+}
+
+vec3 calcNormalFerro(vec3 p) {
+  const float e = 0.0007;
+  const vec2 k = vec2(1.0, -1.0);
+  return normalize(
+    k.xyy * mapFerrofluid(p + k.xyy * e) +
+    k.yyx * mapFerrofluid(p + k.yyx * e) +
+    k.yxy * mapFerrofluid(p + k.yxy * e) +
+    k.xxx * mapFerrofluid(p + k.xxx * e)
+  );
+}
+
+vec3 calcNormalScene(vec3 p) {
+  const float e = 0.0016;
+  const vec2 k = vec2(1.0, -1.0);
+  return normalize(
+    k.xyy * mapScene(p + k.xyy * e).x +
+    k.yyx * mapScene(p + k.yyx * e).x +
+    k.yxy * mapScene(p + k.yxy * e).x +
+    k.xxx * mapScene(p + k.xxx * e).x
+  );
+}
+
+float calcAO(vec3 p, vec3 n, float scale) {
+  float occ = 0.0;
+  float weight = 1.0;
+  for (int i = 1; i <= 5; i++) {
+    float h = scale * float(i) / 5.0;
+    float d = mapScene(p + n * h).x;
+    occ += (h - d) * weight;
+    weight *= 0.65;
+  }
+  return clamp(1.0 - 2.6 * occ / max(scale, 1e-4), 0.0, 1.0);
+}
+
+float calcSoftShadow(vec3 ro, vec3 rd, float mint, float maxt, float k) {
+  float res = 1.0;
+  float t = mint;
+  for (int i = 0; i < 28; i++) {
+    float h = mapScene(ro + rd * t).x;
+    res = min(res, k * h / t);
+    t += clamp(h, 0.035, 0.30);
+    if (res < 0.01 || t > maxt) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+
+// Smooth, anti-aliased photographic studio softbox dome (zero aliasing on curved spikes!)
+vec3 evalStudioSoftboxes(vec3 rd) {
+  vec3 col = vec3(0.006, 0.008, 0.011);
+
+  // 1. Large Overhead-Left Warm-White Key Softbox (classic macro ferrofluid ribbon highlight)
+  vec3 kDir = normalize(vec3(0.62, 0.56, 0.55));
+  float kDot = dot(rd, kDir);
+  float kBox = smoothstep(0.76, 0.90, kDot);
+  col += vec3(3.4, 3.28, 3.08) * kBox;
+
+  // 2. Tall Vertical Cool Daylight Rim Strip (carves razor-sharp silver-cyan edge on spikes)
+  vec3 rDir = normalize(vec3(-0.72, 0.18, -0.67));
+  float rAz = dot(normalize(vec2(rd.x, rd.z) + 1e-5), normalize(vec2(rDir.x, rDir.z)));
+  float rStrip = smoothstep(0.92, 0.985, rAz) * smoothstep(0.78, 0.20, abs(rd.y - 0.12));
+  col += vec3(1.85, 2.35, 3.10) * rStrip;
+
+  // 3. Overhead Circular Ring Diffuser (crowns the tips of upper spikes)
+  float ringElev = smoothstep(0.58, 0.72, rd.y) * smoothstep(0.92, 0.78, rd.y);
+  col += vec3(1.35, 1.45, 1.62) * ringElev;
+
+  // 4. Low Warm Copper-Amber Bounce Strip (echoes the solenoid coils)
+  vec3 bDir = normalize(vec3(-0.55, -0.42, 0.72));
+  float bSoft = smoothstep(0.72, 0.92, dot(rd, bDir));
+  col += vec3(1.25, 0.62, 0.28) * bSoft;
+
+  return col;
+}
+
+vec3 getSoftboxEmission(vec3 p) {
+  if (p.y > 4.2) return vec3(1.1, 1.2, 1.35);
+  // Subtle, architectural vertical LED light channels on the 4 chamber pillars
+  float fy = smoothstep(2.2, 0.5, abs(p.y - 0.35));
+  float warmSide = smoothstep(-0.3, 0.5, p.x + p.z);
+  vec3 cWarm = vec3(1.15, 1.06, 0.94);
+  vec3 cCool = vec3(0.72, 1.05, 1.45);
+  return mix(cCool, cWarm, warmSide) * (0.35 + 0.55 * fy);
+}
+
+// Trace real 3D chamber reflections + smooth studio softbox reflections
+vec3 traceChamberReflection(vec3 ro, vec3 rd, bool isFerro) {
+  float t = 0.015;
+  float mat = -1.0;
+  vec3 hitP = ro;
+
+  for (int i = 0; i < 40; i++) {
+    vec3 p = ro + rd * t;
+    vec2 h = mapScene(p);
+    if (h.x < 0.0035) {
+      mat = h.y;
+      hitP = p;
+      break;
+    }
+    t += max(h.x, 0.014);
+    if (t > 11.0) break;
+  }
+
+  vec3 studio = evalStudioSoftboxes(rd);
+
+  if (mat < 0.0 || mat == MAT_WALL || mat == MAT_SOFTBOX) {
+    return studio;
+  }
+  if (mat == MAT_LED) {
+    // Softly anti-aliased cyan telemetry reflection
+    float ledPulse = 0.65 + 0.75 * uFlux;
+    return mix(studio, vec3(0.32, 0.85, 1.40) * ledPulse * 1.9, 0.82);
+  }
+  if (mat == MAT_FERRO) {
+    // Inter-spike self-reflection: deep glossy obsidian catching a second bounce of the studio rig
+    vec3 n2 = calcNormalFerro(hitP);
+    vec3 r2 = reflect(rd, n2);
+    vec3 env2 = evalStudioSoftboxes(r2);
+    return vec3(0.004, 0.005, 0.007) + env2 * 0.22;
+  }
+  if (mat == MAT_COPPER) {
+    vec3 n = calcNormalScene(hitP);
+    float wire = 0.82 + 0.18 * sin(hitP.y * 220.0);
+    float ndl = 0.30 + 0.70 * max(0.0, dot(n, normalize(vec3(0.6, 0.5, 0.6))));
+    return vec3(0.75, 0.36, 0.16) * wire * ndl * 1.15;
+  }
+  if (mat == MAT_METAL) {
+    vec3 n = calcNormalScene(hitP);
+    float ndl = 0.20 + 0.80 * max(0.0, dot(n, normalize(vec3(0.5, 0.7, 0.4))));
+    return vec3(0.09, 0.105, 0.125) * ndl + studio * 0.15;
+  }
+  if (mat == MAT_FLOOR) {
+    float r = length(hitP.xz);
+    float grid = smoothstep(0.016, 0.0, abs(fract(r * 1.2) - 0.5));
+    return vec3(0.018, 0.022, 0.028) + vec3(0.05, 0.06, 0.08) * grid;
+  }
+
+  return studio;
+}
+
+// GGX Microfacet Specular
+float D_GGX(float NoH, float a) {
+  float a2 = a * a;
+  float d = (NoH * a2 - NoH) * NoH + 1.0;
+  return a2 / (PI * d * d + 1e-6);
+}
+
+float G_Smith(float NoV, float NoL, float a) {
+  float k = (a + 1.0);
+  k = (k * k) * 0.125;
+  float g1 = NoV / (NoV * (1.0 - k) + k);
+  float g2 = NoL / (NoL * (1.0 - k) + k);
+  return g1 * g2;
+}
+
+vec3 F_Schlick(float cosTheta, vec3 F0) {
+  return F0 + (1.0 - F0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Subtle physical thin-film hydrocarbon oil iridescence at extreme grazing angles
+vec3 thinFilmOilTint(float NoV) {
+  float phase = (1.0 - NoV) * 5.0;
+  vec3 irid = 0.5 + 0.5 * cos(TAU * (vec3(0.0, 0.15, 0.33) + phase * 0.26));
+  return mix(vec3(1.0), irid, 0.24 * pow(1.0 - NoV, 3.2));
+}
+
+// Shade the Ferrofluid surface (Velvety obsidian core + razor-sharp oil meniscus reflections)
+vec3 shadeFerrofluid(vec3 p, vec3 V) {
+  vec3 N = calcNormalFerro(p);
+
+  // Subtle capillary micro-ripple normal detail
+  float micro = sin(p.y * 65.0 + uTime * 2.2) * cos(atan(p.z, p.x) * 20.0);
+  N = normalize(N + vec3(0.0022 * micro, 0.0, -0.0022 * micro));
+
+  float NoV = max(dot(N, V), 0.001);
+  float ao = calcAO(p, N, 0.28);
+  // Deepen inter-spike valleys to true velvety obsidian black
+  float aoSharp = pow(ao, 1.85);
+
+  vec3 R = reflect(-V, N);
+  vec3 envRefl = traceChamberReflection(p + N * 0.005, R, true);
+
+  // Dual-lobe Fresnel:
+  // Lobe 1: Crisp glossy hydrocarbon carrier oil (n ~ 1.50 -> F0 = 0.045, strong grazing mirror)
+  vec3 F_coat = F_Schlick(NoV, vec3(0.048));
+  // Lobe 2: Magnetite nanoparticle dark metallic sheen
+  vec3 F_metal = F_Schlick(NoV, vec3(0.16, 0.175, 0.20));
+
+  vec3 oilTint = thinFilmOilTint(NoV);
+
+  // Nearly pure jet-black obsidian core
+  vec3 col = vec3(0.002, 0.0025, 0.0035);
+
+  // Mirror-like reflections of studio softboxes, copper coils & chamber
+  col += envRefl * (F_coat * 1.28 + F_metal * 0.28) * oilTint * (0.16 + 0.84 * aoSharp);
+
+  // Direct studio area-light GGX highlights (crisp pinpoint glints on spike tips & ridges)
+  vec3 lDirs[3];
+  vec3 lCols[3];
+  lDirs[0] = normalize(vec3( 2.4,  2.2,  2.1)); lCols[0] = vec3(2.8, 2.70, 2.55); // Key warm-white
+  lDirs[1] = normalize(vec3(-2.5,  0.9, -2.2)); lCols[1] = vec3(1.3, 1.75, 2.45); // Cool cyan rim
+  lDirs[2] = normalize(vec3(-1.7, -1.5,  2.0)); lCols[2] = vec3(1.0, 0.52, 0.24); // Copper bounce
+
+  for (int i = 0; i < 3; i++) {
+    vec3 L = lDirs[i];
+    vec3 H = normalize(V + L);
+    float NoL = max(dot(N, L), 0.0);
+    float NoH = max(dot(N, H), 0.0);
+    float VoH = max(dot(V, H), 0.0);
+    if (NoL > 0.0) {
+      // Razor-sharp oil meniscus specular (roughness = 0.042)
+      float D1 = D_GGX(NoH, 0.042);
+      float G1 = G_Smith(NoV, NoL, 0.042);
+      vec3  F1 = F_Schlick(VoH, vec3(0.055));
+      vec3 spec1 = (D1 * G1 * F1) / (4.0 * NoV * NoL + 1e-4);
+
+      // Broad magnetite satin sheen (roughness = 0.20)
+      float D2 = D_GGX(NoH, 0.20);
+      float G2 = G_Smith(NoV, NoL, 0.20);
+      vec3  F2 = F_Schlick(VoH, vec3(0.15, 0.165, 0.19));
+      vec3 spec2 = (D2 * G2 * F2) / (4.0 * NoV * NoL + 1e-4);
+
+      col += (spec1 * 0.72 + spec2 * 0.36) * lCols[i] * NoL * (0.18 + 0.82 * aoSharp);
+    }
+  }
+
+  // Subtle cyan-blue pole telemetry glow on top/bottom spike tips
+  float poleGlow = exp(-abs(abs(p.y) - 1.46) * 2.4) * (0.45 + 0.75 * uFlux);
+  col += vec3(0.06, 0.24, 0.44) * poleGlow * max(0.0, abs(N.y)) * (0.25 + 0.75 * aoSharp);
+
+  return col;
+}
+
+// Shade Laboratory Chamber Surfaces
+vec3 shadeChamber(vec3 p, vec3 V, float mat) {
+  if (mat == MAT_SOFTBOX) return getSoftboxEmission(p);
+  if (mat == MAT_LED) {
+    float ledPulse = 0.65 + 0.85 * uFlux;
+    return vec3(0.30, 0.82, 1.38) * ledPulse * 2.6;
+  }
+
+  vec3 N = calcNormalScene(p);
+  float NoV = max(dot(N, V), 0.001);
+  float ao = calcAO(p, N, 0.48);
+
+  vec3 albedo = vec3(0.05);
+  float metallic = 0.0;
+  float roughness = 0.4;
+
+  if (mat == MAT_METAL) {
+    float r = length(p.xz);
+    float grain = 0.91 + 0.09 * sin(r * 210.0 + atan(p.z, p.x) * 4.0);
+    albedo = vec3(0.10, 0.115, 0.135) * grain;
+    metallic = 0.90;
+    roughness = 0.26 + 0.04 * sin(r * 100.0);
+  } else if (mat == MAT_COPPER) {
+    float wire = 0.80 + 0.20 * sin(p.y * 220.0);
+    albedo = vec3(0.82, 0.40, 0.18) * wire;
+    metallic = 0.95;
+    roughness = 0.22;
+  } else if (mat == MAT_FLOOR) {
+    float r = length(p.xz);
+    float ang = atan(p.z, p.x);
+    float ring1 = smoothstep(0.011, 0.0, abs(r - 1.25));
+    float ring2 = smoothstep(0.011, 0.0, abs(r - 2.15));
+    float ring3 = smoothstep(0.013, 0.0, abs(r - 3.20));
+    float ticks = smoothstep(0.016, 0.0, abs(fract(ang / (PI / 12.0)) - 0.5))
+                * smoothstep(1.18, 1.26, r) * smoothstep(2.22, 2.10, r);
+    float groove = max(max(ring1, ring2), max(ring3, ticks * 0.55));
+    albedo = mix(vec3(0.024, 0.028, 0.035), vec3(0.095, 0.118, 0.145), groove);
+    metallic = 0.68;
+    roughness = mix(0.14, 0.42, groove);
+  } else {
+    float panels = smoothstep(0.018, 0.0, abs(fract(atan(p.z, p.x) * 2.546) - 0.5));
+    albedo = mix(vec3(0.016, 0.019, 0.025), vec3(0.008, 0.010, 0.013), panels);
+    metallic = 0.12;
+    roughness = 0.78;
+  }
+
+  vec3 F0 = mix(vec3(0.04), albedo, metallic);
+  vec3 col = albedo * (1.0 - metallic) * vec3(0.04, 0.05, 0.065) * ao;
+
+  vec3 lPos[2];
+  vec3 lCol[2];
+  lPos[0] = vec3( 3.0,  1.8,  2.6); lCol[0] = vec3(1.85, 1.76, 1.64);
+  lPos[1] = vec3(-2.8,  1.2, -2.5); lCol[1] = vec3(0.85, 1.18, 1.60);
+
+  for (int i = 0; i < 2; i++) {
+    vec3 toL = lPos[i] - p;
+    float dist = length(toL);
+    vec3 L = toL / dist;
+    float NoL = max(dot(N, L), 0.0);
+    if (NoL > 0.0) {
+      float atten = 1.0 / (1.0 + 0.042 * dist * dist);
+      float sh = (mat == MAT_WALL) ? 1.0 : calcSoftShadow(p + N * 0.015, L, 0.04, min(dist, 5.2), 6.5);
+      vec3 H = normalize(V + L);
+      float NoH = max(dot(N, H), 0.0);
+      float VoH = max(dot(V, H), 0.0);
+      float D = D_GGX(NoH, roughness);
+      float G = G_Smith(NoV, NoL, roughness);
+      vec3  F = F_Schlick(VoH, F0);
+      vec3 spec = (D * G * F) / (4.0 * NoV * NoL + 1e-4);
+      vec3 diff = (1.0 - F) * (1.0 - metallic) * albedo / PI;
+      col += (diff + spec) * lCol[i] * NoL * atten * sh;
+    }
+  }
+
+  // Cyan telemetry LED spill onto pole tips & floor
+  float ledDist = length(vec2(length(p.xz) - 0.36, abs(p.y) - 1.47));
+  float ledAtten = 1.0 / (1.0 + 3.6 * ledDist * ledDist);
+  col += vec3(0.10, 0.42, 0.72) * (0.45 + 0.75 * uFlux) * ledAtten * ao * (0.32 + 0.68 * metallic);
+
+  // Subtle moody reflection on the dark brushed optical floor (smooth radial falloff, no harsh ring!)
+  if (mat == MAT_FLOOR) {
+    float floorFade = smoothstep(5.8, 1.8, length(p.xz));
+    if (floorFade > 0.001) {
+      vec3 R = reflect(-V, N);
+      vec3 floorRefl = traceChamberReflection(p + N * 0.01, R, false);
+      // Dampen studio ceiling reflections on the matte-satin floor while preserving ferrofluid/coil bounce
+      floorRefl = min(floorRefl, vec3(0.85));
+      vec3 F = F_Schlick(NoV, F0);
+      col += floorRefl * F * 0.22 * ao * floorFade;
+    }
+  }
+
+  return col;
+}
+
+// AR-Coated Optical Quartz Containment Cylinder (r = 2.35)
+// Razor-thin optical edge Fresnel ONLY at the curved outer silhouette — never clouds the ferrofluid!
+vec3 applyGlassCylinder(vec3 ro, vec3 rd, float sceneT, vec3 col) {
+  float camR = length(ro.xz);
+  float glassVis = smoothstep(2.48, 3.05, camR);
+  if (glassVis < 0.001) return col;
+
+  const float R = 2.35;
+  float a = dot(rd.xz, rd.xz);
+  float b = dot(ro.xz, rd.xz);
+  float c = dot(ro.xz, ro.xz) - R * R;
+  float disc = b * b - a * c;
+  if (disc <= 0.0 || a < 1e-6) return col;
+
+  float tHit = (-b - sqrt(disc)) / a;
+  if (tHit > 0.05 && tHit < sceneT) {
+    vec3 gp = ro + rd * tHit;
+    if (abs(gp.y) < 1.72) {
+      vec3 gn = normalize(vec3(gp.x, 0.0, gp.z));
+      float ndv = abs(dot(gn, -rd));
+      // Ultra-clean AR-coated edge Fresnel confined strictly to the grazing silhouette rim
+      float edgeMask = pow(1.0 - ndv, 8.0);
+      vec3 glassSpec = vec3(0.68, 0.84, 1.0) * edgeMask * 0.28;
+
+      // Delicate seating gasket bevel only near the outer curved edges (never cuts across center)
+      float rimBand = smoothstep(1.66, 1.72, abs(gp.y)) * pow(1.0 - ndv, 3.5);
+      glassSpec += vec3(0.18, 0.28, 0.38) * rimBand * 0.08;
+
+      col += glassSpec * glassVis;
+    }
+  }
+  return col;
+}
+
+void main() {
+  vec2 ndc = (gl_FragCoord.xy / uRes) * 2.0 - 1.0;
+  ndc.x *= uRes.x / uRes.y;
+
+  vec3 fw = normalize(uCamTarget - uCamPos);
+  vec3 rt = normalize(cross(fw, vec3(0.0, 1.0, 0.0)));
+  vec3 up = cross(rt, fw);
+  float focal = 1.0 / tan(radians(uFov) * 0.5);
+  vec3 rd = normalize(ndc.x * rt + ndc.y * up + focal * fw);
+  vec3 ro = uCamPos;
+
+  float t = 0.0;
+  float mat = -1.0;
+  vec3 hitP = ro;
+
+  for (int i = 0; i < 136; i++) {
+    vec3 p = ro + rd * t;
+    vec2 h = mapScene(p);
+    if (h.x < 0.00075 * max(1.0, t * 0.32)) {
+      mat = h.y;
+      hitP = p;
+      break;
+    }
+    t += h.x;
+    if (t > 16.0) break;
+  }
+
+  vec3 col = vec3(0.006, 0.008, 0.011);
+  if (mat == MAT_FERRO) {
+    col = shadeFerrofluid(hitP, -rd);
+  } else if (mat > 0.0) {
+    col = shadeChamber(hitP, -rd, mat);
+  }
+
+  // Ultra-subtle atmospheric depth in the dark chamber (never washes out black ferrofluid)
+  float fog = 1.0 - exp(-t * t * 0.0032);
+  col = mix(col, vec3(0.007, 0.009, 0.013), fog * 0.45);
+
+  // Subtle AR-coated quartz containment cylinder rim glints
+  col = applyGlassCylinder(ro, rd, t, col);
+
+  fragColor = vec4(max(col, 0.0), 1.0);
+}
+</script>
+
+<script id="fs-bloom" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform sampler2D uTex;
+uniform vec2 uDir;
+uniform int uExtract;
+
+void main() {
+  const float w[5] = float[5](0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216);
+  vec3 acc = vec3(0.0);
+
+  for (int i = -4; i <= 4; i++) {
+    vec2 uv = clamp(vUv + uDir * float(i), 0.001, 0.999);
+    vec3 c = texture(uTex, uv).rgb;
+    if (uExtract == 1) {
+      float lum = dot(c, vec3(0.2126, 0.7152, 0.0722));
+      float knee = smoothstep(0.85, 2.2, lum);
+      c *= knee;
+    }
+    acc += c * w[abs(i)];
+  }
+  fragColor = vec4(acc, 1.0);
+}
+</script>
+
+<script id="fs-composite" type="x-shader/x-fragment">#version 300 es
+precision highp float;
+in vec2 vUv;
+out vec4 fragColor;
+
+uniform sampler2D uScene;
+uniform sampler2D uBloom;
+uniform float uTime;
+
+// ACES Filmic Tone Mapping (Narkowicz fit)
+vec3 aces(vec3 x) {
+  const float a = 2.51;
+  const float b = 0.03;
+  const float c = 2.43;
+  const float d = 0.59;
+  const float e = 0.14;
+  return clamp((x * (a * x + b)) / (x * (c * x + d) + e), 0.0, 1.0);
+}
+
+float hash12(vec2 p) {
+  vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+  p3 += dot(p3, p3.yzx + 33.33);
+  return fract((p3.x + p3.y) * p3.z);
+}
+
+void main() {
+  vec2 centered = vUv - 0.5;
+  float r2 = dot(centered, centered);
+
+  // Subtle macro-lens radial chromatic dispersion at frame corners
+  vec2 ca = centered * (0.0022 * r2);
+  vec3 sceneCol;
+  sceneCol.r = texture(uScene, clamp(vUv + ca, 0.0, 1.0)).r;
+  sceneCol.g = texture(uScene, vUv).g;
+  sceneCol.b = texture(uScene, clamp(vUv - ca, 0.0, 1.0)).b;
+
+  vec3 bloomCol = texture(uBloom, vUv).rgb;
+  vec3 hdr = sceneCol + bloomCol * 0.34;
+
+  // Exposure & ACES Filmic curve
+  vec3 col = aces(hdr * 1.12);
+
+  // Subtle cinematic studio contrast & cool shadow grade
+  col = pow(col, vec3(1.0 / 2.2));
+
+  // Gentle optical lens vignette
+  float vig = 1.0 - smoothstep(0.28, 1.08, r2 * 1.35) * 0.36;
+  col *= vig;
+
+  // Subtle organic 35mm micro-grain to eliminate dark-chamber banding
+  float grain = (hash12(gl_FragCoord.xy + fract(uTime) * 100.0) - 0.5) * 0.012;
+  col = clamp(col + grain, 0.0, 1.0);
+
+  fragColor = vec4(col, 1.0);
+}
+</script>
+
+<script>
+(() => {
+  const canvas = document.getElementById('gl');
+  const gl = canvas.getContext('webgl2', {
+    antialias: false,
+    alpha: false,
+    depth: false,
+    stencil: false,
+    powerPreference: 'high-performance',
+    preserveDrawingBuffer: true
+  });
+
+  if (!gl) {
+    document.body.innerHTML = '<div style="padding:40px;color:#ccc;font-family:sans-serif">WebGL2 is required to view this simulation.</div>';
+    return;
+  }
+
+  const extColorBufferFloat = gl.getExtension('EXT_color_buffer_float');
+  const extLinearFloat = gl.getExtension('OES_texture_float_linear');
+  const useHDR = Boolean(extColorBufferFloat);
+
+  function compileShader(type, src) {
+    const sh = gl.createShader(type);
+    gl.shaderSource(sh, src);
+    gl.compileShader(sh);
+    if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) {
+      const log = gl.getShaderInfoLog(sh);
+      console.error('Shader compile error:', log);
+      throw new Error(log);
+    }
+    return sh;
+  }
+
+  function createProgram(vsSrc, fsSrc) {
+    const prog = gl.createProgram();
+    gl.attachShader(prog, compileShader(gl.VERTEX_SHADER, vsSrc));
+    gl.attachShader(prog, compileShader(gl.FRAGMENT_SHADER, fsSrc));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+      throw new Error(gl.getProgramInfoLog(prog));
+    }
+    return prog;
+  }
+
+  const vsSrc = document.getElementById('vs-quad').textContent;
+  const progScene = createProgram(vsSrc, document.getElementById('fs-scene').textContent);
+  const progBloom = createProgram(vsSrc, document.getElementById('fs-bloom').textContent);
+  const progComposite = createProgram(vsSrc, document.getElementById('fs-composite').textContent);
+
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  function createTarget(w, h, hdr) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    const internalFormat = hdr ? gl.RGBA16F : gl.RGBA8;
+    const type = hdr ? gl.HALF_FLOAT : gl.UNSIGNED_BYTE;
+    gl.texImage2D(gl.TEXTURE_2D, 0, internalFormat, w, h, 0, gl.RGBA, type, null);
+    const filter = (hdr && !extLinearFloat) ? gl.NEAREST : gl.LINEAR;
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    const fbo = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    return { tex, fbo, w, h };
+  }
+
+  let rtScene = null, rtBloomA = null, rtBloomB = null;
+  let renderW = 1, renderH = 1, bloomW = 1, bloomH = 1;
+  let dprScale = Math.min(window.devicePixelRatio || 1, 1.5);
+
+  function resize() {
+    const cssW = window.innerWidth;
+    const cssH = window.innerHeight;
+    const targetW = Math.max(2, Math.floor(cssW * dprScale));
+    const targetH = Math.max(2, Math.floor(cssH * dprScale));
+    if (targetW === renderW && targetH === renderH && rtScene) return;
+
+    renderW = targetW;
+    renderH = targetH;
+    canvas.width = renderW;
+    canvas.height = renderH;
+
+    bloomW = Math.max(2, Math.floor(renderW * 0.5));
+    bloomH = Math.max(2, Math.floor(renderH * 0.5));
+
+    [rtScene, rtBloomA, rtBloomB].forEach(rt => {
+      if (rt) { gl.deleteTexture(rt.tex); gl.deleteFramebuffer(rt.fbo); }
+    });
+    rtScene = createTarget(renderW, renderH, useHDR);
+    rtBloomA = createTarget(bloomW, bloomH, useHDR);
+    rtBloomB = createTarget(bloomW, bloomH, useHDR);
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  // --- Interactive Orbit Camera with Smooth Auto-Glide Resume ---
+  const cam = {
+    yaw: 0.48,
+    pitch: 0.12,
+    dist: 3.72,
+    targetYaw: 0.48,
+    targetPitch: 0.12,
+    targetDist: 3.72,
+    velYaw: 0,
+    velPitch: 0,
+    autoBlend: 1.0,
+    lastInputTime: -999,
+    isDragging: false,
+    pointers: new Map(),
+    lastPinchDist: 0,
+    lastPointerX: 0,
+    lastPointerY: 0,
+    minDist: 1.65,
+    maxDist: 4.95,
+    minPitch: -0.35,
+    maxPitch: 0.72
+  };
+
+  const hintEl = document.getElementById('hintLabel');
+  let hintFaded = false;
+
+  function registerInput(nowSec) {
+    cam.lastInputTime = nowSec;
+    cam.autoBlend = 0.0;
+    if (!hintFaded) {
+      hintFaded = true;
+      hintEl.classList.add('faded');
+    }
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    canvas.setPointerCapture(e.pointerId);
+    cam.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    registerInput(performance.now() * 0.001);
+    if (cam.pointers.size === 1) {
+      cam.isDragging = true;
+      cam.lastPointerX = e.clientX;
+      cam.lastPointerY = e.clientY;
+    } else if (cam.pointers.size === 2) {
+      cam.isDragging = false;
+      const pts = Array.from(cam.pointers.values());
+      cam.lastPinchDist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!cam.pointers.has(e.pointerId)) return;
+    cam.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    registerInput(performance.now() * 0.001);
+
+    if (cam.pointers.size === 1 && cam.isDragging) {
+      const dx = e.clientX - cam.lastPointerX;
+      const dy = e.clientY - cam.lastPointerY;
+      cam.lastPointerX = e.clientX;
+      cam.lastPointerY = e.clientY;
+      const sens = 0.0062;
+      cam.targetYaw -= dx * sens;
+      cam.targetPitch = Math.max(cam.minPitch, Math.min(cam.maxPitch, cam.targetPitch + dy * sens));
+    } else if (cam.pointers.size === 2) {
+      const pts = Array.from(cam.pointers.values());
+      const dist = Math.hypot(pts[1].x - pts[0].x, pts[1].y - pts[0].y);
+      if (cam.lastPinchDist > 0) {
+        const ratio = cam.lastPinchDist / Math.max(10, dist);
+        cam.targetDist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.targetDist * ratio));
+      }
+      cam.lastPinchDist = dist;
+    }
+  });
+
+  function endPointer(e) {
+    cam.pointers.delete(e.pointerId);
+    if (cam.pointers.size === 1) {
+      const pt = Array.from(cam.pointers.values())[0];
+      cam.isDragging = true;
+      cam.lastPointerX = pt.x;
+      cam.lastPointerY = pt.y;
+      cam.lastPinchDist = 0;
+    } else if (cam.pointers.size === 0) {
+      cam.isDragging = false;
+      cam.lastPinchDist = 0;
+    }
+  }
+  canvas.addEventListener('pointerup', endPointer);
+  canvas.addEventListener('pointercancel', endPointer);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    registerInput(performance.now() * 0.001);
+    const delta = Math.sign(e.deltaY) * Math.min(Math.abs(e.deltaY), 120) * 0.0022;
+    cam.targetDist = Math.max(cam.minDist, Math.min(cam.maxDist, cam.targetDist * (1.0 + delta)));
+  }, { passive: false });
+
+  const locScene = {
+    uRes: gl.getUniformLocation(progScene, 'uRes'),
+    uTime: gl.getUniformLocation(progScene, 'uTime'),
+    uCamPos: gl.getUniformLocation(progScene, 'uCamPos'),
+    uCamTarget: gl.getUniformLocation(progScene, 'uCamTarget'),
+    uFov: gl.getUniformLocation(progScene, 'uFov'),
+    uFlux: gl.getUniformLocation(progScene, 'uFlux'),
+    uRosensweig: gl.getUniformLocation(progScene, 'uRosensweig'),
+    uWaves: gl.getUniformLocation(progScene, 'uWaves'),
+    uDroplets: gl.getUniformLocation(progScene, 'uDroplets'),
+    uTorus: gl.getUniformLocation(progScene, 'uTorus'),
+    uPoly: gl.getUniformLocation(progScene, 'uPoly')
+  };
+  const locBloom = {
+    uTex: gl.getUniformLocation(progBloom, 'uTex'),
+    uDir: gl.getUniformLocation(progBloom, 'uDir'),
+    uExtract: gl.getUniformLocation(progBloom, 'uExtract')
+  };
+  const locComp = {
+    uScene: gl.getUniformLocation(progComposite, 'uScene'),
+    uBloom: gl.getUniformLocation(progComposite, 'uBloom'),
+    uTime: gl.getUniformLocation(progComposite, 'uTime')
+  };
+
+  const phaseLabelEl = document.getElementById('phaseLabel');
+  const fluxValEl = document.getElementById('fluxVal');
+
+  function smoothstep(e0, e1, x) {
+    const t = Math.max(0, Math.min(1, (x - e0) / (e1 - e0)));
+    return t * t * (3 - 2 * t);
+  }
+
+  // Smooth, continuous 45-second electromagnetic choreography loop
+  // Every phase transitions seamlessly through viscous liquid states
+  function evalChoreography(t) {
+    const T = 45.0;
+    const p = ((t % T) + T) % T; // 0..45s
+
+    // Overlapping Gaussian/smoothstep envelopes for C2 continuity
+    // 0..10s:  Rosensweig Instability Spike Eruption (starts active so first frame is iconic!)
+    // 9..19s:  Organic Magnetic Waves & Branching Dendritic Ridges
+    // 18..28s: High-Gradient Satellite Droplet Pinch-off & Coalescence
+    // 27..36s: Coherent Sculptural Form — Magnetic Flux Torus Crown
+    // 35..44s: Programmable Matter — Geodesic Harmonic Polyhedron -> returns to Rosensweig
+    const bump = (center, halfW) => {
+      let d = Math.abs(p - center);
+      d = Math.min(d, T - d);
+      return 1.0 - smoothstep(halfW * 0.35, halfW, d);
+    };
+
+    let wRos = bump(4.5, 6.8) + bump(44.5, 5.5);
+    let wWav = bump(14.0, 6.5);
+    let wDrp = bump(23.0, 6.5);
+    let wTor = bump(31.5, 5.8);
+    let wPol = bump(39.5, 5.5);
+
+    const sum = wRos + wWav + wDrp + wTor + wPol + 1e-5;
+    wRos /= sum; wWav /= sum; wDrp /= sum; wTor /= sum; wPol /= sum;
+
+    // Magnetic flux intensity B (0.35..1.0 normalized -> 18..78 mT)
+    const flux = Math.max(0.25, Math.min(1.0,
+      0.55 + 0.38 * wRos + 0.25 * wWav + 0.32 * wDrp + 0.42 * wTor + 0.36 * wPol
+      + 0.08 * Math.sin(t * 1.1)
+    ));
+
+    let label = 'ROSENSWEIG INSTABILITY';
+    const maxW = Math.max(wRos, wWav, wDrp, wTor, wPol);
+    if (maxW === wWav) label = 'HELICAL FLUX WAVES · BRANCHING';
+    else if (maxW === wDrp) label = 'PINCH-OFF · DROPLET COALESCENCE';
+    else if (maxW === wTor) label = 'MAGNETIC FLUX TORUS';
+    else if (maxW === wPol) label = 'HARMONIC GEODESIC LATTICE';
+
+    return { flux, wRos, wWav, wDrp, wTor, wPol, label };
+  }
+
+  let simTime = 3.2; // Start directly in dramatic Rosensweig spike formation
+  let lastFrameMs = performance.now();
+  let paused = false;
+
+  // Optional URL parameters for deterministic multi-angle inspection (?t=&yaw=&pitch=&dist=&pause=1)
+  const qs = new URLSearchParams(window.location.search);
+  if (qs.has('t')) simTime = parseFloat(qs.get('t')) || simTime;
+  if (qs.has('yaw')) { cam.yaw = cam.targetYaw = parseFloat(qs.get('yaw')); }
+  if (qs.has('pitch')) { cam.pitch = cam.targetPitch = parseFloat(qs.get('pitch')); }
+  if (qs.has('dist')) { cam.dist = cam.targetDist = parseFloat(qs.get('dist')); }
+  if (qs.get('pause') === '1') paused = true;
+
+  // Expose minimal deterministic state hook for automated inspection/testing
+  window.__FERRO = {
+    setState({ time, yaw, pitch, dist, pause } = {}) {
+      if (typeof time === 'number') simTime = time;
+      if (typeof yaw === 'number') { cam.yaw = cam.targetYaw = yaw; }
+      if (typeof pitch === 'number') { cam.pitch = cam.targetPitch = pitch; }
+      if (typeof dist === 'number') { cam.dist = cam.targetDist = dist; }
+      if (typeof pause === 'boolean') paused = pause;
+      renderFrame(0);
+    },
+    getCamera() {
+      return { yaw: cam.yaw, pitch: cam.pitch, dist: cam.dist, autoBlend: cam.autoBlend };
+    }
+  };
+
+  function renderFrame(dt) {
+    resize();
+
+    const nowSec = performance.now() * 0.001;
+    const idleSec = nowSec - cam.lastInputTime;
+
+    // Smoothly resume automatic cinematic glide after 3.5 seconds of no user input
+    if (!cam.isDragging && cam.pointers.size === 0 && idleSec > 3.5) {
+      cam.autoBlend = Math.min(1.0, cam.autoBlend + dt * 0.42);
+    }
+
+    if (!paused && cam.autoBlend > 0.001) {
+      const b = cam.autoBlend * cam.autoBlend * (3.0 - 2.0 * cam.autoBlend);
+      // Gentle cinematic 360-degree orbit + subtle vertical & focal breathing
+      cam.targetYaw += dt * 0.145 * b;
+      const autoPitch = 0.12 + 0.16 * Math.sin(simTime * 0.17);
+      const autoDist  = 3.68 + 0.52 * Math.sin(simTime * 0.13 + 0.8);
+      cam.targetPitch += (autoPitch - cam.targetPitch) * Math.min(1.0, dt * 0.55 * b);
+      cam.targetDist  += (autoDist  - cam.targetDist)  * Math.min(1.0, dt * 0.55 * b);
+    }
+
+    // Critically-damped smooth camera interpolation
+    const damp = 1.0 - Math.exp(-dt * 7.5);
+    if (dt > 0) {
+      cam.yaw   += (cam.targetYaw   - cam.yaw)   * damp;
+      cam.pitch += (cam.targetPitch - cam.pitch) * damp;
+      cam.dist  += (cam.targetDist  - cam.dist)  * damp;
+    }
+
+    const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    const cy = Math.cos(cam.yaw),   sy = Math.sin(cam.yaw);
+    const camX = cam.dist * cp * sy;
+    const camY = cam.dist * sp;
+    const camZ = cam.dist * cp * cy;
+
+    const ch = evalChoreography(simTime);
+    phaseLabelEl.textContent = ch.label;
+    fluxValEl.textContent = (ch.flux * 78.4).toFixed(1) + ' mT';
+
+    const aspect = renderW / Math.max(1, renderH);
+    const fov = aspect < 1.0 ? Math.min(62.0, 42.0 / Math.pow(aspect, 0.55)) : 42.0;
+
+    // --- Pass 1: Raymarch Scene ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rtScene.fbo);
+    gl.viewport(0, 0, renderW, renderH);
+    gl.useProgram(progScene);
+    gl.uniform2f(locScene.uRes, renderW, renderH);
+    gl.uniform1f(locScene.uTime, simTime);
+    gl.uniform3f(locScene.uCamPos, camX, camY, camZ);
+    gl.uniform3f(locScene.uCamTarget, 0.0, 0.0, 0.0);
+    gl.uniform1f(locScene.uFov, fov);
+    gl.uniform1f(locScene.uFlux, ch.flux);
+    gl.uniform1f(locScene.uRosensweig, ch.wRos);
+    gl.uniform1f(locScene.uWaves, ch.wWav);
+    gl.uniform1f(locScene.uDroplets, ch.wDrp);
+    gl.uniform1f(locScene.uTorus, ch.wTor);
+    gl.uniform1f(locScene.uPoly, ch.wPol);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // --- Pass 2: Bloom Extract + Horizontal Blur ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rtBloomA.fbo);
+    gl.viewport(0, 0, bloomW, bloomH);
+    gl.useProgram(progBloom);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rtScene.tex);
+    gl.uniform1i(locBloom.uTex, 0);
+    gl.uniform2f(locBloom.uDir, 1.5 / bloomW, 0.0);
+    gl.uniform1i(locBloom.uExtract, 1);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // --- Pass 3: Bloom Vertical Blur ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, rtBloomB.fbo);
+    gl.viewport(0, 0, bloomW, bloomH);
+    gl.bindTexture(gl.TEXTURE_2D, rtBloomA.tex);
+    gl.uniform2f(locBloom.uDir, 0.0, 1.5 / bloomH);
+    gl.uniform1i(locBloom.uExtract, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    // --- Pass 4: Composite + ACES Filmic Tone Mapping ---
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    gl.viewport(0, 0, renderW, renderH);
+    gl.useProgram(progComposite);
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, rtScene.tex);
+    gl.uniform1i(locComp.uScene, 0);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, rtBloomB.tex);
+    gl.uniform1i(locComp.uBloom, 1);
+    gl.uniform1f(locComp.uTime, simTime);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  function loop(nowMs) {
+    const dt = Math.min(0.05, Math.max(0.0, (nowMs - lastFrameMs) * 0.001));
+    lastFrameMs = nowMs;
+    if (!paused) simTime += dt;
+    renderFrame(dt);
+    requestAnimationFrame(loop);
+  }
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>

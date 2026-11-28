@@ -1,0 +1,1116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>The Obsidian Gate</title>
+<style>
+html,body{margin:0;height:100%;background:#050608;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas{position:fixed;inset:0;width:100vw;height:100vh;height:100dvh;display:block;touch-action:none;cursor:grab;outline:none}
+canvas.drag{cursor:grabbing}
+#hint{position:fixed;left:50%;bottom:max(22px,env(safe-area-inset-bottom));transform:translateX(-50%);font:500 10.5px/1.4 ui-sans-serif,system-ui,-apple-system,"Helvetica Neue",sans-serif;letter-spacing:.24em;text-transform:uppercase;color:rgba(232,222,206,.5);pointer-events:none;transition:opacity 2.5s ease;white-space:nowrap;text-shadow:0 1px 6px rgba(0,0,0,.6)}
+#err{position:fixed;inset:0;display:none;align-items:center;justify-content:center;padding:24px;color:#d9cbb5;font:14px/1.5 ui-monospace,Menlo,monospace;white-space:pre-wrap;background:#0b0c0e}
+</style>
+</head>
+<body>
+<canvas id="c" tabindex="0"></canvas>
+<div id="hint">Drag to orbit &middot; Scroll or pinch to zoom</div>
+<div id="err"></div>
+
+<!-- ============================ SHARED GLSL ============================ -->
+<script type="x-shader/x-fragment" id="fs-common">
+precision highp float;
+precision highp sampler2D;
+uniform vec2 uRes;
+uniform float uTime;
+uniform vec3 uCamPos;
+uniform mat3 uCam;
+uniform float uK;
+uniform float uAct;
+uniform float uOpen;
+uniform float uPulse;
+uniform sampler2D uNoise;
+uniform vec2 uNF;
+out vec4 fragColor;
+
+#define PI 3.14159265
+#define TAU 6.2831853
+const vec3 APC = vec3(0.0, 7.0, 0.0);
+const vec2 APR = vec2(2.2, 3.6);
+const vec3 SUN = normalize(vec3(-0.62, 0.16, -0.77));
+const vec3 SUNC = vec3(1.0, 0.62, 0.40) * 3.4;
+const vec3 OSUN = normalize(vec3(0.85, 0.24, -0.62));
+const vec3 PFRONT = vec3(1.0, 0.80, 0.56);
+const vec3 PBACK = vec3(0.56, 0.78, 0.96);
+const float LENS_K = 0.055;
+float gT = 0.0;
+
+float h11(float n){ return fract(sin(n*127.1 + 13.7)*43758.5453); }
+float h21(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)))*43758.5453); }
+vec2 h22(vec2 p){ return fract(sin(vec2(dot(p, vec2(127.1, 311.7)), dot(p, vec2(269.5, 183.3))))*43758.5453); }
+mat2 rot(float a){ float c = cos(a), s = sin(a); return mat2(c, -s, s, c); }
+
+float noise3(vec3 x){
+  vec3 p = floor(x); vec3 f = fract(x); f = f*f*(3.0 - 2.0*f);
+  vec2 uv = (p.xy + vec2(37.0, 17.0)*p.z) + f.xy;
+  vec2 rg = textureLod(uNoise, (uv + 0.5)/256.0, 0.0).yx;
+  return mix(rg.x, rg.y, f.z);
+}
+float noise2(vec2 x){
+  vec2 p = floor(x); vec2 f = fract(x); f = f*f*(3.0 - 2.0*f);
+  ivec2 i = ivec2(p) & 255;
+  float a = texelFetch(uNoise, i, 0).x, b = texelFetch(uNoise, (i + ivec2(1, 0)) & 255, 0).x;
+  float c = texelFetch(uNoise, (i + ivec2(0, 1)) & 255, 0).x, d = texelFetch(uNoise, (i + ivec2(1, 1)) & 255, 0).x;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm3(vec3 p){ float s = 0.0, a = 0.5; for(int i = 0; i < 4; i++){ s += a*noise3(p); p = p*2.02 + vec3(5.1, 1.3, 7.7); a *= 0.5; } return s/0.9375; }
+float fbm2(vec2 p){ float s = 0.0, a = 0.5; for(int i = 0; i < 5; i++){ s += a*noise2(p); p = mat2(1.6, 1.2, -1.2, 1.6)*p + vec2(3.1, 7.9); a *= 0.5; } return s/0.96875; }
+
+float sdBox(vec3 p, vec3 b){ vec3 q = abs(p) - b; return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0); }
+float sdRBox(vec3 p, vec3 b, float r){ return sdBox(p, b - r) - r; }
+float sdEll(vec2 p, vec2 r){ float k0 = length(p/r); float k1 = length(p/(r*r)); return k0*(k0 - 1.0)/max(k1, 1e-4); }
+vec4 hexCell(vec2 p){
+  const vec2 s = vec2(1.0, 1.7320508);
+  vec4 hC = floor(vec4(p, p - vec2(0.5, 1.0))/s.xyxy) + 0.5;
+  vec4 h = vec4(p - hC.xy*s, p - (hC.zw + 0.5)*s);
+  return dot(h.xy, h.xy) < dot(h.zw, h.zw) ? vec4(h.xy, hC.xy) : vec4(h.zw, hC.zw + 0.5);
+}
+float hexD(vec2 h){ h = abs(h); return max(dot(h, vec2(0.5, 0.8660254)), h.x); }
+float roundEdge(vec2 q, float r){ return length(max(q + r, 0.0)) + min(max(q.x + r, q.y + r), 0.0) - r; }
+</script>
+
+<!-- ======================= OUR WORLD: GEOMETRY ======================== -->
+<script type="x-shader/x-fragment" id="fs-world">
+// ---- columnar basalt ground (natural jointing, levelled into a plaza) ----
+float colTop(vec2 c, float h, out float rise){
+  float r = length(c - vec2(0.0, -1.0));
+  float pz = smoothstep(14.0, 17.0, r);
+  float n = noise2(c*0.05 + vec2(3.0, 7.0));
+  float top = -0.012*h - 0.05*(1.0 - pz)*noise2(c*0.35);
+  top += ((0.1 + 1.3*n*n)*smoothstep(22.0, 60.0, r) + 0.05*h*pz)*pz;
+  float cz = c.y + 4.0*sin(c.x*0.06) + 3.0*noise2(c*0.1);
+  float cl = smoothstep(-74.0, -84.0, cz);
+  top += cl*(22.0 + 16.0*noise2(c*0.03) + 0.8*h);
+  rise = 0.06 + 1.2*pz + 30.0*smoothstep(-70.0, -86.0, cz);
+  return top;
+}
+vec2 mapGround(vec3 p){
+  if (p.y > 31.0) return vec2(p.y - 30.0, 1.0);
+  if (gT > 72.0) {
+    float rise; float top = colTop(p.xz, 0.5, rise);
+    return vec2((p.y - top - 0.1)*0.32, 1.0);
+  }
+  vec2 w = p.xz + 0.45*vec2(noise2(p.xz*0.13), noise2(p.xz*0.13 + vec2(41.0, 13.0))) - 0.225;
+  const float S = 1.15;
+  vec4 hc = hexCell(w/S);
+  vec2 c = (w/S - hc.xy)*S;
+  float h = h21(hc.zw);
+  float rise; float top = colTop(c, h, rise);
+  float e = (hexD(hc.xy) - 0.5)*S;
+  float gap = (0.03 + 0.035*h)*smoothstep(70.0, 35.0, gT);
+  float yd = p.y - top - 0.02*noise2(p.xz*3.0 + h*20.0);
+  float dc = roundEdge(vec2(e + gap, yd), (0.05 + 0.07*h)*smoothstep(70.0, 35.0, gT) + 0.002);
+  dc = min(dc, max(-e + 0.04, yd - rise));
+  float soil = p.y - (top - 0.07 - 0.07*noise2(p.xz*2.3));
+  return dc < soil ? vec2(dc*0.85, 1.0) : vec2(soil*0.85, 6.0);
+}
+
+// ---- stone circle of quarried basalt pillars ----
+vec2 mapPillars(vec3 p){
+  const float N = 9.0;
+  float a = atan(p.z, p.x) - 0.25;
+  float sec = floor(a/(TAU/N) + 0.5);
+  float an = sec*TAU/N + 0.25;
+  float idx = mod(sec + 90.0, N);
+  float hs = h11(idx + 11.0);
+  float R = 12.0 + 0.8*(hs - 0.5);
+  vec3 l = p - vec3(cos(an)*R, 0.0, sin(an)*R);
+  float d;
+  if (abs(idx - 3.0) < 0.5) {
+    vec2 tg = vec2(-sin(an), cos(an));
+    vec3 f = vec3(dot(l.xz, tg), l.y - 0.5, dot(l.xz, vec2(cos(an), sin(an))));
+    f.z += f.x*0.1;
+    float seg = clamp(floor(f.x/1.95 + 0.5), -1.0, 1.0);
+    f.x -= seg*1.95;
+    f.z -= seg*seg*0.25;
+    f.yz = rot(seg*0.45 + 0.2)*f.yz;
+    d = roundEdge(vec2(hexD(f.yz) - 0.6, abs(f.x) - 0.86 - 0.06*noise3(f*3.0)), 0.06);
+  } else {
+    float H = abs(idx - 7.0) < 0.5 ? 1.25 : 3.3 + 4.4*h11(idx + 3.0);
+    float lean = (h11(idx + 7.0) - 0.5)*0.12;
+    l.x -= l.y*lean;
+    l.xz = rot(hs*3.0)*l.xz;
+    float rad = 0.62 + 0.15*h11(idx + 5.0);
+    float dh = hexD(l.xz) - rad;
+    vec3 bn = normalize(vec3(h11(idx + 1.0) - 0.5, 1.5, h11(idx + 2.0) - 0.5));
+    float dt = dot(l - vec3(0.0, H, 0.0), bn) + 0.14*(noise3(l*2.5) - 0.5);
+    d = roundEdge(vec2(dh, dt), 0.05);
+    float jy = abs(fract(l.y/0.92 + hs) - 0.5);
+    d += 0.022*smoothstep(0.45, 0.5, jy);
+    d = max(d, -l.y - 1.0);
+  }
+  d += 0.03*(noise3(p*1.9) - 0.5);
+  return vec2(d, 4.0);
+}
+
+// ---- ashlar gateway: plinth, ruined wall, obsidian voussoir ring ----
+float wallLimit(float bx, float course, float bcx){
+  float lim = 12.9 + 1.0*(noise2(vec2(bcx*0.5, 3.7)) - 0.5);
+  lim -= 3.4*smoothstep(0.8, 4.4, bcx);
+  lim -= 1.2*smoothstep(-1.5, -4.6, bcx);
+  lim += 0.5*(h21(vec2(bx, course)) - 0.5);
+  return lim;
+}
+const float CYC = 3.1;
+float courseOf(float y){
+  float cb = floor(y/CYC); float yy = y - cb*CYC;
+  float k = yy < 0.95 ? 0.0 : (yy < 1.65 ? 1.0 : (yy < 2.5 ? 2.0 : 3.0));
+  return cb*4.0 + k;
+}
+void courseInfo(float course, out float y0, out float hc){
+  float cb = floor(course/4.0); float k = course - cb*4.0;
+  float st = k < 0.5 ? 0.0 : (k < 1.5 ? 0.95 : (k < 2.5 ? 1.65 : 2.5));
+  hc = k < 0.5 ? 0.95 : (k < 1.5 ? 0.7 : (k < 2.5 ? 0.85 : 0.6));
+  y0 = cb*CYC + st;
+}
+float carveCourse(vec3 w, float course){
+  if (course < 0.0) return 1e9;
+  float y0, hc; courseInfo(course, y0, hc);
+  float bw = 1.05 + 0.6*h11(course*7.13);
+  float st = h11(course*3.31)*bw;
+  float bx = floor((w.x + st)/bw);
+  float top = y0 + hc + 1.6;
+  if (top <= wallLimit(bx, course, (bx + 0.5)*bw - st)) return 1e9;
+  float x0 = bx*bw - st, x1 = x0 + bw;
+  if (top > wallLimit(bx - 1.0, course, (bx - 0.5)*bw - st)) x0 -= bw;
+  if (top > wallLimit(bx + 1.0, course, (bx + 1.5)*bw - st)) x1 += bw;
+  vec3 c = vec3(0.5*(x0 + x1), y0 + 10.0, 0.0);
+  return sdBox(w - c, vec3(0.5*(x1 - x0) + 0.003, 10.0, 3.0));
+}
+vec2 mapGate(vec3 p){
+  // plinth: three stepped courses of fitted basalt slabs
+  float dP;
+  {
+    float t1 = sdRBox(p - vec3(0.0, 0.12, 0.0), vec3(7.0, 0.43, 4.4), 0.07);
+    float t2 = sdRBox(p - vec3(0.0, 0.825, 0.0), vec3(5.9, 0.28, 3.4), 0.06);
+    float t3 = sdRBox(p - vec3(0.0, 1.35, 0.0), vec3(5.0, 0.26, 2.5), 0.06);
+    dP = min(t1, min(t2, t3));
+    float lvl = p.y < 0.55 ? 0.0 : (p.y < 1.1 ? 1.0 : 2.0);
+    vec2 g = p.xz/vec2(1.45, 1.2) + vec2(lvl*0.5, lvl*0.33);
+    vec2 gi = floor(g); vec2 gf = fract(g) - 0.5;
+    float ed = min(0.5 - abs(gf.x), 0.5 - abs(gf.y))*1.2;
+    float hb = h21(gi + lvl*17.0);
+    dP += 0.024*(1.0 - smoothstep(0.0, 0.035, ed));
+    dP -= 0.02*hb*smoothstep(0.03, 0.15, ed);
+    dP += 0.05*(noise3(p*1.7) - 0.5);
+  }
+  // wall of rusticated ashlar courses, ruined at the top
+  vec2 rp = p.xy - APC.xy;
+  float dE = sdEll(rp, APR);
+  float dW;
+  {
+    vec3 w = p - vec3(0.0, 1.6, 0.0);
+    float course = courseOf(w.y);
+    float y0, CH; courseInfo(course, y0, CH);
+    float cy = w.y - y0 - CH*0.5;
+    float bw = 1.05 + 0.6*h11(course*7.13);
+    float st = h11(course*3.31)*bw;
+    float u = (w.x + st)/bw;
+    float bx = floor(u);
+    float cx = (fract(u) - 0.5)*bw;
+    dW = sdBox(w - vec3(0.0, 6.0, 0.0), vec3(4.6, 6.0, 0.85));
+    if (w.y > 6.0 && dW < 1.0) {
+      float cv = min(carveCourse(w, course), carveCourse(w, course - 1.0));
+      dW = max(dW, -cv);
+    }
+    float ed = min(bw*0.5 - abs(cx), CH*0.5 - abs(cy));
+    float bh = h21(vec2(bx, course));
+    dW -= smoothstep(0.015, 0.25, ed)*(0.035 + 0.06*bh) + 0.04*(h21(vec2(bx + 0.5, course)) - 0.5)*step(0.6, abs(w.z));
+    dW += 0.022*(1.0 - smoothstep(0.0, 0.03, ed));
+    dW += 0.045*(noise3(p*1.6) - 0.5);
+    dW = max(dW, -(dE - 0.84));
+  }
+  // voussoir ring of knapped and polished obsidian
+  float dR;
+  {
+    const float RW = 0.82;
+    dR = roundEdge(vec2(abs(dE - RW*0.5) - RW*0.5, abs(p.z) - 0.97), 0.08);
+    float ang = atan(rp.y/APR.y, rp.x/APR.x);
+    float s = (ang - PI*0.5)/TAU*19.0;
+    float si = floor(s + 0.5);
+    float jd = (0.5 - abs(s - si))*0.95;
+    dR += 0.03*(1.0 - smoothstep(0.0, 0.025, jd));
+    float inner = smoothstep(0.02, 0.12, jd);
+    dR -= 0.035*h11(si + 40.0)*inner;
+    if (abs(si) < 0.5) dR -= 0.07*inner;
+    dR += 0.012*(noise3(p*3.1) - 0.5);
+  }
+  vec2 res = vec2(dP, 2.0);
+  if (dW < res.x) res = vec2(dW, 2.0);
+  if (dR < res.x) res = vec2(dR, 3.0);
+  return res;
+}
+vec2 mapRubble(vec3 p){
+  float d = 1e9;
+  for (int i = 0; i < 7; i++){
+    float fi = float(i);
+    float side = i < 5 ? 1.0 : -1.0;
+    vec3 sz = vec3(0.42 + 0.3*h11(fi + 3.0), 0.3 + 0.12*h11(fi + 4.0), 0.55 + 0.3*h11(fi + 5.0));
+    vec3 c = vec3(side*(7.8 + 2.4*h11(fi + 1.0)), sz.y - 0.1, -3.2 + 6.4*h11(fi + 2.0));
+    vec3 q = p - c;
+    q.xz = rot(h11(fi + 6.0)*3.0)*q.xz;
+    q.xy = rot((h11(fi + 7.0) - 0.5)*0.3)*q.xy;
+    d = min(d, sdRBox(q, sz, 0.09));
+  }
+  d += 0.05*(noise3(p*2.1) - 0.5);
+  return vec2(d, 2.0);
+}
+vec2 map(vec3 p){
+  vec2 res = mapGround(p);
+  float rr = length(p.xz);
+  float bb = max(max(8.5 - rr, rr - 15.5), p.y - 9.5);
+  if (bb < 0.5) { vec2 r2 = mapPillars(p); if (r2.x < res.x) res = r2; }
+  else res.x = min(res.x, bb);
+  bb = sdBox(p - vec3(0.0, 6.8, 0.0), vec3(11.0, 7.0, 4.8));
+  if (bb < 0.5) {
+    vec2 r2 = mapGate(p); if (r2.x < res.x) res = r2;
+    if (abs(p.x) > 6.5 && p.y < 2.0) { vec2 r3 = mapRubble(p); if (r3.x < res.x) res = r3; }
+  } else res.x = min(res.x, bb);
+  return res;
+}
+</script>
+<!-- ===================== THE OTHER WORLD (seen through) ===================== -->
+<script type="x-shader/x-fragment" id="fs-other">
+vec3 oSky(vec3 rd){
+  float y = rd.y;
+  float yy = clamp(y, 0.0, 1.0);
+  vec3 zen = vec3(0.10, 0.27, 0.40);
+  vec3 hor = vec3(0.86, 0.72, 0.56);
+  vec3 c = mix(hor, zen, pow(yy, 0.42));
+  float sd = max(dot(rd, OSUN), 0.0);
+  c += vec3(1.0, 0.74, 0.44)*(pow(sd, 5.0)*0.75 + pow(sd, 90.0)*2.5);
+  c += vec3(14.0, 11.0, 8.0)*smoothstep(0.9993, 0.9996, sd);
+  // ringed gas giant hanging over the far shore
+  vec3 PD = normalize(vec3(-0.42, 0.42, 1.0));
+  vec3 RN = normalize(vec3(0.25, 1.0, -0.35));
+  const float PR = 0.11;
+  float cpa = dot(rd, PD);
+  float sinR = sin(PR);
+  vec3 t1 = normalize(cross(PD, vec3(0.0, 1.0, 0.0)));
+  vec3 t2 = cross(t1, PD);
+  vec2 sp = vec2(dot(rd, t1), dot(rd, t2))/sinR;
+  float r2 = dot(sp, sp);
+  float onPlanet = cpa > 0.0 ? smoothstep(1.0, 0.985, r2) : 0.0;
+  float s = dot(PD, RN)/dot(rd, RN);
+  vec3 rx = rd*s - PD;
+  float rr = length(rx)/sinR;
+  float ringBand = (s > 0.0) ? smoothstep(1.35, 1.4, rr)*smoothstep(2.35, 2.2, rr)*(0.45 + 0.55*noise2(vec2(rr*28.0, 0.5))) : 0.0;
+  bool ringFront = s < 1.0;
+  vec3 ringCol = vec3(0.95, 0.88, 0.76)*1.2*ringBand;
+  if (!ringFront) c = mix(c, c + ringCol, 0.8*ringBand);
+  if (onPlanet > 0.0) {
+    vec3 n = sp.x*t1 + sp.y*t2 - sqrt(max(1.0 - r2, 0.0))*PD;
+    float lit = smoothstep(-0.15, 0.6, dot(n, OSUN));
+    float lat = dot(n, RN);
+    float bands = noise2(vec2(lat*14.0, lat*3.0 + 1.3))*0.6 + 0.4*sin(lat*40.0 + noise2(vec2(lat*8.0, 2.0))*3.0)*0.5 + 0.2;
+    vec3 pc = mix(vec3(0.62, 0.55, 0.47), vec3(0.95, 0.83, 0.66), bands)*(0.08 + 1.4*lit);
+    pc += vec3(0.4, 0.6, 0.8)*pow(1.0 - sqrt(max(1.0 - r2, 0.0)), 3.0)*0.5;
+    c = mix(c, mix(pc, c, 0.35), onPlanet);
+  }
+  if (ringFront) c = mix(c, c*0.6 + ringCol, 0.8*ringBand);
+  c = mix(c, hor*1.05, exp(-max(y, 0.0)*14.0)*0.8);
+  return c;
+}
+float mapO(vec3 p){
+  float r = length(p.xz);
+  float ledge = 2.1 - 3.4*smoothstep(2.5, 15.0, r + 3.0*noise2(p.xz*0.15));
+  float terr = p.y - (ledge + 0.6*fbm2(p.xz*0.35) - 0.3);
+  const float S = 56.0;
+  vec2 cell = floor(p.xz/S);
+  vec2 lc = p.xz - (cell + 0.5)*S;
+  vec2 hh = h22(cell);
+  vec2 off = (hh - 0.5)*18.0;
+  float R = 5.0 + 7.0*hh.x;
+  float H = 28.0 + 95.0*h21(cell + 7.0);
+  float prof = R*(1.25 - 0.6*smoothstep(0.0, H, p.y))*(0.78 + 0.44*noise2(vec2(p.y*0.07, hh.y*60.0)));
+  vec2 lw = lc - off + 3.0*(vec2(noise2(vec2(p.y*0.05, hh.x*40.0)), noise2(vec2(p.y*0.05 + 9.0, hh.x*40.0))) - 0.5);
+  float dt = length(lw) - prof;
+  dt += 3.0*(noise3(vec3(p.x*0.18, p.y*0.05, p.z*0.18)) - 0.5) + 0.8*(noise3(p*0.6) - 0.5);
+  dt = max(dt, p.y - H - 6.0*noise2(lc*0.1));
+  if (length((cell + 0.5)*S + off) < 34.0) dt = 1e3;
+  // weathered boulders in the shallows, for near parallax
+  const float S2 = 11.0;
+  vec2 c2 = floor(p.xz/S2);
+  vec2 l2 = p.xz - (c2 + 0.5)*S2;
+  vec2 g2 = h22(c2 + 31.0);
+  float rad = 0.7 + 1.8*g2.y;
+  vec3 bq = vec3(l2 - (g2 - 0.5)*5.0, p.y + rad*0.35);
+  float db = (length(bq*vec3(1.0, 1.35, 1.0)) - rad)*0.7 + 0.35*(noise3(p*0.9) - 0.5);
+  float rc = length((c2 + 0.5)*S2);
+  if (g2.x > 0.4 || rc < 10.0 || rc > 90.0) db = 1e3;
+  dt = min(dt, db);
+  return min(terr*0.8, dt*0.6);
+}
+vec3 normalO(vec3 p, float t){
+  float e = 0.01 + 0.002*t;
+  const vec2 k = vec2(1.0, -1.0);
+  return normalize(k.xyy*mapO(p + k.xyy*e) + k.yyx*mapO(p + k.yyx*e) + k.yxy*mapO(p + k.yxy*e) + k.xxx*mapO(p + k.xxx*e));
+}
+vec3 oFog(vec3 col, vec3 ro, vec3 rd, float t){
+  const float a = 0.0045, b = 0.05;
+  float ry = abs(rd.y) < 1e-3 ? 1e-3 : rd.y;
+  float fa = a*exp(-b*ro.y)*(1.0 - exp(-b*ry*t))/(b*ry) + 0.00035*min(t, 700.0);
+  float sd = max(dot(rd, OSUN), 0.0);
+  vec3 fc = mix(vec3(0.33, 0.40, 0.43), vec3(0.88, 0.68, 0.46), pow(sd, 3.0));
+  return mix(col, fc, 1.0 - exp(-fa));
+}
+vec3 shadeO(vec3 p, vec3 rd, float t){
+  vec3 n = normalO(p, t);
+  float lime = noise3(p*0.5);
+  vec3 alb = vec3(0.22, 0.21, 0.19)*(0.65 + 0.5*lime);
+  float streak = smoothstep(0.5, 0.8, noise3(vec3(p.x*0.9, p.y*0.04, p.z*0.9)));
+  alb *= 1.0 - 0.5*streak;
+  float veg = smoothstep(0.5, 0.8, n.y + 0.35*noise3(p*0.7));
+  veg = max(veg, smoothstep(0.6, 0.85, noise3(p*0.8 + 4.0)*0.7 + noise3(p*3.1)*0.3 + 0.2*n.y)*step(4.0, p.y));
+  alb = mix(alb, vec3(0.035, 0.06, 0.03)*(0.6 + 0.8*noise3(p*5.0)), veg*0.9);
+  float wl = smoothstep(0.6, 0.0, p.y);
+  alb *= 1.0 - 0.45*wl;
+  float ndl = max(dot(n, OSUN), 0.0);
+  float sh = 1.0;
+  if (t < 60.0 && ndl > 0.0) {
+    float tt = 0.2; sh = 1.0;
+    for (int i = 0; i < 18; i++){ float h = mapO(p + n*0.05 + OSUN*tt); sh = min(sh, 8.0*h/tt); tt += clamp(h, 0.2, 3.0); if (sh < 0.01) break; }
+    sh = clamp(sh, 0.0, 1.0);
+  }
+  float ao = clamp(0.5 + 0.5*mapO(p + n*1.2)/1.2, 0.0, 1.0);
+  vec3 amb = mix(vec3(0.16, 0.14, 0.11), vec3(0.38, 0.52, 0.62), n.y*0.5 + 0.5);
+  return alb*(vec3(1.3, 1.0, 0.72)*2.1*ndl*sh + amb*ao*0.85);
+}
+vec3 renderOther(vec3 ro, vec3 rd){
+  float tw = rd.y < 0.0 ? -ro.y/rd.y : 1e9;
+  float tmax = min(tw, 420.0);
+  float t = 0.0; bool hit = false;
+  for (int i = 0; i < 110; i++){
+    float h = mapO(ro + rd*t);
+    if (h < 0.002*t + 0.003) { hit = true; break; }
+    t += h;
+    if (t > tmax) break;
+  }
+  vec3 col;
+  if (hit) col = shadeO(ro + rd*t, rd, t);
+  else if (tw < 420.0) {
+    vec3 wp = ro + rd*tw;
+    vec2 wv = vec2(noise2(wp.xz*1.3 + uTime*0.25), noise2(wp.zx*1.3 - uTime*0.2)) - 0.5;
+    vec3 wn = normalize(vec3(wv.x*0.05, 1.0, wv.y*0.05));
+    vec3 rr = reflect(rd, wn);
+    float fres = 0.02 + 0.98*pow(1.0 - max(dot(-rd, wn), 0.0), 5.0);
+    vec3 rc = oSky(rr);
+    float t2 = 0.5;
+    for (int i = 0; i < 40; i++){
+      float h = mapO(wp + rr*t2);
+      if (h < 0.02*t2) { rc = oFog(vec3(0.16, 0.16, 0.13), wp, rr, t2); break; }
+      t2 += h; if (t2 > 300.0) break;
+    }
+    col = mix(vec3(0.015, 0.035, 0.04), rc, fres);
+    t = tw;
+  } else { col = oSky(rd); t = 2000.0; }
+  return oFog(col, ro, rd, t)*0.55;
+}
+</script>
+<!-- ================= OUR WORLD: MATERIALS, LIGHT, MAIN ================= -->
+<script type="x-shader/x-fragment" id="fs-main">
+vec3 skyCol(vec3 rd){
+  float y = rd.y;
+  float yy = max(y, 0.0);
+  vec3 zen = vec3(0.07, 0.10, 0.17);
+  vec3 hor = vec3(0.50, 0.45, 0.42);
+  vec3 c = mix(hor, zen, pow(yy, 0.55));
+  float sd = max(dot(rd, SUN), 0.0);
+  c += vec3(1.0, 0.45, 0.2)*pow(sd, 5.0)*0.6*(1.0 - yy);
+  c += vec3(1.0, 0.62, 0.34)*pow(sd, 48.0)*1.6;
+  c += vec3(30.0, 19.0, 10.0)*smoothstep(0.99965, 0.9998, sd);
+  if (y > 0.0) {
+    vec2 cu = rd.xz/(y + 0.12)*1.2 + vec2(uTime*0.004, 0.0);
+    float cn = fbm2(cu*0.9);
+    float cov = smoothstep(0.42, 0.78, cn);
+    vec3 cc = mix(vec3(0.15, 0.16, 0.20), vec3(1.0, 0.56, 0.32), pow(sd, 3.0)*0.9 + 0.08);
+    cc *= 0.7 + 0.5*fbm2(cu*2.3);
+    c = mix(c, cc, cov*smoothstep(0.0, 0.14, y)*0.9);
+  }
+  float az = atan(rd.z, rd.x);
+  float ridge = 0.032 + 0.018*sin(az*3.0 + 1.0) + 0.012*sin(az*7.0 + 2.0) + 0.006*sin(az*17.0) + 0.003*sin(az*41.0 + 0.5);
+  vec3 mc = mix(hor*0.55, vec3(0.17, 0.18, 0.22), 0.5);
+  c = mix(c, mc, smoothstep(ridge + 0.002, ridge - 0.002, y));
+  if (y < 0.0) c = mc*0.8;
+  return c;
+}
+vec3 skyAmb(vec3 n){ return mix(vec3(0.075, 0.068, 0.06), vec3(0.20, 0.25, 0.34), n.y*0.5 + 0.5); }
+vec3 portalTint(float z){ return mix(PBACK, PFRONT, smoothstep(-1.0, 1.0, z)); }
+
+vec3 lensBend(vec3 p, out float dl){
+  vec2 q = p.xy - APC.xy;
+  float k = length(q/APR);
+  vec2 rim = q/max(k, 1e-3);
+  vec3 v = vec3(rim - q, -p.z);
+  dl = length(v);
+  return v/max(dl, 1e-4)/(dl*dl + 0.35);
+}
+float apMask(vec2 xy){
+  vec2 q = (xy - APC.xy)/APR;
+  float e = length(q);
+  float ang = atan(q.y, q.x);
+  float wob = 0.02*sin(ang*5.0 + uTime*0.9) + 0.04*(noise2(vec2(ang*2.5 + 10.0, uTime*0.35)) - 0.5);
+  return uOpen*(1.0 + wob) - e;
+}
+
+vec3 calcNormal(vec3 p, float t){
+  float e = 0.0012 + 0.0007*t;
+  const vec2 k = vec2(1.0, -1.0);
+  return normalize(k.xyy*map(p + k.xyy*e).x + k.yyx*map(p + k.yyx*e).x + k.yxy*map(p + k.yxy*e).x + k.xxx*map(p + k.xxx*e).x);
+}
+float calcAO(vec3 p, vec3 n){
+  float o = 0.0, s = 1.0;
+  for (int i = 0; i < 5; i++){
+    float h = 0.03 + 0.3*float(i*i)/4.0;
+    o += clamp((h - map(p + n*h).x)/h, 0.0, 1.0)*s;
+    s *= 0.72;
+  }
+  return clamp(1.0 - 0.42*o, 0.0, 1.0);
+}
+float softShadow(vec3 ro, vec3 rd, float tmax, float k){
+  float res = 1.0, t = 0.02;
+  for (int i = 0; i < 44; i++){
+    float h = map(ro + rd*t).x;
+    res = min(res, k*h/t);
+    t += clamp(h, 0.03, 1.6);
+    if (res < 0.003 || t > tmax) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+vec3 portalLight(vec3 p, vec3 n){
+  float o = min(uOpen, 1.0);
+  float A = PI*APR.x*APR.y*o*o/5.0;
+  float acc = 0.0;
+  for (int i = 0; i < 5; i++){
+    vec2 of = i == 0 ? vec2(0.0) : i == 1 ? vec2(0.62*APR.x, 0.0) : i == 2 ? vec2(-0.62*APR.x, 0.0) : i == 3 ? vec2(0.0, 0.62*APR.y) : vec2(0.0, -0.62*APR.y);
+    vec3 l = APC + vec3(of*o, 0.0) - p;
+    float d2 = dot(l, l);
+    vec3 L = l*inversesqrt(d2);
+    acc += A*abs(L.z)*max(dot(n, L), 0.0)/(PI*d2 + A);
+  }
+  return portalTint(p.z)*acc*uAct*uPulse*2.8;
+}
+float portalShadow(vec3 p){
+  vec3 l = APC - p; float D = length(l); vec3 L = l/D;
+  float res = 1.0, t = 0.08;
+  for (int i = 0; i < 16; i++){
+    float h = map(p + L*t).x;
+    res = min(res, 5.0*h/t);
+    t += clamp(h, 0.1, 2.0);
+    if (t > D - 1.2 || res < 0.01) break;
+  }
+  return clamp(res, 0.0, 1.0);
+}
+vec3 portalView(vec3 rd){
+  return oFog(oSky(rd), vec3(0.0, 6.0, 0.0), rd, 60.0)*0.62;
+}
+vec3 traceRefl(vec3 ro, vec3 rd){
+  float tmax = 40.0; bool portal = false;
+  if (abs(rd.z) > 1e-4) {
+    float tp = -ro.z/rd.z;
+    if (tp > 0.0 && apMask((ro + rd*tp).xy) > 0.0) { portal = true; tmax = tp; }
+  }
+  float t = 0.03;
+  for (int i = 0; i < 36; i++){
+    vec3 q = ro + rd*t;
+    float h = map(q).x;
+    if (h < 0.004*t + 0.002) {
+      vec3 c = vec3(0.055)*(vec3(0.17, 0.2, 0.26) + portalTint(q.z)*uAct*1.5/(1.0 + 0.08*dot(q - APC, q - APC)));
+      return mix(c, vec3(0.3, 0.32, 0.36), 1.0 - exp(-0.01*t));
+    }
+    t += h;
+    if (t > tmax) break;
+  }
+  if (portal) return portalView(rd);
+  return skyCol(rd);
+}
+vec3 applyFog(vec3 col, vec3 ro, vec3 rd, float t){
+  const float a = 0.011, b = 0.24;
+  float ry = abs(rd.y) < 1e-3 ? 1e-3 : rd.y;
+  float fa = a*exp(-b*ro.y)*(1.0 - exp(-b*ry*t))/(b*ry) + 0.0028*t;
+  float sd = max(dot(rd, SUN), 0.0);
+  vec3 fc = mix(vec3(0.21, 0.23, 0.27), vec3(1.0, 0.6, 0.34), pow(sd, 6.0)*0.85);
+  col = mix(col, fc, 1.0 - exp(-fa));
+  vec3 oc = APC - ro;
+  float t0 = dot(oc, rd);
+  float hh = sqrt(max(dot(oc, oc) - t0*t0, 0.0) + 6.0);
+  float I = (atan((t - t0)/hh) - atan(-t0/hh))/hh;
+  vec3 cp = ro + rd*clamp(t0, 0.0, t);
+  col += portalTint(cp.z)*I*uAct*uPulse*0.09;
+  return col;
+}
+
+vec3 shade(vec3 p, vec3 rd, float t, float mat){
+  vec3 n = calcNormal(p, t);
+  vec3 v = -rd;
+  float ao = calcAO(p, n);
+  vec3 alb; float rough; float f0 = 0.04;
+  vec3 bn = n;
+  float fine = noise3(p*11.0);
+  if (mat > 2.5 && mat < 3.5) {
+    // obsidian: flow banding, conchoidal undulation, hydration frost, settled dust
+    float fb = fbm3(p*0.8);
+    float band = sin(dot(p, vec3(0.3, 1.0, 0.2))*6.0 + fb*7.0);
+    alb = vec3(0.008, 0.008, 0.010) + vec3(0.014, 0.013, 0.014)*smoothstep(0.7, 1.0, band);
+    rough = 0.03;
+    vec3 g = vec3(noise3(p*2.6 + 1.0), noise3(p*2.6 + 7.0), noise3(p*2.6 + 13.0)) - 0.5;
+    vec3 tg = normalize(cross(n, vec3(0.3, 0.9, 0.1)));
+    bn = normalize(n + g*0.1 + 0.045*sin(fb*38.0)*tg);
+    float frost = smoothstep(0.5, 0.85, noise3(p*1.6) + 0.5*(1.0 - ao));
+    float dust = smoothstep(0.35, 0.85, n.y)*(0.5 + 0.5*noise3(p*4.0));
+    alb = mix(alb, vec3(0.06, 0.055, 0.05), frost*0.55);
+    alb = mix(alb, vec3(0.15, 0.13, 0.11), dust*0.75);
+    rough = mix(rough, 0.45, frost*0.6);
+    rough = mix(rough, 0.9, dust*0.75);
+  } else {
+    // basalt: fresh grey-black core, iron-stained weathering rind, vesicles, lichen, moss
+    float big = fbm3(p*0.35);
+    float mid = noise3(p*2.7);
+    alb = vec3(0.042, 0.042, 0.045)*(0.75 + 0.5*mid);
+    float rind = smoothstep(0.3, 0.9, big + 0.2*n.y);
+    alb = mix(alb, vec3(0.075, 0.072, 0.07)*(0.85 + 0.3*fine), rind*0.5);
+    float ves = smoothstep(0.8, 0.84, noise3(p*48.0 + 3.0));
+    alb *= 1.0 - 0.5*ves;
+    rough = 0.8;
+    if (mat > 1.5 && mat < 2.5) alb *= 0.8 + 0.4*h21(vec2(floor(p.x*0.8 + p.z*0.3), courseOf(p.y - 1.6)));
+    vec3 g = vec3(noise3(p*6.0), noise3(p*6.0 + 11.0), noise3(p*6.0 + 23.0)) - 0.5;
+    bn = normalize(n + g*0.32 + n*ves*0.0);
+    float lic = smoothstep(0.7, 0.74, fbm3(p*1.3 + 7.0))*smoothstep(-0.3, 0.3, n.y + 0.2)*smoothstep(0.3, 1.5, p.y);
+    float licO = smoothstep(0.76, 0.8, noise3(p*4.5 + 20.0))*smoothstep(0.1, 0.8, n.y)*smoothstep(0.5, 0.7, noise3(p*0.7));
+    alb = mix(alb, vec3(0.13, 0.135, 0.11)*(0.8 + 0.3*fine), lic*0.5);
+    alb = mix(alb, vec3(0.4, 0.22, 0.06), licO*0.4);
+    float mm = fbm3(p*0.9 + 3.0) + 0.3*n.y + 0.5*(1.0 - ao) + 0.12*n.z - 0.07*max(p.y - 0.8, 0.0);
+    mm = smoothstep(0.72, 0.95, mm);
+    if (mat < 1.5) mm *= mix(1.0, 0.35, smoothstep(0.85, 0.98, n.y))*smoothstep(0.35, 0.6, noise3(p*0.45 + 2.0) + 0.15);
+    if (mat > 5.5) { alb = vec3(0.055, 0.042, 0.03); mm = max(mm, smoothstep(0.3, 0.6, noise3(p*3.0)) ); }
+    vec3 mossC = mix(vec3(0.05, 0.075, 0.025), vec3(0.13, 0.15, 0.05), noise3(p*7.0));
+    alb = mix(alb, mossC, mm);
+    rough = mix(rough, 0.95, mm);
+    bn = normalize(mix(bn, normalize(n + (vec3(noise3(p*24.0), noise3(p*24.0 + 5.0), noise3(p*24.0 + 9.0)) - 0.5)*0.9), mm));
+    // standing rainwater in worn column tops
+    if (mat < 1.5 && n.y > 0.9 && length(p.xz) < 13.0) {
+      float pud = smoothstep(0.62, 0.66, noise2(p.xz*0.32 + 2.0))*(1.0 - mm);
+      alb = mix(alb, alb*0.3, pud);
+      rough = mix(rough, 0.015, pud);
+      f0 = mix(f0, 0.02, pud);
+      vec2 rp = vec2(noise2(p.xz*6.0 + uTime*0.4), noise2(p.zx*6.0 - uTime*0.3)) - 0.5;
+      bn = normalize(mix(bn, normalize(vec3(rp.x*0.03, 1.0, rp.y*0.03)), pud));
+    }
+    float wet = smoothstep(0.45, 0.0, p.y)*0.6;
+    alb *= 1.0 - 0.35*wet;
+    rough *= 1.0 - 0.35*wet;
+  }
+  float ndv = max(dot(bn, v), 1e-3);
+  float ndl = max(dot(bn, SUN), 0.0);
+  float sh = dot(n, SUN) > -0.05 ? softShadow(p + n*0.03, SUN, 48.0, 12.0) : 0.0;
+  vec3 h = normalize(SUN + v);
+  float ndh = max(dot(bn, h), 0.0);
+  float a = rough*rough; float a2 = a*a;
+  float D = a2/(PI*pow(ndh*ndh*(a2 - 1.0) + 1.0, 2.0));
+  float kk = (rough + 1.0)*(rough + 1.0)/8.0;
+  float G = (ndl/(ndl*(1.0 - kk) + kk))*(ndv/(ndv*(1.0 - kk) + kk));
+  float F = f0 + (1.0 - f0)*pow(1.0 - max(dot(h, v), 0.0), 5.0);
+  vec3 col = SUNC*sh*(alb*ndl*(1.0 - F) + vec3(D*G*F/(4.0*ndv + 1e-3))*0.6);
+  col += alb*skyAmb(bn)*ao*1.15;
+  col += alb*vec3(0.11, 0.08, 0.06)*clamp(-bn.y*0.5 + 0.5, 0.0, 1.0)*ao*0.25;
+  if (uAct > 0.002 && length(p - APC) < 32.0) {
+    vec3 E = portalLight(p, bn);
+    if (dot(E, E) > 1e-5) E *= portalShadow(p + n*0.05);
+    col += alb*E*(0.6 + 0.4*ao);
+    vec3 r = reflect(rd, bn);
+    vec3 L = normalize(APC - p);
+    col += E*F*pow(max(dot(r, L), 0.0), 2.0/(a2 + 0.02))*0.25*(1.0 - rough);
+  }
+  vec3 r = reflect(rd, bn);
+  float Fv = f0 + (1.0 - f0)*pow(1.0 - ndv, 5.0)*(1.0 - rough)*(1.0 - rough);
+  vec3 env = rough < 0.35 ? traceRefl(p + n*0.04, r) : skyAmb(r)*1.2;
+  col += env*Fv*mix(1.0, ao, 0.7);
+  return col;
+}
+
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+  vec2 uv = (fc*2.0 - uRes)/uRes.y;
+  vec3 rd0 = normalize(uCam*vec3(uv*uK, 1.0));
+  vec3 ro = uCamPos;
+  vec3 rd = rd0;
+  vec3 p = ro;
+  float tTot = 0.0;
+  vec2 h = vec2(0.0);
+  bool hit = false, portal = false;
+  float edgeGlow = 0.0;
+  float lensAcc = 0.0;
+  for (int i = 0; i < 230; i++){
+    gT = tTot;
+    h = map(p);
+    if (h.x < 0.0007*(1.0 + tTot)) { hit = true; break; }
+    float stp = h.x;
+    float dl; vec3 bend = lensBend(p, dl);
+    bool inLens = uAct > 0.0 && dl < 4.0;
+    if (inLens) stp = min(stp, 0.1 + 0.3*dl);
+    vec3 np = p + rd*stp;
+    if ((np.z > 0.0) != (p.z > 0.0)) {
+      float f = p.z/(p.z - np.z);
+      vec3 cp = p + (np - p)*f;
+      float e = length((cp.xy - APC.xy)/APR);
+      if (e < 1.05) {
+        float m = apMask(cp.xy);
+        edgeGlow += exp(-abs(m)*150.0)*smoothstep(0.0, 0.3, uOpen);
+        if (m > 0.0) { portal = true; tTot += stp*f; p = cp; break; }
+        if (e < 1.0) {
+          vec3 sv = vec3(noise3(cp*2.2 + uTime*0.7), noise3(cp*2.2 - uTime*0.6 + 9.0), 0.5) - 0.5;
+          rd = normalize(rd + sv*0.045*uAct);
+        }
+      }
+    }
+    if (inLens) { vec3 dd = bend*(uAct*LENS_K*stp); rd = normalize(rd + dd); lensAcc += length(dd); }
+    p = np; tTot += stp;
+    if (tTot > 280.0 || (p.y > 40.0 && rd.y > 0.0)) break;
+  }
+  vec3 col;
+  float depthT;
+  if (portal) {
+    col = renderOther(p, rd);
+    float e = length((p.xy - APC.xy)/APR);
+    col *= mix(1.0, 0.75, smoothstep(0.75, 1.0, e/max(uOpen, 0.01)));
+    col = applyFog(col, ro, rd0, tTot);
+    depthT = tTot;
+  } else if (hit) {
+    col = shade(p, rd, tTot, h.y);
+    col = applyFog(col, ro, rd0, tTot);
+    depthT = tTot;
+  } else {
+    col = applyFog(skyCol(rd), ro, rd, 600.0);
+    depthT = uNF.y*0.999;
+  }
+  col += vec3(1.0, 0.86, 0.66)*edgeGlow*uAct*0.9*uPulse;
+  col += portalTint(0.0)*lensAcc*0.015*uAct;
+  float zv = max(depthT*dot(rd0, uCam[2]), uNF.x);
+  float n = uNF.x, f = uNF.y;
+  float zn = (f + n)/(f - n) - 2.0*f*n/((f - n)*zv);
+  gl_FragDepth = clamp(0.5*zn + 0.5, 0.0, 1.0);
+  fragColor = vec4(max(col, 0.0), 1.0);
+}
+</script>
+<!-- ============================ DUST MOTES ============================ -->
+<script type="x-shader/x-vertex" id="vs-dust">
+precision highp float;
+in vec4 aSeed;
+uniform mat4 uVP;
+uniform float uTime, uAct, uActT, uPx, uPulse;
+uniform vec3 uCamPos;
+out vec3 vCol; out float vA;
+const vec3 APC = vec3(0.0, 7.0, 0.0);
+const vec2 APR = vec2(2.2, 3.6);
+const vec3 SUN = normalize(vec3(-0.62, 0.16, -0.77));
+void main(){
+  vec3 pos; float sz; float energ; float alpha;
+  if (aSeed.w < 0.64) {
+    vec3 base = vec3(aSeed.x*48.0 - 24.0, 0.05 + 8.0*aSeed.y*aSeed.y, aSeed.z*48.0 - 24.0);
+    base += vec3(0.22, 0.0, 0.08)*uTime;
+    base += vec3(sin(uTime*0.31 + aSeed.x*40.0), 0.5*sin(uTime*0.23 + aSeed.z*30.0), cos(uTime*0.27 + aSeed.y*50.0))*0.6;
+    base.xz = mod(base.xz + 24.0, 48.0) - 24.0;
+    vec3 rel = base - APC;
+    float d = length(rel);
+    float infl = uAct*exp(-d*0.17);
+    float a = infl*(2.2 + 0.4*sin(uTime*0.5)) + infl*uTime*0.08;
+    rel.xy = rot2(a)*rel.xy;
+    rel *= 1.0 - 0.32*infl;
+    float wt = uTime - uActT;
+    if (wt > 0.0) rel += normalize(rel)*2.6*exp(-pow(d - wt*9.0, 2.0)*0.06)*exp(-wt*0.22);
+    pos = APC + rel;
+    pos.y = max(pos.y, 0.04);
+    sz = 0.011 + 0.018*aSeed.x;
+    energ = infl;
+    alpha = 0.55*smoothstep(24.0, 20.0, max(abs(base.x), abs(base.z)));
+  } else {
+    float sp = 0.035 + 0.06*aSeed.x;
+    float life = fract(uTime*sp + aSeed.y*7.0);
+    float dir = aSeed.w > 0.82 ? 1.0 : -1.0;
+    float ang = aSeed.z*6.2831853 + uTime*(0.12 + 0.22*aSeed.x)*dir + life*1.5*dir;
+    float e = mix(1.7 + 1.3*aSeed.x, 1.04, smoothstep(0.0, 1.0, life));
+    float zz = (fract(aSeed.y*13.7) - 0.5)*7.0*(1.0 - life*0.85);
+    pos = APC + vec3(cos(ang)*APR.x*e, sin(ang)*APR.y*e, zz);
+    pos.y += life*0.7;
+    sz = 0.008 + 0.012*aSeed.y;
+    energ = sin(life*3.14159);
+    alpha = uAct*energ;
+  }
+  vec3 l = APC - pos;
+  float d2 = dot(l, l);
+  vec3 pc = mix(vec3(0.56, 0.78, 0.96), vec3(1.0, 0.8, 0.56), smoothstep(-1.0, 1.0, pos.z));
+  vec3 V = normalize(pos - uCamPos);
+  float ph = pow(max(dot(V, SUN), 0.0), 6.0)*2.2 + 0.12;
+  vCol = pc*uAct*uPulse*16.0/(d2 + 1.0)*(0.6 + energ) + vec3(1.0, 0.57, 0.31)*0.5*ph;
+  vec4 cp = uVP*vec4(pos, 1.0);
+  gl_Position = cp;
+  float px = sz*uPx/max(cp.w, 0.05);
+  gl_PointSize = clamp(px, 1.0, 9.0);
+  vA = alpha*clamp(px*px, 0.04, 1.0)/max(gl_PointSize*gl_PointSize/(px*px + 1e-4), 1.0);
+}
+</script>
+<script type="x-shader/x-fragment" id="fs-dust">
+precision highp float;
+in vec3 vCol; in float vA;
+out vec4 o;
+void main(){
+  vec2 q = gl_PointCoord*2.0 - 1.0;
+  float r = dot(q, q);
+  if (r > 1.0) discard;
+  float a = exp(-r*3.0)*vA;
+  o = vec4(vCol*a, a);
+}
+</script>
+
+<!-- ============================ FILMIC POST ============================ -->
+<script type="x-shader/x-fragment" id="fs-post">
+precision highp float;
+uniform sampler2D uTex;
+uniform vec2 uRes;
+uniform float uTime;
+out vec4 o;
+vec3 aces(vec3 x){ return clamp((x*(2.51*x + 0.03))/(x*(2.43*x + 0.59) + 0.14), 0.0, 1.0); }
+float hash(vec2 p){ return fract(sin(dot(p, vec2(12.9898, 78.233)))*43758.5453); }
+void main(){
+  vec2 uv = gl_FragCoord.xy/uRes;
+  vec2 dc = uv - 0.5;
+  float ca = 0.006*dot(dc, dc);
+  vec3 col;
+  col.r = texture(uTex, uv - dc*ca).r;
+  col.g = texture(uTex, uv).g;
+  col.b = texture(uTex, uv + dc*ca).b;
+  vec3 bl = textureLod(uTex, uv, 2.0).rgb*0.28 + textureLod(uTex, uv, 3.0).rgb*0.26 + textureLod(uTex, uv, 4.0).rgb*0.2
+          + textureLod(uTex, uv, 5.0).rgb*0.15 + textureLod(uTex, uv, 6.0).rgb*0.11;
+  col += max(bl - 0.55, 0.0)*0.32 + bl*0.025;
+  col *= 1.25;
+  float vig = 1.0 - 0.55*pow(length(dc*vec2(uRes.x/uRes.y, 1.0))*0.85, 2.2);
+  col *= vig;
+  col = aces(col);
+  float l = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  col = mix(col, col*vec3(0.94, 1.0, 1.06), (1.0 - l)*0.35);
+  col = pow(col, vec3(1.0/2.2));
+  col += (hash(gl_FragCoord.xy + fract(uTime*7.13)*100.0) - 0.5)*0.022;
+  o = vec4(col, 1.0);
+}
+</script>
+
+<script>
+(() => {
+'use strict';
+const canvas = document.getElementById('c');
+const errBox = document.getElementById('err');
+const hint = document.getElementById('hint');
+function fail(msg){ errBox.style.display = 'flex'; errBox.textContent = msg; console.error(msg); }
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: true, stencil: false, powerPreference: 'high-performance', preserveDrawingBuffer: true });
+if (!gl) { fail('This scene needs WebGL2.'); return; }
+const hdr = !!gl.getExtension('EXT_color_buffer_float');
+gl.getExtension('EXT_color_buffer_half_float');
+
+const src = id => document.getElementById(id).textContent;
+function compile(type, text){
+  const s = gl.createShader(type);
+  gl.shaderSource(s, text); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(vsText, fsText){
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, vsText));
+  gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fsText));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {}; const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++){ const info = gl.getActiveUniform(p, i); u[info.name] = gl.getUniformLocation(p, info.name); }
+  return { p, u };
+}
+const V = '#version 300 es\n';
+const FSQ = V + 'void main(){ vec2 p = vec2(float((gl_VertexID<<1)&2), float(gl_VertexID&2)); gl_Position = vec4(p*2.0-1.0, 0.0, 1.0); }';
+let sceneP, dustP, postP;
+try {
+  sceneP = program(FSQ, V + src('fs-common') + src('fs-world') + src('fs-other') + src('fs-main'));
+  dustP = program(V + 'mat2 rot2(float a){ float c=cos(a), s=sin(a); return mat2(c,-s,s,c); }\n' + src('vs-dust').replace('precision highp float;', 'precision highp float;\n'), V + src('fs-dust'));
+  postP = program(FSQ, V + src('fs-post'));
+} catch (e) { fail('Shader error:\n' + e.message); return; }
+
+// --- procedural noise texture (value noise lattice, G = R offset by (37,17) for fast 3D lookups)
+{
+  const N = 256, data = new Uint8Array(N*N*4);
+  let seed = 1337;
+  const rnd = () => { seed = (seed*1664525 + 1013904223) >>> 0; return seed >>> 24; };
+  for (let i = 0; i < N*N; i++){ data[i*4] = rnd(); data[i*4 + 2] = rnd(); data[i*4 + 3] = rnd(); }
+  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++){
+    const x2 = (x - 37) & 255, y2 = (y - 17) & 255;
+    data[(y*N + x)*4 + 1] = data[(y2*N + x2)*4];
+  }
+  const t = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, N, N, 0, gl.RGBA, gl.UNSIGNED_BYTE, data);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.REPEAT);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.REPEAT);
+  gl.activeTexture(gl.TEXTURE0);
+}
+
+// --- dust particle buffer
+const DUST = 7000;
+const vao = gl.createVertexArray();
+{
+  gl.bindVertexArray(vao);
+  const a = new Float32Array(DUST*4);
+  for (let i = 0; i < a.length; i++) a[i] = Math.random();
+  const b = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, b);
+  gl.bufferData(gl.ARRAY_BUFFER, a, gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(dustP.p, 'aSeed');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, 0, 0);
+  gl.bindVertexArray(null);
+}
+const emptyVao = gl.createVertexArray();
+
+// --- HDR render target with mip chain (bloom source) + depth for particle occlusion
+let rt = null;
+function makeTarget(w, h){
+  if (rt) { gl.deleteTexture(rt.tex); gl.deleteRenderbuffer(rt.depth); gl.deleteFramebuffer(rt.fb); }
+  const tex = gl.createTexture();
+  gl.bindTexture(gl.TEXTURE_2D, tex);
+  const levels = Math.floor(Math.log2(Math.max(w, h))) + 1;
+  gl.texStorage2D(gl.TEXTURE_2D, levels, hdr ? gl.RGBA16F : gl.RGBA8, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  const depth = gl.createRenderbuffer();
+  gl.bindRenderbuffer(gl.RENDERBUFFER, depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, w, h);
+  const fb = gl.createFramebuffer();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, depth);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  rt = { tex, depth, fb, w, h };
+}
+
+// --- sizing and adaptive resolution
+const Q = new URLSearchParams(location.search);
+let scale = parseFloat(Q.get('scale') || '0.6');
+const fixedScale = Q.has('scale');
+let lastResize = 0;
+function resize(){
+  const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
+  const w = Math.max(1, Math.round(canvas.clientWidth*dpr)), h = Math.max(1, Math.round(canvas.clientHeight*dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  const sw = Math.max(64, Math.round(w*scale)), sh = Math.max(64, Math.round(h*scale));
+  if (!rt || rt.w !== sw || rt.h !== sh) makeTarget(sw, sh);
+}
+window.addEventListener('resize', resize);
+
+// --- camera: auto glide + orbit / zoom with inertia, resume after idle
+const TARGET_Y = 6.2;
+const cam = {
+  yaw: parseFloat(Q.get('yaw') || '0.55'), pitch: parseFloat(Q.get('pitch') || '0.08'),
+  r: parseFloat(Q.get('r') || '21'), tr: 0, vyaw: 0, vpitch: 0
+};
+cam.tr = cam.r;
+const still = Q.has('still');
+let lastInput = -1e9;
+const R_MIN = 7.5, R_MAX = 42;
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const smooth = (a, b, x) => { const t = clamp((x - a)/(b - a), 0, 1); return t*t*(3 - 2*t); };
+function groundAt(r){ return 0.15 + 0.5*smooth(15, 17, r) + 1.6*smooth(15, 40, r); }
+function updateCamera(t, dt){
+  const idle = t - lastInput;
+  const auto = still ? 0 : smooth(3.0, 6.0, idle);
+  cam.yaw += (0.045*auto + cam.vyaw)*dt;
+  cam.pitch += cam.vpitch*dt;
+  const damp = Math.exp(-dt*3.5);
+  cam.vyaw *= damp; cam.vpitch *= damp;
+  if (auto > 0) {
+    const ar = 20 + 4.5*Math.sin(t*0.05);
+    const ap = 0.07 + 0.06*Math.sin(t*0.037 + 1.0);
+    const k = 1 - Math.exp(-dt*0.35*auto);
+    cam.tr += (ar - cam.tr)*k;
+    cam.pitch += (ap - cam.pitch)*k;
+  }
+  cam.tr = clamp(cam.tr, R_MIN, R_MAX);
+  cam.r = clamp(cam.r + (cam.tr - cam.r)*(1 - Math.exp(-dt*6)), R_MIN, R_MAX);
+  const minY = groundAt(cam.r) + 1.6;
+  const minP = Math.asin(clamp((minY - TARGET_Y)/cam.r, -1, 1));
+  cam.pitch = clamp(cam.pitch, minP, 1.25);
+  let x = cam.r*Math.cos(cam.pitch)*Math.sin(cam.yaw);
+  let z = cam.r*Math.cos(cam.pitch)*Math.cos(cam.yaw);
+  let y = TARGET_Y + cam.r*Math.sin(cam.pitch);
+  if (y < 9.5) {
+    for (let i = 0; i < 9; i++){
+      const an = i*Math.PI*2/9 + 0.25;
+      const px = Math.cos(an)*12, pz = Math.sin(an)*12;
+      const dx = x - px, dz = z - pz, d = Math.hypot(dx, dz);
+      if (d < 2.4) { x = px + dx/(d || 1)*2.4; z = pz + dz/(d || 1)*2.4; }
+    }
+  }
+  return [x, y, z];
+}
+function camBasis(pos){
+  const tg = [0, TARGET_Y + 0.3*Math.sin(performance.now()*0.0002), 0];
+  let f = [tg[0] - pos[0], tg[1] - pos[1], tg[2] - pos[2]];
+  const fl = Math.hypot(...f); f = f.map(v => v/fl);
+  let r = [f[2], 0, -f[0]]; const rl = Math.hypot(...r) || 1; r = r.map(v => -v/rl);
+  const u = [r[1]*f[2] - r[2]*f[1], r[2]*f[0] - r[0]*f[2], r[0]*f[1] - r[1]*f[0]];
+  return { f, r, u };
+}
+
+// --- input: pointer (mouse + touch), wheel, pinch
+const pts = new Map();
+let pinch0 = 0, pinchR = 0;
+const now = () => performance.now()/1000;
+function touchInput(){ lastInput = clock; hint.style.opacity = '0'; }
+canvas.addEventListener('pointerdown', e => {
+  canvas.setPointerCapture(e.pointerId);
+  pts.set(e.pointerId, { x: e.clientX, y: e.clientY, t: now() });
+  canvas.classList.add('drag');
+  cam.vyaw = 0; cam.vpitch = 0;
+  if (pts.size === 2) { const [a, b] = [...pts.values()]; pinch0 = Math.hypot(a.x - b.x, a.y - b.y); pinchR = cam.tr; }
+  touchInput(); e.preventDefault();
+});
+canvas.addEventListener('pointermove', e => {
+  const p = pts.get(e.pointerId); if (!p) return;
+  const dx = e.clientX - p.x, dy = e.clientY - p.y, tn = now(), dtt = Math.max(tn - p.t, 1/240);
+  p.x = e.clientX; p.y = e.clientY; p.t = tn;
+  if (pts.size === 1) {
+    const s = 3.4/Math.max(canvas.clientWidth, canvas.clientHeight, 400);
+    cam.yaw -= dx*s; cam.pitch += dy*s*0.8;
+    cam.vyaw = cam.vyaw*0.5 + (-dx*s/dtt)*0.5; cam.vpitch = cam.vpitch*0.5 + (dy*s*0.8/dtt)*0.5;
+  } else if (pts.size === 2) {
+    const [a, b] = [...pts.values()];
+    const d = Math.hypot(a.x - b.x, a.y - b.y);
+    if (pinch0 > 0 && d > 0) cam.tr = clamp(pinchR*pinch0/d, R_MIN, R_MAX);
+    cam.vyaw = 0; cam.vpitch = 0;
+  }
+  touchInput(); e.preventDefault();
+});
+function endPtr(e){
+  if (!pts.has(e.pointerId)) return;
+  const p = pts.get(e.pointerId);
+  pts.delete(e.pointerId);
+  if (now() - p.t > 0.08) { cam.vyaw = 0; cam.vpitch = 0; }
+  if (pts.size < 2) pinch0 = 0;
+  if (pts.size === 1) { const q = [...pts.values()][0]; q.t = now(); }
+  if (pts.size === 0) canvas.classList.remove('drag');
+  touchInput();
+}
+canvas.addEventListener('pointerup', endPtr);
+canvas.addEventListener('pointercancel', endPtr);
+canvas.addEventListener('lostpointercapture', endPtr);
+canvas.addEventListener('wheel', e => {
+  const k = e.deltaMode === 1 ? 0.05 : 0.0015;
+  cam.tr = clamp(cam.tr*Math.exp(e.deltaY*k), R_MIN, R_MAX);
+  touchInput(); e.preventDefault();
+}, { passive: false });
+['gesturestart', 'gesturechange', 'contextmenu'].forEach(n => document.addEventListener(n, e => e.preventDefault(), { passive: false }));
+setTimeout(() => { if (lastInput < 0) hint.style.opacity = '0'; }, 9000);
+
+// --- activation timeline
+const T0 = parseFloat(Q.get('t') || '0');
+const ACT_T = 3.6;
+let clock = T0, prev = performance.now();
+function activation(t){
+  const a = smooth(0.8, 9.0, t);
+  const flick = t < 6 ? 1 - 0.25*Math.max(0, Math.sin(t*23.0)*Math.sin(t*7.1)) : 1;
+  return a*flick;
+}
+const openAt = t => 0.975*Math.pow(smooth(ACT_T, 11.5, t), 0.8);
+
+// --- render loop
+let ema = 16, lastAdapt = 0;
+function frame(ms){
+  const dt = clamp((ms - prev)/1000, 0, 0.1); prev = ms;
+  clock += dt;
+  const t = clock;
+  ema = ema*0.92 + dt*1000*0.08;
+  if (!fixedScale && t - lastAdapt > 1.2 && t > 1.5) {
+    if (ema > 36 && scale > 0.34) { scale = Math.max(0.34, scale*0.86); lastAdapt = t; }
+    else if (ema < 20 && scale < 1.0) { scale = Math.min(1.0, scale*1.08); lastAdapt = t; }
+  }
+  resize();
+  const pos = updateCamera(t, dt);
+  const B = camBasis(pos);
+  const fov = (canvas.clientWidth < canvas.clientHeight ? 62 : 44)*Math.PI/180;
+  const K = Math.tan(fov/2);
+  const near = 0.1, far = 1000;
+  const act = activation(t), open = openAt(t), pulse = 1 + 0.06*Math.sin(t*1.3) + 0.03*Math.sin(t*3.7);
+  const aspect = rt.w/rt.h;
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, rt.fb);
+  gl.viewport(0, 0, rt.w, rt.h);
+  gl.disable(gl.BLEND);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.ALWAYS); gl.depthMask(true);
+  gl.useProgram(sceneP.p);
+  const u = sceneP.u;
+  gl.uniform2f(u.uRes, rt.w, rt.h);
+  gl.uniform1f(u.uTime, t);
+  gl.uniform3f(u.uCamPos, pos[0], pos[1], pos[2]);
+  gl.uniformMatrix3fv(u.uCam, false, [...B.r, ...B.u, ...B.f]);
+  gl.uniform1f(u.uK, K);
+  gl.uniform1f(u.uAct, act);
+  gl.uniform1f(u.uOpen, open);
+  gl.uniform1f(u.uPulse, pulse);
+  gl.uniform2f(u.uNF, near, far);
+  gl.uniform1i(u.uNoise, 1);
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // view-projection for dust (matches the ray camera)
+  const fx = 1/(K*aspect), fy = 1/K, A = (far + near)/(far - near), Bz = 2*far*near/(far - near);
+  const d = p => -(p[0]*pos[0] + p[1]*pos[1] + p[2]*pos[2]);
+  const vp = new Float32Array([
+    fx*B.r[0], fy*B.u[0], A*B.f[0], B.f[0],
+    fx*B.r[1], fy*B.u[1], A*B.f[1], B.f[1],
+    fx*B.r[2], fy*B.u[2], A*B.f[2], B.f[2],
+    fx*d(B.r), fy*d(B.u), A*d(B.f) - Bz, d(B.f)
+  ]);
+  gl.depthFunc(gl.LESS); gl.depthMask(false);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE);
+  gl.useProgram(dustP.p);
+  gl.uniformMatrix4fv(dustP.u.uVP, false, vp);
+  gl.uniform1f(dustP.u.uTime, t);
+  gl.uniform1f(dustP.u.uAct, act);
+  gl.uniform1f(dustP.u.uActT, ACT_T);
+  gl.uniform1f(dustP.u.uPulse, pulse);
+  gl.uniform1f(dustP.u.uPx, rt.h/(2*K));
+  gl.uniform3f(dustP.u.uCamPos, pos[0], pos[1], pos[2]);
+  gl.bindVertexArray(vao);
+  gl.drawArrays(gl.POINTS, 0, DUST);
+  gl.disable(gl.BLEND); gl.disable(gl.DEPTH_TEST); gl.depthMask(true);
+
+  gl.bindTexture(gl.TEXTURE_2D, rt.tex);
+  gl.generateMipmap(gl.TEXTURE_2D);
+
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(postP.p);
+  gl.uniform1i(postP.u.uTex, 0);
+  gl.uniform2f(postP.u.uRes, canvas.width, canvas.height);
+  gl.uniform1f(postP.u.uTime, t);
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  requestAnimationFrame(frame);
+}
+window.__portal = { cam, get scale(){ return scale; }, get ms(){ return ema; }, setTime: v => { clock = v; }, get time(){ return clock; } };
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+
+
+
+</body>
+</html>
